@@ -1,15 +1,29 @@
 # Binaries
 /sup-kv
 /bin/
+dist/
+*.exe
 
 # Tests
 *.test
 *.out
 coverage.*
+*.coverprofile
+
+# Caches
+.cache/
+.gocache/
+.gomodcache/
 
 # IDE
 .idea/
 .vscode/
+*.swp
+*~
 
 # OS
 .DS_Store
+Thumbs.db
+
+# Local environment
+.env
