@@ -1,0 +1,60 @@
+# Quality gates: strict lint + 4-cell OS/arch gate matrix.
+# Check-run names ("lint", "gate (<cell>)") are the required-check contexts
+# recorded in the branch-protection ruleset — any matrix change is a ruleset change.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0 # full patch pin == go.mod tool directive (local/CI parity)
+
+  gate:
+    name: gate (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on || matrix.name }}
+    strategy:
+      fail-fast: false # a red cell must not cancel the remaining cells' evidence
+      matrix:
+        include:
+          - name: ubuntu-latest # linux/amd64 native — full gate
+          - name: ubuntu-24.04-arm # linux/arm64 native — full gate
+          - name: macos-15 # darwin/arm64 native — full gate
+          - name: darwin-amd64-cross # cross-compile cell on Linux
+            runs-on: ubuntu-latest
+            goos: darwin
+            goarch: amd64
+            cross: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - if: matrix.cross
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./... && go vet ./...
+      - if: ${{ !matrix.cross }}
+        run: |
+          go vet ./...
+          go test -race ./...
+          go mod tidy
+          git diff --exit-code go.mod go.sum
