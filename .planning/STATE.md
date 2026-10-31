@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 1
 current_phase_name: CI Bootstrap and Repo Skeleton
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-10-31T15:27:30.079Z"
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-10-31T15:43:51.116Z"
 last_activity: 2026-10-31
 last_activity_desc: Phase 1 execution started
-state_head: f9110eef751038b66a89bd48a029144776659d06
+state_head: a893d9c6f15f116fb6bc83616d6248bc7b859ded
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-31)
 ## Current Position
 
 Phase: 1 (CI Bootstrap and Repo Skeleton) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-10-31 — Phase 1 execution started
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01 P01 | 10min | 3 tasks | 10 files |
 | Phase 01 P02 | 12min | 3 tasks | 2 files |
+| Phase 01 P03 | 6min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -76,6 +77,9 @@ Recent decisions affecting current work:
 - [Phase 01]: PR-only landing for code and docs per CI-03: plan 01-01 code via PR #1, SUMMARY via docs PR; no direct master commits (plan 01-01)
 - [Phase 01]: CI check-run contexts fixed verbatim as lint, gate (ubuntu-latest), gate (ubuntu-24.04-arm), gate (macos-15), gate (darwin-amd64-cross) — plan 04 ruleset required_status_checks must copy these exactly (plan 01-02)
 - [Phase 01]: go.sum completed with 54 tidy-required entries after the CI tidy gate caught the gap; go.mod unchanged, tidy idempotent under GOTOOLCHAIN=go1.27.1 — fix direction: complete module files, never weaken the tidy gate (plan 01-02)
+- [Phase 01]: vulncheck triggers fixed: weekly cron 0 6 * * 1 (Mon 06:00 UTC) + pull_request paths go.mod/go.sum + workflow_dispatch; scan runs go tool govulncheck (pinned v1.9.0, never a latest-tag run) (plan 01-03)
+- [Phase 01]: Dependabot groups minor+patch weekly (gomod-safe-updates, actions-safe-updates) so the small tool graph yields one PR per week; alerts are GHAS-gated on this private repo and stay off until the deferred public flip (plan 01-03)
+- [Phase 01]: Dispatched vulncheck run 41216077968 green on master at a893d9c — 'Your code is affected by 0 vulnerabilities'; CI-02's assertable half proven live (plan 01-03)
 
 ### Pending Todos
 
@@ -96,6 +100,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-31T15:27:30.047Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-10-31T15:43:42.522Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
