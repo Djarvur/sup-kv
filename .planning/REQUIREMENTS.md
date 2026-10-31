@@ -76,7 +76,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Quality
 
-- [ ] **QUAL-01**: Strict golangci-lint configuration (all applicable linters enabled; no suppressions without written justification) and go-ultimate conventions govern every package from the first feature commit; a red gate blocks merge
+- [x] **QUAL-01**: Strict golangci-lint configuration (all applicable linters enabled; no suppressions without written justification) and go-ultimate conventions govern every package from the first feature commit; a red gate blocks merge
 
 ### CI
 
@@ -139,7 +139,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CI-01 | Phase 1 | Pending |
 | CI-02 | Phase 1 | Pending |
 | CI-03 | Phase 1 | Pending |
-| QUAL-01 | Phase 1 | Pending |
+| QUAL-01 | Phase 1 | Complete |
 | CORE-01 | Phase 2 | Pending |
 | CORE-02 | Phase 2 | Pending |
 | CORE-03 | Phase 2 | Pending |

@@ -32,10 +32,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Direct pushes to `master` are rejected by branch protection; every change (code and docs) lands through a pull request from a feature branch
   3. Dependabot is active (updates and alerts) and the scheduled `govulncheck` job runs green against the Go vulnerability database
   4. The dependency boundary is machine-enforced from the first feature commit: code in `internal/app` importing `net`/`os`/grpc (or `internal/port` reaching beyond stdlib) fails the lint gate
-**Plans**: 4 plans
+**Plans**: 1/4 plans executed
 Plans:
 **Wave 1**
-- [ ] 01-01-PLAN.md — Walking skeleton: module, packages, pinned tools, vendored strict lint + depguard boundary (QUAL-01)
+- [x] 01-01-PLAN.md — Walking skeleton: module, packages, pinned tools, vendored strict lint + depguard boundary (QUAL-01)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 01-02-PLAN.md — CI gate matrix: lint + 4-cell matrix proven green through a PR, red-teeth proof (CI-01)
@@ -126,7 +126,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. CI Bootstrap and Repo Skeleton | 0/4 | Not started | - |
+| 1. CI Bootstrap and Repo Skeleton | 1/4 | In Progress | - |
 | 2. Engine — HLC Versioning and LWW Store | 0/TBD | Not started | - |
 | 3. Persistence — Dump and Write Confirmation | 0/TBD | Not started | - |
 | 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
