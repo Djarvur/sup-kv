@@ -23,9 +23,13 @@ findings:
     severity: info
     disposition: open
     title: "The no-I/O boundary exempts test files and does not cover x/sys"
+  - id: IN-05
+    severity: info
+    disposition: open
+    title: "\"Apply command above\" points the wrong direction — the Apply command is below"
 open: 4
-total: 5
-recorded: 2026-10-31T16:23:53.695Z
+total: 6
+recorded: 2026-10-31T19:15:22.311Z
 ---
 
 # Phase 01: Code Review Disposition
@@ -34,9 +38,10 @@ recorded: 2026-10-31T16:23:53.695Z
 |---------|----------|-------------|--------|
 | WR-01 | warning | fixed | PR #12 |
 | IN-01 | info | open | - |
-| IN-02 | info | open | - |
+| IN-02 | info | fixed | PR #20 — .claude/CLAUDE.md deferral parenthetical; confirmed by incremental review 85fa4dc |
 | IN-03 | info | open | - |
 | IN-04 | info | open | - |
+| IN-05 | info | open | - |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.

@@ -1,6 +1,6 @@
 ---
 phase: 01-ci-bootstrap-and-repo-skeleton
-reviewed: 2026-10-31T16:16:54Z
+reviewed: 2026-10-31T19:11:54Z
 depth: standard
 files_reviewed: 16
 files_reviewed_list:
@@ -23,8 +23,8 @@ files_reviewed_list:
 findings:
   critical: 0
   warning: 1
-  info: 4
-  total: 5
+  info: 5
+  total: 6
 status: issues_found
 ---
 
@@ -142,3 +142,88 @@ The trap fires silently: the Dependabot PR passes CI (the lint job still runs v2
 _Reviewed: 2026-10-31T16:16:54Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+## Incremental Review — 2026-10-31 (post gap-closure)
+
+**Base review:** 2026-10-31T16:16:54Z (above) · **Increment reviewed:** 2026-10-31T19:11:54Z
+**Depth:** quick (pattern scan + targeted reference verification)
+**Scope:** the 3 files changed since the base review — `.github/dependabot.yml`
+(commit `7ac0c51`, PR #12), `docs/setup/branch-protection.md` and `.claude/CLAUDE.md`
+(commit `0a4ca44`, PR #20).
+**Increment status:** clean — the increment's edits introduced no new defects. One
+pre-existing Info (IN-05) was surfaced by the mandated consistency check; it predates
+the base review (introduced by `17d89c4` at 15:55Z, ~20 min before the base review
+was written, and missed there). Frontmatter counts updated to include it.
+
+### Quick-scan results
+
+All four pattern families clean across all three files (zero hits): hardcoded
+secrets, dangerous functions (`eval`/`exec`/`innerHTML`/etc.), debug artifacts
+(`TODO`/`FIXME`/`console.log`/`debugger`), empty catch blocks.
+
+### Per-file verification
+
+1. **`.github/dependabot.yml`** (`7ac0c51` — WR-01 fix, already dispositioned via
+   PR #12; re-checked for regressions only). YAML machine-parsed: valid. The
+   `ignore:` block sits at the schema-correct level (update-entry, sibling of
+   `schedule`/`commit-message`), so Dependabot will honor it. `dependency-name:
+   github.com/golangci/golangci-lint/v2` is byte-exact against the go.mod:94 require
+   line — a near-miss (e.g. dropping `/v2`) would silently never match. A bare
+   `dependency-name` without `versions` ignores ALL updates, which is exactly the
+   intended full-manual lockstep re-vendor protocol. All four citations in the new
+   comment verified accurate: `.golangci.yml:1` (2.15.0-exact strict config),
+   `ci.yml:28` (`version: v2.15.0` pin), AGENTS.md deviation #2 (lines 19-25,
+   vendored lint config provenance), and WR-01 in this file. **No new defects.**
+
+2. **`docs/setup/branch-protection.md`** (`0a4ca44` — heading → `## Status: DEFERRED
+   (accepted override)` + ratification paragraph). Commands and payload references
+   remain intact: the Apply/Verify/Delete/PATCH `gh api` commands are byte-unchanged
+   by the edit, `docs/setup/ruleset.json` exists, and the five required-check
+   contexts quoted in the doc still match `ci.yml`'s job/matrix naming exactly
+   (`lint`, `gate (ubuntu-latest)`, `gate (ubuntu-24.04-arm)`, `gate (macos-15)`,
+   `gate (darwin-amd64-cross)`). The ratification paragraph's cross-file claims
+   verified TRUE: `01-VERIFICATION.md:61-65` records the override ratified by the
+   maintainer (`accepted_by: onokonem`, `accepted_at: 2026-10-31T18:41:25Z`), and
+   `REQUIREMENTS.md:141` records CI-03 as deferred/ratified. The heading rename left
+   no dangling "PENDING" self-reference in the doc. "The re-apply path below stays
+   current" is directionally correct. One inconsistency found — see IN-05 (it is the
+   "Apply command above" wording the edit did NOT touch, i.e. pre-existing).
+
+3. **`.claude/CLAUDE.md`** (`0a4ca44` — Process bullet deferral parenthetical,
+   generated file; checked for actively misleading content only). Every claim in the
+   parenthetical verified: server-side ruleset deferred 2026-10-31 (matches the doc),
+   "ratified accepted override" (matches 01-VERIFICATION.md), "org-plan gated"
+   (matches the 403/Team-tier finding), "one-command re-apply in
+   docs/setup/branch-protection.md" (the Apply section is indeed a single command).
+   GSD section markers intact; the edit is exactly the caveat IN-02's fix
+   prescribed. **No new defects.**
+
+### Prior finding dispositions updated by this increment
+
+- **WR-01: FIXED** (`7ac0c51`, PR #12) — fix verified against schema, go.mod, and all
+  cited cross-references (see per-file item 1).
+- **IN-02: FIXED** (`0a4ca44`) — the Process bullet now carries the deferral caveat
+  with accurate details (see per-file item 3).
+
+## Info (increment)
+
+### IN-05: "Apply command above" points the wrong direction — the Apply command is below
+
+**File:** `docs/setup/branch-protection.md:25`
+**Issue:** The deferral-decision blockquote says "the moment the plan changes, run
+the Apply command **above**" — but no command exists above line 25; the Apply
+section (lines 32-37) is *below* it, and the new ratification paragraph (line 30)
+correctly says "the re-apply path **below**", leaving the two adjacent paragraphs
+pointing in opposite directions. Provenance: pre-existing, not introduced by this
+increment — added by `17d89c4` (15:55Z), before the base review (16:16:54Z), which
+missed it; surfaced by this pass's command-reference consistency check. Severity Info
+because the doc contains exactly one Apply command two paragraphs away, so an
+auditor cannot be misled in practice; it is an audit-trail wording defect only.
+**Fix:** In line 25 change "run the Apply command above" to "run the Apply command
+below (## Apply)".
+
+---
+
+_Increment reviewed: 2026-10-31T19:11:54Z_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: quick (incremental)_
