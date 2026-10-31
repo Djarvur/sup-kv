@@ -585,19 +585,21 @@ Expected red output (verified verbatim today): `import 'net' is not allowed from
 | A7 | `AGENTS.md` should be created this phase (go-ultimate required-files list; repo currently lacks it) | Project Structure | Low — a review finding if missing |
 | A8 | Port rule should allow the own module path (`github.com/Djarvur/sup-kv`) in addition to `$gostd`, per D-11's "deny third-party" wording | Pitfall 5 | Medium — wrong choice blocks legitimate port↔app type references in later phases |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Branch protection is blocked by the GitHub plan (Q1 — affects CI-03)**
+All four questions carry adopted dispositions as of plan finalization (2026-10-31); one-line status per question below.
+
+1. **Branch protection is blocked by the GitHub plan (Q1 — affects CI-03)** — RESOLVED: routed to plan 04 Task 2 as a blocking `checkpoint:decision` (apply-now vs defer); everything else lands first, and the defer path records the scripted commands as pending in the setup doc.
    - What we know: live 403 on `repos/Djarvur/sup-kv/rulesets` — "Upgrade to GitHub Pro or make this repository public"; owner is an Organization; D-09 locks the repo private; D-08 requires scripted rulesets.
    - What's unclear: whether the user will upgrade the org plan (Team) for this repo.
    - Recommendation: plan the phase so everything except protection lands first (workflows, skeleton, lint boundary, Dependabot, govulncheck); make the ruleset task a `checkpoint:human-verify` — apply immediately if the plan is upgraded by then, otherwise record the scripted commands in the setup doc as "pending plan upgrade". CI-03's verification can assert the *workflows + PR flow* while flagging protection as plan-gated. Alternatives: flip public (locked out by D-09) or descope protection (violates CI-03 — needs explicit user sign-off).
-2. **Dependabot alerts interpretation (affects CI-02 verification wording)**
+2. **Dependabot alerts interpretation (affects CI-02 verification wording)** — RESOLVED: plan 03 handles it — verification asserts updates + govulncheck and documents alerts as GHAS-gated/plan-gated, unlocked by the deferred public flip.
    - What we know: version updates work on private repos; alerts need GHAS — unavailable here.
    - Recommendation: verify updates + govulncheck; document alerts as unlocked-by-public-flip (already a Deferred item). Success criterion 3 should be read as "Dependabot updates active; alerts plan-gated".
-3. **linux/arm64 native cell (D-05 adjustment)**
+3. **linux/arm64 native cell (D-05 adjustment)** — RESOLVED: D-05 amended (2026-10-31) — the native `ubuntu-24.04-arm` full-gate cell is adopted; the matrix is 3 native cells + darwin/amd64 cross.
    - What we know: `ubuntu-24.04-arm` is available for private repos and cheaper than x64; D-05's premise was "unavailable for private".
    - Recommendation: adopt the native cell now (D-05's own "if public, upgrade to ubuntu-24.04-arm" note shows that was always the desired end state; it just turns out to be available and cheap while private). Planner confirms.
-4. **macos-15 vs macos-26 for the darwin/arm64 cell**
+4. **macos-15 vs macos-26 for the darwin/arm64 cell** — RESOLVED: `macos-15` kept per locked D-05 (explicit stable label); revisit when macOS 15 approaches retirement.
    - What we know: D-05 locks `macos-15` (still available, verified); `macos-latest` now aliases `macos-26`.
    - Recommendation: keep `macos-15` as locked (explicit label, stable); revisit when macOS 15 approaches retirement.
 
