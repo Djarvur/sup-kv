@@ -23,6 +23,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # `run` silently ignores unknown top-level config keys (T-01-01): schema-check
+      # the vendored strict config with the same pinned binary before linting.
+      - run: go tool golangci-lint config verify
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.15.0 # full patch pin == go.mod tool directive (local/CI parity)
