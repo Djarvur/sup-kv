@@ -24,7 +24,6 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 ### Phase 1: CI Bootstrap and Repo Skeleton
 **Goal**: Quality gates and the enforced repo skeleton exist before any feature code, so every subsequent change lands inside the architecture and behind a red-light-blocking gate
-**Mode:** mvp
 **Depends on**: Nothing (first phase)
 **Requirements**: CI-01, CI-02, CI-03, QUAL-01
 **Success Criteria** (what must be TRUE):
@@ -54,7 +53,6 @@ Plans:
 
 ### Phase 2: Engine — HLC Versioning and LWW Store
 **Goal**: The decision core exists as a pure, I/O-free library — HLC versions packed into UUIDv7 and the LWW-Element-Map store — with its correctness laws proven by property tests that run forever after
-**Mode:** mvp
 **Depends on**: Phase 1
 **Requirements**: CORE-01, CORE-02, CORE-03, CORE-04, CORE-05, CORE-06, CORE-07, VERS-01, VERS-02, VERS-03, VERS-04, VERS-05, TEST-01, TEST-02
 **Success Criteria** (what must be TRUE):
@@ -66,7 +64,6 @@ Plans:
 
 ### Phase 3: Persistence — Dump and Write Confirmation
 **Goal**: State survives restarts and a client-confirmed write is always on disk — the write-confirmation contract that makes every later phase strictly additive
-**Mode:** mvp
 **Depends on**: Phase 2
 **Requirements**: PERS-01, PERS-02, PERS-03, PERS-04, PERS-05
 **Success Criteria** (what must be TRUE):
@@ -78,7 +75,6 @@ Plans:
 
 ### Phase 4: Replication and Deterministic Simulator
 **Goal**: Nodes converge to identical state — the pointwise supremum of all writes — over a lossy UDP broadcast segment, with convergence under chaos proven by the deterministic simulator
-**Mode:** mvp
 **Depends on**: Phase 3
 **Requirements**: REPL-01, REPL-02, REPL-03, REPL-04, REPL-05, REPL-06, REPL-07, REPL-08, REPL-09, REPL-10, TEST-03
 **Success Criteria** (what must be TRUE):
@@ -91,7 +87,6 @@ Plans:
 
 ### Phase 5: gRPC API and Binary
 **Goal**: sup-kv becomes a usable product — a single static binary exposing the typed gRPC surface with Watch, startup gate, `wait_for_replication` and standard health checking
-**Mode:** mvp
 **Depends on**: Phase 4
 **Requirements**: API-01, API-02, API-03, API-04, API-05, API-06, API-07, TOOL-01
 **Success Criteria** (what must be TRUE):
@@ -104,7 +99,6 @@ Plans:
 
 ### Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks
 **Goal**: Every documented failure scenario is an automated passing test and the node is observable enough to operate — the evidence that the core value holds under chaos
-**Mode:** mvp
 **Depends on**: Phase 5
 **Requirements**: OBS-01, OBS-02, OBS-03, TEST-04, TEST-05
 **Success Criteria** (what must be TRUE):
@@ -116,7 +110,6 @@ Plans:
 
 ### Phase 7: v1.0 — Docs, Examples and Release
 **Goal**: A stranger can deploy and operate a two-node sup-kv cluster from the documentation alone, and v1.0 ships
-**Mode:** mvp
 **Depends on**: Phase 6
 **Requirements**: DOCS-01, DOCS-02, DOCS-03
 **Success Criteria** (what must be TRUE):
