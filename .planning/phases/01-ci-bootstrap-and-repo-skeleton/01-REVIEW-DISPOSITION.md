@@ -38,7 +38,7 @@ recorded: 2026-10-31T19:15:22.311Z
 |---------|----------|-------------|--------|
 | WR-01 | warning | fixed | PR #12 |
 | IN-01 | info | open | - |
-| IN-02 | info | open | - |
+| IN-02 | info | fixed | PR #20 — .claude/CLAUDE.md deferral parenthetical; confirmed by incremental review 85fa4dc |
 | IN-03 | info | open | - |
 | IN-04 | info | open | - |
 | IN-05 | info | open | - |
