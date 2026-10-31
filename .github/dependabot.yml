@@ -8,6 +8,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Must move in lockstep with .golangci.yml (vendored 2.15.0-exact strict
+      # config) and the `version:` pin in .github/workflows/ci.yml — re-vendor
+      # by hand per AGENTS.md deviation #2. See WR-01 in 01-REVIEW.md.
+      - dependency-name: github.com/golangci/golangci-lint/v2
     commit-message:
       prefix: go-deps
       include: scope
