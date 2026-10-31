@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Direct pushes to `master` are rejected by branch protection; every change (code and docs) lands through a pull request from a feature branch
   3. Dependabot is active (updates and alerts) and the scheduled `govulncheck` job runs green against the Go vulnerability database
   4. The dependency boundary is machine-enforced from the first feature commit: code in `internal/app` importing `net`/`os`/grpc (or `internal/port` reaching beyond stdlib) fails the lint gate
-**Plans**: 4/4 plans executed
+**Plans**: 6 plans (4 executed, 2 gap-closure pending)
 Plans:
 **Wave 1**
 - [x] 01-01-PLAN.md — Walking skeleton: module, packages, pinned tools, vendored strict lint + depguard boundary (QUAL-01)
@@ -45,6 +45,10 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [x] 01-04-PLAN.md — Branch protection on master: scripted ruleset + plan-blocker decision (CI-03)
+
+**Wave 5** *(gap closure — blocked on Wave 4; both plans parallel, no file overlap)*
+- [ ] 01-05-PLAN.md — Record ratified accepted overrides: VERIFICATION.md frontmatter override mechanism + REQUIREMENTS.md CI-02 Partial annotation, CI-03 ratification (CI-02, CI-03)
+- [ ] 01-06-PLAN.md — Accepted-deferral state markers: branch-protection.md DEFERRED status, PROJECT/CLAUDE process constraint (IN-02), WINDOWS.md item 2 waiver, STATE.md decision log (CI-02, CI-03)
 
 ### Phase 2: Engine — HLC Versioning and LWW Store
 **Goal**: The decision core exists as a pure, I/O-free library — HLC versions packed into UUIDv7 and the LWW-Element-Map store — with its correctness laws proven by property tests that run forever after
