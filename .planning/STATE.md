@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 1
 current_phase_name: CI Bootstrap and Repo Skeleton
-status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-10-31T15:43:51.116Z"
+status: verifying
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-10-31T16:00:03.870Z"
 last_activity: 2026-10-31
 last_activity_desc: Phase 1 execution started
-state_head: a893d9c6f15f116fb6bc83616d6248bc7b859ded
+state_head: edc5d3f79be1d5d7ef409bb16a5ec8548030edd2
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 4
-  completed_plans: 2
+  completed_plans: 4
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-31)
 
 Phase: 1 (CI Bootstrap and Repo Skeleton) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-31 — Phase 1 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 10min | 3 tasks | 10 files |
 | Phase 01 P02 | 12min | 3 tasks | 2 files |
 | Phase 01 P03 | 6min | 3 tasks | 2 files |
+| Phase 01 P04 | 6min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,9 @@ Recent decisions affecting current work:
 - [Phase 01]: vulncheck triggers fixed: weekly cron 0 6 * * 1 (Mon 06:00 UTC) + pull_request paths go.mod/go.sum + workflow_dispatch; scan runs go tool govulncheck (pinned v1.9.0, never a latest-tag run) (plan 01-03)
 - [Phase 01]: Dependabot groups minor+patch weekly (gomod-safe-updates, actions-safe-updates) so the small tool graph yields one PR per week; alerts are GHAS-gated on this private repo and stay off until the deferred public flip (plan 01-03)
 - [Phase 01]: Dispatched vulncheck run 41216077968 green on master at a893d9c — 'Your code is affected by 0 vulnerabilities'; CI-02's assertable half proven live (plan 01-03)
+- [Phase 01]: Plan 01-04 Task 2 decision auto-selected 'defer' (gate=blocking, auto_select honored): no org plan upgrade now — rulesets API is 403-plan-gated on this private repo; payload + one-command re-apply recorded in docs/setup/branch-protection.md; CI-03 protection sub-item flagged plan-gated, not hidden
+- [Phase 01]: Ruleset required_approving_review_count=0 (A5 resolved): GitHub forbids PR authors approving their own PRs, so any count >= 1 deadlocks the solo maintainer; require_last_push_approval and required_review_thread_resolution false for the same reason; PR-only contract still enforced by the pull_request rule (plan 01-04)
+- [Phase 01]: delete_branch_on_merge=true applied via gh api PATCH and verified live (ordinary repo setting, not plan-gated); CI-03 deliberately left Pending in REQUIREMENTS.md with Partial annotation — PR-only is practiced (PRs #1-#10) but server-side protection is deferred (plan 01-04)
 
 ### Pending Todos
 
@@ -100,6 +104,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-31T15:43:42.522Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-10-31T16:00:03.804Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None

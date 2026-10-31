@@ -138,7 +138,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | CI-01 | Phase 1 | Complete |
 | CI-02 | Phase 1 | Complete |
-| CI-03 | Phase 1 | Pending |
+| CI-03 | Phase 1 | Partial — PR-only practiced since plan 01-01 (PRs #1-#10); server-side branch protection deferred 2026-10-31 (org plan 403, decision `defer`; re-apply path in docs/setup/branch-protection.md) |
 | QUAL-01 | Phase 1 | Complete |
 | CORE-01 | Phase 2 | Pending |
 | CORE-02 | Phase 2 | Pending |
