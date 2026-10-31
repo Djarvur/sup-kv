@@ -36,6 +36,10 @@ Quality gates and the machine-enforced repo skeleton exist **before any feature 
 - **D-11:** depguard rules encode the architecture boundary: `internal/port` — stdlib only (deny third-party imports); `internal/app` — deny `net`, `os`, `syscall`, `google.golang.org/*` (the pure decision core has no I/O or infrastructure). Exact deny-list finalized by the planner against go-ultimate and the roadmap wording; a probe (a violating file making the gate red) demonstrates enforcement in verification.
 - **D-12:** No `//nolint` without a written justification — project rule, enforced by the strict config's nolint handling (already part of powerman strict).
 
+### Research Corrections (2026-10-31, post-research — auto-mode decisions amended on verified facts)
+- **D-05 amended:** `ubuntu-24.04-arm` hosted runners ARE available for private repos ($0.005/min — cheaper than x64), and `macos-13` is retired. The matrix therefore uses **native full gates** (vet + race) on `ubuntu-latest` (linux/amd64), `ubuntu-24.04-arm` (linux/arm64), and `macos-15` (darwin/arm64); darwin/amd64 stays a cross-compile cell (Intel macOS runners exist at ~10x cost — not worth it). Criterion 1 interpretation note stands, now with 3 of 4 cells native.
+- **D-10 amended:** `extends:` does not exist in golangci-lint v2.15.0 — and a config containing it is **silently ignored entirely** (verified by execution). Replacement mechanism: a single `.golangci.yml` = the vendored powerman/golangci-lint-strict 2.15.0 config byte-unmodified **with project depguard rules inserted as new keys under the existing `linters.settings.depguard.rules` mapping**; provenance (fetch URL + version) documented; upstream content otherwise never edited.
+
 ### Claude's Discretion
 - Placeholder file names and content within the skeleton (doc.go vs real minimal types), workflow file naming/layout (one workflow vs split lint/test/schedule), the exact cron schedule for govulncheck, and the setup-doc location/format. All guided by go-ultimate references.
 
