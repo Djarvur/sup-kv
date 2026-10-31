@@ -46,8 +46,10 @@ Plans:
 **Wave 4** *(blocked on Wave 3 completion)*
 - [x] 01-04-PLAN.md — Branch protection on master: scripted ruleset + plan-blocker decision (CI-03)
 
-**Wave 5** *(gap closure — blocked on Wave 4; both plans parallel, no file overlap)*
+**Wave 5** *(gap closure — blocked on Wave 4)*
 - [ ] 01-05-PLAN.md — Record ratified accepted overrides: VERIFICATION.md frontmatter override mechanism + REQUIREMENTS.md CI-02 Partial annotation, CI-03 ratification (CI-02, CI-03)
+
+**Wave 6** *(gap closure — blocked on 01-05: 01-06's markers and decision-log entries cite 01-05's recorded overrides as accomplished fact)*
 - [ ] 01-06-PLAN.md — Accepted-deferral state markers: branch-protection.md DEFERRED status, PROJECT/CLAUDE process constraint (IN-02), WINDOWS.md item 2 waiver, STATE.md decision log (CI-02, CI-03)
 
 ### Phase 2: Engine — HLC Versioning and LWW Store
@@ -130,7 +132,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. CI Bootstrap and Repo Skeleton | 4/4 | In Progress | - |
+| 1. CI Bootstrap and Repo Skeleton | 4/6 | In Progress | - |
 | 2. Engine — HLC Versioning and LWW Store | 0/TBD | Not started | - |
 | 3. Persistence — Dump and Write Confirmation | 0/TBD | Not started | - |
 | 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
