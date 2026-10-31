@@ -13,7 +13,7 @@ findings:
     title: "AGENTS.md quotes an outdated go directive value"
   - id: IN-02
     severity: info
-    disposition: open
+    disposition: fixed
     title: ".claude/CLAUDE.md asserts branch protection that is not yet applied"
   - id: IN-03
     severity: info
@@ -27,9 +27,13 @@ findings:
     severity: info
     disposition: open
     title: "\"Apply command above\" points the wrong direction — the Apply command is below"
-open: 4
-total: 6
-recorded: 2026-10-31T19:15:22.311Z
+  - id: IN-06
+    severity: info
+    disposition: open
+    title: "CI's schema gate and CI's lint run use two separately-pinned binaries"
+open: 5
+total: 7
+recorded: 2026-11-01T00:00:00.000Z
 ---
 
 # Phase 01: Code Review Disposition
@@ -42,6 +46,7 @@ recorded: 2026-10-31T19:15:22.311Z
 | IN-03 | info | open | - |
 | IN-04 | info | open | - |
 | IN-05 | info | open | - |
+| IN-06 | info | open | Increment 2 (PR #26 follow-up review, 2026-11-01) — new finding |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
