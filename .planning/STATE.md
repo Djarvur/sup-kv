@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 1
 current_phase_name: CI Bootstrap and Repo Skeleton
 status: executing
-stopped_at: Phase 1 executed; verification gaps_found (2 external billing-gated deferrals await human decision)
-last_updated: "2026-10-31T18:23:39.263Z"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-10-31T18:49:31.334Z"
 last_activity: 2026-10-31
 last_activity_desc: Phase 1 execution started
-state_head: 6b51518741f9f84513971e6d0d7b01042967ba4b
+state_head: e3cf61785abe49dde7448ac9d86c7c5ae99cac4e
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -27,19 +27,19 @@ See: .planning/PROJECT.md (updated 2026-10-31)
 
 ## Current Position
 
-Phase: 1 (CI Bootstrap and Repo Skeleton) — READY TO EXECUTE
-Plan: 4 of 4
-Status: Ready to execute
-Last activity: 2026-10-31 — Phase 1 execution started
+Phase: 1 (CI Bootstrap and Repo Skeleton) — EXECUTING (gap closure)
+Plan: 5 of 6
+Status: Plan 01-05 complete (ratified overrides recorded); 01-06 pending
+Last activity: 2026-10-31 — gap-closure plan 01-05 executed
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+- Total plans completed: 5
+- Average duration: 10min
+- Total execution time: ~1 hour
 
 **By Phase:**
 
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 12min | 3 tasks | 2 files |
 | Phase 01 P03 | 6min | 3 tasks | 2 files |
 | Phase 01 P04 | 6min | 3 tasks | 2 files |
+| Phase 01 P05 | 18min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,9 @@ Recent decisions affecting current work:
 - [Phase 01]: Plan 01-04 Task 2 decision auto-selected 'defer' (gate=blocking, auto_select honored): no org plan upgrade now — rulesets API is 403-plan-gated on this private repo; payload + one-command re-apply recorded in docs/setup/branch-protection.md; CI-03 protection sub-item flagged plan-gated, not hidden
 - [Phase 01]: Ruleset required_approving_review_count=0 (A5 resolved): GitHub forbids PR authors approving their own PRs, so any count >= 1 deadlocks the solo maintainer; require_last_push_approval and required_review_thread_resolution false for the same reason; PR-only contract still enforced by the pull_request rule (plan 01-04)
 - [Phase 01]: delete_branch_on_merge=true applied via gh api PATCH and verified live (ordinary repo setting, not plan-gated); CI-03 deliberately left Pending in REQUIREMENTS.md with Partial annotation — PR-only is practiced (PRs #1-#10) but server-side protection is deferred (plan 01-04)
+- [Phase 01]: Gap deferrals recorded as accepted overrides with must_have/reason verbatim from the verifier's own suggestion block, ratified 2026-10-31, attributed accepted_by "onokonem" — the verifier re-run reads the overrides: mechanism and passes gaps 1-2 as accepted deviations (plan 01-05)
+- [Phase 01]: CI-02 traceability honestly Partial (unchecked, alerts half deferred GHAS-gated, ratified) mirroring CI-03's pattern; CI-02/CI-03 deliberately NOT marked complete — plan 01-05 records accepted deviations, it does not deliver the deferred halves (plan 01-05)
+- [Phase 01]: Rule 3 deviation — orphan STATE.md commit 3ac4b3f (planner's, outside PR flow) routed through PR #16 before task branches so each task PR diff stayed single-file per acceptance criteria (plan 01-05)
 
 ### Pending Todos
 
@@ -104,6 +108,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-31T16:37:42.171Z
-Stopped at: Phase 1 executed; verification gaps_found (2 external billing-gated deferrals await human decision)
-Resume file: .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-VERIFICATION.md
+Last session: 2026-10-31T18:49:31.288Z
+Stopped at: Completed 01-05-PLAN.md
+Resume file: None
