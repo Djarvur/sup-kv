@@ -11,7 +11,7 @@ audit trail (decision D-08): every command below is re-runnable verbatim.
   workflow-only, and planning-only changes go through pull requests exactly like code
   (CI-03: the PR-only contract admits no side doors).
 
-## Status: PENDING
+## Status: DEFERRED (accepted override)
 
 > **The ruleset is NOT yet applied.** The GitHub rulesets API returns
 > `403 Upgrade to GitHub Pro or make this repository public` for this private org
@@ -23,6 +23,11 @@ audit trail (decision D-08): every command below is re-runnable verbatim.
 >
 > **Deferral decision 2026-10-31: `defer`** — keep everything else, do not upgrade the
 > org plan now; the moment the plan changes, run the Apply command above.
+>
+> **Ratified 2026-10-31: accepted override.** The maintainer confirmed the deferral as a
+> deliberate, accepted limitation (org-plan gated; no plan upgrade, no public flip) —
+> recorded in 01-VERIFICATION.md overrides and REQUIREMENTS.md CI-03; the re-apply path
+> below stays current for whenever that decision changes.
 
 ## Apply
 
