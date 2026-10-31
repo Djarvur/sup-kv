@@ -27,7 +27,7 @@ findings:
     severity: info
     disposition: open
     title: "\"Apply command above\" points the wrong direction — the Apply command is below"
-open: 5
+open: 4
 total: 6
 recorded: 2026-10-31T19:15:22.311Z
 ---
