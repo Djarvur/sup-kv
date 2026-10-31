@@ -27,6 +27,7 @@ concurrence: "All 7 prohibitions reviewed and accepted (QUAL-01 x2, CI-01 x2, CI
 expected: `Mode: mvp` is set on all roadmap phases but goals are outcome-shaped, not user-story-shaped — run `/gsd:mvp-phase 1` to author a story or drop the marker; cosmetic, non-blocking
 result: pass
 decision: "run /gsd:mvp-phase 1 to author the story"
+resolution: "mvp-phase 1 refused by in_progress status guard (executed phase — conversion would invalidate plans/summaries); maintainer resolved by dropping **Mode:** mvp from all 7 phases (PR #27, merged 2026-11-01)"
 
 ## Summary
 
