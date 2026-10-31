@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 1
 current_phase_name: CI Bootstrap and Repo Skeleton
 status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-10-31T14:49:41.141Z"
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-10-31T15:10:25.946Z"
 last_activity: 2026-10-31
-last_activity_desc: "Roadmap created: 7 phases, 50 v1 requirements mapped (100% coverage)"
-state_head: aaa129551c0f1c336b997a36254e21a2af0b291d
+last_activity_desc: Phase 1 execution started
+state_head: 7137282090438b43effad715bc3b16df3a298222
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 4
-  completed_plans: 0
+  completed_plans: 1
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-10-31)
 
 ## Current Position
 
-Phase: 1 (CI Bootstrap and Repo Skeleton) — READY TO EXECUTE
-Plan: 0 of TBD in current phase
+Phase: 1 (CI Bootstrap and Repo Skeleton) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-10-31 — Roadmap created: 7 phases, 50 v1 requirements mapped (100% coverage)
+Last activity: 2026-10-31 — Phase 1 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -52,6 +52,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 10min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -63,6 +68,11 @@ Recent decisions affecting current work:
 - Roadmap: phase order is dependency-forced (engine → persistence → replication → API); simulator lands in Phase 4 with replication, not in hardening (research-validated refinement)
 - Roadmap: property tests (TEST-01/02) live in Phase 2 with the engine; failure suite (TEST-04) and benchmarks (TEST-05) in Phase 6
 - Roadmap: strict lint config + depguard boundary rules land in Phase 1 before any feature code (QUAL-01)
+- [Phase 01]: D-03 read as zero direct runtime requires; tool-directive graph's ~213 indirect lines documented in AGENTS.md (plan 01-01)
+- [Phase 01]: Lint config vendored single-file: extends: silently no-ops in golangci-lint 2.15.0, so sup-kv depguard rules are additive keys inside linters.settings.depguard.rules with upstream byte-unmodified (plan 01-01)
+- [Phase 01]: sup-kv-port-stdlib-only allows $gostd plus own module path github.com/Djarvur/sup-kv so port-to-app type references stay legal (plan 01-01)
+- [Phase 01]: Strict-gate findings fixed in code direction: app_test.go external app_test package with t.Parallel(); never weaken the vendored config (plan 01-01)
+- [Phase 01]: PR-only landing for code and docs per CI-03: plan 01-01 code via PR #1, SUMMARY via docs PR; no direct master commits (plan 01-01)
 
 ### Pending Todos
 
@@ -83,6 +93,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-31T13:27:05.311Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-CONTEXT.md
+Last session: 2026-10-31T15:10:12.501Z
+Stopped at: Completed 01-01-PLAN.md
+Resume file: None
