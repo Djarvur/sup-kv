@@ -58,6 +58,15 @@ behavior_unverified_items:
     test: "After Monday 2026-11-02 06:00 UTC (first cron window), list PRs authored by app/dependabot"
     expected: "At least one gomod or github-actions update PR (grouped minor+patch) exists against master"
     why_human: "insufficient_spec abstention — the weekly window had not elapsed at verification time (config merged 2026-10-31, Saturday); live check shows zero Dependabot PRs so far, which proves nothing either way; presence+wiring of the config is verified but the first-PR event is a future observation"
+overrides:
+  - must_have: "Direct pushes to master are rejected by branch protection; a red gate blocks the merge"
+    reason: "Rulesets API 403 on private org repo (plan-gated); payload + one-command re-apply recorded in docs/setup/branch-protection.md; defer decision taken 2026-10-31 at the plan 01-04 blocking checkpoint ; ratified by the maintainer as an accepted override 2026-10-31 (no org plan upgrade, no public flip)"
+    accepted_by: "onokonem"
+    accepted_at: "2026-10-31T18:41:25Z"
+  - must_have: "Dependabot is active (updates and alerts)"
+    reason: "Alerts GHAS-gated on private repo tier; version updates + govulncheck delivered and green; alerts unlock at the deferred public flip ; ratified by the maintainer as an accepted override 2026-10-31."
+    accepted_by: "onokonem"
+    accepted_at: "2026-10-31T18:41:25Z"
 ---
 
 # Phase 1: CI Bootstrap and Repo Skeleton Verification Report
