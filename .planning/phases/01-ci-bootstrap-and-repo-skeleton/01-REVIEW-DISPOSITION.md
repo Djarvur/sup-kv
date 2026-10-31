@@ -5,7 +5,7 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Dependabot will silently break the golangci-lint local/CI version-parity invariant"
   - id: IN-01
     severity: info
@@ -23,7 +23,7 @@ findings:
     severity: info
     disposition: open
     title: "The no-I/O boundary exempts test files and does not cover x/sys"
-open: 5
+open: 4
 total: 5
 recorded: 2026-10-31T16:23:53.695Z
 ---
@@ -32,7 +32,7 @@ recorded: 2026-10-31T16:23:53.695Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
+| WR-01 | warning | fixed | PR #12 |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
