@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 1
 current_phase_name: CI Bootstrap and Repo Skeleton
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-10-31T15:10:25.946Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-10-31T15:27:30.079Z"
 last_activity: 2026-10-31
 last_activity_desc: Phase 1 execution started
-state_head: 7137282090438b43effad715bc3b16df3a298222
+state_head: f9110eef751038b66a89bd48a029144776659d06
 progress:
   total_phases: 7
   completed_phases: 0
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-31)
 ## Current Position
 
 Phase: 1 (CI Bootstrap and Repo Skeleton) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-10-31 — Phase 1 execution started
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 10min | 3 tasks | 10 files |
+| Phase 01 P02 | 12min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,8 @@ Recent decisions affecting current work:
 - [Phase 01]: sup-kv-port-stdlib-only allows $gostd plus own module path github.com/Djarvur/sup-kv so port-to-app type references stay legal (plan 01-01)
 - [Phase 01]: Strict-gate findings fixed in code direction: app_test.go external app_test package with t.Parallel(); never weaken the vendored config (plan 01-01)
 - [Phase 01]: PR-only landing for code and docs per CI-03: plan 01-01 code via PR #1, SUMMARY via docs PR; no direct master commits (plan 01-01)
+- [Phase 01]: CI check-run contexts fixed verbatim as lint, gate (ubuntu-latest), gate (ubuntu-24.04-arm), gate (macos-15), gate (darwin-amd64-cross) — plan 04 ruleset required_status_checks must copy these exactly (plan 01-02)
+- [Phase 01]: go.sum completed with 54 tidy-required entries after the CI tidy gate caught the gap; go.mod unchanged, tidy idempotent under GOTOOLCHAIN=go1.27.1 — fix direction: complete module files, never weaken the tidy gate (plan 01-02)
 
 ### Pending Todos
 
@@ -93,6 +96,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-31T15:10:12.501Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-10-31T15:27:30.047Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
