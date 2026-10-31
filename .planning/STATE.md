@@ -88,6 +88,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Gap deferrals recorded as accepted overrides with must_have/reason verbatim from the verifier's own suggestion block, ratified 2026-10-31, attributed accepted_by "onokonem" — the verifier re-run reads the overrides: mechanism and passes gaps 1-2 as accepted deviations (plan 01-05)
 - [Phase 01]: CI-02 traceability honestly Partial (unchecked, alerts half deferred GHAS-gated, ratified) mirroring CI-03's pattern; CI-02/CI-03 deliberately NOT marked complete — plan 01-05 records accepted deviations, it does not deliver the deferred halves (plan 01-05)
 - [Phase 01]: Rule 3 deviation — orphan STATE.md commit 3ac4b3f (planner's, outside PR flow) routed through PR #16 before task branches so each task PR diff stayed single-file per acceptance criteria (plan 01-05)
+- [Phase 01]: Verification gap 1 ratified 2026-10-31 (maintainer, accepted override): CI-03 server-side branch protection stays deferred — org plan 403 gates rulesets; branch-protection.md marker now DEFERRED (accepted override) with the re-apply path kept; WINDOWS.md item 2 waived (gap plan 01-06)
+- [Phase 01]: Verification gap 2 ratified 2026-10-31 (maintainer, accepted override): CI-02 alerts half stays GHAS-gated off until GHAS license or the deferred public flip; updates + scheduled govulncheck delivered and green; REQUIREMENTS.md CI-02 annotated Partial mirroring CI-03 (gap plan 01-05)
 
 ### Pending Todos
 
