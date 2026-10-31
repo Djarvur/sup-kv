@@ -15,11 +15,14 @@ audit trail (decision D-08): every command below is re-runnable verbatim.
 
 > **The ruleset is NOT yet applied.** The GitHub rulesets API returns
 > `403 Upgrade to GitHub Pro or make this repository public` for this private org
-> repository (research-verified live, 2026-10-31). Rulesets on private repositories
-> require a paid org plan (Team tier or equivalent). Until the org plan changes (or the
-> repo flips public — itself a deferred decision), the payload below sits recorded and
-> the protection sub-item of CI-03 is **plan-gated** — explicitly flagged, not silently
-> skipped.
+> repository (research-verified live 2026-10-31; re-verified by read-side probe at
+> execution, same day). Rulesets on private repositories require a paid org plan
+> (Team tier or equivalent). Until the org plan changes (or the repo flips public —
+> itself a deferred decision), the payload below sits recorded and the protection
+> sub-item of CI-03 is **plan-gated** — explicitly flagged, not silently skipped.
+>
+> **Deferral decision 2026-10-31: `defer`** — keep everything else, do not upgrade the
+> org plan now; the moment the plan changes, run the Apply command above.
 
 ## Apply
 
