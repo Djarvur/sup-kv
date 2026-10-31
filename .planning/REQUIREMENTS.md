@@ -80,7 +80,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### CI
 
-- [ ] **CI-01**: GitHub Actions runs the quality gates (strict lint, `go vet`, tests with race detector) on every push and PR, on Linux and macOS, amd64 and arm64
+- [x] **CI-01**: GitHub Actions runs the quality gates (strict lint, `go vet`, tests with race detector) on every push and PR, on Linux and macOS, amd64 and arm64
 - [ ] **CI-02**: Dependabot keeps dependencies current (updates and alerts) and a scheduled `govulncheck` job runs against the Go vulnerability database; no open critical vulnerabilities at release
 - [ ] **CI-03**: Development is PR-only — branch protection on `master`, direct pushes forbidden, every change (code and docs) lands through a pull request
 
@@ -136,7 +136,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CI-01 | Phase 1 | Pending |
+| CI-01 | Phase 1 | Complete |
 | CI-02 | Phase 1 | Pending |
 | CI-03 | Phase 1 | Pending |
 | QUAL-01 | Phase 1 | Complete |
