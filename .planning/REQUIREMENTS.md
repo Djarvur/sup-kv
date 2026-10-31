@@ -136,13 +136,64 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (to be filled by roadmap creation) | | |
+| CI-01 | Phase 1 | Pending |
+| CI-02 | Phase 1 | Pending |
+| CI-03 | Phase 1 | Pending |
+| QUAL-01 | Phase 1 | Pending |
+| CORE-01 | Phase 2 | Pending |
+| CORE-02 | Phase 2 | Pending |
+| CORE-03 | Phase 2 | Pending |
+| CORE-04 | Phase 2 | Pending |
+| CORE-05 | Phase 2 | Pending |
+| CORE-06 | Phase 2 | Pending |
+| CORE-07 | Phase 2 | Pending |
+| VERS-01 | Phase 2 | Pending |
+| VERS-02 | Phase 2 | Pending |
+| VERS-03 | Phase 2 | Pending |
+| VERS-04 | Phase 2 | Pending |
+| VERS-05 | Phase 2 | Pending |
+| TEST-01 | Phase 2 | Pending |
+| TEST-02 | Phase 2 | Pending |
+| PERS-01 | Phase 3 | Pending |
+| PERS-02 | Phase 3 | Pending |
+| PERS-03 | Phase 3 | Pending |
+| PERS-04 | Phase 3 | Pending |
+| PERS-05 | Phase 3 | Pending |
+| REPL-01 | Phase 4 | Pending |
+| REPL-02 | Phase 4 | Pending |
+| REPL-03 | Phase 4 | Pending |
+| REPL-04 | Phase 4 | Pending |
+| REPL-05 | Phase 4 | Pending |
+| REPL-06 | Phase 4 | Pending |
+| REPL-07 | Phase 4 | Pending |
+| REPL-08 | Phase 4 | Pending |
+| REPL-09 | Phase 4 | Pending |
+| REPL-10 | Phase 4 | Pending |
+| TEST-03 | Phase 4 | Pending |
+| API-01 | Phase 5 | Pending |
+| API-02 | Phase 5 | Pending |
+| API-03 | Phase 5 | Pending |
+| API-04 | Phase 5 | Pending |
+| API-05 | Phase 5 | Pending |
+| API-06 | Phase 5 | Pending |
+| API-07 | Phase 5 | Pending |
+| TOOL-01 | Phase 5 | Pending |
+| OBS-01 | Phase 6 | Pending |
+| OBS-02 | Phase 6 | Pending |
+| OBS-03 | Phase 6 | Pending |
+| TEST-04 | Phase 6 | Pending |
+| TEST-05 | Phase 6 | Pending |
+| DOCS-01 | Phase 7 | Pending |
+| DOCS-02 | Phase 7 | Pending |
+| DOCS-03 | Phase 7 | Pending |
 
 **Coverage:**
-- v1 requirements: 41 total
-- Mapped to phases: 0
-- Unmapped: 41 ⚠️
+- v1 requirements: 50 total
+- Mapped to phases: 50
+- Unmapped: 0
+
+Note: the previously stated total of 41 did not match the enumerated requirement IDs; the actual v1 count is 50 (7 CORE + 5 VERS + 10 REPL + 5 PERS + 7 API + 3 OBS + 5 TEST + 1 TOOL + 1 QUAL + 3 CI + 3 DOCS). All 50 are mapped.
 
 ---
 *Requirements defined: 2026-10-31*
-*Last updated: 2026-10-31 after initial definition*
+*Last updated: 2026-10-31 after roadmap creation*
