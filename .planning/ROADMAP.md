@@ -34,9 +34,16 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The dependency boundary is machine-enforced from the first feature commit: code in `internal/app` importing `net`/`os`/grpc (or `internal/port` reaching beyond stdlib) fails the lint gate
 **Plans**: 4 plans
 Plans:
+**Wave 1**
 - [ ] 01-01-PLAN.md — Walking skeleton: module, packages, pinned tools, vendored strict lint + depguard boundary (QUAL-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 01-02-PLAN.md — CI gate matrix: lint + 4-cell matrix proven green through a PR, red-teeth proof (CI-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 01-03-PLAN.md — Dependency currency: scheduled govulncheck + Dependabot (CI-02)
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 01-04-PLAN.md — Branch protection on master: scripted ruleset + plan-blocker decision (CI-03)
 
 ### Phase 2: Engine — HLC Versioning and LWW Store
