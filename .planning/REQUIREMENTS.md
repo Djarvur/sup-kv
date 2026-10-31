@@ -81,7 +81,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### CI
 
 - [x] **CI-01**: GitHub Actions runs the quality gates (strict lint, `go vet`, tests with race detector) on every push and PR, on Linux and macOS, amd64 and arm64
-- [x] **CI-02**: Dependabot keeps dependencies current (updates and alerts) and a scheduled `govulncheck` job runs against the Go vulnerability database; no open critical vulnerabilities at release
+- [ ] **CI-02**: Dependabot keeps dependencies current (updates and alerts) and a scheduled `govulncheck` job runs against the Go vulnerability database; no open critical vulnerabilities at release
 - [ ] **CI-03**: Development is PR-only — branch protection on `master`, direct pushes forbidden, every change (code and docs) lands through a pull request
 
 ### Documentation
@@ -137,8 +137,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | CI-01 | Phase 1 | Complete |
-| CI-02 | Phase 1 | Complete |
-| CI-03 | Phase 1 | Partial — PR-only practiced since plan 01-01 (PRs #1-#10); server-side branch protection deferred 2026-10-31 (org plan 403, decision `defer`; re-apply path in docs/setup/branch-protection.md) |
+| CI-02 | Phase 1 | Partial — version updates + scheduled govulncheck delivered and green; alerts half deferred (GHAS-gated on private tier), ratified accepted override 2026-10-31; unlocks at GHAS license or the deferred public flip |
+| CI-03 | Phase 1 | Partial — PR-only practiced since plan 01-01 (PRs #1-#10); server-side branch protection deferred 2026-10-31 (org plan 403, decision `defer`, ratified 2026-10-31 as accepted override (no org plan upgrade, no public flip); re-apply path in docs/setup/branch-protection.md) |
 | QUAL-01 | Phase 1 | Complete |
 | CORE-01 | Phase 2 | Pending |
 | CORE-02 | Phase 2 | Pending |
