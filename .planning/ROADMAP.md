@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Direct pushes to `master` are rejected by branch protection; every change (code and docs) lands through a pull request from a feature branch
   3. Dependabot is active (updates and alerts) and the scheduled `govulncheck` job runs green against the Go vulnerability database
   4. The dependency boundary is machine-enforced from the first feature commit: code in `internal/app` importing `net`/`os`/grpc (or `internal/port` reaching beyond stdlib) fails the lint gate
-**Plans**: 3/4 plans executed
+**Plans**: 4/4 plans executed
 Plans:
 **Wave 1**
 - [x] 01-01-PLAN.md — Walking skeleton: module, packages, pinned tools, vendored strict lint + depguard boundary (QUAL-01)
@@ -44,7 +44,7 @@ Plans:
 - [x] 01-03-PLAN.md — Dependency currency: scheduled govulncheck + Dependabot (CI-02)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 01-04-PLAN.md — Branch protection on master: scripted ruleset + plan-blocker decision (CI-03)
+- [x] 01-04-PLAN.md — Branch protection on master: scripted ruleset + plan-blocker decision (CI-03)
 
 ### Phase 2: Engine — HLC Versioning and LWW Store
 **Goal**: The decision core exists as a pure, I/O-free library — HLC versions packed into UUIDv7 and the LWW-Element-Map store — with its correctness laws proven by property tests that run forever after
@@ -126,7 +126,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. CI Bootstrap and Repo Skeleton | 3/4 | In Progress | - |
+| 1. CI Bootstrap and Repo Skeleton | 4/4 | In Progress | - |
 | 2. Engine — HLC Versioning and LWW Store | 0/TBD | Not started | - |
 | 3. Persistence — Dump and Write Confirmation | 0/TBD | Not started | - |
 | 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
