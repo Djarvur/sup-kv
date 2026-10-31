@@ -1,0 +1,32 @@
+# Dependabot version updates: gomod + github-actions, weekly, grouped minor+patch.
+# The tool graph is small — one grouped PR per week beats five.
+# (Dependabot ALERTS are GHAS-gated on this private repo and stay off until the
+# deferred public flip; version updates are active — see plan 01-03 SUMMARY.)
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: go-deps
+      include: scope
+    open-pull-requests-limit: 10
+    groups:
+      gomod-safe-updates:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    open-pull-requests-limit: 10
+    groups:
+      actions-safe-updates:
+        update-types:
+          - minor
+          - patch
