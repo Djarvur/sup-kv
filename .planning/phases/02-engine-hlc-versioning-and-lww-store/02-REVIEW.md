@@ -1,6 +1,6 @@
 ---
 phase: 02-engine-hlc-versioning-and-lww-store
-reviewed: 2026-11-02T01:51:30Z
+reviewed: 2026-11-02T02:46:49Z
 depth: standard
 files_reviewed: 11
 files_reviewed_list:
@@ -17,18 +17,18 @@ files_reviewed_list:
   - internal/app/merge_test.go
 findings:
   critical: 0
-  warning: 1
+  warning: 0
   info: 3
-  total: 4
+  total: 3
 status: issues_found
 ---
 
 # Phase 02: Code Review Report
 
-**Reviewed:** 2026-11-02T01:51:30Z
+**Reviewed:** 2026-11-02T02:46:49Z (incremental pass over the 02-04 gap-closure delta, commits a5a78a5..ba54587; first pass 2026-11-02T01:51:30Z)
 **Depth:** standard
-**Files Reviewed:** 11 (plus the removal of `internal/app/app_test.go`, commit 148fba4)
-**Status:** issues_found
+**Files Reviewed:** 11 (plus the removal of `internal/app/app_test.go`, commit 148fba4). Delta pass scope: `clock.go`, `store.go`, `clock_test.go`, `store_test.go`, `hlc_prop_test.go`.
+**Status:** issues_found (3 open Info findings; the one Warning is fixed)
 
 ## Summary
 
@@ -49,18 +49,79 @@ after `RUnlock` in `Get` safe; all imports satisfy `sup-kv-app-no-io`.
 `go test -race ./internal/app/` passes. The deleted `app_test.go` leaves no
 dangling references (its helpers live on in `store_test.go`).
 
-What lint cannot see turned up one real contract deficiency and three smaller
-defects, listed below. No Critical issues: nothing in this phase's shipped
-code path loses data or breaks convergence — the Warning is a seam that Phase 3
-(VERS-04 dump/restart) will build on and that is insufficient as documented.
+**Incremental pass (02-04 delta, +237/−33 over `internal/app/`).** The delta
+seeds the restart seam with the dump's full watermark: `NewClock` gained
+`initialC uint16` masked with `counterMask` (`clock.go:39-41`), `Config.InitialC`
+propagates at `NewStore` (`store.go:31-32`, `store.go:75`); `Tick`/`Update`
+bodies are byte-identical to the first-pass review. Adversarial trace of the
+delta found no defects:
+
+- The documented dominance claim holds branch-by-branch: `pt > initialL` →
+  `(pt, 0)`; `pt <= initialL` with seed `< counterMax` → `(initialL,
+  initialC+1)`; seed `== counterMax` → `(initialL+1, 0)` through the existing
+  overflow rule — each strictly after `(initialL, initialC)`, and since
+  byte-wise `Compare` orders `(l, counter, nodeID)`, the `(l, c)` pair alone
+  is informationally complete for dominance (no nodeID seed is needed or
+  possible: packed versions physically cannot carry a counter above 4095).
+- The masking convention (`initialC & counterMask`) mirrors `Update`'s existing
+  `remoteC &= counterMask` totality rule; a dump-derived seed can never
+  legitimately exceed 12 bits, and over-seeding could only strengthen
+  dominance, never weaken it.
+- `Update` before the first post-restart `Tick` (a Merge arriving right after
+  restart) stays monotone and dominant over the seed, including the
+  `max(c0, remoteC)+1` overflow path.
+- `Config.normalized()` passes `InitialL`/`InitialC` through untouched —
+  correct, since `uint16` cannot be negative and a zero counter seed
+  degenerates safely (`(T,1)` still beats a `(T,0)` watermark).
+- Regression strength verified against the pre-fix code: each new row fails
+  under the old constructor — `TestStore_restartDominance` variants A/B would
+  observe zero conflicts and stale/reverted data through the equal-version
+  no-op, so both WR-01 consequences are pinned dead. The watermark property
+  draws `watermarkC` from 1..4095 with a wall-clock seed per run (excluding 0
+  is correct targeting: counter 0 was never hazardous) and initializes `prev`
+  at the full watermark, so the very first tick must strictly dominate it.
+- `go test -race -count=1 ./internal/app/` green, plus 8 randomized runs of
+  the three restart suites — all green.
+
+No new findings in the delta. **WR-01 is fixed** (see below); counts in the
+frontmatter reflect open findings. IN-01/IN-02/IN-03 remain open — the delta
+did not touch them (note: the clock.go constructor region grew by nine lines,
+so IN-02's cited overflow paths now sit at `clock.go:57-60` and
+`clock.go:89-93`; the finding text is unchanged).
 
 ## Warnings
 
-### WR-01: Restart seam seeds only `l` — post-restart writes can collide with or lose to pre-restart versions
+### WR-01 [FIXED by 02-04]: Restart seam seeds only `l` — post-restart writes can collide with or lose to pre-restart versions
+
+**Status:** FIXED in gap-closure 02-04 (commits a5a78a5, 68e4b62, b4b5397).
+No longer counted in the open findings above.
+
+**Fix evidence (verified this pass against the source):**
+`NewClock(now, initialL, initialC, driftWarn)` now seeds `c = initialC &
+counterMask` (`internal/app/clock.go:39-41`) and `Config.InitialC` propagates
+through `NewStore` (`internal/app/store.go:31-32`, `internal/app/store.go:75`),
+with both doc contracts rewritten to demand the dump's FULL watermark and to
+state that seeding `initialL` alone is insufficient. The original hazard — the
+same-ms restart stamping `(T, 1)` identical to a dumped `(T, 1, N)` (variant A:
+silent revert on peers) and post-restart writes landing below a `(T, 5, N)`
+watermark (variant B: acknowledged writes reverting on merge) — is now
+unreachable through the seam: the first `Tick` is strictly after `(initialL,
+initialC)` on every branch. Regressions: `TestClock_restartFromDumpMax`
+counter-seeded rows (`internal/app/clock_test.go:300-352` — seed+1, counterMax
+overflow bump, wall-ahead adoption, out-of-range masking),
+`TestClock_restartProperty` now models the full watermark
+`(dumpMax, watermarkC ∈ 1..4095, ownNodeID)` (`internal/app/hlc_prop_test.go:236-272`),
+and `TestStore_restartDominance` (`internal/app/store_test.go:577-698`) encodes
+both WR-01 consequences as dead at the store level with exact Conflict
+assertions. Residual exposure is IN-02's open 48-bit ceiling (a dump watermark
+at `l = 2^48-1` with counter 4095 still wraps on the overflow bump), which
+subsumes this seam's last theoretical corner.
+
+Original finding, retained for the record:
 
 **File:** `internal/app/clock.go:24-31` (and the mirrored contract at `internal/app/store.go:20-28`, `Config.InitialL`)
-**Issue:** `NewClock(now, initialL, driftWarn)` documents VERS-04 restart as
-"pass the dump's maximum l". That is not enough information to preserve the
+**Issue:** `NewClock(now, initialL, driftWarn)` documented VERS-04 restart as
+"pass the dump's maximum l". That was not enough information to preserve the
 package's own stated laws ("versions unique per write"; a local write after
 seeing a record beats it):
 
@@ -88,16 +149,9 @@ seeing a record beats it):
 Not reachable through any code path shipped in this phase (nothing loads a
 dump yet), hence Warning rather than Critical — but the seam and its doc
 contract are this phase's deliverable, and `TestClock_restartProperty`
-(`hlc_prop_test.go:230-265`) actively cements the weak contract by modelling
-the watermark only as `(dumpMax, 0, maxNodeID)`, so the hazardous cases are
-untested and the insufficiency is invisible to the suite.
-**Fix:** Seed the clock from the dump's maximum *full* reading, e.g. add an
-`initialC uint16` parameter (`NewClock(now, initialL, initialC, driftWarn)`
-with first Tick then returning at least `(initialL, initialC+1)` and the
-existing overflow-to-`l+1` rule), or keep the signature and document + enforce
-that restarts start at `dumpMax + 1` so no post-restart version can equal or
-precede a dumped one. Extend `TestClock_restartProperty` with a dump whose
-watermark is `(dumpMax, c>0, ownNodeID)`.
+(`hlc_prop_test.go:230-265`) actively cemented the weak contract by modelling
+the watermark only as `(dumpMax, 0, maxNodeID)`, so the hazardous cases were
+untested and the insufficiency was invisible to the suite.
 
 ## Info
 
@@ -114,7 +168,7 @@ truncation instead of masking with it).
 
 ### IN-02: No guard at the 48-bit `l` ceiling — counter overflow wraps the version stream to zero
 
-**File:** `internal/app/clock.go:49` and `internal/app/clock.go:81` (masked away at `internal/app/version.go:35`)
+**File:** `internal/app/clock.go:49` and `internal/app/clock.go:81` (masked away at `internal/app/version.go:35`; after the 02-04 delta these overflow paths sit at `clock.go:57-60` and `clock.go:89-93`)
 **Issue:** When `l` reaches `2^48-1` with the counter at `counterMax`, both
 `Tick` and `Update` execute `c.l++`, producing `l = 2^48`. `PackVersion` then
 applies `l & tsMask`, silently wrapping the timestamp to `0` — the version
@@ -122,7 +176,9 @@ stream restarts from the bottom of the domain, breaking monotonicity and
 uniqueness (equal/predecessor versions on merge → the same divergence class as
 WR-01). Unreachable with a truthful wall clock before ~year 8921, but the D-02
 seam explicitly admits an injected `now`, and `randVersion`
-(`props_test.go:53-59`) already generates readings at the ceiling.
+(`props_test.go:53-59`) already generates readings at the ceiling. The 02-04
+restart seed adds one more route into this corner (a dump watermark at the
+ceiling with counter 4095), but the finding is unchanged in kind.
 **Fix:** Either clamp (skip the bump, reuse the reading — acceptable since
 `Tick` may return a repeated `(l, c)` only if callers tolerate it) or document
 the invariant "l < 2^48-1 is a caller precondition on `now`" in `NewClock`,
@@ -148,6 +204,6 @@ octet 10 zero). That property can actually fail and is the meaningful
 
 ---
 
-_Reviewed: 2026-11-02T01:51:30Z_
+_Reviewed: 2026-11-02T02:46:49Z (incremental 02-04 delta pass; first pass 2026-11-02T01:51:30Z)_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
