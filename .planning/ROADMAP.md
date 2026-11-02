@@ -13,7 +13,7 @@ sup-kv ships in seven dependency-forced phases. Quality gates and the depguard-e
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 1: CI Bootstrap and Repo Skeleton** - Quality gates, 4-OS CI matrix, Dependabot/govulncheck and the machine-enforced architecture boundary, before any feature code
-- [ ] **Phase 2: Engine — HLC Versioning and LWW Store** - Pure in-memory decision core: UUIDv7-packed HLC versions, LWW-Element-Map with tombstones and conflict journal, proven by property tests
+- [x] **Phase 2: Engine — HLC Versioning and LWW Store** - Pure in-memory decision core: UUIDv7-packed HLC versions, LWW-Element-Map with tombstones and conflict journal, proven by property tests (completed 2026-11-02)
 - [ ] **Phase 3: Persistence — Dump and Write Confirmation** - Human-readable JSON dumps with atomic write, `.prev` fallback chain and snapshots; a confirmed write is always on disk
 - [ ] **Phase 4: Replication and Deterministic Simulator** - UDP broadcast replication (Hello, DataReplication/Ack, DataSync) with N-peer tracking, plus the seeded-chaos simulator that proves the convergence bounds
 - [ ] **Phase 5: gRPC API and Binary** - The user-facing surface: Get/Set/Delete/List/Watch, startup gate, `wait_for_replication`, health endpoint, snapshots, single static binary
@@ -60,7 +60,7 @@ Plans:
   2. Property tests prove merge is commutative, associative and idempotent — including tombstoned entries — so delivery order, duplicates and retransmissions cannot affect the outcome, and every version displaced by a merge is recorded in the conflict journal
   3. Byte-wise UUIDv7 comparison equals `(l, c, NodeID)` order and versions are unique per write by construction — both property-tested
   4. The HLC stays monotonic under adversarial clock input (backward and forward jumps, stuck clock, counter overflow, restart initialized from the dump's max `l` rather than the wall clock), and drift beyond `drift_warn` is logged as a warning
-**Plans**: 4/4 plans executed (3 executed, 1 gap-closure)
+**Plans**: 4/4 plans complete (3 executed, 1 gap-closure)
 Plans:
 **Wave 1**
 - [x] 02-01-PLAN.md — Tracer: engine core wired end-to-end — errors, UUIDv7 RecordVersion, HLC clock with now seam, LWW store with merge losers returned (CORE-01..CORE-07)
@@ -138,7 +138,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | 6/6 | In Progress | - |
-| 2. Engine — HLC Versioning and LWW Store | 4/4 | In Progress | - |
+| 2. Engine — HLC Versioning and LWW Store | 4/4 | Complete    | 2026-11-02 |
 | 3. Persistence — Dump and Write Confirmation | 0/TBD | Not started | - |
 | 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
 | 5. gRPC API and Binary | 0/TBD | Not started | - |
