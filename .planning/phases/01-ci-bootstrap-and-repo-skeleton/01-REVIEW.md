@@ -1,328 +1,155 @@
 ---
 phase: 01-ci-bootstrap-and-repo-skeleton
-reviewed: 2026-10-31T22:46:46Z
+reviewed: 2026-11-02T16:03:17Z
 depth: standard
-files_reviewed: 16
+files_reviewed: 13
 files_reviewed_list:
   - AGENTS.md
-  - cmd/sup-kv/main.go
-  - docs/setup/branch-protection.md
-  - docs/setup/ruleset.json
-  - .github/dependabot.yml
-  - .github/workflows/ci.yml
-  - .github/workflows/vulncheck.yml
-  - .gitignore
-  - .golangci.yml
-  - go.mod
-  - go.sum
-  - internal/app/app_test.go
-  - internal/app/doc.go
-  - internal/port/doc.go
-  - Makefile
-  - .claude/CLAUDE.md
+  - internal/app/clock/clock.go
+  - internal/app/clock/clock_test.go
+  - internal/app/clock/hlc_prop_test.go
+  - internal/app/internal/testutil/gen.go
+  - internal/app/internal/testutil/rng.go
+  - internal/app/storage/doc.go
+  - internal/app/storage/errors.go
+  - internal/app/storage/merge_test.go
+  - internal/app/storage/store.go
+  - internal/app/storage/store_test.go
+  - internal/app/version/version.go
+  - internal/app/version/version_test.go
 findings:
   critical: 0
-  warning: 1
-  info: 6
-  total: 7
+  warning: 2
+  info: 1
+  total: 3
 status: issues_found
 ---
 
-# Phase 1: Code Review Report
+# Phase 01: Code Review Report
 
-**Reviewed:** 2026-10-31T22:46:46Z (increment 2; base 2026-10-31T16:16:54Z)
+**Reviewed:** 2026-11-02T16:03:17Z
 **Depth:** standard
-**Files Reviewed:** 16 (cumulative; increment 2 scope: 2 files)
+**Files Reviewed:** 13
 **Status:** issues_found
 
 ## Summary
 
-Phase 1 skeleton for sup-kv: CI quality gates (strict golangci-lint + 4-cell OS/arch
-matrix), Dependabot + govulncheck automation, and a recorded-but-deferred branch
-protection ruleset. The base review went beyond static reading: every YAML/JSON file
-was machine-parsed, the Go code was built/vetted/linted with the project's own pinned
-toolchain, `go mod tidy` sync was verified in a scratch copy, and — decisively — the
-depguard architecture-boundary rules were verified against the actual depguard v2.2.1
-source in the module cache and then empirically probed with deliberately violating
-scratch files (in `/tmp`, never in the repo).
+Reviewed the current on-disk state of the AGENTS.md conventions update and the
+split of `internal/app` into the `version`, `clock` and `storage` packages plus
+the shared `internal/app/internal/testutil` generators (the delta since
+diff_base 0ca46c9 that touched phase-01's covered files).
 
-**Verified correct (adversarially confirmed, not assumed):**
+The core is well-built: the HLC Tick/Update state machines were traced through
+every Kulkarni branch including counter overflow, ceiling saturation and
+adversarial inputs (negative/over-domain remote readings, out-of-range
+counters) and are correct — every returned reading is strictly greater than
+the pre-state, and saturation pins at `(maxL, counterMax)` instead of wrapping.
+The RFC 9562 pack/unpack round-trip was verified against the layout vector,
+the 12/14-bit masking, and the truncation trick that drops the variant bits;
+byte-wise `Compare` order is sound. The LWW join laws, tombstone asymmetry and
+defensive copying in `storage` match the documented contract. Machine gates
+verified on this tree: `go test -race ./internal/...` passes,
+`go tool golangci-lint run ./internal/...` is clean, the depguard rules match
+AGENTS.md, the `# Origin:` header is in place, and all `//nolint` directives
+in scope name their linter and carry justifications per deviation #3.
 
-- **Depguard rules work as commented.** depguard v2.2.1 `strInPrefixList`
-  (`settings.go:224-248`) confirms: plain `pkg` strings are prefix matches (`net`
-  catches `net/http`), trailing `$` means exact match, and bare dot-free words never
-  match dotted third-party paths (so `pkg: os` cannot false-positive on e.g.
-  `gosimple/...`). Empirical probe: `internal/app` file importing `net/http` +
-  `os/exec` → denied by `sup-kv-app-no-io`; `internal/port` file importing
-  `github.com/stretchr/testify` → denied by `sup-kv-port-stdlib-only` (strict mode);
-  port file importing stdlib + `github.com/Djarvur/sup-kv/internal/app` → allowed.
-  `!$test` expands to `!**/*_test.go` and rules without `files:` (upstream `main`)
-  apply to all files — all exactly as the config comments claim.
-- **Workflows are injection- and privilege-hardened.** Every `${{ }}` interpolation in
-  `ci.yml` draws from the statically-defined matrix or config, never from untrusted
-  PR data; there is no `pull_request_target`; both workflows pin
-  `permissions: contents: read`; no secrets are referenced.
-- **Ruleset contexts match CI check names exactly**: `lint` (job without `name:`) and
-  `gate (${{ matrix.name }})` produce exactly the five contexts in `ruleset.json`
-  (`lint`, `gate (ubuntu-latest)`, `gate (ubuntu-24.04-arm)`, `gate (macos-15)`,
-  `gate (darwin-amd64-cross)`). `ruleset.json` is valid JSON with correct ruleset-API
-  field names; the `gh api` commands in `branch-protection.md` target the actual
-  remote (`git remote -v` → `Djarvur/sup-kv`).
-- **Toolchain state is consistent**: `go build`/`go vet`/gofmt clean; full strict
-  lint gate passes on the skeleton (`go tool golangci-lint run ./...` exit 0, so the
-  project-added depguard keys parse and compile inside the vendored config);
-  `go mod tidy && git diff --exit-code go.mod go.sum` is clean in a scratch copy, so
-  the CI tidy gate will not fail spuriously; `vulncheck.yml` cron `0 6 * * * 1`
-  matches its "weekly, Monday 06:00 UTC" comment and uses the go.mod tool pin as
-  claimed.
-
-No Critical findings. One Warning (an automation design flaw that will silently break
-a documented invariant), plus Info items. (WR-01 and IN-02 were fixed in increment 1;
-dispositions recorded there.)
-
-## Critical Issues
-
-None.
+Two warnings survive the adversarial pass, both in `clock.go` and both
+involving the 48-bit domain ceiling — the code carefully clamps every input
+into the domain (initialC, remoteC, ptMs, newL) except one, and the drift
+signal arithmetic overflows precisely in the saturated state it exists to
+report. Both were confirmed by execution, not just reading.
 
 ## Warnings
 
-### WR-01: Dependabot will silently break the golangci-lint local/CI version-parity invariant
+### WR-01: driftBetween overflows int64 at the domain ceiling, corrupting the drift signal exactly when the clock is pathological
 
-**Status: FIXED** (increment 1, `7ac0c51`, PR #12) — see disposition in increment 1
-below. Retained for audit trail.
+**File:** `internal/app/clock/clock.go:144`
+**Issue:** `d := (l - ptMs) * int64(time.Millisecond)` overflows when
+`|l - ptMs|` exceeds ~9.22e12 ms (~292 years). That state is reachable
+through the public API without any contract violation: `remoteL = maxL`
+(2^48-1) is a valid in-domain RFC 9562 timestamp, so a single
+`Store.Merge` of a peer record carrying `l = maxL` (or a clock seam past
+year ~8921) ratchets `l` to `maxL` permanently via `Update`'s documented
+saturation. With `l = maxL` and a realistic wall clock (2024-11), the true
+divergence is 279,744,976,710,655,000,000 ns (~+8871 years), but the int64
+product wraps to 3,043,815,605,011,725,760 ns (~+96 years) — wrong
+magnitude, and for other (l, ptMs) pairs the wrapped value flips sign or
+lands inside tolerance. The drift signal (VERS-05) is the operator's
+mechanism for detecting a stuck/lying clock; after the wrap it reports
+garbage in precisely the state that needs flagging. Verified by running
+the arithmetic: true delta ~8871 years, wrapped int64 delta ~96 years.
+Monotonicity and stored versions are unaffected (drift never feeds back
+into clock state), which is why this is a Warning, not a Critical.
+**Fix:** Compare in milliseconds before scaling, and saturate instead of
+wrapping:
 
-**File:** `.github/dependabot.yml:7-19` (interacting with `.github/workflows/ci.yml:28`, `.golangci.yml:1`, `go.mod:94`)
-**Issue:** The `tool` directive pulls `github.com/golangci/golangci-lint/v2 v2.15.0` into go.mod as a require line (line 94, `// indirect`). Dependabot's `gomod` ecosystem opens PRs for outdated requires — including indirect ones — so the weekly grouped "minor+patch" PR will bump the golangci-lint module version. But nothing updates the two other pins that the design requires to stay in lockstep:
-
-1. the action input `version: v2.15.0` in `ci.yml` (Dependabot's `github-actions` ecosystem only bumps `uses:` refs, never `version:` inputs), and
-2. the vendored powerman strict config, which per AGENTS.md deviation #2 must match the lint version **exactly** ("mismatch fails to parse or silently drops sections" per the project's own research).
-
-The trap fires silently: the Dependabot PR passes CI (the lint job still runs v2.15.0 from the action pin), so merging it looks green — after which local `make lint` runs a different golangci-lint against the 2.15.0-exact config, violating the "full patch pin == go.mod tool directive (local/CI parity)" comment in `ci.yml:28` and potentially failing to parse or silently dropping lint sections. All three pins must move together, and only one of them is automated.
-
-**Fix:** exclude the linter module from automated updates so bumps go through the manual re-vendor protocol that AGENTS.md deviation #2 already mandates:
-
-```yaml
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: weekly
-    ignore:
-      # Must move in lockstep with .golangci.yml (vendored 2.15.0 strict config)
-      # and the `version:` pin in .github/workflows/ci.yml — re-vendor by hand
-      # per AGENTS.md deviation #2. See WR-01 in 01-REVIEW.md.
-      - dependency-name: github.com/golangci/golangci-lint/v2
+```go
+func driftBetween(l, ptMs int64, warn time.Duration) time.Duration {
+	if warn <= 0 {
+		return 0
+	}
+	const maxDeltaMs = int64(math.MaxInt64 / int64(time.Millisecond)) // ±~292 years.
+	d := l - ptMs
+	if d > maxDeltaMs {
+		return time.Duration(maxDeltaMs) * time.Millisecond // saturate ahead, never wrap
+	}
+	if d < -maxDeltaMs {
+		return time.Duration(-maxDeltaMs) * time.Millisecond // saturate behind
+	}
+	scaled := d * int64(time.Millisecond)
+	if scaled > int64(warn) || scaled < -int64(warn) {
+		return time.Duration(scaled)
+	}
+	return 0
+}
 ```
 
-(`golang.org/x/vuln` needs no exclusion: `vulncheck.yml` resolves it via `go tool`, so the Dependabot bump and the workflow stay in sync by construction.)
+### WR-02: NewClock never clamps initialL to the 48-bit domain — the one unclamped input silently defeats the documented wrap protection
+
+**File:** `internal/app/clock/clock.go:63-65`
+**Issue:** `NewClock` masks `initialC` (`& counterMask`), `Update` masks
+`remoteC`, clamps `newL` with `min(newL, maxL)`, and `Tick` clamps the wall
+reading with `min(ptMs, maxL)` — but `initialL` is stored raw with no clamp
+and, unlike `PackVersion`, its doc comment states no range constraint on the
+caller. For `initialL > maxL`: `Tick`'s saturation guard `c.l == maxL`
+(clock.go:85) never fires because `c.l > maxL`, `l` only grows, and every
+stamped version reaches `PackVersion` with `l` beyond the domain, where
+`l&tsMask` silently wraps it to the bottom — verified by execution:
+`initialL = maxL+5` ticks to `l = maxL+6`, and `PackVersion` packs `l = 6`.
+That is exactly the "silently wrap the timestamp" failure the package doc
+(clock.go:20-23) promises cannot happen ("readings saturate at the 48-bit
+timestamp ceiling instead of wrapping out of the version domain ... never a
+wrap to zero"): a node restarted with a corrupted out-of-range watermark
+would issue low versions that lose every future LWW merge against its own
+prior writes. Not reachable through the intended dump pipeline (`Unpack` is
+masking, so dump-derived watermarks are always ≤ maxL), hence Warning
+rather than Critical — but the package's stated totality philosophy makes
+this input the inconsistent one.
+**Fix:** Clamp in the constructor, matching the treatment of every other
+input:
+
+```go
+func NewClock(now func() time.Time, initialL int64, initialC uint16, driftWarn time.Duration) *Clock {
+	return &Clock{l: min(initialL, maxL), c: initialC & counterMask, now: now, driftWarn: driftWarn}
+}
+```
 
 ## Info
 
-### IN-01: AGENTS.md quotes an outdated go directive value
+### IN-01: NewRNG doc comment overstates the printed-seed contract ("on every run")
 
-**File:** `AGENTS.md:5`
-**Issue:** "Go version: as pinned in `go.mod` (`go 1.27`)" — go.mod actually pins `go 1.27.1`. The self-referential phrasing ("as pinned in go.mod") keeps this harmless, but the parenthetical value is stale.
-**Fix:** Update the parenthetical to `go 1.27.1`, or drop the value and rely on the pointer to go.mod.
-
-### IN-02: .claude/CLAUDE.md asserts branch protection that is not yet applied
-
-**Status: FIXED** (increment 1, `0a4ca44`) — see disposition in increment 1 below.
-
-**File:** `.claude/CLAUDE.md:17`
-**Issue:** The Process constraint states "branch protection on `master`, direct pushes forbidden" as if enforced. Per `docs/setup/branch-protection.md` the ruleset is **NOT applied** (403 rulesets-API error on the private org repo; plan-gated, deferred 2026-10-31). An agent trusting the generated context would assume direct pushes to master are blocked when they are not — the master branch is currently protected only by convention.
-**Fix:** Regenerate the context after the ruleset is applied, or add a caveat that CI-03's protection sub-item is plan-gated/deferred (see docs/setup/branch-protection.md).
-
-### IN-03: Third-party actions pinned by mutable major tags, not commit SHAs
-
-**File:** `.github/workflows/ci.yml:22-26,46`, `.github/workflows/vulncheck.yml:26`
-**Issue:** `actions/checkout@v7`, `actions/setup-go@v7`, and third-party `golangci/golangci-lint-action@v9` are tag refs, which are mutable. A hijacked tag executes attacker code in CI. Impact here is bounded (token is `contents: read`, no secrets in either workflow, no `pull_request_target`, PR code already runs in `go test`), so this is hardening advice, not a vulnerability.
-**Fix:** Pin third-party actions (at minimum `golangci/golangci-lint-action`) to full commit SHAs; Dependabot updates SHA pins for `github-actions` natively.
-
-### IN-04: The no-I/O boundary exempts test files and does not cover x/sys
-
-**File:** `.golangci.yml:68-80`
-**Issue:** Two intentional-but-worth-knowing gaps in `sup-kv-app-no-io`: (a) `!$test` exempts `*_test.go` in `internal/app`, so the machine-enforced purity claim covers production files only — app tests could open sockets/files without lint complaint (the exemption is deliberate per the inline comment, and is what lets port/app tests use the planned `pgregory.net/rapid` test-only dep); (b) the deny entries `syscall`/`google.golang.org/` do not cover `golang.org/x/sys/unix` (dotted path, separate module), so raw-syscall access would only be caught by the dependency policy (a visible go.mod change), not by the lint gate.
-**Fix:** Accept as documented; if the boundary should bind tests too, drop `!$test` from this rule only (keep it in the port rule) and add `golang.org/x/sys/` to the deny list in the same `.golangci.yml` commit.
-
-### IN-05: "Apply command above" points the wrong direction — the Apply command is below
-
-**File:** `docs/setup/branch-protection.md:25`
-**Issue:** The deferral-decision blockquote says "the moment the plan changes, run
-the Apply command **above**" — but no command exists above line 25; the Apply
-section (lines 32-37) is *below* it, and the new ratification paragraph (line 30)
-correctly says "the re-apply path **below**", leaving the two adjacent paragraphs
-pointing in opposite directions. Provenance: pre-existing, not introduced by the
-first increment — added by `17d89c4` (15:55Z), before the base review (16:16:54Z),
-which missed it; surfaced by that pass's command-reference consistency check.
-Severity Info because the doc contains exactly one Apply command two paragraphs
-away, so an auditor cannot be misled in practice; it is an audit-trail wording
-defect only.
-**Fix:** In line 25 change "run the Apply command above" to "run the Apply command
-below (## Apply)".
-
-### IN-06: CI's schema gate and CI's lint run use two separately-pinned binaries
-
-**File:** `.github/workflows/ci.yml:28-31`
-**Issue:** The new standing gate `go tool golangci-lint config verify` validates
-`.golangci.yml` against the **go.mod tool-directive** binary (v2.15.0), while the
-subsequent lint execution runs the **action `version:`-input** binary (also
-v2.15.0) installed by `golangci/golangci-lint-action@v9`. Today the pins match, so
-the comment "with the same pinned binary" holds — but the gate's protection in CI
-is conditional on the documented three-pin lockstep (go.mod require, action
-`version:`, vendored strict config) staying enforced by hand, per AGENTS.md
-deviation #2 and the WR-01 Dependabot ignore. If a future manual bump moves one
-pin without the others, the schema check validates against the wrong version's
-schema — precisely the T-01-01 silent-mismatch class the gate exists to catch.
-Local `make lint` has no such split (both steps use the `go tool` binary).
-Not a regression: before PR #26 there was no schema check anywhere, so this
-increment strictly strengthens the gate; this is a residual design limitation,
-recorded so the lockstep dependency is visible. It cannot fire without a human
-violating the documented protocol, hence Info.
-**Fix:** Optional hardening — replace the action step with a plain
-`run: go tool golangci-lint run ./...` step (the verify step already proves `go
-tool` works in CI), collapsing the action `version:` pin entirely and leaving the
-go.mod tool directive as the single lint-version pin. Trade-off: loses the action's
-inline-annotations and caching. Alternatively, extend the ci.yml:31 parity comment
-to state explicitly that the verify step's schema is also tied to the go.mod pin.
+**File:** `internal/app/internal/testutil/rng.go:38-40`
+**Issue:** The comment says the seed "is printed with the exact
+`property seed:` prefix on every run", but it is emitted via `t.Logf`,
+which `go test` suppresses for passing tests unless `-v` is given. The
+D-04 replay contract still holds where it matters — the output appears on
+failure, and every failure message says "replay with the property seed
+above" — so this is a doc-accuracy nit, not a broken contract.
+**Fix:** Reword to "printed with the exact `property seed:` prefix on every
+failing run (or under `-v`)".
 
 ---
 
-_Reviewed: 2026-10-31T16:16:54Z_
+_Reviewed: 2026-11-02T16:03:17Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
-
-## Incremental Review — 2026-10-31 (post gap-closure)
-
-**Base review:** 2026-10-31T16:16:54Z (above) · **Increment reviewed:** 2026-10-31T19:11:54Z
-**Depth:** quick (pattern scan + targeted reference verification)
-**Scope:** the 3 files changed since the base review — `.github/dependabot.yml`
-(commit `7ac0c51`, PR #12), `docs/setup/branch-protection.md` and `.claude/CLAUDE.md`
-(commit `0a4ca44`, PR #20).
-**Increment status:** clean — the increment's edits introduced no new defects. One
-pre-existing Info (IN-05) was surfaced by the mandated consistency check; it predates
-the base review (introduced by `17d89c4` at 15:55Z, ~20 min before the base review
-was written, and missed there). Frontmatter counts updated to include it.
-
-### Quick-scan results
-
-All four pattern families clean across all three files (zero hits): hardcoded
-secrets, dangerous functions (`eval`/`exec`/`innerHTML`/etc.), debug artifacts
-(`TODO`/`FIXME`/`console.log`/`debugger`), empty catch blocks.
-
-### Per-file verification
-
-1. **`.github/dependabot.yml`** (`7ac0c51` — WR-01 fix, already dispositioned via
-   PR #12; re-checked for regressions only). YAML machine-parsed: valid. The
-   `ignore:` block sits at the schema-correct level (update-entry, sibling of
-   `schedule`/`commit-message`), so Dependabot will honor it. `dependency-name:
-   github.com/golangci/golangci-lint/v2` is byte-exact against the go.mod:94 require
-   line — a near-miss (e.g. dropping `/v2`) would silently never match. A bare
-   `dependency-name` without `versions` ignores ALL updates, which is exactly the
-   intended full-manual lockstep re-vendor protocol. All four citations in the new
-   comment verified accurate: `.golangci.yml:1` (2.15.0-exact strict config),
-   `ci.yml:28` (`version: v2.15.0` pin), AGENTS.md deviation #2 (lines 19-25,
-   vendored lint config provenance), and WR-01 in this file. **No new defects.**
-
-2. **`docs/setup/branch-protection.md`** (`0a4ca44` — heading → `## Status: DEFERRED
-   (accepted override)` + ratification paragraph). Commands and payload references
-   remain intact: the Apply/Verify/Delete/PATCH `gh api` commands are byte-unchanged
-   by the edit, `docs/setup/ruleset.json` exists, and the five required-check
-   contexts quoted in the doc still match `ci.yml`'s job/matrix naming exactly
-   (`lint`, `gate (ubuntu-latest)`, `gate (ubuntu-24.04-arm)`, `gate (macos-15)`,
-   `gate (darwin-amd64-cross)`). The ratification paragraph's cross-file claims
-   verified TRUE: `01-VERIFICATION.md:61-65` records the override ratified by the
-   maintainer (`accepted_by: onokonem`, `accepted_at: 2026-10-31T18:41:25Z`), and
-   `REQUIREMENTS.md:141` records CI-03 as deferred/ratified. The heading rename left
-   no dangling "PENDING" self-reference in the doc. "The re-apply path below stays
-   current" is directionally correct. One inconsistency found — see IN-05 (it is the
-   "Apply command above" wording the edit did NOT touch, i.e. pre-existing).
-
-3. **`.claude/CLAUDE.md`** (`0a4ca44` — Process bullet deferral parenthetical,
-   generated file; checked for actively misleading content only). Every claim in the
-   parenthetical verified: server-side ruleset deferred 2026-10-31 (matches the doc),
-   "ratified accepted override" (matches 01-VERIFICATION.md), "org-plan gated"
-   (matches the 403/Team-tier finding), "one-command re-apply in
-   docs/setup/branch-protection.md" (the Apply section is indeed a single command).
-   GSD section markers intact; the edit is exactly the caveat IN-02's fix
-   prescribed. **No new defects.**
-
-### Prior finding dispositions updated by this increment
-
-- **WR-01: FIXED** (`7ac0c51`, PR #12) — fix verified against schema, go.mod, and all
-  cited cross-references (see per-file item 1).
-- **IN-02: FIXED** (`0a4ca44`) — the Process bullet now carries the deferral caveat
-  with accurate details (see per-file item 3).
-
----
-
-_Increment reviewed: 2026-10-31T19:11:54Z_
-_Reviewer: Claude (gsd-code-reviewer)_
-_Depth: quick (incremental)_
-
-## Incremental Review 2 — 2026-10-31 (config-verify standing gate, PR #26)
-
-**Base:** 2026-10-31T19:11:54Z (increment 1, commit `85fa4dc`) · **Increment
-reviewed:** 2026-10-31T22:46:46Z
-**Depth:** standard
-**Scope:** the 2 files changed since `85fa4dc` — `Makefile` and
-`.github/workflows/ci.yml` (commit `acf1215`, PR #26: adds
-`go tool golangci-lint config verify` as a standing gate to the Makefile `lint`
-target and the ci.yml `lint` job). Diff verified to be exactly those two additions
-plus comments — nothing else changed.
-**Increment status:** no new Critical or Warning findings. One Info (IN-06)
-documents a residual design limitation of the surrounding pin architecture that the
-increment inherits (and partially mitigates). Frontmatter counts updated:
-info 5 → 6, total 6 → 7.
-
-### Empirical verification (not assumed from comments)
-
-The gate's entire premise is the T-01-01 claim that `golangci-lint run` silently
-ignores unknown top-level config keys. This pass proved both halves with the
-project's own pinned binary (scratch config in `/tmp`, repo sources untouched):
-
-1. **Premise TRUE — `run` is silent.** A copy of `.golangci.yml` with
-   `unknown-top-level-key: true` appended:
-   `go tool golangci-lint run -c <scratch> ./internal/... ./cmd/...` → **exit 0,
-   zero output**. The config error is completely invisible to the existing gate.
-2. **Gate catches it.** `go tool golangci-lint config verify -c <scratch>` →
-   **exit 3**, `jsonschema: ... additional properties 'unknown-top-level-key' not
-   allowed`. The step is load-bearing, not redundant.
-3. **Current config passes:** `go tool golangci-lint config verify` at repo root →
-   exit 0, so the vendored strict config + project depguard keys are schema-valid
-   for v2.15.0 and the new gate does not break local `make lint` or the CI lint job.
-4. **Fail-closed on missing config:** `config verify -c <nonexistent>` → exit 3
-   ("can't load config"), so the gate cannot silently degrade into a no-op if the
-   config file is renamed/moved.
-5. **Makefile hygiene:** both recipe lines remain hard-tab indented (`grep -P
-   '^\t'` — all five recipe lines in the file are tabs; zero space-indented recipe
-   candidates), and since each recipe line is a separate shell with make's default
-   fail-fast, a verify failure aborts before `run` executes. Fail-closed ordering.
-6. **ci.yml hygiene:** machine-parsed (YAML valid); the new step sits at the
-   correct `steps:` list level between `setup-go` and the lint action; the step is
-   a static `run:` string with no `${{ }}` interpolation, no new permissions, no
-   secrets — the injection/privilege posture from the base review is unchanged.
-7. **Coverage is complete:** a repo-wide grep confirms the only two lint entry
-   points are `Makefile` (verify then run, lines 7-8) and the ci.yml lint job
-   (verify step line 28, then the action) — every path that lints now schema-checks
-   first. (`vulncheck.yml` uses govulncheck, not the lint config; the `gate` job
-   runs vet/test, not lint.)
-8. **Required-check contexts unaffected:** job and matrix names are untouched by
-   the diff, and `docs/setup/ruleset.json:25-29` still enumerates exactly
-   `lint` + the four `gate (...)` contexts that ci.yml produces.
-
-### Per-file notes
-
-1. **`Makefile`** (`acf1215`) — verify-before-run ordering, fail-closed semantics,
-   empirically accurate comments (see items 1-3, 5 above). The
-   "schema-checked on every gate invocation" claim holds: both `make lint` and CI
-   run verify unconditionally. **No defects.**
-2. **`.github/workflows/ci.yml`** (`acf1215`) — comment "schema-check the vendored
-   strict config with the same pinned binary before linting" is version-accurate
-   today (verify uses the go.mod tool pin v2.15.0; action `version:` is v2.15.0)
-   but glosses over the two-binary split — see IN-06. No other defects; no new
-   attack surface (item 6).
-
----
-
-_Increment 2 reviewed: 2026-10-31T22:46:46Z_
-_Reviewer: Claude (gsd-code-reviewer)_
-_Depth: standard (incremental)_
