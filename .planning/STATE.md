@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 02
 current_phase_name: Engine — HLC Versioning and LWW Store
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-11-02T00:49:37.176Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-11-02T01:16:44.564Z"
 last_activity: 2026-11-02
 last_activity_desc: Phase 02 execution started
-state_head: 3acbd42ee0926f6a6b9139321bc3d65d9724dd1d
+state_head: 4b14fd59acd807c81e6412691c275e1116e66e3b
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-31)
 ## Current Position
 
 Phase: 02 (Engine — HLC Versioning and LWW Store) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-11-02 — Phase 02 execution started
 
@@ -63,6 +63,7 @@ Progress: [██████████] 100%
 | Phase 01 P05 | 18min | 2 tasks | 2 files |
 | Phase 01 P06 | 8min | 2 tasks | 5 files |
 | Phase 02 P01 | 31min | 3 tasks | 7 files |
+| Phase 02 P02 | 17min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -98,6 +99,11 @@ Recent decisions affecting current work:
 - [Phase 02]: Clock.Update masks the remote counter to 12 bits, making Merge total over any record content (plan 02-01)
 - [Phase 02]: Merge installs remote records with a recomputed checksum instead of trusting the wire field (plan 02-01)
 - [Phase 02]: RecordChecksum flag byte via tombstoneFlag.checksumByte method: code-direction lint fix, zero nolint in internal/app (plan 02-01)
+- [Phase 02]: Plan 02-02: zero clock.go fixes — the 02-01 implementation held on every Kulkarni branch, the 4096/4097 boundary, both drift signs and all six TEST-02 properties
+- [Phase 02]: Plan 02-02: fake clocks build time with time.UnixMilli; the plan prose's time.Unix(ms, 0) reads ms as seconds (Pitfall 8 applied to the plan text)
+- [Phase 02]: Plan 02-02: restart property reads strictly-greater-than-every-dump-version as older-l or (dumpMax, 0); counters >= 1 at the watermark l are unreachable from a cold start given the locked (dumpMax, 1) first tick
+- [Phase 02]: Plan 02-02: temporary written-reason nolint:unused bridged task 2's lint gate for generators consumed in task 3 / plan 02-03; all removed once call sites landed, zero nolint remains
+- [Phase 02]: Plan 02-02: concurrent Tick/Update hammer added as a TestClock_monotonic subtest (t.Run adds no test function), satisfying the VERS-03 concurrency probe
 
 ### Pending Todos
 
@@ -118,6 +124,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T00:49:37.114Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-11-02T01:16:44.497Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

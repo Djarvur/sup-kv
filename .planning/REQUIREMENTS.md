@@ -19,11 +19,11 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Versioning
 
-- [ ] **VERS-01**: RecordVersion is an HLC state packed into UUID v7; byte-wise UUID comparison equals `(l, c, NodeID)` order
-- [ ] **VERS-02**: Versions are unique per write by construction (one node increments the counter; nodes differ in NodeID) — property-tested
-- [ ] **VERS-03**: The HLC stays monotonic under backward and forward wall-clock jumps (Tick on local write, Update on receive; counter overflow bumps `l` by 1 ms) — property-tested against adversarial clock input
-- [ ] **VERS-04**: The HLC initializes at startup from the dump's max `l`, not from the wall clock
-- [ ] **VERS-05**: Clock drift beyond `drift_warn` is logged as a warning
+- [x] **VERS-01**: RecordVersion is an HLC state packed into UUID v7; byte-wise UUID comparison equals `(l, c, NodeID)` order
+- [x] **VERS-02**: Versions are unique per write by construction (one node increments the counter; nodes differ in NodeID) — property-tested
+- [x] **VERS-03**: The HLC stays monotonic under backward and forward wall-clock jumps (Tick on local write, Update on receive; counter overflow bumps `l` by 1 ms) — property-tested against adversarial clock input
+- [x] **VERS-04**: The HLC initializes at startup from the dump's max `l`, not from the wall clock
+- [x] **VERS-05**: Clock drift beyond `drift_warn` is logged as a warning
 
 ### Replication
 
@@ -65,7 +65,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Testing
 
 - [ ] **TEST-01**: CRDT property tests prove merge is commutative, associative and idempotent
-- [ ] **TEST-02**: HLC property tests prove monotonicity under adversarial clock input, post-receive ordering and version uniqueness; counter-reset and restart-from-dump-max cases included
+- [x] **TEST-02**: HLC property tests prove monotonicity under adversarial clock input, post-receive ordering and version uniqueness; counter-reset and restart-from-dump-max cases included
 - [ ] **TEST-03**: A deterministic multi-node simulation runs 2..N nodes over a virtual network that loses, duplicates and reorders datagrams and simulates partitions, with seeded runs
 - [ ] **TEST-04**: Every documented failure scenario is an automated test demonstrating convergence within the documented bounds: datagram loss; Ack loss; duplicates/reordering/own-broadcast echo; partition for seconds and for days (both sides serving writes, deterministic winner, conflict-journal entries); one-way connectivity; node restart (RunID change triggers resync); empty-disk recovery at `sync_response_rate`; both-nodes-down restart; corrupted dump records; wall-clock jumps live and between restarts; a node's clock far ahead; ~1000 writes/s bursts; duplicate `node_id`; protocol version mismatch
 - [ ] **TEST-05**: Benchmarks cover dump at 10k keys and replication throughput (burst writes), with bounded confirmation latency under bursts
@@ -147,13 +147,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CORE-05 | Phase 2 | Complete |
 | CORE-06 | Phase 2 | Pending |
 | CORE-07 | Phase 2 | Pending |
-| VERS-01 | Phase 2 | Pending |
-| VERS-02 | Phase 2 | Pending |
-| VERS-03 | Phase 2 | Pending |
-| VERS-04 | Phase 2 | Pending |
-| VERS-05 | Phase 2 | Pending |
+| VERS-01 | Phase 2 | Complete |
+| VERS-02 | Phase 2 | Complete |
+| VERS-03 | Phase 2 | Complete |
+| VERS-04 | Phase 2 | Complete |
+| VERS-05 | Phase 2 | Complete |
 | TEST-01 | Phase 2 | Pending |
-| TEST-02 | Phase 2 | Pending |
+| TEST-02 | Phase 2 | Complete |
 | PERS-01 | Phase 3 | Pending |
 | PERS-02 | Phase 3 | Pending |
 | PERS-03 | Phase 3 | Pending |
