@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
@@ -69,10 +70,13 @@ func RandKey(rng *rand.Rand) string {
 // over random keys: Merge installs externally versioned records, which is
 // how tests construct stores with arbitrary versions (research Pattern 2).
 func RandStore(rng *rand.Rand) *storage.Store {
+	// The one-minute drift tolerance mirrors the design default from
+	// docs/IDEA.md; generated stores never read the drift signal.
+	clk := clock.NewClock(fixedNow(), 0, 0, time.Minute)
 	store := storage.NewStore(
 		uint16(rng.IntN(maxNodeID+1)), //nolint:gosec // G115: IntN(0x10000) <= 0xFFFF, the conversion cannot overflow
+		clk,
 		storage.Config{},
-		fixedNow(),
 	)
 	for range 1 + rng.IntN(recsMax) {
 		_, _, _ = store.Merge(RandKey(rng), RandRecord(rng))

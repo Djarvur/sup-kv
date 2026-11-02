@@ -6,33 +6,24 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
-// Design defaults NewStore substitutes for zero Config fields, and the
+// Design default NewStore substitutes for a zero Config field, and the
 // checksum flag bytes of the RecordChecksum domain, from docs/IDEA.md.
 const (
 	defaultValueMaxBytes = 61440
-	defaultDriftWarn     = 60 * time.Second
 	notDeletedFlag       = 0
 	deletedFlag          = 1
 )
 
 // Config holds the store tuning parameters; it is immutable once handed to
-// NewStore. Zero fields are normalized to the design defaults:
-// ValueMaxBytes 61440 and DriftWarn 60s. A restart passes the dump's full
-// watermark (VERS-04): InitialL the dump's maximum l and InitialC the
-// dump's maximum counter at that l. InitialL zero means start from the
-// wall clock; InitialC zero means no counter seed — seeding InitialL alone
-// is insufficient whenever any dump version carries counter >= 1 at the
-// watermark millisecond. A negative DriftWarn is passed through and
-// disables the signal.
+// NewStore. A zero or negative ValueMaxBytes is normalized to the design
+// default of 61440. Clock tuning — the drift tolerance and the restart
+// watermark (VERS-04) — is constructor state of the injected clock
+// (clock.NewClock), not store configuration.
 type Config struct {
 	ValueMaxBytes int
-	DriftWarn     time.Duration
-	InitialL      int64
-	InitialC      uint16
 }
 
 // Record is one stored key's state. Data is defensively copied on the way
@@ -53,6 +44,15 @@ type Conflict struct {
 	Loser  version.RecordVersion
 }
 
+// Clock is the version source the store consumes: Tick stamps local writes,
+// Update absorbs received readings. The concrete clock (internal/app/clock)
+// satisfies it; tests may substitute fakes. Declared consumer-side here —
+// per D-03, internal/port holds no interfaces.
+type Clock interface {
+	Tick() (l int64, counter uint16, drift time.Duration)
+	Update(remoteL int64, remoteC uint16) (l int64, counter uint16, drift time.Duration)
+}
+
 // Store is the in-memory LWW-Element-Map: per key the record with the
 // greater full version wins on merge. Store is safe for concurrent use
 // by multiple goroutines.
@@ -61,33 +61,27 @@ type Store struct {
 	nodeID  uint16
 	cfg     Config
 	records map[string]Record
-	clock   *clock.Clock
+	clock   Clock
 }
 
-// NewStore returns a store for nodeID with cfg normalized to the design
-// defaults and a clock built from cfg.InitialL, cfg.InitialC, cfg.DriftWarn
-// and now (D-02: the single wall-clock seam — the restart seed is
-// constructor state flowing through this construction, not a clock read).
-// now must be non-nil.
-func NewStore(nodeID uint16, cfg Config, now func() time.Time) *Store {
-	cfg = cfg.normalized()
+// NewStore returns a store for nodeID whose writes are stamped by clk, with
+// cfg normalized to the design defaults. clk must be non-nil; the restart
+// watermark and the drift tolerance are clk's constructor state (D-02: the
+// single wall-clock seam lives in clock.NewClock), not store configuration.
+func NewStore(nodeID uint16, clk Clock, cfg Config) *Store {
 	return &Store{
 		nodeID:  nodeID,
-		cfg:     cfg,
+		cfg:     cfg.normalized(),
 		records: make(map[string]Record),
-		clock:   clock.NewClock(now, cfg.InitialL, cfg.InitialC, cfg.DriftWarn),
+		clock:   clk,
 	}
 }
 
-// normalized returns cfg with zero fields replaced by the design defaults.
-// A negative ValueMaxBytes is normalized too; a negative DriftWarn is kept
-// and disables the drift signal (see clock.NewClock).
+// normalized returns cfg with a zero or negative ValueMaxBytes replaced by
+// the design default.
 func (c Config) normalized() Config {
 	if c.ValueMaxBytes <= 0 {
 		c.ValueMaxBytes = defaultValueMaxBytes
-	}
-	if c.DriftWarn == 0 {
-		c.DriftWarn = defaultDriftWarn
 	}
 	return c
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
@@ -17,6 +18,7 @@ import (
 
 // Shared test constants: a fixed wall-clock millisecond (the D-02 seam), the
 // test node ID, the default value limit from docs/IDEA.md parameters, the
+// drift tolerance (the design default the store's clock used to carry), the
 // RFC 9562 domain ceilings, the UUIDv7 marker bits, and Compare result
 // codes.
 const (
@@ -24,6 +26,7 @@ const (
 	testNodeID     = uint16(0xABCD)
 	valueMax       = 61440
 	valueOver      = valueMax + 1
+	testDriftWarn  = time.Minute
 	maxNodeID      = 0xFFFF
 	testCounterMax = 4095
 
@@ -47,9 +50,10 @@ func fixedNow() func() time.Time {
 }
 
 // newStoreFor returns a store on the given node with the default config at
-// the fixed wall clock.
+// the fixed wall clock, its clock carrying the design-default drift
+// tolerance.
 func newStoreFor(nodeID uint16) *storage.Store {
-	return storage.NewStore(nodeID, storage.Config{}, fixedNow())
+	return storage.NewStore(nodeID, clock.NewClock(fixedNow(), 0, 0, testDriftWarn), storage.Config{})
 }
 
 // newStore returns a store on the test node with the default config at the
@@ -588,15 +592,16 @@ func TestMerge_losers(t *testing.T) {
 }
 
 // TestStore_restartDominance covers the counter-seeded restart seam at the
-// store level (VERS-04, WR-01): a store built with the dump's full watermark
-// — InitialL plus InitialC — stamps its first post-restart write strictly
-// past that watermark even with the wall clock parked exactly on the
-// watermark millisecond, the adversarial same-ms restart. The regression
-// rows encode both WR-01 consequences as dead: a peer holding the dump
-// watermark accepts the fresh write (no silent revert of an acknowledged
-// write, probe variant A), and the stale watermark record displaces
-// against the fresh write with exactly one Conflict (no equal-version
-// no-op silently dropping fresh data, probe variant B).
+// store level (VERS-04, WR-01): a store whose injected clock carries the
+// dump's full watermark — initialL plus initialC — stamps its first
+// post-restart write strictly past that watermark even with the wall clock
+// parked exactly on the watermark millisecond, the adversarial same-ms
+// restart. The regression rows encode both WR-01 consequences as dead: a
+// peer holding the dump watermark accepts the fresh write (no silent
+// revert of an acknowledged write, probe variant A), and the stale
+// watermark record displaces against the fresh write with exactly one
+// Conflict (no equal-version no-op silently dropping fresh data, probe
+// variant B).
 func TestStore_restartDominance(t *testing.T) {
 	t.Parallel()
 	// watermarkC is the dump watermark's counter at testNowMs, carried by a
@@ -606,8 +611,8 @@ func TestStore_restartDominance(t *testing.T) {
 		t.Parallel()
 		store := storage.NewStore(
 			testNodeID,
-			storage.Config{InitialL: testNowMs, InitialC: watermarkC},
-			fixedNow(),
+			clock.NewClock(fixedNow(), testNowMs, watermarkC, testDriftWarn),
+			storage.Config{},
 		)
 		ver, _, err := store.Set("k", []byte("fresh"))
 		if err != nil {
@@ -627,8 +632,8 @@ func TestStore_restartDominance(t *testing.T) {
 		t.Parallel()
 		store := storage.NewStore(
 			testNodeID,
-			storage.Config{InitialL: testNowMs, InitialC: testCounterMax},
-			fixedNow(),
+			clock.NewClock(fixedNow(), testNowMs, testCounterMax, testDriftWarn),
+			storage.Config{},
 		)
 		ver, _, err := store.Set("k", []byte("fresh"))
 		if err != nil {
@@ -648,8 +653,8 @@ func TestStore_restartDominance(t *testing.T) {
 		t.Parallel()
 		restarted := storage.NewStore(
 			testNodeID,
-			storage.Config{InitialL: testNowMs, InitialC: watermarkC},
-			fixedNow(),
+			clock.NewClock(fixedNow(), testNowMs, watermarkC, testDriftWarn),
+			storage.Config{},
 		)
 		fresh, _, err := restarted.Set("k", []byte("fresh"))
 		if err != nil {
@@ -682,8 +687,8 @@ func TestStore_restartDominance(t *testing.T) {
 		t.Parallel()
 		restarted := storage.NewStore(
 			testNodeID,
-			storage.Config{InitialL: testNowMs, InitialC: watermarkC},
-			fixedNow(),
+			clock.NewClock(fixedNow(), testNowMs, watermarkC, testDriftWarn),
+			storage.Config{},
 		)
 		fresh, _, err := restarted.Set("k", []byte("fresh"))
 		if err != nil {
@@ -731,7 +736,7 @@ func TestStore_concurrentHammer(t *testing.T) {
 	t.Parallel()
 	rng := testutil.NewRNG(t)
 	keys := []string{"hammer-0", "hammer-1", "hammer-2", "hammer-3"}
-	store := storage.NewStore(testNodeID, storage.Config{}, atomicNow(testNowMs))
+	store := storage.NewStore(testNodeID, clock.NewClock(atomicNow(testNowMs), 0, 0, testDriftWarn), storage.Config{})
 	for _, key := range keys {
 		_, _, err := store.Set(key, []byte("seed"))
 		if err != nil {

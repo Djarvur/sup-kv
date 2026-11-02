@@ -1,9 +1,11 @@
 // Package storage is the sup-kv in-memory LWW-Element-Map store: a pure,
 // I/O-free library over records versioned by the sibling version package
-// and stamped by a hybrid logical clock built from the sibling clock
-// package. The lint gate forbids networking, filesystem, syscall and
-// gRPC/protobuf imports here — see the sup-kv-app-no-io depguard rule in
-// .golangci.yml.
+// and stamped by a clock supplied by the caller through the consumer-side
+// Clock interface declared here — the concrete clock (internal/app/clock)
+// satisfies it and tests may substitute fakes; per D-03, internal/port
+// holds no interfaces. The lint gate forbids networking, filesystem,
+// syscall and gRPC/protobuf imports here — see the sup-kv-app-no-io
+// depguard rule in .golangci.yml.
 //
 // The store is a Last-Write-Wins-Element-Map CRDT: per key, the record with
 // the greater full version.RecordVersion wins on merge, so merge is
@@ -19,12 +21,12 @@
 // The package has no side effects: Merge reports every displaced or rejected
 // version by returning it as a Conflict value, and every clock-advancing
 // operation returns a drift signal as a signed [time.Duration] — zero within
-// the Config.DriftWarn tolerance, positive when the logical clock runs ahead
-// of the wall clock beyond it, negative when the wall clock jumped forward
-// past it. Callers decide where losers and drift warnings are recorded;
-// nothing is logged or emitted inside this package. The errors ErrNotFound,
-// ErrAlreadyExists and ErrValueTooLarge are sentinels matched with
-// [errors.Is].
+// the injected clock's driftWarn tolerance, positive when the logical clock
+// runs ahead of the wall clock beyond it, negative when the wall clock
+// jumped forward past it. Callers decide where losers and drift warnings
+// are recorded; nothing is logged or emitted inside this package. The
+// errors ErrNotFound, ErrAlreadyExists and ErrValueTooLarge are sentinels
+// matched with [errors.Is].
 //
 // Store is safe for concurrent use by multiple goroutines and the clock is
 // independently safe; the store holds the write lock across each clock
