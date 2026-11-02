@@ -31,6 +31,7 @@ const (
 	versionTag      = `"record_version":"`
 	hexVersionLen   = 32
 	dumpFileMode    = 0o600
+	snapshotsDir    = ".snapshots"
 )
 
 // runEngine launches eng's single dumper goroutine (Run's lifecycle is the
@@ -666,5 +667,186 @@ func TestEngine_restartDiscardsTornRecord(t *testing.T) {
 	}
 	if got := len(eng2.Records()); got != 2 {
 		t.Errorf("reloaded records = %d, want the two siblings only", got)
+	}
+}
+
+// TestEngine_snapshotCreateLoadRestore is plan 03-02's tracer (PERS-05): a
+// named snapshot is a byte-exact copy of the confirmed on-disk main dump
+// (D-10), and Restore replays exactly the snapshot's keys through the
+// store's ordinary write path with fresh dominating versions — a
+// snapshot-live value beats a current tombstone, a snapshot tombstone beats
+// a current live value, and a key absent from the snapshot keeps its state
+// untouched (D-09) — while a fresh engine with only the carried-over
+// snapshot directory restores every snapshot key (recovery from scratch).
+func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	eng, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	if discarded != 0 {
+		t.Fatalf("Open() discarded = %d, want 0", discarded)
+	}
+	runEngine(t, eng)
+
+	// The snapshot's state: three live keys plus two that go in tombstoned.
+	seeds := []struct{ key, value string }{
+		{"keep-a", "keep-a-value"},
+		{"keep-b", "keep-b-value"},
+		{"resurrect", "resurrect-value"},
+		{"re-tomb", "doomed-in-snapshot"},
+		{"gone", "gone-in-snapshot"},
+	}
+	for _, s := range seeds {
+		_, _, err := eng.Set(s.key, []byte(s.value))
+		if err != nil {
+			t.Fatalf("seed Set(%s) error = %v, want nil", s.key, err)
+		}
+	}
+	for _, key := range []string{"re-tomb", "gone"} {
+		_, _, err := eng.Delete(key)
+		if err != nil {
+			t.Fatalf("seed Delete(%s) error = %v, want nil", key, err)
+		}
+	}
+
+	err := eng.Snapshot("pre")
+	if err != nil {
+		t.Fatalf("Snapshot(pre) error = %v, want nil", err)
+	}
+	// D-10: the snapshot file is byte-identical to the main dump at
+	// creation time — read both before any further write lands.
+	mainDump, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read the main dump: %v", err)
+	}
+	snapshotPath := filepath.Join(dumpPath+snapshotsDir, "pre")
+	snapshotDump, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read the snapshot: %v", err)
+	}
+	if !bytes.Equal(snapshotDump, mainDump) {
+		t.Error("snapshot bytes differ from the main dump at creation time")
+	}
+
+	// Post-snapshot drift: tombstone a snapshot-live key, resurrect a
+	// snapshot-tombstoned one, create a key the snapshot never saw.
+	_, _, err = eng.Delete("resurrect")
+	if err != nil {
+		t.Fatalf("post-snapshot Delete(resurrect) error = %v, want nil", err)
+	}
+	_, _, err = eng.Set("re-tomb", []byte("live-after-snapshot"))
+	if err != nil {
+		t.Fatalf("post-snapshot Set(re-tomb) error = %v, want nil", err)
+	}
+	_, _, err = eng.Set("post-key", []byte("post-value"))
+	if err != nil {
+		t.Fatalf("post-snapshot Set(post-key) error = %v, want nil", err)
+	}
+
+	preRestore := eng.Records()
+	err = eng.Restore("pre")
+	if err != nil {
+		t.Fatalf("Restore(pre) error = %v, want nil", err)
+	}
+	restored := eng.Records()
+
+	// Fresh-version dominance: every replayed record beats every
+	// pre-restore version, so the restore replicates and wins by normal
+	// LWW like any write (D-09).
+	var maxPre version.RecordVersion
+	for _, rec := range preRestore {
+		if rec.Version.Compare(maxPre) > 0 {
+			maxPre = rec.Version
+		}
+	}
+	for _, key := range []string{"keep-a", "keep-b", "resurrect", "re-tomb"} {
+		rec, ok := restored[key]
+		if !ok {
+			t.Fatalf("restored records lack %s", key)
+		}
+		if rec.Version.Compare(maxPre) != 1 {
+			t.Errorf("restored %s version %x does not dominate every pre-restore version (max %x)",
+				key, rec.Version[:], maxPre[:])
+		}
+	}
+	// The snapshot's live values are back, including the resurrected key
+	// whose fresh Set beats the post-snapshot tombstone.
+	for key, want := range map[string]string{
+		"keep-a":    "keep-a-value",
+		"keep-b":    "keep-b-value",
+		"resurrect": "resurrect-value",
+	} {
+		rec, err := eng.Get(key)
+		if err != nil || string(rec.Data) != want {
+			t.Errorf("post-restore Get(%s) = (%q, %v), want (%q, nil)", key, rec.Data, err, want)
+		}
+	}
+	// re-tomb: the snapshot's tombstone beats the post-snapshot live value.
+	if _, err := eng.Get("re-tomb"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("post-restore Get(re-tomb) error = %v, want ErrNotFound (the snapshot tombstone wins)", err)
+	}
+	if rec := restored["re-tomb"]; !rec.Deleted {
+		t.Error("restored re-tomb is live, want the snapshot's tombstone")
+	}
+	// gone: the snapshot holds it deleted and it stayed tombstoned — the
+	// replay Delete is the store's ErrNotFound no-op: no version burned.
+	if got, want := restored["gone"].Version, preRestore["gone"].Version; got != want {
+		t.Errorf("restored gone version %x differs from pre-restore %x, want identical (no version burned on the no-op Delete)",
+			got[:], want[:])
+	}
+	// post-key: absent from the snapshot — its post-snapshot state stands.
+	rec, err := eng.Get("post-key")
+	if err != nil || string(rec.Data) != "post-value" {
+		t.Errorf("post-restore Get(post-key) = (%q, %v), want the untouched post-snapshot value",
+			rec.Data, err)
+	}
+	if got, want := restored["post-key"].Version, preRestore["post-key"].Version; got != want {
+		t.Errorf("post-key version moved across the restore: %x then %x, want identical (absent keys untouched)",
+			want[:], got[:])
+	}
+
+	// Recovery from scratch: a fresh engine — empty store, fresh disk, only
+	// the snapshot directory carried over — loads every snapshot key.
+	freshPath := filepath.Join(t.TempDir(), "dump.json")
+	err = os.MkdirAll(freshPath+snapshotsDir, 0o700)
+	if err != nil {
+		t.Fatalf("create the fresh snapshots dir: %v", err)
+	}
+	err = os.WriteFile(filepath.Join(freshPath+snapshotsDir, "pre"), snapshotDump, dumpFileMode)
+	if err != nil {
+		t.Fatalf("carry the snapshot over: %v", err)
+	}
+	eng3, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(freshPath), storage.Config{}, persist.Config{},
+	)
+	if discarded != 0 {
+		t.Errorf("fresh Open() discarded = %d, want 0", discarded)
+	}
+	runEngine(t, eng3)
+	err = eng3.Restore("pre")
+	if err != nil {
+		t.Fatalf("fresh Restore(pre) error = %v, want nil", err)
+	}
+	for key, want := range map[string]string{
+		"keep-a":    "keep-a-value",
+		"keep-b":    "keep-b-value",
+		"resurrect": "resurrect-value",
+	} {
+		rec, err := eng3.Get(key)
+		if err != nil || string(rec.Data) != want {
+			t.Errorf("fresh-restored Get(%s) = (%q, %v), want (%q, nil)", key, rec.Data, err, want)
+		}
+	}
+	for _, key := range []string{"re-tomb", "gone", "post-key"} {
+		_, err := eng3.Get(key)
+		if !errors.Is(err, storage.ErrNotFound) {
+			t.Errorf("fresh-restored Get(%s) error = %v, want ErrNotFound", key, err)
+		}
+	}
+	if got := len(eng3.Records()); got != len(seeds) {
+		t.Errorf("fresh-restored records = %d, want the %d snapshot keys", got, len(seeds))
 	}
 }

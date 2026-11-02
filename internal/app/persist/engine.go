@@ -384,3 +384,17 @@ func (e *Engine) Get(key string) (storage.Record, error) {
 func (e *Engine) Records() map[string]storage.Record {
 	return e.store.Records()
 }
+
+// Snapshot forces the current dump to complete, then byte-copies the
+// finished main dump under name (D-10, PERS-05). RED-phase stub: the
+// behavior lands with the tracer test.
+func (*Engine) Snapshot(string) error {
+	return nil
+}
+
+// Restore replays the named snapshot's records as ordinary writes with
+// fresh versions (D-09, PERS-05). RED-phase stub: the behavior lands with
+// the tracer test.
+func (*Engine) Restore(string) error {
+	return nil
+}
