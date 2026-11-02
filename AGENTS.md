@@ -33,8 +33,12 @@
 
 - `cmd/sup-kv/` — the single binary; `main()` holds no testable logic
   (flags/env/signals live there from Phase 5, nothing else).
-- `internal/app/` — pure decision core (store, CRDT merge, HLC); no I/O,
-  enforced by the lint gate.
+- `internal/app/` — pure decision core, split into three packages:
+  `version` (RFC 9562 record versions), `clock` (hybrid logical clock) and
+  `storage` (LWW-Element-Map store, consuming the consumer-side `Clock`
+  interface declared in `storage`); no I/O, enforced by the lint gate.
+  `internal/app/internal/testutil` holds the shared property-test
+  generators.
 - `internal/port/` — port/interface definitions; stdlib-only imports,
   enforced by the lint gate.
 - Adapter packages under `internal/` appear with the phases that need them;

@@ -3,17 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 1
 current_phase_name: CI Bootstrap and Repo Skeleton
-status: executing
-stopped_at: "Phase 1: 6/6 plans, re-verification human_needed 24/25 (3 ratified overrides; backstop awaits 2026-11-02 window). Next: /gsd:verify-work 1"
-last_updated: "2026-10-31T19:37:31.851Z"
-last_activity: 2026-10-31
-last_activity_desc: Phase 1 execution started
-state_head: 55fb901d9d37850af998c85b30cec5231e912c8c
+status: verifying
+stopped_at: Phase 02 complete, ready to verify Phase 1
+last_updated: "2026-11-02T02:56:26.125Z"
+last_activity: 2026-11-02
+last_activity_desc: Phase 02 complete, transitioned to Phase 1
+state_head: 0ad9dcd5847de5d5f67a197ade01739f96c382ae
 progress:
   total_phases: 7
-  completed_phases: 0
-  total_plans: 6
-  completed_plans: 6
+  completed_phases: 1
+  total_plans: 10
+  completed_plans: 10
+  percent: 14
 ---
 
 # Project State
@@ -23,21 +24,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-31)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 1 — CI Bootstrap and Repo Skeleton
+**Current focus:** Phase 02 — Engine — HLC Versioning and LWW Store
 
 ## Current Position
 
-Phase: 1 (CI Bootstrap and Repo Skeleton) — EXECUTING (gap closure)
-Plan: 6 of 6
-Status: Plan 01-06 complete (ratified deferral markers recorded); all 6 plans done, phase ready for verification
-Last activity: 2026-10-31 — gap-closure plan 01-06 executed
+Phase: 1 — CI Bootstrap and Repo Skeleton
+Plan: 6
+Status: Phase complete — ready for verification
+Last activity: 2026-11-02 — Phase 02 complete, transitioned to Phase 1
 
-Progress: [██████████] 100%
+Progress: [█░░░░░░░░░] 14%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
+- Total plans completed: 4
 - Average duration: 10min
 - Total execution time: ~1 hour (60 min of plan execution)
 
@@ -45,7 +46,7 @@ Progress: [██████████] 100%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 02 | 4 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -62,6 +63,10 @@ Progress: [██████████] 100%
 | Phase 01 P04 | 6min | 3 tasks | 2 files |
 | Phase 01 P05 | 18min | 2 tasks | 2 files |
 | Phase 01 P06 | 8min | 2 tasks | 5 files |
+| Phase 02 P01 | 31min | 3 tasks | 7 files |
+| Phase 02 P02 | 17min | 3 tasks | 4 files |
+| Phase 02 P03 | 14min | 2 tasks | 2 files |
+| Phase 02 P04 | 8min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -92,6 +97,22 @@ Recent decisions affecting current work:
 - [Phase 01]: Verification gap 1 ratified 2026-10-31 (maintainer, accepted override): CI-03 server-side branch protection stays deferred — org plan 403 gates rulesets; branch-protection.md marker now DEFERRED (accepted override) with the re-apply path kept; WINDOWS.md item 2 waived (gap plan 01-06)
 - [Phase 01]: Verification gap 2 ratified 2026-10-31 (maintainer, accepted override): CI-02 alerts half stays GHAS-gated off until GHAS license or the deferred public flip; updates + scheduled govulncheck delivered and green; REQUIREMENTS.md CI-02 annotated Partial mirroring CI-03 (gap plan 01-05)
 - [Phase 01]: Plan 01-06 records ratified deferral markers only — CI-02/CI-03 deliberately not marked complete in REQUIREMENTS.md (Partial stands); requirements-completed empty (plan 01-06)
+- [Phase 02]: Cold start: NewClock seeds l from initialL only (0 defers to the wall clock on the first Tick), so the first write stamps counter 0 (plan 02-01)
+- [Phase 02]: Store write paths hold the write lock across Tick/Update so version order equals commit order; Clock keeps its own mutex (Pitfall 7) (plan 02-01)
+- [Phase 02]: Clock.Update masks the remote counter to 12 bits, making Merge total over any record content (plan 02-01)
+- [Phase 02]: Merge installs remote records with a recomputed checksum instead of trusting the wire field (plan 02-01)
+- [Phase 02]: RecordChecksum flag byte via tombstoneFlag.checksumByte method: code-direction lint fix, zero nolint in internal/app (plan 02-01)
+- [Phase 02]: Plan 02-02: zero clock.go fixes — the 02-01 implementation held on every Kulkarni branch, the 4096/4097 boundary, both drift signs and all six TEST-02 properties
+- [Phase 02]: Plan 02-02: fake clocks build time with time.UnixMilli; the plan prose's time.Unix(ms, 0) reads ms as seconds (Pitfall 8 applied to the plan text)
+- [Phase 02]: Plan 02-02: restart property reads strictly-greater-than-every-dump-version as older-l or (dumpMax, 0); counters >= 1 at the watermark l are unreachable from a cold start given the locked (dumpMax, 1) first tick
+- [Phase 02]: Plan 02-02: temporary written-reason nolint:unused bridged task 2's lint gate for generators consumed in task 3 / plan 02-03; all removed once call sites landed, zero nolint remains
+- [Phase 02]: Plan 02-02: concurrent Tick/Update hammer added as a TestClock_monotonic subtest (t.Run adds no test function), satisfying the VERS-03 concurrency probe
+- [Phase 02]: Plan 02-03: zero store.go fixes — the 02-01 Merge held every law (commutativity, associativity, idempotence, exact loser pairing) over 1000 seeded triples plus 500 loser pairs
+- [Phase 02]: Plan 02-03: atomicNow uses time.UnixMilli over an atomic Int64 ms counter — the plan prose's time.Unix(ms, 0) repeated the Pitfall 8 seconds trap, locked 02-02 correction applied
+- [Phase 02]: Plan 02-03: hammer pre-seeds every key so the every-key-present coherence assertion is reachable (Delete/SetIfAbsent never create); duplicate-delivery no-op asserted for the equal-version case, a re-delivered loser legitimately re-reports (CORE-07)
+- [Phase 02]: Plan 02-04: initialC parameter over dumpMax+1 — the restart seam expresses an exact restart (constructor state equals the dump's full watermark); a dumpMax+1 convention stays unenforceable at NewClock level and discards the counter (WR-01 mechanism)
+- [Phase 02]: Plan 02-04: Tick/Update stayed byte-identical — the seeded state routes the first Tick through the existing increment, counterMax overflow and wall-ahead paths, so the 02-02 Kulkarni proofs carry over unmodified
+- [Phase 02]: Plan 02-04: WR-01 dominance proofs are mutation-checked regression locks — stripping the seed reproduces the verifier's probe failures (tick 1 subordinate, peer revert, equal-version drop), proving the tests bind on the initialC seam
 
 ### Pending Todos
 
@@ -112,6 +133,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-31T19:37:31.757Z
-Stopped at: Phase 1: 6/6 plans, re-verification human_needed 24/25 (3 ratified overrides; backstop awaits 2026-11-02 window). Next: /gsd:verify-work 1
-Resume file: .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-UAT.md
+Last session: 2026-11-02T02:39:07.698Z
+Stopped at: Phase 02 complete, ready to verify Phase 1
+Resume file: None
