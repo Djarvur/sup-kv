@@ -578,7 +578,12 @@ func TestMerge_losers(t *testing.T) {
 // store level (VERS-04, WR-01): a store built with the dump's full watermark
 // — InitialL plus InitialC — stamps its first post-restart write strictly
 // past that watermark even with the wall clock parked exactly on the
-// watermark millisecond, the adversarial same-ms restart.
+// watermark millisecond, the adversarial same-ms restart. The regression
+// rows encode both WR-01 consequences as dead: a peer holding the dump
+// watermark accepts the fresh write (no silent revert of an acknowledged
+// write, probe variant A), and the stale watermark record displaces
+// against the fresh write with exactly one Conflict (no equal-version
+// no-op silently dropping fresh data, probe variant B).
 func TestStore_restartDominance(t *testing.T) {
 	t.Parallel()
 	// watermarkC is the dump watermark's counter at testNowMs, carried by a
@@ -624,6 +629,69 @@ func TestStore_restartDominance(t *testing.T) {
 		watermark := app.PackVersion(testNowMs, testCounterMax, testNodeID)
 		if got := ver.Compare(watermark); got != cmpNewer {
 			t.Errorf("Compare(watermark) = %d, want %d", got, cmpNewer)
+		}
+	})
+	t.Run("a peer holding the dump watermark accepts the first post-restart write", func(t *testing.T) {
+		t.Parallel()
+		restarted := app.NewStore(
+			testNodeID,
+			app.Config{InitialL: testNowMs, InitialC: watermarkC},
+			fixedNow(testNowMs),
+		)
+		fresh, _, err := restarted.Set("k", []byte("fresh"))
+		if err != nil {
+			t.Fatalf("Set() error = %v, want nil", err)
+		}
+		peer := app.NewStore(nodeB, app.Config{}, fixedNow(testNowMs))
+		watermark := app.Record{
+			Version: app.PackVersion(testNowMs, watermarkC, testNodeID),
+			Data:    []byte("old"),
+		}
+		_, _, err = peer.Merge("k", watermark)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		conflicts, _, err := peer.Merge("k", app.Record{Version: fresh, Data: []byte("fresh")})
+		if err != nil {
+			t.Fatalf("Merge() error = %v, want nil", err)
+		}
+		want := []app.Conflict{{Key: "k", Winner: fresh, Loser: watermark.Version}}
+		if !conflictsEqual(conflicts, want) {
+			t.Errorf("Merge() conflicts = %v, want %v (the acknowledged write must not revert)",
+				conflicts, want)
+		}
+		rec, err := peer.Get("k")
+		if err != nil || !bytes.Equal(rec.Data, []byte("fresh")) {
+			t.Errorf("Get() = (%q, %v), want the fresh write (%q, nil)", rec.Data, err, "fresh")
+		}
+	})
+	t.Run("the stale watermark record cannot collide with the fresh write", func(t *testing.T) {
+		t.Parallel()
+		restarted := app.NewStore(
+			testNodeID,
+			app.Config{InitialL: testNowMs, InitialC: watermarkC},
+			fixedNow(testNowMs),
+		)
+		fresh, _, err := restarted.Set("k", []byte("fresh"))
+		if err != nil {
+			t.Fatalf("Set() error = %v, want nil", err)
+		}
+		stale := app.Record{
+			Version: app.PackVersion(testNowMs, watermarkC, testNodeID),
+			Data:    []byte("old"),
+		}
+		conflicts, _, err := restarted.Merge("k", stale)
+		if err != nil {
+			t.Fatalf("Merge() error = %v, want nil", err)
+		}
+		want := []app.Conflict{{Key: "k", Winner: fresh, Loser: stale.Version}}
+		if !conflictsEqual(conflicts, want) {
+			t.Errorf("Merge() conflicts = %v, want %v (an equal-version no-op would silently drop the fresh write)",
+				conflicts, want)
+		}
+		rec, err := restarted.Get("k")
+		if err != nil || !bytes.Equal(rec.Data, []byte("fresh")) {
+			t.Errorf("Get() = (%q, %v), want the fresh data (%q, nil)", rec.Data, err, "fresh")
 		}
 	})
 }

@@ -222,25 +222,32 @@ func TestClock_counterReset(t *testing.T) {
 }
 
 // TestClock_restartProperty covers restart-from-dump-max under chaos
-// (VERS-04, TEST-02): seeded with a random dumpMax and a wall clock jumped
-// backward beyond it, 100 Ticks over a continued adversarial walk stay at or
-// above dumpMax, strictly increase, and beat every version of the dump
-// (older l values, and the watermark l itself at counter 0 — the first
-// post-restart tick starts at (dumpMax, 1) by the locked first-tick rule).
+// (VERS-04, TEST-02): the dump models the FULL watermark — its watermark
+// record is (dumpMax, watermarkC, testNodeID) with watermarkC drawn from
+// 1..4095, counter >= 1 at the watermark millisecond carrying the store's
+// own NodeID, the exact WR-01 collision hazard — plus eight older-l records
+// with arbitrary counters and nodeIDs. A clock seeded with that full
+// watermark (NewClock's initialC), under a wall clock jumped backward
+// beyond dumpMax and a continued adversarial walk, keeps 100 Ticks at or
+// above dumpMax, strictly increasing, with every packed emission beating
+// every dump version including the watermark. This supersedes the
+// counter-0 narrowing of the dump watermark recorded in the 02-02 summary,
+// which 02-VERIFICATION falsified.
 func TestClock_restartProperty(t *testing.T) {
 	t.Parallel()
 	rng := newRNG(t)
 	dumpMax := testNowMs + rng.Int64N(1_000_000)
+	watermarkC := uint16(1 + rng.IntN(testCounterMax))
 	nowMs := dumpMax - 1 - rng.Int64N(4*60*60*1000)
 	now := func() time.Time { return time.UnixMilli(nowMs) }
-	clock := app.NewClock(now, dumpMax, 0, testDriftWarn)
+	clock := app.NewClock(now, dumpMax, watermarkC, testDriftWarn)
 	dump := make([]app.RecordVersion, 0, 9)
 	for range 8 {
 		olderL := dumpMax - 1 - rng.Int64N(1_000_000)
 		dump = append(dump, app.PackVersion(olderL, uint16(rng.IntN(testCounterMax+1)), uint16(rng.IntN(maxNodeID+1))))
 	}
-	dump = append(dump, app.PackVersion(dumpMax, 0, maxNodeID))
-	prev := reading{l: dumpMax, counter: 0}
+	dump = append(dump, app.PackVersion(dumpMax, watermarkC, testNodeID))
+	prev := reading{l: dumpMax, counter: watermarkC}
 	for i := range 100 {
 		nowMs = nextWallTime(rng, nowMs)
 		l, counter, _ := clock.Tick()
