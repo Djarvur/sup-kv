@@ -22,7 +22,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **VERS-01**: RecordVersion is an HLC state packed into UUID v7; byte-wise UUID comparison equals `(l, c, NodeID)` order
 - [x] **VERS-02**: Versions are unique per write by construction (one node increments the counter; nodes differ in NodeID) — property-tested
 - [x] **VERS-03**: The HLC stays monotonic under backward and forward wall-clock jumps (Tick on local write, Update on receive; counter overflow bumps `l` by 1 ms) — property-tested against adversarial clock input
-- [x] **VERS-04**: The HLC initializes at startup from the dump's max `l`, not from the wall clock; restart seeds the dump's full watermark (max `l` plus max counter at that `l` via `Config.InitialL`/`InitialC`), so every post-restart version strictly dominates every dumped version — strict-dominance extension delivered by plan 02-04 (WR-01 closed)
+- [x] **VERS-04**: The HLC initializes at startup from the dump's max `l`, not from the wall clock; restart seeds the dump's full watermark (max `l` plus max counter at that `l` via `clock.NewClock`'s `initialL`/`initialC` parameters — the clock is injected into `storage.NewStore` through the `storage.Clock` interface), so every post-restart version strictly dominates every dumped version — strict-dominance extension delivered by plan 02-04 (WR-01 closed)
 - [x] **VERS-05**: Clock drift beyond `drift_warn` is logged as a warning
 
 ### Replication
