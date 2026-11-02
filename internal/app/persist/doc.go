@@ -13,4 +13,13 @@
 // write is on disk (PERS-04), ErrDumpFailed reports the failed dump while
 // the record stays readable in memory (D-05). Reads are never gated on
 // dumps. No callbacks, no events — results only (Phase 2 D-01 tradition).
+//
+// Timing guarantees (D-04, PERS-03): under any write cadence a write is
+// confirmed within MaxWait plus one dump duration — the dump starts no
+// later than the oldest unconfirmed write plus MaxWait, because the
+// deadline timer is armed from the clean-to-dirty transition and only the
+// debounce timer resets on later changes, so bursts can coalesce but never
+// starve confirmation. After a failed dump the next attempt starts one
+// debounce interval later — the re-armed timer, never a tight retry loop —
+// and it also carries the failed era's surviving records.
 package persist

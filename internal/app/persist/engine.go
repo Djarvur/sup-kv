@@ -329,10 +329,17 @@ func (e *Engine) Delete(key string) (version.RecordVersion, time.Duration, error
 	return ver, drift, e.await(ver)
 }
 
-// SetIfAbsent stores data under key only when the key holds no record
-// (stub: no confirmation wait — the surface test's failing behavior).
+// SetIfAbsent stores data under key only when the key holds no record,
+// including no tombstone, and blocks until a dump containing the record
+// completed. Any existing record — a live value or a tombstone — returns
+// the store's ErrAlreadyExists unchanged with no waiter registered, so a
+// Delete-then-SetIfAbsent cannot resurrect the key.
 func (e *Engine) SetIfAbsent(key string, data []byte) (version.RecordVersion, time.Duration, error) {
-	return e.store.SetIfAbsent(key, data)
+	ver, drift, err := e.store.SetIfAbsent(key, data)
+	if err != nil {
+		return ver, drift, err
+	}
+	return ver, drift, e.await(ver)
 }
 
 // await registers a waiter for ver — freshly installed in the store by the

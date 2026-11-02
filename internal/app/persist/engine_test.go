@@ -270,7 +270,7 @@ func (f *fakeDumpPort) Save(dump []byte) error {
 }
 
 // Load is the empty start; the synctest suite never restarts.
-func (f *fakeDumpPort) Load(_ func([]byte) error) ([]byte, bool) { return nil, false }
+func (*fakeDumpPort) Load(_ func([]byte) error) ([]byte, bool) { return nil, false }
 
 // CreateSnapshot stores an in-memory copy under the name.
 func (f *fakeDumpPort) CreateSnapshot(name string) error {
@@ -318,14 +318,15 @@ func (f *fakeDumpPort) save(i int) fakeSave {
 	return f.saves[i]
 }
 
-// newFakeEngine builds an engine over an empty store and a fresh fake port;
+// newFakeEngine builds an engine over an empty store and a fresh fake port,
+// running the design-default timing (the D-04 defaults the suite asserts);
 // inside a synctest bubble time.Now is the virtual clock, so the store's
 // clock rides it directly.
-func newFakeEngine(cfg persist.Config) (*persist.Engine, *fakeDumpPort) {
+func newFakeEngine() (*persist.Engine, *fakeDumpPort) {
 	dumps := &fakeDumpPort{}
 	clk := clock.NewClock(time.Now, 0, 0, time.Minute)
 	store := storage.NewStore(synctestNodeID, clk, storage.Config{})
-	return persist.New(store, dumps, cfg), dumps
+	return persist.New(store, dumps, persist.Config{}), dumps
 }
 
 // startDumper launches eng.Run inside the bubble and returns a stop func
@@ -353,7 +354,7 @@ func startDumper(t *testing.T, eng *persist.Engine) (stop func()) {
 func TestEngine_confirmDebounceTiming(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		eng, dumps := newFakeEngine(persist.Config{})
+		eng, dumps := newFakeEngine()
 		defer startDumper(t, eng)()
 		start := time.Now()
 		setDone := make(chan time.Time, 1)
@@ -399,7 +400,7 @@ func TestEngine_confirmDebounceTiming(t *testing.T) {
 func TestEngine_burstBoundedConfirmation(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		eng, dumps := newFakeEngine(persist.Config{})
+		eng, dumps := newFakeEngine()
 		defer startDumper(t, eng)()
 		oldest := time.Now()
 		returns := make(chan time.Time, burstWrites)
@@ -449,7 +450,7 @@ func TestEngine_burstBoundedConfirmation(t *testing.T) {
 func TestEngine_dumpFailureFansOut(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		eng, dumps := newFakeEngine(persist.Config{})
+		eng, dumps := newFakeEngine()
 		dumps.failSaves = 1
 		defer startDumper(t, eng)()
 		failedAt := make(chan time.Time, fanoutWaiters)
@@ -520,7 +521,7 @@ func TestEngine_dumpFailureFansOut(t *testing.T) {
 func TestEngine_runExitClosesWaiters(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		eng, _ := newFakeEngine(persist.Config{})
+		eng, _ := newFakeEngine()
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
 		go func() { done <- eng.Run(ctx) }()
@@ -552,7 +553,7 @@ func TestEngine_runExitClosesWaiters(t *testing.T) {
 func TestEngine_writeSurface(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		eng, dumps := newFakeEngine(persist.Config{})
+		eng, dumps := newFakeEngine()
 		defer startDumper(t, eng)()
 		_, _, err := eng.Set("tomb", []byte("doomed"))
 		if err != nil {
