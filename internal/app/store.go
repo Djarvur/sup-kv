@@ -149,15 +149,30 @@ func (s *Store) write(key string, data []byte, deleted bool) (RecordVersion, tim
 // Delete-then-SetIfAbsent must not recreate the key. Values over
 // Config.ValueMaxBytes are rejected with ErrValueTooLarge before any copy
 // is made.
-func (*Store) SetIfAbsent(_ string, _ []byte) (RecordVersion, time.Duration, error) {
-	return RecordVersion{}, 0, nil
+func (s *Store) SetIfAbsent(key string, data []byte) (RecordVersion, time.Duration, error) {
+	if len(data) > s.cfg.ValueMaxBytes {
+		return RecordVersion{}, 0, ErrValueTooLarge
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.records[key]; ok {
+		return RecordVersion{}, 0, ErrAlreadyExists
+	}
+	ver, drift := s.write(key, data, false)
+	return ver, drift, nil
 }
 
 // Delete writes a fresh-version tombstone for key that merges like any
 // write; a missing key and an already-tombstoned key are both ErrNotFound
 // and write nothing, so no version is burned on a no-op.
-func (*Store) Delete(_ string) (RecordVersion, time.Duration, error) {
-	return RecordVersion{}, 0, nil
+func (s *Store) Delete(key string) (RecordVersion, time.Duration, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec, ok := s.records[key]; !ok || rec.Deleted {
+		return RecordVersion{}, 0, ErrNotFound
+	}
+	ver, drift := s.write(key, nil, true)
+	return ver, drift, nil
 }
 
 // Merge joins an externally versioned record for key: the remote record
@@ -166,13 +181,65 @@ func (*Store) Delete(_ string) (RecordVersion, time.Duration, error) {
 // displaced or rejected version is returned exactly once as a Conflict.
 // Values over Config.ValueMaxBytes are rejected with ErrValueTooLarge and
 // nothing is stored.
-func (*Store) Merge(_ string, _ Record) (conflicts []Conflict, drift time.Duration, err error) {
-	return nil, 0, nil
+func (s *Store) Merge(key string, rec Record) (conflicts []Conflict, drift time.Duration, err error) {
+	if len(rec.Data) > s.cfg.ValueMaxBytes {
+		return nil, 0, ErrValueTooLarge
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conflicts = s.join(key, rec)
+	remoteL, remoteC, _ := rec.Version.Unpack()
+	_, _, drift = s.clock.Update(remoteL, remoteC)
+	return conflicts, drift, nil
+}
+
+// join compares rec against the stored record by the full 16-byte version
+// and installs it when strictly greater; the caller must hold the write
+// lock. It returns the displaced or rejected versions as conflicts.
+func (s *Store) join(key string, rec Record) []Conflict {
+	stored, ok := s.records[key]
+	if !ok {
+		s.install(key, rec)
+		return nil
+	}
+	cmp := rec.Version.Compare(stored.Version)
+	switch {
+	case cmp > 0:
+		s.install(key, rec)
+		return []Conflict{{Key: key, Winner: rec.Version, Loser: stored.Version}}
+	case cmp < 0:
+		return []Conflict{{Key: key, Winner: stored.Version, Loser: rec.Version}}
+	default:
+		return nil
+	}
+}
+
+// install defensively copies rec and stores it under key with a recomputed
+// checksum; the caller must hold the write lock.
+func (s *Store) install(key string, rec Record) {
+	data := bytes.Clone(rec.Data)
+	s.records[key] = Record{
+		Version:  rec.Version,
+		Data:     data,
+		Deleted:  rec.Deleted,
+		Checksum: RecordChecksum(key, rec.Version, data, rec.Deleted),
+	}
 }
 
 // Records returns a full snapshot of the map, tombstones included, with Data
 // defensively copied. This is the Phase 3 dump source; Get cannot see
 // tombstones by design.
-func (*Store) Records() map[string]Record {
-	return nil
+func (s *Store) Records() map[string]Record {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]Record, len(s.records))
+	for key, rec := range s.records {
+		out[key] = Record{
+			Version:  rec.Version,
+			Data:     bytes.Clone(rec.Data),
+			Deleted:  rec.Deleted,
+			Checksum: rec.Checksum,
+		}
+	}
+	return out
 }
