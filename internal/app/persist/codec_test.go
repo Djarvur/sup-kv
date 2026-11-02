@@ -21,6 +21,12 @@ const (
 	codecPropertySteps = 500
 	maxRecordBytes     = 61440
 	oversizeBy         = 1
+	// watermarkOrderScans re-scans the equal-counter fixture: map iteration
+	// order is random per call, so the law is asserted over many orders.
+	watermarkOrderScans = 100
+	// tornTailCut bytes off the dump's tail, landing the cut mid-JSON of the
+	// last record line — the torn-tail residue class.
+	tornTailCut = 10
 )
 
 // dumpLine is the test-side mirror of the codec's record line — the shape
@@ -328,4 +334,52 @@ func TestWatermark_fullProperty(t *testing.T) {
 			t.Errorf("Watermark(empty) = (%d, %d), want (0, 0)", gotL, gotC)
 		}
 	})
+}
+
+// TestWatermark_equalCounterDomain pins the equal-l half of the full
+// watermark law (VERS-04): at the maximum l the greatest counter wins, and a
+// higher counter at a lower l never does — the (100,5)+(100,7)+(99,4095)
+// acceptance tuple yielding (100,7). Map iteration order is random per call,
+// so the fixture is scanned repeatedly: every order must keep the exact pair,
+// which is what a restart-seeded clock needs to strictly dominate versions
+// stamped at the same l with different counters.
+func TestWatermark_equalCounterDomain(t *testing.T) {
+	t.Parallel()
+	records := map[string]storage.Record{
+		"same-l-low-c":  sealed("same-l-low-c", storage.Record{Version: version.PackVersion(100, 5, 1), Data: []byte("low-c")}),
+		"same-l-high-c": sealed("same-l-high-c", storage.Record{Version: version.PackVersion(100, 7, 1), Data: []byte("high-c")}),
+		"lower-l-decoy": sealed("lower-l-decoy", storage.Record{Version: version.PackVersion(99, 4095, 1), Data: []byte("decoy")}),
+	}
+	for range watermarkOrderScans {
+		gotL, gotC := persist.Watermark(records)
+		if gotL != 100 || gotC != 7 {
+			t.Fatalf("Watermark(equal-l fixture) = (%d, %d), want (100, 7) under every iteration order", gotL, gotC)
+		}
+	}
+}
+
+// TestCodec_truncatedGenerationUnreadable pins the generation-level fault
+// class for a torn tail (PERS-02, D-02): a dump truncated mid-record is
+// unreadable as a whole generation — Parse rejects it, so Load's fallback
+// chain advances to .prev instead of serving the torn bytes, and Decode
+// errors rather than silently returning the records that preceded the tear.
+// The intact generation stays the control.
+func TestCodec_truncatedGenerationUnreadable(t *testing.T) {
+	t.Parallel()
+	dump := encodeRecords(t, map[string]storage.Record{
+		"tail": sealed("tail", storage.Record{Version: version.PackVersion(1006, 6, 1), Data: []byte("tail-value")}),
+	})
+	torn := dump[:len(dump)-tornTailCut]
+	err := persist.Parse(torn)
+	if err == nil {
+		t.Error("Parse(torn) = nil, want a generation-level error")
+	}
+	_, _, err = persist.Decode(torn)
+	if err == nil {
+		t.Error("Decode(torn) error = nil, want a generation-level error, not the records before the tear")
+	}
+	err = persist.Parse(dump)
+	if err != nil {
+		t.Errorf("Parse(intact) error = %v, want nil", err)
+	}
 }

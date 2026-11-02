@@ -33,6 +33,10 @@ const (
 	hexVersionLen   = 32
 	dumpFileMode    = 0o600
 	snapshotsDir    = ".snapshots"
+	// shrunkValueLimit is the config-shrunk store limit the resilience test
+	// installs: values over it stay codec-legal (envelope 61440) but the
+	// store rejects them.
+	shrunkValueLimit = 16
 )
 
 // runEngine launches eng's single dumper goroutine (Run's lifecycle is the
@@ -954,5 +958,196 @@ func TestEngine_restoreMissingSnapshot(t *testing.T) {
 	}
 	if !recordsEqual(eng.Records(), before) {
 		t.Error("records changed across the failed restore")
+	}
+}
+
+// TestEngine_closeSurface pins the post-close contract of every blocking
+// engine call (PERS-04, Pitfall 4): once Run has exited, Set, SetIfAbsent,
+// Delete, Snapshot and Restore return ErrClosed immediately — no writer can
+// register after the exit sweep and block forever — while Get keeps serving
+// the in-memory records (reads are never gated on dumps or the dumper) and a
+// rejected Snapshot copies nothing to disk.
+func TestEngine_closeSurface(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	eng, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	if discarded != 0 {
+		t.Fatalf("Open() discarded = %d, want 0", discarded)
+	}
+	stop := runEngine(t, eng)
+	_, _, err := eng.Set("k", []byte("v"))
+	if err != nil {
+		t.Fatalf("pre-close Set(k) error = %v, want nil", err)
+	}
+	err = eng.Snapshot("pre")
+	if err != nil {
+		t.Fatalf("pre-close Snapshot(pre) error = %v, want nil", err)
+	}
+	stop()
+
+	_, _, err = eng.Set("set", []byte("v"))
+	if !errors.Is(err, persist.ErrClosed) {
+		t.Errorf("post-close Set() error = %v, want ErrClosed", err)
+	}
+	_, _, err = eng.SetIfAbsent("sia", []byte("v"))
+	if !errors.Is(err, persist.ErrClosed) {
+		t.Errorf("post-close SetIfAbsent() error = %v, want ErrClosed", err)
+	}
+	err = eng.Snapshot("post")
+	if !errors.Is(err, persist.ErrClosed) {
+		t.Errorf("post-close Snapshot() error = %v, want ErrClosed", err)
+	}
+	_, err = os.Stat(filepath.Join(dumpPath+snapshotsDir, "post"))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("post-close Snapshot() left a file behind: %v", err)
+	}
+	rec, getErr := eng.Get("k")
+	if getErr != nil || string(rec.Data) != "v" {
+		t.Errorf("post-close Get(k) = (%q, %v), want (v, nil) — reads are never gated", rec.Data, getErr)
+	}
+	_, _, err = eng.Delete("k")
+	if !errors.Is(err, persist.ErrClosed) {
+		t.Errorf("post-close Delete() error = %v, want ErrClosed", err)
+	}
+	err = eng.Restore("pre")
+	if !errors.Is(err, persist.ErrClosed) {
+		t.Errorf("post-close Restore() error = %v, want ErrClosed", err)
+	}
+}
+
+// TestEngine_snapshotFlushErrorAborts pins D-10's safety half under synctest:
+// when the forced flush's dump fails, Snapshot aborts with that error and
+// copies nothing — state that is not confirmed on disk must never become a
+// recovery point — while the record stays readable in memory (D-05).
+func TestEngine_snapshotFlushErrorAborts(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		dumps.failSaves = burstWrites // every save this bubble attempts fails
+		defer startDumper(t, eng)()
+		_, _, err := eng.Set("k", []byte("v"))
+		if !errors.Is(err, persist.ErrDumpFailed) {
+			t.Fatalf("Set(k) error = %v, want ErrDumpFailed", err)
+		}
+		err = eng.Snapshot("never")
+		if !errors.Is(err, errFakeSave) {
+			t.Fatalf("Snapshot(never) error = %v, want the forced flush's save error", err)
+		}
+		if got := dumps.snapshot("never"); got != nil {
+			t.Error("Snapshot() copied bytes despite the failed forced flush")
+		}
+		rec, getErr := eng.Get("k")
+		if getErr != nil || string(rec.Data) != "v" {
+			t.Errorf("Get(k) after the failed flush = (%q, %v), want the in-memory record", rec.Data, getErr)
+		}
+	})
+}
+
+// TestEngine_restoreCorruptSnapshot pins the corrupt-snapshot error class
+// (PERS-05): a snapshot whose bytes carry a generation-level decode fault —
+// a torn record tail — surfaces that error from Restore, never a silent
+// empty success, and leaves the map unchanged.
+func TestEngine_restoreCorruptSnapshot(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	eng, _ := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	stop := runEngine(t, eng)
+	_, _, err := eng.Set("k", []byte("v"))
+	if err != nil {
+		t.Fatalf("seed Set(k) error = %v, want nil", err)
+	}
+	err = eng.Snapshot("bad")
+	if err != nil {
+		t.Fatalf("seed Snapshot(bad) error = %v, want nil", err)
+	}
+	stop()
+	snapPath := filepath.Join(dumpPath+snapshotsDir, "bad")
+	torn := []byte("{\"format_version\":1}\n{\"key\":\"torn\"")
+	err = os.WriteFile(snapPath, torn, dumpFileMode)
+	if err != nil {
+		t.Fatalf("corrupt the snapshot bytes: %v", err)
+	}
+	eng2, _ := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	runEngine(t, eng2)
+	before := eng2.Records()
+	err = eng2.Restore("bad")
+	if err == nil {
+		t.Fatal("Restore(corrupt snapshot) = nil, want the generation-level decode error")
+	}
+	if !recordsEqual(eng2.Records(), before) {
+		t.Error("records changed across the corrupt-snapshot restore")
+	}
+}
+
+// TestEngine_configShrunkValueLimits pins the config-shrink resilience
+// paths: Open skips a dumped record the shrunk store limit rejects instead
+// of aborting startup, Restore skips the same class instead of failing, and
+// a direct Set surfaces storage.ErrValueTooLarge unchanged with no waiter
+// registered (PERS-02/PERS-05 — the codec's 61440 envelope does not shrink
+// with the config, so these are the belt-and-braces skips).
+func TestEngine_configShrunkValueLimits(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	fat := bytes.Repeat([]byte("f"), shrunkValueLimit*4)
+	eng, _ := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	stop := runEngine(t, eng)
+	_, _, err := eng.Set("fat", fat)
+	if err != nil {
+		t.Fatalf("seed Set(fat) error = %v, want nil", err)
+	}
+	_, _, err = eng.Set("slim", []byte("slim"))
+	if err != nil {
+		t.Fatalf("seed Set(slim) error = %v, want nil", err)
+	}
+	err = eng.Snapshot("cfg")
+	if err != nil {
+		t.Fatalf("seed Snapshot(cfg) error = %v, want nil", err)
+	}
+	stop()
+
+	shrunk, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath),
+		storage.Config{ValueMaxBytes: shrunkValueLimit}, persist.Config{},
+	)
+	if discarded != 0 {
+		t.Errorf("shrunk Open() discarded = %d, want 0 (the skip is at merge, not codec)", discarded)
+	}
+	_, err = shrunk.Get("fat")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("shrunk Get(fat) error = %v, want ErrNotFound (skipped at startup)", err)
+	}
+	slimRec, slimErr := shrunk.Get("slim")
+	if slimErr != nil || string(slimRec.Data) != "slim" {
+		t.Errorf("shrunk Get(slim) = (%q, %v), want (slim, nil)", slimRec.Data, slimErr)
+	}
+	_, _, err = shrunk.Set("huge", fat)
+	if !errors.Is(err, storage.ErrValueTooLarge) {
+		t.Errorf("shrunk Set(huge) error = %v, want ErrValueTooLarge unchanged", err)
+	}
+	runEngine(t, shrunk)
+	err = shrunk.Restore("cfg")
+	if err != nil {
+		t.Fatalf("shrunk Restore(cfg) error = %v, want nil (oversized record skipped)", err)
+	}
+	_, err = shrunk.Get("fat")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("post-restore Get(fat) error = %v, want ErrNotFound (replay skipped)", err)
+	}
+	slimRec, slimErr = shrunk.Get("slim")
+	if slimErr != nil || string(slimRec.Data) != "slim" {
+		t.Errorf("post-restore Get(slim) = (%q, %v), want (slim, nil)", slimRec.Data, slimErr)
 	}
 }
