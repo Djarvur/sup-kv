@@ -14,22 +14,22 @@ Every node stays writable at all times with no coordination, and a write confirm
 
 ### Validated
 
-(None yet — ship to validate)
+- ✓ **Quality gates** — Phase 1 (strict golangci-lint + go-ultimate from the first commit; lint/vet/race on every push)
+- ✓ **CI/process** — Phase 1 (CI matrix Linux/macOS × amd64/arm64 green live; Dependabot version updates active — nothing updatable at v2.15.0, upstream-latest; scheduled govulncheck fired on schedule; PR-only practiced. Ratified Partial: CI-02 alerts half GHAS-gated, CI-03 server-side ruleset org-plan-gated — recorded accepted overrides)
+- ✓ **Core store** — Phase 2 (LWW-Element-Map in `internal/app/storage`; Get/Set/Delete/SetIfAbsent; tombstones; 60 KiB limit; conflict journal via Merge-returned losers)
+- ✓ **Versioning** — Phase 2 (HLC in `internal/app/clock` with UUIDv7 packing in `internal/app/version`; byte-order comparison = `(l, c, NodeID)`; monotonic under adversarial clocks incl. restart watermark seeding and 48-bit ceiling saturation; drift signal both directions)
+- ✓ **Property tests** — Phase 2 (merge laws incl. tombstones; HLC monotonicity, uniqueness, restart dominance — seeded, replayable, 100% statement coverage)
 
 ### Active
 
 All Active requirements are hypotheses until shipped and validated.
 
-- [ ] **Core store**: in-memory LWW-Element-Map; Get/Set/Delete/CreateIfAbsent; tombstones; value size limit (60 KiB); conflict journal
-- [ ] **Versioning**: HLC clock; UUIDv7 packing; byte-order comparison; monotonic under clock jumps (backwards and forwards); drift warning
 - [ ] **Replication**: UDP envelope; Hello discovery; DataReplication/Ack with retransmission backoff; DataRequest; chunked DataSync full reconciliation with rate-limited responses; N-peer table and per-peer ack tracking
 - [ ] **Persistence**: JSON dump, atomic write with `.prev` fallback, debounced dumps, write-confirmed-after-dump guarantee; snapshots create/load
 - [ ] **API**: gRPC service + protobuf definitions; Watch stream; startup gate; `wait_for_replication`
 - [ ] **Observability**: metrics endpoint; structured logs; discarded-datagram counters
-- [ ] **Testing**: CRDT property tests (merge laws); HLC property tests (monotonicity, post-receive ordering); deterministic multi-node simulation with lossy/duplicating/reordering/partitioning virtual network; failure-scenario suite; benchmarks (dump at 10k keys, replication throughput)
+- [ ] **Testing (remaining)**: deterministic multi-node simulation with lossy/duplicating/reordering/partitioning virtual network; failure-scenario suite; benchmarks (dump at 10k keys, replication throughput)
 - [ ] **Tooling**: single static binary, flags/env config, `--version`, systemd-friendly
-- [ ] **Quality gates**: strict golangci-lint + go-ultimate conventions from the first commit; CI runs lint, `go vet`, race tests on every push
-- [ ] **CI/process**: GitHub Actions with quality gates on every push and PR (Linux/macOS, amd64/arm64); Dependabot; scheduled `govulncheck`; PR-only development with branch protection on `master`
 
 ### Out of Scope
 
@@ -83,13 +83,13 @@ Target workloads: service configuration (writes/hour, KiB values, hundreds of ke
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| LWW-Element-Map CRDT as the store | Strong eventual consistency; merge is commutative/associative/idempotent, so UDP loss/duplication/reordering cannot affect outcome | — Pending |
-| HLC packed into UUIDv7 as `RecordVersion` | Byte-wise comparison = `(l, c, NodeID)` order; unique per write; no clock-sync protocol needed | — Pending |
+| LWW-Element-Map CRDT as the store | Strong eventual consistency; merge is commutative/associative/idempotent, so UDP loss/duplication/reordering cannot affect outcome | ✓ Validated (Phase 2)
+| HLC packed into UUIDv7 as `RecordVersion` | Byte-wise comparison = `(l, c, NodeID)` order; unique per write; no clock-sync protocol needed | ✓ Validated (Phase 2)
 | UDP broadcast replication: ack + retransmit + periodic chunked DataSync anti-entropy | Fits a single trusted segment; bounded convergence (loss ≤ `ack_timeout_max`, partition heal ≤ 2 × `sync_interval`) | — Pending |
 | Human-readable JSON dump; atomic write with `.prev` fallback; write confirmed only after dump | Inspectable state; confirmed writes always on disk | — Pending |
 | gRPC API with Watch stream and `wait_for_replication` | Typed clients, streaming change notifications, optional replication confirmation | — Pending |
 | Trusted-segment trust model in v1 (CRC32 only, no HMAC) | Accepted limitation; HMAC is documented future work | — Pending |
-| Quality gates from first commit (strict golangci-lint + go-ultimate, PR-only, CI matrix, Dependabot, govulncheck) | Correctness-critical infrastructure; gates are cheaper the earlier they land | — Pending |
+| Quality gates from first commit (strict golangci-lint + go-ultimate, PR-only, CI matrix, Dependabot, govulncheck) | Correctness-critical infrastructure; gates are cheaper the earlier they land | ✓ Validated (Phase 1)
 | Deterministic simulation testing as a first-class feature | Replication correctness under chaos cannot be shown by unit tests alone | — Pending |
 
 ## Evolution
@@ -110,4 +110,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-31 after initialization*
+*Last updated: 2026-11-02 after Phases 1–2*

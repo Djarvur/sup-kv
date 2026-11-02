@@ -12,7 +12,7 @@ sup-kv ships in seven dependency-forced phases. Quality gates and the depguard-e
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: CI Bootstrap and Repo Skeleton** - Quality gates, 4-OS CI matrix, Dependabot/govulncheck and the machine-enforced architecture boundary, before any feature code
+- [x] **Phase 1: CI Bootstrap and Repo Skeleton** - Quality gates, 4-OS CI matrix, Dependabot/govulncheck and the machine-enforced architecture boundary, before any feature code (completed 2026-11-02)
 - [x] **Phase 2: Engine — HLC Versioning and LWW Store** - Pure in-memory decision core: UUIDv7-packed HLC versions, LWW-Element-Map with tombstones and conflict journal, proven by property tests (completed 2026-11-02)
 - [ ] **Phase 3: Persistence — Dump and Write Confirmation** - Human-readable JSON dumps with atomic write, `.prev` fallback chain and snapshots; a confirmed write is always on disk
 - [ ] **Phase 4: Replication and Deterministic Simulator** - UDP broadcast replication (Hello, DataReplication/Ack, DataSync) with N-peer tracking, plus the seeded-chaos simulator that proves the convergence bounds
@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Direct pushes to `master` are rejected by branch protection; every change (code and docs) lands through a pull request from a feature branch
   3. Dependabot is active (updates and alerts) and the scheduled `govulncheck` job runs green against the Go vulnerability database
   4. The dependency boundary is machine-enforced from the first feature commit: code in `internal/app` importing `net`/`os`/grpc (or `internal/port` reaching beyond stdlib) fails the lint gate
-**Plans**: 6/6 plans executed (4 executed, 2 gap-closure pending)
+**Plans**: 6/6 plans complete (4 executed, 2 gap-closure pending)
 Plans:
 **Wave 1**
 - [x] 01-01-PLAN.md — Walking skeleton: module, packages, pinned tools, vendored strict lint + depguard boundary (QUAL-01)
@@ -137,7 +137,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. CI Bootstrap and Repo Skeleton | 6/6 | In Progress | - |
+| 1. CI Bootstrap and Repo Skeleton | 6/6 | Complete    | 2026-11-02 |
 | 2. Engine — HLC Versioning and LWW Store | 4/4 | Complete    | 2026-11-02 |
 | 3. Persistence — Dump and Write Confirmation | 0/TBD | Not started | - |
 | 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
