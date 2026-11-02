@@ -574,6 +574,60 @@ func TestMerge_losers(t *testing.T) {
 	})
 }
 
+// TestStore_restartDominance covers the counter-seeded restart seam at the
+// store level (VERS-04, WR-01): a store built with the dump's full watermark
+// — InitialL plus InitialC — stamps its first post-restart write strictly
+// past that watermark even with the wall clock parked exactly on the
+// watermark millisecond, the adversarial same-ms restart.
+func TestStore_restartDominance(t *testing.T) {
+	t.Parallel()
+	// watermarkC is the dump watermark's counter at testNowMs, carried by a
+	// version of the store's own NodeID — the hardest case the seam must beat.
+	const watermarkC = 5
+	t.Run("the first post-restart Set stamps strictly past the seeded watermark", func(t *testing.T) {
+		t.Parallel()
+		store := app.NewStore(
+			testNodeID,
+			app.Config{InitialL: testNowMs, InitialC: watermarkC},
+			fixedNow(testNowMs),
+		)
+		ver, _, err := store.Set("k", []byte("fresh"))
+		if err != nil {
+			t.Fatalf("Set() error = %v, want nil", err)
+		}
+		l, counter, nodeID := ver.Unpack()
+		if l != testNowMs || counter != watermarkC+1 || nodeID != testNodeID {
+			t.Errorf("Unpack() = (%d, %d, %d), want (%d, %d, %d)",
+				l, counter, nodeID, testNowMs, watermarkC+1, testNodeID)
+		}
+		watermark := app.PackVersion(testNowMs, watermarkC, testNodeID)
+		if got := ver.Compare(watermark); got != cmpNewer {
+			t.Errorf("Compare(watermark) = %d, want %d", got, cmpNewer)
+		}
+	})
+	t.Run("InitialC at counterMax bumps the store's first write past the watermark", func(t *testing.T) {
+		t.Parallel()
+		store := app.NewStore(
+			testNodeID,
+			app.Config{InitialL: testNowMs, InitialC: testCounterMax},
+			fixedNow(testNowMs),
+		)
+		ver, _, err := store.Set("k", []byte("fresh"))
+		if err != nil {
+			t.Fatalf("Set() error = %v, want nil", err)
+		}
+		l, counter, nodeID := ver.Unpack()
+		if l != testNowMs+1 || counter != 0 || nodeID != testNodeID {
+			t.Errorf("Unpack() = (%d, %d, %d), want (%d, 0, %d)",
+				l, counter, nodeID, testNowMs+1, testNodeID)
+		}
+		watermark := app.PackVersion(testNowMs, testCounterMax, testNodeID)
+		if got := ver.Compare(watermark); got != cmpNewer {
+			t.Errorf("Compare(watermark) = %d, want %d", got, cmpNewer)
+		}
+	})
+}
+
 // atomicNow returns a goroutine-safe fake now over an atomic millisecond
 // counter: every call advances the wall clock by one millisecond, so
 // concurrent Tick and Update callers observe strictly increasing readings

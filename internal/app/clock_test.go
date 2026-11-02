@@ -252,8 +252,13 @@ func TestClock_counterOverflowBoundary(t *testing.T) {
 
 // TestClock_restartFromDumpMax covers the restart seam (VERS-04): a clock
 // whose InitialL is far ahead of a wall clock that then jumps backward hours
-// further never drops below InitialL and strictly increases, while a clock
-// with InitialL zero starts from the wall clock.
+// further never drops below InitialL and strictly increases, a clock with
+// InitialL zero starts from the wall clock, and — the counter-seeded rows —
+// a clock seeded with the dump's full watermark (initialL plus initialC)
+// emits a first Tick strictly after (initialL, initialC): (initialL,
+// initialC+1) inside the millisecond, the counterMax overflow bump to
+// (initialL+1, 0), adoption of the wall clock when it already runs ahead,
+// and out-of-range initialC masked to the 12-bit domain.
 func TestClock_restartFromDumpMax(t *testing.T) {
 	t.Parallel()
 	t.Run("InitialL ahead of a backward-jumped wall stays at or above InitialL", func(t *testing.T) {
@@ -290,6 +295,60 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 		second.l, second.counter, _ = clock.Tick()
 		if second != (reading{l: testNowMs, counter: 1}) {
 			t.Errorf("second tick = (%d, %d), want (%d, 1)", second.l, second.counter, testNowMs)
+		}
+	})
+	t.Run("InitialC seeds the counter: first tick strictly after the watermark", func(t *testing.T) {
+		t.Parallel()
+		clock := app.NewClock(fixedNow(testNowMs), testNowMs, 5, testDriftWarn)
+		first := reading{}
+		first.l, first.counter, _ = clock.Tick()
+		if first != (reading{l: testNowMs, counter: 6}) {
+			t.Errorf("first tick = (%d, %d), want (%d, 6)", first.l, first.counter, testNowMs)
+		}
+		second := reading{}
+		second.l, second.counter, _ = clock.Tick()
+		if second != (reading{l: testNowMs, counter: 7}) {
+			t.Errorf("second tick = (%d, %d), want (%d, 7)", second.l, second.counter, testNowMs)
+		}
+	})
+	t.Run("InitialC at counterMax bumps l on the first tick", func(t *testing.T) {
+		t.Parallel()
+		clock := app.NewClock(fixedNow(testNowMs), testNowMs, testCounterMax, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clock.Tick()
+		want := reading{l: testNowMs + 1, counter: 0}
+		if got != want {
+			t.Errorf("first tick = (%d, %d), want (%d, %d) through the overflow rule",
+				got.l, got.counter, want.l, want.counter)
+		}
+		watermark := reading{l: testNowMs, counter: testCounterMax}
+		if !got.after(watermark) {
+			t.Errorf("first tick = (%d, %d), want strictly after the watermark (%d, %d)",
+				got.l, got.counter, watermark.l, watermark.counter)
+		}
+	})
+	t.Run("wall clock ahead of the watermark starts from the wall clock", func(t *testing.T) {
+		t.Parallel()
+		clock := app.NewClock(fixedNow(testNowMs+10), testNowMs, 5, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clock.Tick()
+		if got != (reading{l: testNowMs + 10, counter: 0}) {
+			t.Errorf("first tick = (%d, %d), want (%d, 0)", got.l, got.counter, testNowMs+10)
+		}
+		watermark := reading{l: testNowMs, counter: 5}
+		if !got.after(watermark) {
+			t.Errorf("first tick = (%d, %d), want strictly after the watermark (%d, %d) because l leads",
+				got.l, got.counter, watermark.l, watermark.counter)
+		}
+	})
+	t.Run("out-of-range InitialC is masked to the 12-bit domain", func(t *testing.T) {
+		t.Parallel()
+		clock := app.NewClock(fixedNow(testNowMs), testNowMs, testCounterMax+6, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clock.Tick()
+		if got != (reading{l: testNowMs, counter: 6}) {
+			t.Errorf("first tick = (%d, %d), want (%d, 6) with the seed 4101 masked to 5",
+				got.l, got.counter, testNowMs)
 		}
 	})
 }
