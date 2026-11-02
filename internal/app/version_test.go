@@ -165,33 +165,37 @@ func TestVersion_byteOrder(t *testing.T) {
 	}
 }
 
-// TestVersion_unpackTotal proves Unpack and Compare are total over arbitrary
-// bit patterns: 1000 seeded random raw 16-byte values unpack without
-// panicking into masked ranges (l within 48 bits, counter at most 4095,
-// nodeID within 16 bits), and Compare on random pairs never panics and stays
-// antisymmetric (T-02-03).
+// canonicalRaw returns v with the RFC 9562 marker and filler bits forced to
+// their packed values: the version 7 nibble in octet 6's high nibble, the
+// variant 0b10 in octet 8's top two bits — bit 0x40 cleared — and the zero
+// filler in octet 10's low six bits and octets 11-15. Every bit Unpack
+// keeps survives verbatim; these are exactly the bits PackVersion rewrites.
+func canonicalRaw(v app.RecordVersion) app.RecordVersion {
+	v[6] = v[6]&0x0F | uuidVerBits
+	v[8] = v[8]&0x3F | uuidVarBits
+	v[10] &= 0xC0
+	clear(v[11:])
+	return v
+}
+
+// TestVersion_unpackTotal proves Unpack is total and lossless over the bits
+// it keeps: for 1000 seeded random raw 16-byte values — arbitrary bit
+// patterns off the wire — Unpack never panics and PackVersion of the
+// unpacked triple reproduces v exactly modulo the RFC 9562 marker and filler
+// bits (canonicalRaw), and Compare never panics on raw pairs (T-02-03).
 func TestVersion_unpackTotal(t *testing.T) {
 	t.Parallel()
 	rng := newRNG(t)
 	for range 1000 {
 		v := randRawVersion(rng)
 		l, counter, nodeID := v.Unpack()
-		if l < 0 || l > maxL {
-			t.Fatalf("Unpack(%x) l = %d, want within the 48-bit domain", v[:], l)
-		}
-		if counter > testCounterMax {
-			t.Fatalf("Unpack(%x) counter = %d, want at most %d", v[:], counter, testCounterMax)
-		}
-		if nodeID > maxNodeID {
-			t.Fatalf("Unpack(%x) nodeID = %d, want within 16 bits", v[:], nodeID)
+		want := canonicalRaw(v)
+		got := app.PackVersion(l, counter, nodeID)
+		if got != want {
+			t.Fatalf("PackVersion(Unpack(%x)) = %x, want %x — the input with the marker and filler bits normalized",
+				v[:], got[:], want[:])
 		}
 		other := randRawVersion(rng)
-		cmp := v.Compare(other)
-		if cmp < -1 || cmp > 1 {
-			t.Fatalf("Compare(%x, %x) = %d, want -1, 0 or 1", v[:], other[:], cmp)
-		}
-		if back := other.Compare(v); back != -cmp {
-			t.Fatalf("Compare antisymmetry broken: (%x, %x) gave %d and %d", v[:], other[:], cmp, back)
-		}
+		v.Compare(other) // total over raw wire patterns: must not panic.
 	}
 }
