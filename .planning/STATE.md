@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 02
 current_phase_name: Engine — HLC Versioning and LWW Store
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-11-02T00:12:09.088Z"
-last_activity: 2026-11-01
-last_activity_desc: Phase 01 execution started
-state_head: 1e82803d7781fc9c700e8c65bc950626a4a10d72
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-11-02T00:49:37.176Z"
+last_activity: 2026-11-02
+last_activity_desc: Phase 02 execution started
+state_head: 3acbd42ee0926f6a6b9139321bc3d65d9724dd1d
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 9
-  completed_plans: 6
+  completed_plans: 7
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-31)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 01 — CI Bootstrap and Repo Skeleton
+**Current focus:** Phase 02 — Engine — HLC Versioning and LWW Store
 
 ## Current Position
 
-Phase: 02 (Engine — HLC Versioning and LWW Store) — READY TO EXECUTE
-Plan: 1 of 6
+Phase: 02 (Engine — HLC Versioning and LWW Store) — EXECUTING
+Plan: 2 of 3
 Status: Ready to execute
-Last activity: 2026-11-01 — Phase 01 execution started
+Last activity: 2026-11-02 — Phase 02 execution started
 
 Progress: [██████████] 100%
 
@@ -62,6 +62,7 @@ Progress: [██████████] 100%
 | Phase 01 P04 | 6min | 3 tasks | 2 files |
 | Phase 01 P05 | 18min | 2 tasks | 2 files |
 | Phase 01 P06 | 8min | 2 tasks | 5 files |
+| Phase 02 P01 | 31min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,11 @@ Recent decisions affecting current work:
 - [Phase 01]: Verification gap 1 ratified 2026-10-31 (maintainer, accepted override): CI-03 server-side branch protection stays deferred — org plan 403 gates rulesets; branch-protection.md marker now DEFERRED (accepted override) with the re-apply path kept; WINDOWS.md item 2 waived (gap plan 01-06)
 - [Phase 01]: Verification gap 2 ratified 2026-10-31 (maintainer, accepted override): CI-02 alerts half stays GHAS-gated off until GHAS license or the deferred public flip; updates + scheduled govulncheck delivered and green; REQUIREMENTS.md CI-02 annotated Partial mirroring CI-03 (gap plan 01-05)
 - [Phase 01]: Plan 01-06 records ratified deferral markers only — CI-02/CI-03 deliberately not marked complete in REQUIREMENTS.md (Partial stands); requirements-completed empty (plan 01-06)
+- [Phase 02]: Cold start: NewClock seeds l from initialL only (0 defers to the wall clock on the first Tick), so the first write stamps counter 0 (plan 02-01)
+- [Phase 02]: Store write paths hold the write lock across Tick/Update so version order equals commit order; Clock keeps its own mutex (Pitfall 7) (plan 02-01)
+- [Phase 02]: Clock.Update masks the remote counter to 12 bits, making Merge total over any record content (plan 02-01)
+- [Phase 02]: Merge installs remote records with a recomputed checksum instead of trusting the wire field (plan 02-01)
+- [Phase 02]: RecordChecksum flag byte via tombstoneFlag.checksumByte method: code-direction lint fix, zero nolint in internal/app (plan 02-01)
 
 ### Pending Todos
 
@@ -112,6 +118,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-01T23:16:03.269Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-engine-hlc-versioning-and-lww-store/02-CONTEXT.md
+Last session: 2026-11-02T00:49:37.114Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

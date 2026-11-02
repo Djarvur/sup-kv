@@ -9,11 +9,11 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Core Store
 
-- [ ] **CORE-01**: User can Get a key; a missing or deleted (tombstoned) key returns NotFound
-- [ ] **CORE-02**: User can Set a key's value (create or update), replacing any prior value under LWW
-- [ ] **CORE-03**: User can create a key only if absent (create-if-absent) for seeding build-time defaults; an existing key returns AlreadyExists
-- [ ] **CORE-04**: User can Delete a key; the tombstone is written with a fresh version and replicates like any write
-- [ ] **CORE-05**: Values larger than `value_max_bytes` (default 60 KiB) are rejected with InvalidArgument
+- [x] **CORE-01**: User can Get a key; a missing or deleted (tombstoned) key returns NotFound
+- [x] **CORE-02**: User can Set a key's value (create or update), replacing any prior value under LWW
+- [x] **CORE-03**: User can create a key only if absent (create-if-absent) for seeding build-time defaults; an existing key returns AlreadyExists
+- [x] **CORE-04**: User can Delete a key; the tombstone is written with a fresh version and replicates like any write
+- [x] **CORE-05**: Values larger than `value_max_bytes` (default 60 KiB) are rejected with InvalidArgument
 - [ ] **CORE-06**: Merge follows LWW-Element-Map laws — per key the greater RecordVersion wins; merge is commutative, associative and idempotent, so delivery order, duplicates and retransmissions cannot affect the outcome
 - [ ] **CORE-07**: Every version displaced by a merge conflict is recorded in the conflict journal (the merge exposes the loser, not just the winner)
 
@@ -140,11 +140,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CI-02 | Phase 1 | Partial — version updates + scheduled govulncheck delivered and green; alerts half deferred (GHAS-gated on private tier), ratified accepted override 2026-10-31; unlocks at GHAS license or the deferred public flip |
 | CI-03 | Phase 1 | Partial — PR-only practiced since plan 01-01 (PRs #1-#10); server-side branch protection deferred 2026-10-31 (org plan 403, decision `defer`, ratified 2026-10-31 as accepted override (no org plan upgrade, no public flip); re-apply path in docs/setup/branch-protection.md) |
 | QUAL-01 | Phase 1 | Complete |
-| CORE-01 | Phase 2 | Pending |
-| CORE-02 | Phase 2 | Pending |
-| CORE-03 | Phase 2 | Pending |
-| CORE-04 | Phase 2 | Pending |
-| CORE-05 | Phase 2 | Pending |
+| CORE-01 | Phase 2 | Complete |
+| CORE-02 | Phase 2 | Complete |
+| CORE-03 | Phase 2 | Complete |
+| CORE-04 | Phase 2 | Complete |
+| CORE-05 | Phase 2 | Complete |
 | CORE-06 | Phase 2 | Pending |
 | CORE-07 | Phase 2 | Pending |
 | VERS-01 | Phase 2 | Pending |
