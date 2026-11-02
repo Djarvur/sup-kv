@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 3
 current_phase_name: Persistence — Dump and Write Confirmation
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-11-02T22:39:01.178Z"
-last_activity: 2026-11-02
-last_activity_desc: Phase 01 complete, transitioned to Phase 3
-state_head: 2dbc0d6431a91b08a1dc6039de7dfa5f8185a8a2
+stopped_at: Completed 03-01-PLAN.md — persistence core (codec, engine, port seam, file adapter); next 03-02 snapshots
+last_updated: "2026-11-02T23:16:44.818Z"
+last_activity: 2026-11-03
+last_activity_desc: Phase 3 execution started
+state_head: 143a09bec093bf69938c19808e97c15bcbbf3449
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 12
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 
 ## Current Position
 
-Phase: 3 (Persistence — Dump and Write Confirmation) — READY TO EXECUTE
-Plan: Not started
+Phase: 3 (Persistence — Dump and Write Confirmation) — EXECUTING
+Plan: 2 of 2
 Status: Ready to execute
-Last activity: 2026-11-02 — Phase 01 complete, transitioned to Phase 3
+Last activity: 2026-11-03 — Phase 3 execution started
 
 Progress: [███░░░░░░░] 29%
 
@@ -67,6 +67,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 02 P02 | 17min | 3 tasks | 4 files |
 | Phase 02 P03 | 14min | 2 tasks | 2 files |
 | Phase 02 P04 | 8min | 2 tasks | 5 files |
+| Phase 03 P01 | 35min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,11 @@ Recent decisions affecting current work:
 - [Phase 02]: Plan 02-04: initialC parameter over dumpMax+1 — the restart seam expresses an exact restart (constructor state equals the dump's full watermark); a dumpMax+1 convention stays unenforceable at NewClock level and discards the counter (WR-01 mechanism)
 - [Phase 02]: Plan 02-04: Tick/Update stayed byte-identical — the seeded state routes the first Tick through the existing increment, counterMax overflow and wall-ahead paths, so the 02-02 Kulkarni proofs carry over unmodified
 - [Phase 02]: Plan 02-04: WR-01 dominance proofs are mutation-checked regression locks — stripping the seed reproduces the verifier's probe failures (tick 1 subordinate, peer revert, equal-version drop), proving the tests bind on the initialC seam
+- [Phase 03]: Parse-oracle Load settled per D-02-literal recommendation (A6/Open Q1): engine hands codec.Parse to the adapter, which stays record-blind (plan 03-01)
+- [Phase 03]: Dump/snapshot files keep CreateTemp 0600, directories 0700 — values privacy over non-owner readability; flagged for phase-verification ratification (plan 03-01)
+- [Phase 03]: Dump failure retry cadence per A8: dirty re-arms from a fresh epoch, debounce timer starts the next attempt one interval later, never a tight loop (plan 03-01)
+- [Phase 03]: Engine cover discipline (PERS-04): lastLocal captured under mu before Records(); a waiter resolves only from a dump whose snapshot contains its record — confirmation means on-disk containment (plan 03-01)
+- [Phase 03]: Five documented nolint suppressions where no code-direction fix exists: gosec G304 on the adapter's variable-path reads, iface on the port seam consumed cross-package (AGENTS.md sanctioned form) (plan 03-01)
 
 ### Pending Todos
 
@@ -133,6 +139,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T21:40:52.357Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-persistence-dump-and-write-confirmation/03-CONTEXT.md
+Last session: 2026-11-02T23:16:44.707Z
+Stopped at: Completed 03-01-PLAN.md — persistence core (codec, engine, port seam, file adapter); next 03-02 snapshots
+Resume file: .planning/phases/03-persistence-dump-and-write-confirmation/03-02-PLAN.md
