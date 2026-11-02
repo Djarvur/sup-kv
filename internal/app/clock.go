@@ -5,9 +5,16 @@ import (
 	"time"
 )
 
-// counterMax is the highest value the 12-bit rand_a counter holds; past it
-// the clock bumps l by one millisecond instead of wrapping.
-const counterMax = counterMask
+// Version-domain ceilings: counterMax is the highest value the 12-bit rand_a
+// counter holds — past it the clock bumps l by one millisecond instead of
+// wrapping — and maxL is the highest value the 48-bit unix_ts_ms holds — at
+// it the clock saturates, repeating the top reading instead of bumping l
+// past the domain, where PackVersion would silently wrap the timestamp to
+// zero.
+const (
+	counterMax = counterMask
+	maxL       = tsMask
+)
 
 // Clock is a Hybrid Logical Clock (Kulkarni et al., 2014): node state (l, c)
 // where l is Unix-millisecond wall-clock time and c counts events inside one
@@ -32,7 +39,13 @@ type Clock struct {
 // any dump version carries counter >= 1 at the watermark millisecond.
 // initialL zero and initialC zero start from the wall clock on the first
 // Tick. initialC values above the 12-bit counter range are masked, so the
-// constructor is total over any uint16 input. driftWarn bounds the
+// constructor is total over any uint16 input. The version domain ends at
+// (maxL, counterMax): a now seam beyond maxL — possible only with a clock
+// lying past year ~8921 — saturates l at maxL, and once the counter also
+// exhausts at the ceiling Tick and Update repeat the top reading (maxL,
+// counterMax) instead of bumping l out of the domain, so writes at the
+// exhausted domain may repeat versions: an honest, documented degradation,
+// never a wrap to zero. driftWarn bounds the
 // tolerated divergence between l and the wall clock before Tick and Update
 // report a drift signal; driftWarn less than or equal to zero disables the
 // signal.
@@ -50,11 +63,17 @@ func (c *Clock) Tick() (l int64, counter uint16, drift time.Duration) {
 	ptMs := c.now().UnixMilli()
 	drift = driftBetween(c.l, ptMs, c.driftWarn)
 	if ptMs > c.l {
-		c.l = ptMs
-		c.c = 0
-		return c.l, c.c, drift
+		ptMs = min(ptMs, maxL) // a wall reading beyond the domain saturates.
+		if ptMs > c.l {
+			c.l = ptMs
+			c.c = 0
+			return c.l, c.c, drift
+		}
 	}
 	if c.c == counterMax {
+		if c.l == maxL {
+			return c.l, c.c, drift // the domain is exhausted: repeat the top reading.
+		}
 		c.l++
 		c.c = 0
 		return c.l, c.c, drift
@@ -65,7 +84,8 @@ func (c *Clock) Tick() (l int64, counter uint16, drift time.Duration) {
 
 // Update advances the clock for a received event carrying (remoteL, remoteC)
 // per the Kulkarni receive rule: l becomes the maximum of the local l, the
-// remote l and the wall clock, and the counter is picked so the next local
+// remote l and the wall clock — saturated at the maxL domain ceiling (see
+// NewClock) — and the counter is picked so the next local
 // Tick beats the remote reading. The drift signal follows the Tick
 // convention. A remote counter above the 12-bit range is masked, so Update
 // is total over every input.
@@ -76,6 +96,7 @@ func (c *Clock) Update(remoteL int64, remoteC uint16) (l int64, counter uint16, 
 	ptMs := c.now().UnixMilli()
 	drift = driftBetween(c.l, ptMs, c.driftWarn)
 	newL := max(c.l, remoteL, ptMs)
+	newL = min(newL, maxL) // a wall or remote reading beyond the domain saturates.
 	switch {
 	case newL == c.l && c.l == remoteL:
 		c.c = max(c.c, remoteC) + 1
@@ -87,6 +108,11 @@ func (c *Clock) Update(remoteL int64, remoteC uint16) (l int64, counter uint16, 
 		c.c = 0
 	}
 	if c.c > counterMax {
+		if newL == maxL {
+			c.l = newL
+			c.c = counterMax
+			return c.l, c.c, drift // the domain is exhausted: repeat the top reading.
+		}
 		c.l = newL + 1
 		c.c = 0
 		return c.l, c.c, drift

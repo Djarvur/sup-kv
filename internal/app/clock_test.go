@@ -250,6 +250,67 @@ func TestClock_counterOverflowBoundary(t *testing.T) {
 	}
 }
 
+// TestClock_ceilingSaturation covers the 48-bit domain ceiling (VERS-02):
+// seeded at maxL with the adversarial now seam beyond the ceiling, the
+// clock saturates — every Tick and Update reading holds l at maxL, no
+// packed version ever reads below its predecessor (the old code bumped l to
+// 2^48 and PackVersion's tsMask silently wrapped the timestamp to zero),
+// and once the counter passes counterMax the top reading (maxL, counterMax)
+// repeats: a documented degradation, never a restart from the bottom of
+// the domain.
+func TestClock_ceilingSaturation(t *testing.T) {
+	t.Parallel()
+	t.Run("the saturated Tick bump repeats the top reading", func(t *testing.T) {
+		t.Parallel()
+		clock := app.NewClock(fixedNow(maxL+5), maxL, testCounterMax, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clock.Tick()
+		want := reading{l: maxL, counter: testCounterMax}
+		if got != want {
+			t.Errorf("tick at the ceiling = (%d, %d), want the repeated top reading (%d, %d)",
+				got.l, got.counter, want.l, want.counter)
+		}
+	})
+	t.Run("the saturated Update overflow pins the top reading", func(t *testing.T) {
+		t.Parallel()
+		clock := app.NewClock(fixedNow(maxL), maxL, 0, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clock.Update(maxL, testCounterMax)
+		want := reading{l: maxL, counter: testCounterMax}
+		if got != want {
+			t.Errorf("Update at the ceiling = (%d, %d), want the pinned top reading (%d, %d)",
+				got.l, got.counter, want.l, want.counter)
+		}
+	})
+	t.Run("an adversarial walk beyond the ceiling never wraps", func(t *testing.T) {
+		t.Parallel()
+		rng := newRNG(t)
+		nowMs := maxL + 1 + rng.Int64N(1_000_000)
+		now := func() time.Time { return time.UnixMilli(nowMs) }
+		clock := app.NewClock(now, maxL, 0, testDriftWarn)
+		prev := app.PackVersion(maxL, 0, testNodeID)
+		for i := range testCounterMax + 10 {
+			nowMs = maxL + 1 + rng.Int64N(1_000_000)
+			got := reading{}
+			if rng.IntN(2) == 0 {
+				got.l, got.counter, _ = clock.Tick()
+			} else {
+				got.l, got.counter, _ = clock.Update(maxL, uint16(rng.IntN(testCounterMax+1)))
+			}
+			if got.l != maxL {
+				t.Fatalf("step %d l = %d, want the saturated ceiling %d (replay with the property seed above)",
+					i+1, got.l, maxL)
+			}
+			ver := app.PackVersion(got.l, got.counter, testNodeID)
+			if ver.Compare(prev) < 0 {
+				t.Fatalf("step %d version %x reads below its predecessor %x — the stream wrapped to zero (replay with the property seed above)",
+					i+1, ver[:], prev[:])
+			}
+			prev = ver
+		}
+	})
+}
+
 // TestClock_restartFromDumpMax covers the restart seam (VERS-04): a clock
 // whose InitialL is far ahead of a wall clock that then jumps backward hours
 // further never drops below InitialL and strictly increases, a clock with
