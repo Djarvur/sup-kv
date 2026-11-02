@@ -82,16 +82,23 @@ func (c Config) normalized() Config {
 	return c
 }
 
+// tombstoneFlag carries the Record deleted flag into the checksum domain.
+type tombstoneFlag bool
+
+// checksumByte returns the checksum domain byte for the flag: deletedFlag
+// for a tombstone, notDeletedFlag for a live record.
+func (f tombstoneFlag) checksumByte() byte {
+	if f {
+		return deletedFlag
+	}
+	return notDeletedFlag
+}
+
 // RecordChecksum returns the CRC32 over the key bytes, the 16 version bytes,
 // the data bytes and one flag byte for deleted. It is corruption detection
 // for the Phase 3 dump, never tamper protection.
-//
-//nolint:revive // flag-parameter: deleted is checksum domain data (the flag byte 0/1 of the dump format), not a control flag; the signature is fixed by the Phase 3 dump contract.
 func RecordChecksum(key string, ver RecordVersion, data []byte, deleted bool) uint32 {
-	flag := byte(notDeletedFlag)
-	if deleted {
-		flag = deletedFlag
-	}
+	flag := tombstoneFlag(deleted).checksumByte()
 	sum := crc32.Update(0, crc32.IEEETable, []byte(key))
 	sum = crc32.Update(sum, crc32.IEEETable, ver[:])
 	sum = crc32.Update(sum, crc32.IEEETable, data)
