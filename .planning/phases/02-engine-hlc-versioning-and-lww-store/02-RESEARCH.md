@@ -402,21 +402,23 @@ func TestMerge_laws(t *testing.T) {
 | A3 | `Delete` of a missing or already-tombstoned key returns `ErrNotFound` (fresh tombstone only written for a live key) | Open Question 1 | If chosen otherwise, CORE-04 test expectations change; no structural impact |
 | A4 | Drift signal fires on `\|l − pt\| > drift_warn` in either direction (not only wall-clock-ahead) | Open Question 2 | Single-direction check would miss the "far-ahead node" TEST-04 scenario wiring |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Delete semantics for missing/tombstoned keys**
+All four questions carry adopted dispositions as of plan finalization (2026-11-02); one-line status per question below, citing the deciding plan task.
+
+1. **Delete semantics for missing/tombstoned keys** — RESOLVED: plan 02-01 Task 2 adopts `ErrNotFound` for missing and already-tombstoned keys — no version is burned on a no-op (assumption A3).
    - What we know: CORE-04 requires a fresh-version tombstone on Delete; Get defines NotFound for missing/tombstoned; nothing states Delete's behavior on an absent key.
    - What's unclear: error (recommended — `ErrNotFound`, symmetric with Get and maps to the same RPC code) vs. idempotent silent success (always writes a tombstone).
    - Recommendation: `ErrNotFound` for missing and already-tombstoned; keeps versions from being burned on no-ops. Planner decides.
-2. **Drift signal direction**
+2. **Drift signal direction** — RESOLVED: plan 02-01 Task 1 (clock.go spec) implements the signed both-directions signal of assumption A4 — positive when the HLC runs ahead beyond `drift_warn`, negative on a forward wall-clock jump beyond it; carried into testing as flagged assumption VERS-05 in plan 02-02.
    - What we know: D-02 says "return a drift signal when the wall clock runs ahead beyond `drift_warn`"; ROADMAP criterion 4 says "drift beyond `drift_warn`"; TEST-04 (Phase 6) includes "a node's clock far ahead".
    - What's unclear: whether the signal covers only `pt > l + drift_warn` (forward) or both directions.
    - Recommendation: signal on `|l − pt| > drift_warn` with the sign available — both directions are operationally meaningful (backward jump = timestamps in the future = unfair LWW wins; forward jump = NTP correction), and the cost is one comparison. Planner decides.
-3. **Record Checksum helper now or in Phase 3**
+3. **Record Checksum helper now or in Phase 3** — RESOLVED: plan 02-01 Task 1 ships the exported `RecordChecksum` (CRC32 over key+version+data+deleted) alongside the Record type now; enforcement stays deferred to Phase 3 (PERS-02).
    - What we know: IDEA.md defines Checksum as a record field ("CRC32 over key+version+data+deleted" [VERIFIED: docs/IDEA.md:54]); Phase 2's boundary text does not list checksum computation; PERS-02 (Phase 3) validates it on dump load.
    - What's unclear: whether Phase 2 ships the ~10-line `hash/crc32` helper alongside the Record type.
    - Recommendation: define the field in Phase 2 (the Record type is Phase 2's deliverable; Phase 3 serializes it) and include the tiny constructor/check function now so records are self-validating from the start — but defer *enforcement* to Phase 3. Planner decides; strict-minimal alternative (field only) is also defensible.
-4. **Store constructor shape for the `now` seam**
+4. **Store constructor shape for the `now` seam** — RESOLVED: plan 02-01 Task 1 — `NewStore(nodeID, cfg, now)` builds its internal clock from `now`, `cfg.InitialL` and `cfg.DriftWarn` (one composition point, one seam; Clock stays an implementation detail, independently exported and testable).
    - What we know: D-02 puts `now func() time.Time` in the *clock's* constructor; the store needs a clock; Phase 3 needs to inject the dump's max `l` through the same construction path.
    - What's unclear: `NewStore(nodeID, cfg, now)` (store builds its clock) vs. exposing the Clock so callers compose it.
    - Recommendation: store accepts `now` (and cfg carries `DriftWarn` plus an optional initial `l`) and builds its internal clock — one composition point, one seam, matches "accept functions, return structs" and keeps Clock an implementation detail while still independently exported/testable. Planner decides.
