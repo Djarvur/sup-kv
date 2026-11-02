@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 1
+open_count: 0
 waived_count: 1
-fixed_count: 0
+fixed_count: 1
 total_count: 2
-last_updated: 2026-10-31T18:59:31.534Z
+last_updated: 2026-11-02T15:55:45.509Z
 ---
 
 # Broken Windows Ledger
@@ -15,7 +15,7 @@ last_updated: 2026-10-31T18:59:31.534Z
 
 | id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
-| 1 | 01 | unmet-truth | .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-03-SUMMARY.md |  | Backstop truth D5: Dependabot's first version-update PR not yet observed — weekly schedule window has not elapsed since dependabot.yml landed (2026-10-31) | open |  | 2026-10-31T15:45:51.348Z |  |
+| 1 | 01 | unmet-truth | .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-03-SUMMARY.md |  | Backstop truth D5: Dependabot's first version-update PR not yet observed — weekly schedule window has not elapsed since dependabot.yml landed (2026-10-31) | fixed |  | 2026-10-31T15:45:51.348Z | 2026-11-02T15:55:45.509Z |
 | 2 | 01 | unmet-truth | docs/setup/branch-protection.md | 14 | CI-03 protection sub-item deferred (org plan 403, decision defer 2026-10-31): direct pushes to master are not server-side rejected until the ruleset is applied; PENDING marker records the one-command re-apply path | waived | Ratified accepted override 2026-10-31 (maintainer): org plan gates rulesets on this private repo (403); no plan upgrade, no public flip; payload + one-command re-apply kept in docs/setup/branch-protection.md | 2026-10-31T16:00:46.876Z | 2026-10-31T18:59:31.534Z |
 
 ````json
@@ -27,10 +27,10 @@ last_updated: 2026-10-31T18:59:31.534Z
     "file": ".planning/phases/01-ci-bootstrap-and-repo-skeleton/01-03-SUMMARY.md",
     "line": null,
     "description": "Backstop truth D5: Dependabot's first version-update PR not yet observed — weekly schedule window has not elapsed since dependabot.yml landed (2026-10-31)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-31T15:45:51.348Z",
-    "resolved_at": null,
+    "resolved_at": "2026-11-02T15:55:45.509Z",
     "milestone": "v1.0"
   },
   {
