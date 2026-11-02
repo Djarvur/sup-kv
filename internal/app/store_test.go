@@ -3,6 +3,10 @@ package app_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"math/rand/v2"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -568,4 +572,190 @@ func TestMerge_losers(t *testing.T) {
 				rec.Version[:], rec.Deleted, ok)
 		}
 	})
+}
+
+// atomicNow returns a goroutine-safe fake now over an atomic millisecond
+// counter: every call advances the wall clock by one millisecond, so
+// concurrent Tick and Update callers observe strictly increasing readings
+// (the D-02 seam under concurrency — a bare closure over a shared int64
+// would race).
+func atomicNow(startMs int64) func() time.Time {
+	var ms atomic.Int64
+	ms.Store(startMs)
+	return func() time.Time { return time.UnixMilli(ms.Add(1)) }
+}
+
+// TestStore_concurrentHammer races the whole exported surface of one store —
+// Set, SetIfAbsent, Delete, Merge and Get — across 8 goroutines x 200
+// deterministic-PCG operations over a small shared key set: no operation
+// panics, the race detector finds nothing, and once the hammer drains every
+// key is still present in Records() with Get agreeing with Records() — a
+// live record returns its data, a tombstone returns ErrNotFound (CORE-02
+// concurrency probe).
+func TestStore_concurrentHammer(t *testing.T) {
+	t.Parallel()
+	rng := newRNG(t)
+	keys := []string{"hammer-0", "hammer-1", "hammer-2", "hammer-3"}
+	store := app.NewStore(testNodeID, app.Config{}, atomicNow(testNowMs))
+	for _, key := range keys {
+		_, _, err := store.Set(key, []byte("seed"))
+		if err != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		}
+	}
+	hammerSeed := rng.Uint64()
+	var wg sync.WaitGroup
+	for worker := range 8 {
+		wg.Go(func() {
+			workerRng := rand.New(rand.NewPCG(hammerSeed, uint64(worker)))
+			for range 200 {
+				key := keys[workerRng.IntN(len(keys))]
+				payload := make([]byte, workerRng.IntN(32))
+				for i := range payload {
+					payload[i] = byte(workerRng.IntN(256))
+				}
+				switch workerRng.IntN(10) {
+				case 0, 1, 2, 3:
+					_, _, _ = store.Set(key, payload)
+				case 4, 5:
+					_, _, _ = store.SetIfAbsent(key, payload)
+				case 6:
+					_, _, _ = store.Delete(key)
+				case 7, 8:
+					rec := app.Record{
+						Version: app.PackVersion(
+							testNowMs+workerRng.Int64N(4001),
+							uint16(workerRng.IntN(testCounterMax+1)),
+							uint16(worker)),
+						Data: payload,
+					}
+					if workerRng.IntN(4) == 0 {
+						rec.Deleted = true
+						rec.Data = nil
+					}
+					_, _, _ = store.Merge(key, rec)
+				default:
+					_, _ = store.Get(key)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	records := store.Records()
+	for _, key := range keys {
+		rec, ok := records[key]
+		if !ok {
+			t.Errorf("key %q missing from Records() after the hammer", key)
+			continue
+		}
+		got, err := store.Get(key)
+		if rec.Deleted {
+			if !errors.Is(err, app.ErrNotFound) {
+				t.Errorf("Get(%q) error = %v, want ErrNotFound for the tombstone", key, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("Get(%q) error = %v, want nil for a live record", key, err)
+			continue
+		}
+		if got.Version != rec.Version || !bytes.Equal(got.Data, rec.Data) {
+			t.Errorf("Get(%q) = (%x, %q), want the Records() entry (%x, %q)",
+				key, got.Version[:], got.Data, rec.Version[:], rec.Data)
+		}
+	}
+}
+
+// TestStore_concurrentSetIfAbsent races 16 create-if-absent callers on one
+// fresh key with distinct payloads: exactly one caller succeeds, every other
+// caller gets ErrAlreadyExists, and the stored data equals the single
+// winner's payload (CORE-03 concurrency probe).
+func TestStore_concurrentSetIfAbsent(t *testing.T) {
+	t.Parallel()
+	store := newStore()
+	const callers = 16
+	errs := make([]error, callers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Go(func() {
+			<-start
+			_, _, errs[i] = store.SetIfAbsent("fresh", []byte{byte(i)})
+		})
+	}
+	close(start)
+	wg.Wait()
+	winners := 0
+	var winnerPayload []byte
+	for i, err := range errs {
+		if err == nil {
+			winners++
+			winnerPayload = []byte{byte(i)}
+			continue
+		}
+		if !errors.Is(err, app.ErrAlreadyExists) {
+			t.Errorf("caller %d error = %v, want nil or ErrAlreadyExists", i, err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("successful SetIfAbsent callers = %d, want exactly 1", winners)
+	}
+	rec, err := store.Get("fresh")
+	if err != nil {
+		t.Fatalf("Get() error = %v, want nil", err)
+	}
+	if !bytes.Equal(rec.Data, winnerPayload) {
+		t.Errorf("Get() data = %q, want the winner payload %q", rec.Data, winnerPayload)
+	}
+}
+
+// TestStore_concurrentDeleteVsSet duels Delete against Set on one live key
+// for 50 rounds of fresh keys, both sides capturing their returned versions:
+// after each round the key's Records() entry holds exactly the greater of the
+// two captured versions — the tombstone when Delete won, the live payload
+// when Set won (CORE-04 concurrency probe).
+func TestStore_concurrentDeleteVsSet(t *testing.T) {
+	t.Parallel()
+	store := newStore()
+	for round := range 50 {
+		key := fmt.Sprintf("duel-%d", round)
+		_, _, err := store.Set(key, []byte("seed"))
+		if err != nil {
+			t.Fatalf("round %d seed Set() error = %v, want nil", round, err)
+		}
+		var wg sync.WaitGroup
+		var setVer, delVer app.RecordVersion
+		wg.Go(func() {
+			ver, _, err := store.Set(key, []byte("set"))
+			if err != nil {
+				t.Errorf("round %d Set() error = %v, want nil", round, err)
+				return
+			}
+			setVer = ver
+		})
+		wg.Go(func() {
+			ver, _, err := store.Delete(key)
+			if err != nil {
+				t.Errorf("round %d Delete() error = %v, want nil", round, err)
+				return
+			}
+			delVer = ver
+		})
+		wg.Wait()
+		rec, ok := store.Records()[key]
+		if !ok {
+			t.Fatalf("round %d: key %q missing from Records()", round, key)
+		}
+		if delVer.Compare(setVer) == cmpNewer {
+			if rec.Version != delVer || !rec.Deleted {
+				t.Fatalf("round %d: Records()[%q] = (%x, deleted=%t), want the delete tombstone %x",
+					round, key, rec.Version[:], rec.Deleted, delVer[:])
+			}
+			continue
+		}
+		if rec.Version != setVer || rec.Deleted || !bytes.Equal(rec.Data, []byte("set")) {
+			t.Fatalf("round %d: Records()[%q] = (%x, deleted=%t, %q), want the set write (%x, live)",
+				round, key, rec.Version[:], rec.Deleted, rec.Data, setVer[:])
+		}
+	}
 }
