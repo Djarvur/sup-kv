@@ -31,11 +31,11 @@ created: "2026-11-02"
 
 | Threat ID | Category | Component | Severity | Disposition | Mitigation | Status |
 |-----------|----------|-----------|----------|-------------|------------|--------|
-| T-02-01 | DoS | Store.Set/SetIfAbsent/Merge size check | high | mitigate | `len(data) > ValueMaxBytes` rejected with `ErrValueTooLarge` before any allocation or copy — store.go:129/160/192; boundary tested at 61440/61441 in `TestStore_valueLimit` | closed |
-| T-02-02 | Tampering | Record.Data aliasing between store and callers | medium | mitigate | `bytes.Clone` defensive copies on write (store.go:119/144) and read (store.go:227/246); ownership documented in doc.go | closed |
+| T-02-01 | DoS | Store.Set/SetIfAbsent/Merge size check | high | mitigate | `len(data) > ValueMaxBytes` rejected with `ErrValueTooLarge` before any allocation or copy — internal/app/storage/store.go:133/165/199; boundary tested at 61440/61441 in `TestStore_valueLimit` | closed |
+| T-02-02 | Tampering | Record.Data aliasing between store and callers | medium | mitigate | `bytes.Clone` defensive copies on write (internal/app/storage/store.go:123/148) and read (internal/app/storage/store.go:231/250); ownership documented in doc.go | closed |
 | T-02-03 | DoS | RecordVersion.Unpack/Compare on arbitrary bit patterns | medium | mitigate | Unpack/Compare are pure masking arithmetic with no panic path; `TestVersion_unpackTotal` feeds seeded-random raw 16-byte values through them | closed |
 | T-02-04 | Tampering / Elevation of Privilege | Forged future timestamps winning every merge | medium | accept | Trusted-segment trust model is a documented accepted limitation (docs/IDEA.md "Trust model"); no auth in v1 by design; the drift signal (VERS-05) makes the condition observable; HMAC is documented future work | closed |
-| T-02-05 | Tampering | Record.Checksum (CRC32) misconstrued as integrity/auth control | low | mitigate | doc.go:32 states Checksum is corruption detection for the Phase 3 dump only; `TestMerge_losersProperty` confirms Checksum never participates in version comparison | closed |
+| T-02-05 | Tampering | Record.Checksum (CRC32) misconstrued as integrity/auth control | low | mitigate | internal/app/storage/doc.go:35 states Checksum is corruption detection for the Phase 3 dump only; `TestMerge_losersProperty` confirms Checksum never participates in version comparison | closed |
 | T-02-SC | Tampering | Package installs (new modules) | high | mitigate | Zero installs this phase per D-04; `go.mod`/`go.sum` byte-identical to master across the whole phase branch (verified `git diff --quiet origin/master..HEAD -- go.mod go.sum`); no install commands in any task | closed |
 
 *Status: open · closed · open — below high threshold (non-blocking)*
@@ -70,3 +70,11 @@ created: "2026-11-02"
 - [x] `status: verified` set in frontmatter
 
 **Approval:** verified 2026-11-02
+
+## Security Audit 2026-11-02
+
+| Metric | Count |
+|---|---|
+| Threats found | 6 |
+| Closed | 6 |
+| Open | 0 |
