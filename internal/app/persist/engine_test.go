@@ -6,15 +6,19 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
 )
 
@@ -215,4 +219,390 @@ func TestEngine_openEmptyStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Set() error = %v, want nil", err)
 	}
+}
+
+// Synctest-suite constants: the engine timing under test (the design
+// defaults, D-04) and the fake port's node identity.
+const (
+	synctestNodeID   = uint16(0x0302)
+	synctestDebounce = 50 * time.Millisecond
+	synctestMaxWait  = time.Second
+	burstWrites      = 1000
+	fanoutWaiters    = 5
+)
+
+// errFakeSave is the fake port's injected Save failure.
+var errFakeSave = errors.New("fake dump save failure")
+
+// fakeSave is one recorded dump: its virtual timestamp and bytes.
+type fakeSave struct {
+	at   time.Time
+	dump []byte
+}
+
+// fakeDumpPort is the in-memory port.DumpStore of the synctest suite: it
+// records every save's virtual timestamp and bytes, counts attempts
+// separately from completed saves, and fails the leading failSaves saves.
+// It never touches the filesystem — real I/O inside a synctest bubble is
+// not durably blocking and deadlock-panics the bubble (Pitfall 6). Snapshot
+// methods are trivial in-memory stubs; full snapshot behavior is plan
+// 03-02's subject.
+type fakeDumpPort struct {
+	mu        sync.Mutex
+	attempts  int
+	saves     []fakeSave
+	failSaves int
+	snapshots map[string][]byte
+}
+
+// Save records the dump at the current virtual time, failing the leading
+// configured saves.
+func (f *fakeDumpPort) Save(dump []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attempts++
+	if f.failSaves > 0 {
+		f.failSaves--
+		return errFakeSave
+	}
+	f.saves = append(f.saves, fakeSave{at: time.Now(), dump: bytes.Clone(dump)})
+	return nil
+}
+
+// Load is the empty start; the synctest suite never restarts.
+func (f *fakeDumpPort) Load(_ func([]byte) error) ([]byte, bool) { return nil, false }
+
+// CreateSnapshot stores an in-memory copy under the name.
+func (f *fakeDumpPort) CreateSnapshot(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.snapshots == nil {
+		f.snapshots = make(map[string][]byte)
+	}
+	if len(f.saves) == 0 {
+		return persist.ErrDumpFailed // no dump to snapshot — never exercised in this suite.
+	}
+	f.snapshots[name] = bytes.Clone(f.saves[len(f.saves)-1].dump)
+	return nil
+}
+
+// ReadSnapshot returns the in-memory copy, or a plain missing error.
+func (f *fakeDumpPort) ReadSnapshot(name string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.snapshots[name]
+	if !ok {
+		return nil, errFakeSave
+	}
+	return bytes.Clone(data), nil
+}
+
+// saveCount returns the number of completed saves.
+func (f *fakeDumpPort) saveCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.saves)
+}
+
+// saveAttempts returns the number of Save calls, failed ones included.
+func (f *fakeDumpPort) saveAttempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts
+}
+
+// save returns the recorded save i.
+func (f *fakeDumpPort) save(i int) fakeSave {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.saves[i]
+}
+
+// newFakeEngine builds an engine over an empty store and a fresh fake port;
+// inside a synctest bubble time.Now is the virtual clock, so the store's
+// clock rides it directly.
+func newFakeEngine(cfg persist.Config) (*persist.Engine, *fakeDumpPort) {
+	dumps := &fakeDumpPort{}
+	clk := clock.NewClock(time.Now, 0, 0, time.Minute)
+	store := storage.NewStore(synctestNodeID, clk, storage.Config{})
+	return persist.New(store, dumps, cfg), dumps
+}
+
+// startDumper launches eng.Run inside the bubble and returns a stop func
+// that cancels and drains it; every synctest test defers stop inside the
+// bubble so no dumper goroutine survives it (Pitfall 4).
+func startDumper(t *testing.T, eng *persist.Engine) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(ctx) }()
+	return func() {
+		cancel()
+		err := <-done
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run() error = %v, want context.Canceled", err)
+		}
+	}
+}
+
+// TestEngine_confirmDebounceTiming proves the write-confirmation timing law
+// exactly in virtual time (PERS-04, D-04): a Set at t=0 registers its
+// waiter, the debounced dumper waits out the full 50 ms quiet window, the
+// single save lands at virtual t=50 ms, and Set returns only then — with
+// the saved bytes decoding to the written record.
+func TestEngine_confirmDebounceTiming(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine(persist.Config{})
+		defer startDumper(t, eng)()
+		start := time.Now()
+		setDone := make(chan time.Time, 1)
+		go func() {
+			ver, _, err := eng.Set("k", []byte("v"))
+			if err != nil {
+				t.Errorf("Set() error = %v, want nil", err)
+			}
+			if ver == (version.RecordVersion{}) {
+				t.Error("Set() version is the zero version")
+			}
+			setDone <- time.Now()
+		}()
+		returnedAt := <-setDone
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("save count = %d, want 1", got)
+		}
+		save := dumps.save(0)
+		if !save.at.Equal(start.Add(synctestDebounce)) {
+			t.Errorf("save landed at %v, want exactly %v", save.at, start.Add(synctestDebounce))
+		}
+		if !returnedAt.Equal(start.Add(synctestDebounce)) {
+			t.Errorf("Set returned at %v, want exactly the dump instant %v",
+				returnedAt, start.Add(synctestDebounce))
+		}
+		records, discarded, err := persist.Decode(save.dump)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode() = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		if rec, ok := records["k"]; !ok || string(rec.Data) != "v" {
+			t.Errorf("saved record for k = (%q, %t), want the written value", rec.Data, ok)
+		}
+	})
+}
+
+// TestEngine_burstBoundedConfirmation proves the D-04 bound under a
+// sustained 1000 writes/s burst (PERS-03, success criterion 3): writes at a
+// 1 ms virtual cadence keep resetting the debounce, so the first dump is
+// forced by the oldest-write deadline at exactly virtual 1 s, every one of
+// the 1000 writes is confirmed by then, and the burst coalesces into at
+// most 3 dumps — never one dump per write.
+func TestEngine_burstBoundedConfirmation(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine(persist.Config{})
+		defer startDumper(t, eng)()
+		oldest := time.Now()
+		returns := make(chan time.Time, burstWrites)
+		var wg sync.WaitGroup
+		for i := range burstWrites {
+			wg.Go(func() {
+				_, _, err := eng.Set(fmt.Sprintf("key-%03d", i), []byte("burst-value"))
+				if err != nil {
+					t.Errorf("burst Set(key-%03d) error = %v, want nil", i, err)
+				}
+				returns <- time.Now()
+			})
+			synctest.Sleep(time.Millisecond)
+		}
+		wg.Wait()
+		close(returns)
+		synctest.Wait()
+		bound := oldest.Add(synctestMaxWait)
+		confirmed := 0
+		for returnedAt := range returns {
+			confirmed++
+			if returnedAt.After(bound) {
+				t.Errorf("a burst write returned at %v, past the bound %v", returnedAt, bound)
+			}
+		}
+		if confirmed != burstWrites {
+			t.Fatalf("confirmed writes = %d, want %d", confirmed, burstWrites)
+		}
+		if got := dumps.saveAttempts(); got > 3 {
+			t.Errorf("save attempts = %d, want at most 3 for %d writes", got, burstWrites)
+		}
+		if got := dumps.saveAttempts(); got == 0 {
+			t.Fatal("no dump ever started")
+		}
+		if first := dumps.save(0).at; first.After(bound) {
+			t.Errorf("first save at %v, past the oldest-write bound %v", first, bound)
+		}
+	})
+}
+
+// TestEngine_dumpFailureFansOut proves the D-05 failure contract: the
+// failed save hands ErrDumpFailed to every current waiter at the same
+// virtual instant while every record stays readable through Get, and after
+// the port recovers a further Set is confirmed by the second save, which
+// also carries the failed-era records — exactly 2 saves, no retry loop in
+// between beyond the re-armed debounce timer.
+func TestEngine_dumpFailureFansOut(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine(persist.Config{})
+		dumps.failSaves = 1
+		defer startDumper(t, eng)()
+		failedAt := make(chan time.Time, fanoutWaiters)
+		var wg sync.WaitGroup
+		for i := range fanoutWaiters {
+			wg.Go(func() {
+				_, _, err := eng.Set(fmt.Sprintf("fan-%d", i), []byte("fan-value"))
+				failedAt <- time.Now()
+				if !errors.Is(err, persist.ErrDumpFailed) {
+					t.Errorf("Set(fan-%d) error = %v, want ErrDumpFailed", i, err)
+				}
+			})
+		}
+		wg.Wait()
+		close(failedAt)
+		synctest.Wait()
+		var instant time.Time
+		first := true
+		for at := range failedAt {
+			if first {
+				instant, first = at, false
+			} else if !at.Equal(instant) {
+				t.Errorf("waiters resolved at %v and %v, want the same virtual instant", instant, at)
+			}
+		}
+		for i := range fanoutWaiters {
+			rec, err := eng.Get(fmt.Sprintf("fan-%d", i))
+			if err != nil || string(rec.Data) != "fan-value" {
+				t.Errorf("Get(fan-%d) after the failed dump = (%q, %v), want the in-memory record",
+					i, rec.Data, err)
+			}
+		}
+		recoveredAt := make(chan time.Time, 1)
+		go func() {
+			_, _, err := eng.Set("recovered", []byte("recovered-value"))
+			if err != nil {
+				t.Errorf("recovery Set() error = %v, want nil", err)
+			}
+			recoveredAt <- time.Now()
+		}()
+		<-recoveredAt
+		synctest.Wait()
+		if got := dumps.saveAttempts(); got != 2 {
+			t.Fatalf("save attempts = %d, want exactly 2 (one failed, one recovered — no retry loop)", got)
+		}
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("completed saves = %d, want 1", got)
+		}
+		records, discarded, err := persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode(second dump) = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		for i := range fanoutWaiters {
+			if _, ok := records[fmt.Sprintf("fan-%d", i)]; !ok {
+				t.Errorf("second dump lacks the failed-era record fan-%d", i)
+			}
+		}
+		if _, ok := records["recovered"]; !ok {
+			t.Error("second dump lacks the recovered record")
+		}
+	})
+}
+
+// TestEngine_runExitClosesWaiters proves Run's exit sweep: a Set blocked
+// mid-debounce resolves with ErrClosed the moment the context is
+// cancelled, Run returns the context error, and synctest quiescence proves
+// no goroutine survives the bubble.
+func TestEngine_runExitClosesWaiters(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, _ := newFakeEngine(persist.Config{})
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- eng.Run(ctx) }()
+		setDone := make(chan error, 1)
+		go func() {
+			_, _, err := eng.Set("k", []byte("v"))
+			setDone <- err
+		}()
+		synctest.Wait()
+		cancel()
+		err := <-setDone
+		if !errors.Is(err, persist.ErrClosed) {
+			t.Errorf("blocked Set() error = %v, want ErrClosed", err)
+		}
+		err = <-done
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run() error = %v, want context.Canceled", err)
+		}
+		synctest.Wait()
+	})
+}
+
+// TestEngine_writeSurface proves the full write surface through the engine:
+// SetIfAbsent on a tombstoned key returns the store's ErrAlreadyExists and
+// Delete on a missing key the store's ErrNotFound — both unchanged, with no
+// waiter registered — while SetIfAbsent on a fresh key and Delete of a live
+// key confirm like Set: nil only after a covering dump that carries the
+// record (PERS-04).
+func TestEngine_writeSurface(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine(persist.Config{})
+		defer startDumper(t, eng)()
+		_, _, err := eng.Set("tomb", []byte("doomed"))
+		if err != nil {
+			t.Fatalf("seed Set(tomb) error = %v, want nil", err)
+		}
+		_, _, err = eng.Delete("tomb")
+		if err != nil {
+			t.Fatalf("seed Delete(tomb) error = %v, want nil", err)
+		}
+		_, _, err = eng.SetIfAbsent("tomb", []byte("resurrect"))
+		if !errors.Is(err, storage.ErrAlreadyExists) {
+			t.Errorf("SetIfAbsent(tombstoned) error = %v, want ErrAlreadyExists", err)
+		}
+		_, _, err = eng.Delete("missing")
+		if !errors.Is(err, storage.ErrNotFound) {
+			t.Errorf("Delete(missing) error = %v, want ErrNotFound", err)
+		}
+		synctest.Wait()
+		savesBefore := dumps.saveCount()
+
+		ver, _, err := eng.SetIfAbsent("fresh", []byte("fresh-value"))
+		if err != nil {
+			t.Fatalf("SetIfAbsent(fresh) error = %v, want nil", err)
+		}
+		synctest.Wait()
+		if got := dumps.saveCount(); got <= savesBefore {
+			t.Fatalf("SetIfAbsent confirmed without a covering dump: saves %d, before %d",
+				got, savesBefore)
+		}
+		records, _, err := persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
+		if err != nil {
+			t.Fatalf("Decode() error = %v, want nil", err)
+		}
+		if rec, ok := records["fresh"]; !ok || rec.Version != ver {
+			t.Errorf("covering dump carries fresh = (%t, version match %t), want the SetIfAbsent record",
+				ok, rec.Version == ver)
+		}
+
+		ver, _, err = eng.Delete("fresh")
+		if err != nil {
+			t.Fatalf("Delete(live) error = %v, want nil", err)
+		}
+		synctest.Wait()
+		records, _, err = persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
+		if err != nil {
+			t.Fatalf("Decode() error = %v, want nil", err)
+		}
+		if rec, ok := records["fresh"]; !ok || !rec.Deleted || rec.Version != ver {
+			t.Errorf("covering dump carries the fresh tombstone = (present=%t, deleted=%t, match=%t)",
+				ok, rec.Deleted, rec.Version == ver)
+		}
+	})
 }

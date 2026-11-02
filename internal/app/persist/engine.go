@@ -329,6 +329,12 @@ func (e *Engine) Delete(key string) (version.RecordVersion, time.Duration, error
 	return ver, drift, e.await(ver)
 }
 
+// SetIfAbsent stores data under key only when the key holds no record
+// (stub: no confirmation wait — the surface test's failing behavior).
+func (e *Engine) SetIfAbsent(key string, data []byte) (version.RecordVersion, time.Duration, error) {
+	return e.store.SetIfAbsent(key, data)
+}
+
 // await registers a waiter for ver — freshly installed in the store by the
 // caller — marks the engine dirty and blocks until a dump resolution closes
 // the waiter. lastLocal tracks the highest locally stamped version under
