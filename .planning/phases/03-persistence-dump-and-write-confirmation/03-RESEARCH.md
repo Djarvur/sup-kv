@@ -569,18 +569,23 @@ Real SIGKILL harnesses are Phase 6 (TEST-04); the library-level equivalent cover
 | A7 | Package names `internal/app/persist` and `internal/persistfile` as concrete suggestions (explicitly planner's discretion per CONTEXT) | Project Structure | None — naming only |
 | A8 | Debounce timer MAY re-arm after a failed dump without a new change (one attempt per debounce interval), reading D-05's "or the debounce timer" literally | Pattern 5 | Low — retry cadence detail; either reading satisfies "no auto-retry loops" |
 
-## Open Questions
+## Open Questions (all five RESOLVED — settled by plans 03-01/03-02, back-annotated 2026-11-03)
 
 1. **Fallback-chain seam shape (D-02-literal vs simpler)**
    - What we know: D-02 assigns chain resolution to the adapter; "unparseable" requires the codec.
    - What's unclear: parse-oracle callback (A6) vs the port returning both generations' bytes with the core iterating.
    - Recommendation: parse-oracle `Load` — one place owns chain logic; engine-test fakes implement the interface trivially either way. Decide in planning; it's the costly-to-reverse seam.
+   - **(RESOLVED)** Parse-oracle Load, per the recommendation (A6 accepted): `port.DumpStore.Load(parse func([]byte) error) (dump []byte, ok bool)` with the engine supplying `codec.Parse`, keeping the adapter record-blind. Settled in plan 03-01 Task 1 (reversibility note and the port interface action).
 2. **Snapshot file `.prev`/rotation policy**
    - What we know: D-10 says byte-copy under the name; overwrite semantics unspecified.
    - Recommendation: reuse the atomic write; no `.prev` for snapshots (overwrite in place atomically). Low stakes.
+   - **(RESOLVED)** Atomic overwrite in place, no `.prev` for snapshots: `saveAtomically(..., rotate=false)` — snapshots are operator-named recovery points, not crash generations; the dump's own `.prev` chain is the crash mechanism. Settled in plan 03-01 Task 1 (snapshot.go action); ratified in plan 03-02 flagged assumption 2.
 3. **Dump/snapshot file mode (A3):** 0600 vs 0644 — one-line decision, confirm with user if operator-readability as non-owner matters.
+   - **(RESOLVED)** 0600 for dump and snapshot files (CreateTemp default kept — values privacy over non-owner readability) and 0700 for the `.snapshots` directory; greppability is preserved because grep runs as the owner. Settled in plan 03-01 Task 1; carried as flagged assumption 2 there for phase-verification ratification.
 4. **Restore replay and confirmation:** replay through the ordinary blocking write path (each restored write confirmed; debounce coalesces to a few dumps) vs an internal batch path with one final dump. Recommendation: ordinary path — simpler, PERS-04-consistent; revisit only if restore benchmarks hurt (they won't at v1 scale).
+   - **(RESOLVED)** Semantics-level reading adopted: each key replays through the store's ordinary write path (`store.Set`/`store.Delete`, fresh versions — never `Merge`), but the whole batch is confirmed by ONE final flush rather than per-write blocking (identical per-key semantics, stronger batch confirmation; sequential per-write blocking would serialize N writes at one debounce each). Settled in plan 03-02 Task 1 (Restore action); carried as flagged assumption 1 there.
 5. **Oversized-record-on-load policy (A5).** Recommendation: discard-and-count, mirroring PERS-02's checksum class.
+   - **(RESOLVED)** Discard-and-count, mirroring the checksum class: decode-side records whose `Data` exceeds `maxRecordBytes` (61440, the docs/IDEA.md design envelope) are discarded and counted; Open additionally skips `storage.ErrValueTooLarge` on merge so a config-shrunk limit never aborts startup. Settled in plan 03-01 Task 1 (codec.go action).
 
 ## Environment Availability
 
