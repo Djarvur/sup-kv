@@ -1,4 +1,4 @@
-package app_test
+package storage_test
 
 import (
 	"bytes"
@@ -10,17 +10,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Djarvur/sup-kv/internal/app"
+	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
 // Shared test constants: a fixed wall-clock millisecond (the D-02 seam), the
 // test node ID, the default value limit from docs/IDEA.md parameters, the
-// UUIDv7 marker bits, and Compare result codes.
+// RFC 9562 domain ceilings, the UUIDv7 marker bits, and Compare result
+// codes.
 const (
-	testNowMs   = int64(1730000000000)
-	testNodeID  = uint16(0xABCD)
-	valueMax    = 61440
-	valueOver   = valueMax + 1
+	testNowMs      = int64(1730000000000)
+	testNodeID     = uint16(0xABCD)
+	valueMax       = 61440
+	valueOver      = valueMax + 1
+	maxNodeID      = 0xFFFF
+	testCounterMax = 4095
+
 	uuidVerMask = 0xF0 // high nibble of octet 6 carries the UUID version.
 	uuidVerBits = 0x70 // version 7.
 	uuidVarMask = 0xC0 // top two bits of octet 8 carry the UUID variant.
@@ -33,16 +39,23 @@ const (
 	secondWriteCounter = 1
 )
 
-// fixedNow returns a now func parked at the given Unix millisecond, built
-// with time.UnixMilli so no monotonic reading is involved (D-02).
-func fixedNow(ms int64) func() time.Time {
-	return func() time.Time { return time.UnixMilli(ms) }
+// fixedNow returns a now func parked at the fixed test wall-clock
+// millisecond, built with time.UnixMilli so no monotonic reading is involved
+// (D-02).
+func fixedNow() func() time.Time {
+	return func() time.Time { return time.UnixMilli(testNowMs) }
+}
+
+// newStoreFor returns a store on the given node with the default config at
+// the fixed wall clock.
+func newStoreFor(nodeID uint16) *storage.Store {
+	return storage.NewStore(nodeID, storage.Config{}, fixedNow())
 }
 
 // newStore returns a store on the test node with the default config at the
 // fixed wall clock.
-func newStore() *app.Store {
-	return app.NewStore(testNodeID, app.Config{}, fixedNow(testNowMs))
+func newStore() *storage.Store {
+	return newStoreFor(testNodeID)
 }
 
 // TestStore_endToEnd wires one local write through every layer: the injected
@@ -115,7 +128,7 @@ func TestStore_endToEnd(t *testing.T) {
 		t.Parallel()
 		store := newStore()
 		_, err := store.Get("missing")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get() error = %v, want ErrNotFound", err)
 		}
 	})
@@ -123,11 +136,11 @@ func TestStore_endToEnd(t *testing.T) {
 		t.Parallel()
 		store := newStore()
 		_, _, err := store.Set("k", make([]byte, valueOver))
-		if !errors.Is(err, app.ErrValueTooLarge) {
+		if !errors.Is(err, storage.ErrValueTooLarge) {
 			t.Errorf("Set() error = %v, want ErrValueTooLarge", err)
 		}
 		_, err = store.Get("k")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get() error = %v, want ErrNotFound (nothing stored)", err)
 		}
 	})
@@ -144,7 +157,7 @@ const (
 )
 
 // conflictsEqual reports whether two conflict slices match element-wise.
-func conflictsEqual(got, want []app.Conflict) bool {
+func conflictsEqual(got, want []storage.Conflict) bool {
 	if len(got) != len(want) {
 		return false
 	}
@@ -180,7 +193,7 @@ func TestStore_Get(t *testing.T) {
 		t.Parallel()
 		store := newStore()
 		_, err := store.Get("missing")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get() error = %v, want ErrNotFound", err)
 		}
 	})
@@ -196,7 +209,7 @@ func TestStore_Get(t *testing.T) {
 			t.Fatalf("Delete() error = %v, want nil", err)
 		}
 		_, err = store.Get("k")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get() error = %v, want ErrNotFound (tombstone invisible)", err)
 		}
 	})
@@ -311,7 +324,7 @@ func TestStore_SetIfAbsent(t *testing.T) {
 			t.Fatalf("Set() error = %v, want nil", err)
 		}
 		_, _, err = store.SetIfAbsent("k", []byte("two"))
-		if !errors.Is(err, app.ErrAlreadyExists) {
+		if !errors.Is(err, storage.ErrAlreadyExists) {
 			t.Errorf("SetIfAbsent() error = %v, want ErrAlreadyExists", err)
 		}
 		rec, err := store.Get("k")
@@ -331,11 +344,11 @@ func TestStore_SetIfAbsent(t *testing.T) {
 			t.Fatalf("Delete() error = %v, want nil", err)
 		}
 		_, _, err = store.SetIfAbsent("k", []byte("two"))
-		if !errors.Is(err, app.ErrAlreadyExists) {
+		if !errors.Is(err, storage.ErrAlreadyExists) {
 			t.Errorf("SetIfAbsent() error = %v, want ErrAlreadyExists (tombstone counts as existing)", err)
 		}
 		_, err = store.Get("k")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get() error = %v, want ErrNotFound (no resurrection)", err)
 		}
 	})
@@ -362,7 +375,7 @@ func TestStore_Delete(t *testing.T) {
 			t.Errorf("tombstone Compare(live) = %d, want %d", got, cmpNewer)
 		}
 		_, err = store.Get("k")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get() error = %v, want ErrNotFound", err)
 		}
 		rec, ok := store.Records()["k"]
@@ -375,7 +388,7 @@ func TestStore_Delete(t *testing.T) {
 		t.Parallel()
 		store := newStore()
 		_, _, err := store.Delete("k")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Delete() error = %v, want ErrNotFound", err)
 		}
 		if got := len(store.Records()); got != 0 {
@@ -394,7 +407,7 @@ func TestStore_Delete(t *testing.T) {
 			t.Fatalf("first Delete() error = %v, want nil", err)
 		}
 		_, _, err = store.Delete("k")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("second Delete() error = %v, want ErrNotFound", err)
 		}
 		rec, ok := store.Records()["k"]
@@ -417,11 +430,11 @@ func TestStore_valueLimit(t *testing.T) {
 		wantErr error
 	}{
 		{name: "set accepts exactly the limit", op: "set", size: valueMax},
-		{name: "set rejects one byte over the limit", op: "set", size: valueOver, wantErr: app.ErrValueTooLarge},
+		{name: "set rejects one byte over the limit", op: "set", size: valueOver, wantErr: storage.ErrValueTooLarge},
 		{name: "setifabsent accepts exactly the limit", op: "setifabsent", size: valueMax},
-		{name: "setifabsent rejects one byte over the limit", op: "setifabsent", size: valueOver, wantErr: app.ErrValueTooLarge},
+		{name: "setifabsent rejects one byte over the limit", op: "setifabsent", size: valueOver, wantErr: storage.ErrValueTooLarge},
 		{name: "merge accepts exactly the limit", op: "merge", size: valueMax},
-		{name: "merge rejects one byte over the limit", op: "merge", size: valueOver, wantErr: app.ErrValueTooLarge},
+		{name: "merge rejects one byte over the limit", op: "merge", size: valueOver, wantErr: storage.ErrValueTooLarge},
 		{name: "set accepts a zero-length value", op: "set", size: 0},
 		{name: "setifabsent accepts a zero-length value", op: "setifabsent", size: 0},
 		{name: "merge accepts a zero-length value", op: "merge", size: 0},
@@ -437,7 +450,7 @@ func TestStore_valueLimit(t *testing.T) {
 			case "setifabsent":
 				_, _, err = store.SetIfAbsent("k", make([]byte, tt.size))
 			case "merge":
-				rec := app.Record{Version: app.PackVersion(mergeL, 0, nodeA), Data: make([]byte, tt.size)}
+				rec := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: make([]byte, tt.size)}
 				_, _, err = store.Merge("k", rec)
 			default:
 				t.Fatalf("unknown op %q", tt.op)
@@ -465,17 +478,17 @@ func TestMerge_losers(t *testing.T) {
 	t.Run("newer incoming displaces stored and reports it as the loser", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
-		stored := app.Record{Version: app.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
 		_, _, err := store.Merge("k", stored)
 		if err != nil {
 			t.Fatalf("seed Merge() error = %v, want nil", err)
 		}
-		incoming := app.Record{Version: app.PackVersion(mergeLNext, 0, nodeB), Data: []byte("b")}
+		incoming := storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeB), Data: []byte("b")}
 		conflicts, _, err := store.Merge("k", incoming)
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
-		want := []app.Conflict{{Key: "k", Winner: incoming.Version, Loser: stored.Version}}
+		want := []storage.Conflict{{Key: "k", Winner: incoming.Version, Loser: stored.Version}}
 		if !conflictsEqual(conflicts, want) {
 			t.Errorf("Merge() conflicts = %v, want %v", conflicts, want)
 		}
@@ -487,12 +500,12 @@ func TestMerge_losers(t *testing.T) {
 	t.Run("older incoming loses and is reported as the loser", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
-		stored := app.Record{Version: app.PackVersion(mergeLNext, 0, nodeA), Data: []byte("a")}
+		stored := storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeA), Data: []byte("a")}
 		_, _, err := store.Merge("k", stored)
 		if err != nil {
 			t.Fatalf("seed Merge() error = %v, want nil", err)
 		}
-		incoming := app.Record{Version: app.PackVersion(mergeL, 0, nodeB), Data: []byte("b")}
+		incoming := storage.Record{Version: version.PackVersion(mergeL, 0, nodeB), Data: []byte("b")}
 		if got := incoming.Version.Compare(stored.Version); got != cmpOlder {
 			t.Fatalf("fixture Compare() = %d, want %d", got, cmpOlder)
 		}
@@ -500,7 +513,7 @@ func TestMerge_losers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
-		want := []app.Conflict{{Key: "k", Winner: stored.Version, Loser: incoming.Version}}
+		want := []storage.Conflict{{Key: "k", Winner: stored.Version, Loser: incoming.Version}}
 		if !conflictsEqual(conflicts, want) {
 			t.Errorf("Merge() conflicts = %v, want %v", conflicts, want)
 		}
@@ -512,12 +525,12 @@ func TestMerge_losers(t *testing.T) {
 	t.Run("equal version is a no-op with no conflicts", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
-		stored := app.Record{Version: app.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
 		_, _, err := store.Merge("k", stored)
 		if err != nil {
 			t.Fatalf("seed Merge() error = %v, want nil", err)
 		}
-		dup := app.Record{Version: stored.Version, Data: []byte("x")}
+		dup := storage.Record{Version: stored.Version, Data: []byte("x")}
 		conflicts, _, err := store.Merge("k", dup)
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
@@ -533,7 +546,7 @@ func TestMerge_losers(t *testing.T) {
 	t.Run("merging into a missing key installs with no conflicts", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
-		incoming := app.Record{Version: app.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		incoming := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
 		conflicts, _, err := store.Merge("k", incoming)
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
@@ -549,22 +562,22 @@ func TestMerge_losers(t *testing.T) {
 	t.Run("a greater-version tombstone beats an older live record", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
-		live := app.Record{Version: app.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		live := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
 		_, _, err := store.Merge("k", live)
 		if err != nil {
 			t.Fatalf("seed Merge() error = %v, want nil", err)
 		}
-		tomb := app.Record{Version: app.PackVersion(mergeLNext, 0, nodeB), Deleted: true}
+		tomb := storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeB), Deleted: true}
 		conflicts, _, err := store.Merge("k", tomb)
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
-		want := []app.Conflict{{Key: "k", Winner: tomb.Version, Loser: live.Version}}
+		want := []storage.Conflict{{Key: "k", Winner: tomb.Version, Loser: live.Version}}
 		if !conflictsEqual(conflicts, want) {
 			t.Errorf("Merge() conflicts = %v, want %v", conflicts, want)
 		}
 		_, err = store.Get("k")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get() error = %v, want ErrNotFound (no resurrection)", err)
 		}
 		if rec, ok := store.Records()["k"]; !ok || !rec.Deleted {
@@ -591,10 +604,10 @@ func TestStore_restartDominance(t *testing.T) {
 	const watermarkC = 5
 	t.Run("the first post-restart Set stamps strictly past the seeded watermark", func(t *testing.T) {
 		t.Parallel()
-		store := app.NewStore(
+		store := storage.NewStore(
 			testNodeID,
-			app.Config{InitialL: testNowMs, InitialC: watermarkC},
-			fixedNow(testNowMs),
+			storage.Config{InitialL: testNowMs, InitialC: watermarkC},
+			fixedNow(),
 		)
 		ver, _, err := store.Set("k", []byte("fresh"))
 		if err != nil {
@@ -605,17 +618,17 @@ func TestStore_restartDominance(t *testing.T) {
 			t.Errorf("Unpack() = (%d, %d, %d), want (%d, %d, %d)",
 				l, counter, nodeID, testNowMs, watermarkC+1, testNodeID)
 		}
-		watermark := app.PackVersion(testNowMs, watermarkC, testNodeID)
+		watermark := version.PackVersion(testNowMs, watermarkC, testNodeID)
 		if got := ver.Compare(watermark); got != cmpNewer {
 			t.Errorf("Compare(watermark) = %d, want %d", got, cmpNewer)
 		}
 	})
 	t.Run("InitialC at counterMax bumps the store's first write past the watermark", func(t *testing.T) {
 		t.Parallel()
-		store := app.NewStore(
+		store := storage.NewStore(
 			testNodeID,
-			app.Config{InitialL: testNowMs, InitialC: testCounterMax},
-			fixedNow(testNowMs),
+			storage.Config{InitialL: testNowMs, InitialC: testCounterMax},
+			fixedNow(),
 		)
 		ver, _, err := store.Set("k", []byte("fresh"))
 		if err != nil {
@@ -626,36 +639,36 @@ func TestStore_restartDominance(t *testing.T) {
 			t.Errorf("Unpack() = (%d, %d, %d), want (%d, 0, %d)",
 				l, counter, nodeID, testNowMs+1, testNodeID)
 		}
-		watermark := app.PackVersion(testNowMs, testCounterMax, testNodeID)
+		watermark := version.PackVersion(testNowMs, testCounterMax, testNodeID)
 		if got := ver.Compare(watermark); got != cmpNewer {
 			t.Errorf("Compare(watermark) = %d, want %d", got, cmpNewer)
 		}
 	})
 	t.Run("a peer holding the dump watermark accepts the first post-restart write", func(t *testing.T) {
 		t.Parallel()
-		restarted := app.NewStore(
+		restarted := storage.NewStore(
 			testNodeID,
-			app.Config{InitialL: testNowMs, InitialC: watermarkC},
-			fixedNow(testNowMs),
+			storage.Config{InitialL: testNowMs, InitialC: watermarkC},
+			fixedNow(),
 		)
 		fresh, _, err := restarted.Set("k", []byte("fresh"))
 		if err != nil {
 			t.Fatalf("Set() error = %v, want nil", err)
 		}
-		peer := app.NewStore(nodeB, app.Config{}, fixedNow(testNowMs))
-		watermark := app.Record{
-			Version: app.PackVersion(testNowMs, watermarkC, testNodeID),
+		peer := newStoreFor(nodeB)
+		watermark := storage.Record{
+			Version: version.PackVersion(testNowMs, watermarkC, testNodeID),
 			Data:    []byte("old"),
 		}
 		_, _, err = peer.Merge("k", watermark)
 		if err != nil {
 			t.Fatalf("seed Merge() error = %v, want nil", err)
 		}
-		conflicts, _, err := peer.Merge("k", app.Record{Version: fresh, Data: []byte("fresh")})
+		conflicts, _, err := peer.Merge("k", storage.Record{Version: fresh, Data: []byte("fresh")})
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
-		want := []app.Conflict{{Key: "k", Winner: fresh, Loser: watermark.Version}}
+		want := []storage.Conflict{{Key: "k", Winner: fresh, Loser: watermark.Version}}
 		if !conflictsEqual(conflicts, want) {
 			t.Errorf("Merge() conflicts = %v, want %v (the acknowledged write must not revert)",
 				conflicts, want)
@@ -667,24 +680,24 @@ func TestStore_restartDominance(t *testing.T) {
 	})
 	t.Run("the stale watermark record cannot collide with the fresh write", func(t *testing.T) {
 		t.Parallel()
-		restarted := app.NewStore(
+		restarted := storage.NewStore(
 			testNodeID,
-			app.Config{InitialL: testNowMs, InitialC: watermarkC},
-			fixedNow(testNowMs),
+			storage.Config{InitialL: testNowMs, InitialC: watermarkC},
+			fixedNow(),
 		)
 		fresh, _, err := restarted.Set("k", []byte("fresh"))
 		if err != nil {
 			t.Fatalf("Set() error = %v, want nil", err)
 		}
-		stale := app.Record{
-			Version: app.PackVersion(testNowMs, watermarkC, testNodeID),
+		stale := storage.Record{
+			Version: version.PackVersion(testNowMs, watermarkC, testNodeID),
 			Data:    []byte("old"),
 		}
 		conflicts, _, err := restarted.Merge("k", stale)
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
-		want := []app.Conflict{{Key: "k", Winner: fresh, Loser: stale.Version}}
+		want := []storage.Conflict{{Key: "k", Winner: fresh, Loser: stale.Version}}
 		if !conflictsEqual(conflicts, want) {
 			t.Errorf("Merge() conflicts = %v, want %v (an equal-version no-op would silently drop the fresh write)",
 				conflicts, want)
@@ -716,9 +729,9 @@ func atomicNow(startMs int64) func() time.Time {
 // concurrency probe).
 func TestStore_concurrentHammer(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	keys := []string{"hammer-0", "hammer-1", "hammer-2", "hammer-3"}
-	store := app.NewStore(testNodeID, app.Config{}, atomicNow(testNowMs))
+	store := storage.NewStore(testNodeID, storage.Config{}, atomicNow(testNowMs))
 	for _, key := range keys {
 		_, _, err := store.Set(key, []byte("seed"))
 		if err != nil {
@@ -744,8 +757,8 @@ func TestStore_concurrentHammer(t *testing.T) {
 				case 6:
 					_, _, _ = store.Delete(key)
 				case 7, 8:
-					rec := app.Record{
-						Version: app.PackVersion(
+					rec := storage.Record{
+						Version: version.PackVersion(
 							testNowMs+workerRng.Int64N(4001),
 							uint16(workerRng.IntN(testCounterMax+1)),
 							uint16(worker)),
@@ -772,7 +785,7 @@ func TestStore_concurrentHammer(t *testing.T) {
 		}
 		got, err := store.Get(key)
 		if rec.Deleted {
-			if !errors.Is(err, app.ErrNotFound) {
+			if !errors.Is(err, storage.ErrNotFound) {
 				t.Errorf("Get(%q) error = %v, want ErrNotFound for the tombstone", key, err)
 			}
 			continue
@@ -815,7 +828,7 @@ func TestStore_concurrentSetIfAbsent(t *testing.T) {
 			winnerPayload = []byte{byte(i)}
 			continue
 		}
-		if !errors.Is(err, app.ErrAlreadyExists) {
+		if !errors.Is(err, storage.ErrAlreadyExists) {
 			t.Errorf("caller %d error = %v, want nil or ErrAlreadyExists", i, err)
 		}
 	}
@@ -846,7 +859,7 @@ func TestStore_concurrentDeleteVsSet(t *testing.T) {
 			t.Fatalf("round %d seed Set() error = %v, want nil", round, err)
 		}
 		var wg sync.WaitGroup
-		var setVer, delVer app.RecordVersion
+		var setVer, delVer version.RecordVersion
 		wg.Go(func() {
 			ver, _, err := store.Set(key, []byte("set"))
 			if err != nil {

@@ -1,4 +1,4 @@
-package app_test
+package version_test
 
 import (
 	"bytes"
@@ -6,14 +6,24 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/Djarvur/sup-kv/internal/app"
+	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
-// Version-domain bounds from RFC 9562: the 48-bit unix_ts_ms ceiling and the
-// 16-bit nodeID ceiling.
+// Shared fixtures: the version-domain bounds from RFC 9562 (the 48-bit
+// unix_ts_ms ceiling and the 16-bit nodeID ceiling), the counter ceiling,
+// the fixed wall-clock millisecond, and the UUIDv7 marker bits.
 const (
 	maxL      = 1<<48 - 1
 	maxNodeID = 0xFFFF
+
+	testCounterMax = 4095
+	testNowMs      = int64(1730000000000)
+
+	uuidVerMask = 0xF0 // high nibble of octet 6 carries the UUID version.
+	uuidVerBits = 0x70 // version 7.
+	uuidVarMask = 0xC0 // top two bits of octet 8 carry the UUID variant.
+	uuidVarBits = 0x80 // variant 0b10.
 )
 
 // TestVersion_layout covers the RFC 9562 octet layout with fixed vectors:
@@ -24,7 +34,7 @@ func TestVersion_layout(t *testing.T) {
 	t.Parallel()
 	t.Run("PackVersion(1, 0x123, 0xABCD) matches the RFC 9562 octet vector", func(t *testing.T) {
 		t.Parallel()
-		got := app.PackVersion(1, 0x123, 0xABCD)
+		got := version.PackVersion(1, 0x123, 0xABCD)
 		const want = "0000000000017123aaf3400000000000"
 		if gotHex := hex.EncodeToString(got[:]); gotHex != want {
 			t.Errorf("PackVersion(1, 0x123, 0xABCD) = %s, want %s", gotHex, want)
@@ -32,7 +42,7 @@ func TestVersion_layout(t *testing.T) {
 	})
 	t.Run("the 48-bit l occupies octets 0-5 big-endian", func(t *testing.T) {
 		t.Parallel()
-		got := app.PackVersion(0x112233445566, 0, 0)
+		got := version.PackVersion(0x112233445566, 0, 0)
 		want := [6]byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}
 		if !bytes.Equal(got[0:6], want[:]) {
 			t.Errorf("octets 0-5 = %x, want %x", got[0:6], want[:])
@@ -40,7 +50,7 @@ func TestVersion_layout(t *testing.T) {
 	})
 	t.Run("the rand_b filler bits are zero-filled", func(t *testing.T) {
 		t.Parallel()
-		got := app.PackVersion(testNowMs, 0x123, 0xABCD)
+		got := version.PackVersion(testNowMs, 0x123, 0xABCD)
 		for i := 11; i < len(got); i++ {
 			if got[i] != 0 {
 				t.Errorf("octet %d = %#x, want 0 (zero filler)", i, got[i])
@@ -52,9 +62,9 @@ func TestVersion_layout(t *testing.T) {
 	})
 	t.Run("every packed value carries the version 7 and variant bits", func(t *testing.T) {
 		t.Parallel()
-		rng := newRNG(t)
+		rng := testutil.NewRNG(t)
 		for range 100 {
-			v := randVersion(rng)
+			v := testutil.RandVersion(rng)
 			if got := v[6] & uuidVerMask; got != uuidVerBits {
 				t.Fatalf("octet 6 version bits = %#x, want %#x", got, uuidVerBits)
 			}
@@ -87,7 +97,7 @@ func TestVersion_roundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			packed := app.PackVersion(tt.l, tt.counter, tt.nodeID)
+			packed := version.PackVersion(tt.l, tt.counter, tt.nodeID)
 			l, counter, nodeID := packed.Unpack()
 			if l != tt.l || counter != tt.counter || nodeID != tt.nodeID {
 				t.Errorf("Unpack(PackVersion(%d, %d, %d)) = (%d, %d, %d), want the input triple",
@@ -149,14 +159,14 @@ func randTriple(rng *rand.Rand) versionTriple {
 // iterations the sign of the byte-wise Compare equals the sign of the
 // field-by-field reference comparison of (l, counter, nodeID) (VERS-01). A
 // failure reports the offending pair; the "property seed:" line printed by
-// newRNG carries the replay seed (Pitfall 5).
+// NewRNG carries the replay seed (Pitfall 5).
 func TestVersion_byteOrder(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	for range 1000 {
 		a, b := randTriple(rng), randTriple(rng)
-		got := app.PackVersion(a.l, a.counter, a.nodeID).
-			Compare(app.PackVersion(b.l, b.counter, b.nodeID))
+		got := version.PackVersion(a.l, a.counter, a.nodeID).
+			Compare(version.PackVersion(b.l, b.counter, b.nodeID))
 		want := compareTriple(a, b)
 		if got != want {
 			t.Fatalf("Compare of (%d, %d, %d) vs (%d, %d, %d) = %d, want %d (replay with the property seed above)",
@@ -170,7 +180,7 @@ func TestVersion_byteOrder(t *testing.T) {
 // variant 0b10 in octet 8's top two bits — bit 0x40 cleared — and the zero
 // filler in octet 10's low six bits and octets 11-15. Every bit Unpack
 // keeps survives verbatim; these are exactly the bits PackVersion rewrites.
-func canonicalRaw(v app.RecordVersion) app.RecordVersion {
+func canonicalRaw(v version.RecordVersion) version.RecordVersion {
 	v[6] = v[6]&0x0F | uuidVerBits
 	v[8] = v[8]&0x3F | uuidVarBits
 	v[10] &= 0xC0
@@ -185,17 +195,17 @@ func canonicalRaw(v app.RecordVersion) app.RecordVersion {
 // bits (canonicalRaw), and Compare never panics on raw pairs (T-02-03).
 func TestVersion_unpackTotal(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	for range 1000 {
-		v := randRawVersion(rng)
+		v := testutil.RandRawVersion(rng)
 		l, counter, nodeID := v.Unpack()
 		want := canonicalRaw(v)
-		got := app.PackVersion(l, counter, nodeID)
+		got := version.PackVersion(l, counter, nodeID)
 		if got != want {
 			t.Fatalf("PackVersion(Unpack(%x)) = %x, want %x — the input with the marker and filler bits normalized",
 				v[:], got[:], want[:])
 		}
-		other := randRawVersion(rng)
+		other := testutil.RandRawVersion(rng)
 		v.Compare(other) // total over raw wire patterns: must not panic.
 	}
 }

@@ -1,4 +1,10 @@
-package app
+// Package version implements the sup-kv record version: a 16-byte RFC 9562
+// UUIDv7 carrying the hybrid logical clock reading (unix_ts_ms, counter) and
+// the writing node's ID. The big-endian layout guarantees that byte-wise
+// comparison equals (l, counter, nodeID) order — the total order the sibling
+// storage package's LWW join sorts by. The package depends on the standard
+// library only.
+package version
 
 import (
 	"bytes"

@@ -1,17 +1,25 @@
-package app_test
+package clock_test
 
 import (
+	"math/rand/v2"
 	"testing"
 	"time"
 
-	"github.com/Djarvur/sup-kv/internal/app"
+	"github.com/Djarvur/sup-kv/internal/app/clock"
+	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
-// Clock-test constants: the drift tolerance under test and the 12-bit
-// rand_a counter ceiling from RFC 9562.
+// Clock-test constants: the drift tolerance under test, the 12-bit rand_a
+// counter ceiling from RFC 9562, the fixed wall-clock millisecond and node
+// ID of the shared fixtures, and the version-domain ceilings.
 const (
 	testDriftWarn  = time.Minute
 	testCounterMax = 4095
+	testNowMs      = int64(1730000000000)
+	testNodeID     = uint16(0xABCD)
+	maxL           = 1<<48 - 1
+	maxNodeID      = 0xFFFF
 )
 
 // reading is one (l, counter) pair returned by Tick or Update.
@@ -23,6 +31,12 @@ type reading struct {
 // after reports whether r sorts strictly after other in (l, counter) order.
 func (r reading) after(other reading) bool {
 	return r.l > other.l || (r.l == other.l && r.counter > other.counter)
+}
+
+// fixedNow returns a now func parked at the given Unix millisecond, built
+// with time.UnixMilli so no monotonic reading is involved (D-02).
+func fixedNow(ms int64) func() time.Time {
+	return func() time.Time { return time.UnixMilli(ms) }
 }
 
 // seqNow returns a now func yielding the given Unix milliseconds in order,
@@ -46,6 +60,23 @@ func ticks(ms int64, n int) []int64 {
 		out[i] = ms
 	}
 	return out
+}
+
+// nextWallTime advances the adversarial wall-clock walk: one in ten a
+// backward jump of up to four hours in milliseconds, one in ten a forward
+// jump of the same scale, two in ten stuck at the same millisecond, else a
+// 0..2 ms step (research "Code Examples", the TEST-02 chaos input).
+func nextWallTime(rng *rand.Rand, prev int64) int64 {
+	switch rng.IntN(10) {
+	case 0:
+		return prev - rng.Int64N(4*60*60*1000)
+	case 1:
+		return prev + rng.Int64N(4*60*60*1000)
+	case 2, 3:
+		return prev
+	default:
+		return prev + rng.Int64N(3)
+	}
 }
 
 // TestClock_tick covers the Kulkarni local-event rule per table: the wall
@@ -110,9 +141,9 @@ func TestClock_tick(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clock := app.NewClock(seqNow(tt.nows...), tt.initialL, 0, testDriftWarn)
+			clk := clock.NewClock(seqNow(tt.nows...), tt.initialL, 0, testDriftWarn)
 			for i, want := range tt.want {
-				l, counter, _ := clock.Tick()
+				l, counter, _ := clk.Tick()
 				got := reading{l: l, counter: counter}
 				if got != want {
 					t.Errorf("tick %d = (%d, %d), want (%d, %d)",
@@ -205,12 +236,12 @@ func TestClock_update(t *testing.T) {
 			t.Parallel()
 			nows := ticks(tt.initialL, tt.preTicks)
 			nows = append(nows, tt.updNow)
-			clock := app.NewClock(seqNow(nows...), tt.initialL, 0, testDriftWarn)
+			clk := clock.NewClock(seqNow(nows...), tt.initialL, 0, testDriftWarn)
 			for range tt.preTicks {
-				clock.Tick()
+				clk.Tick()
 			}
 			pre := reading{l: tt.initialL, counter: uint16(tt.preTicks)}
-			l, counter, _ := clock.Update(tt.remoteL, tt.remoteC)
+			l, counter, _ := clk.Update(tt.remoteL, tt.remoteC)
 			got := reading{l: l, counter: counter}
 			if got != tt.want {
 				t.Errorf("Update(%d, %d) = (%d, %d), want (%d, %d)",
@@ -230,10 +261,10 @@ func TestClock_update(t *testing.T) {
 // counter to 0 (VERS-03, TEST-02 boundary).
 func TestClock_counterOverflowBoundary(t *testing.T) {
 	t.Parallel()
-	clock := app.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
+	clk := clock.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
 	seen := make(map[reading]bool, testCounterMax+2)
 	for i := 1; i <= testCounterMax+1; i++ {
-		l, counter, _ := clock.Tick()
+		l, counter, _ := clk.Tick()
 		got := reading{l: l, counter: counter}
 		want := reading{l: testNowMs, counter: uint16(i - 1)}
 		if got != want {
@@ -244,7 +275,7 @@ func TestClock_counterOverflowBoundary(t *testing.T) {
 		}
 		seen[got] = true
 	}
-	l, counter, _ := clock.Tick()
+	l, counter, _ := clk.Tick()
 	if l != testNowMs+1 || counter != 0 {
 		t.Errorf("tick %d = (%d, %d), want (%d, 0)", testCounterMax+2, l, counter, testNowMs+1)
 	}
@@ -262,9 +293,9 @@ func TestClock_ceilingSaturation(t *testing.T) {
 	t.Parallel()
 	t.Run("the saturated Tick bump repeats the top reading", func(t *testing.T) {
 		t.Parallel()
-		clock := app.NewClock(fixedNow(maxL+5), maxL, testCounterMax, testDriftWarn)
+		clk := clock.NewClock(fixedNow(maxL+5), maxL, testCounterMax, testDriftWarn)
 		got := reading{}
-		got.l, got.counter, _ = clock.Tick()
+		got.l, got.counter, _ = clk.Tick()
 		want := reading{l: maxL, counter: testCounterMax}
 		if got != want {
 			t.Errorf("tick at the ceiling = (%d, %d), want the repeated top reading (%d, %d)",
@@ -273,9 +304,9 @@ func TestClock_ceilingSaturation(t *testing.T) {
 	})
 	t.Run("the saturated Update overflow pins the top reading", func(t *testing.T) {
 		t.Parallel()
-		clock := app.NewClock(fixedNow(maxL), maxL, 0, testDriftWarn)
+		clk := clock.NewClock(fixedNow(maxL), maxL, 0, testDriftWarn)
 		got := reading{}
-		got.l, got.counter, _ = clock.Update(maxL, testCounterMax)
+		got.l, got.counter, _ = clk.Update(maxL, testCounterMax)
 		want := reading{l: maxL, counter: testCounterMax}
 		if got != want {
 			t.Errorf("Update at the ceiling = (%d, %d), want the pinned top reading (%d, %d)",
@@ -284,24 +315,24 @@ func TestClock_ceilingSaturation(t *testing.T) {
 	})
 	t.Run("an adversarial walk beyond the ceiling never wraps", func(t *testing.T) {
 		t.Parallel()
-		rng := newRNG(t)
+		rng := testutil.NewRNG(t)
 		nowMs := maxL + 1 + rng.Int64N(1_000_000)
 		now := func() time.Time { return time.UnixMilli(nowMs) }
-		clock := app.NewClock(now, maxL, 0, testDriftWarn)
-		prev := app.PackVersion(maxL, 0, testNodeID)
+		clk := clock.NewClock(now, maxL, 0, testDriftWarn)
+		prev := version.PackVersion(maxL, 0, testNodeID)
 		for i := range testCounterMax + 10 {
 			nowMs = maxL + 1 + rng.Int64N(1_000_000)
 			got := reading{}
 			if rng.IntN(2) == 0 {
-				got.l, got.counter, _ = clock.Tick()
+				got.l, got.counter, _ = clk.Tick()
 			} else {
-				got.l, got.counter, _ = clock.Update(maxL, uint16(rng.IntN(testCounterMax+1)))
+				got.l, got.counter, _ = clk.Update(maxL, uint16(rng.IntN(testCounterMax+1)))
 			}
 			if got.l != maxL {
 				t.Fatalf("step %d l = %d, want the saturated ceiling %d (replay with the property seed above)",
 					i+1, got.l, maxL)
 			}
-			ver := app.PackVersion(got.l, got.counter, testNodeID)
+			ver := version.PackVersion(got.l, got.counter, testNodeID)
 			if ver.Compare(prev) < 0 {
 				t.Fatalf("step %d version %x reads below its predecessor %x — the stream wrapped to zero (replay with the property seed above)",
 					i+1, ver[:], prev[:])
@@ -327,12 +358,12 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 		initialL := testNowMs + int64(time.Hour/time.Millisecond)
 		nowMs := testNowMs
 		now := func() time.Time { return time.UnixMilli(nowMs) }
-		clock := app.NewClock(now, initialL, 0, testDriftWarn)
+		clk := clock.NewClock(now, initialL, 0, testDriftWarn)
 		nowMs = testNowMs - 3*int64(time.Hour/time.Millisecond)
 		prev := reading{l: initialL, counter: 0}
 		for i := 1; i <= 100; i++ {
 			nowMs -= 1000
-			l, counter, _ := clock.Tick()
+			l, counter, _ := clk.Tick()
 			got := reading{l: l, counter: counter}
 			if got.l < initialL {
 				t.Fatalf("tick %d l = %d, want at or above InitialL %d", i, got.l, initialL)
@@ -346,37 +377,37 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 	})
 	t.Run("InitialL zero starts from the wall clock", func(t *testing.T) {
 		t.Parallel()
-		clock := app.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
+		clk := clock.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
 		first := reading{}
-		first.l, first.counter, _ = clock.Tick()
+		first.l, first.counter, _ = clk.Tick()
 		if first != (reading{l: testNowMs, counter: 0}) {
 			t.Errorf("first tick = (%d, %d), want (%d, 0)", first.l, first.counter, testNowMs)
 		}
 		second := reading{}
-		second.l, second.counter, _ = clock.Tick()
+		second.l, second.counter, _ = clk.Tick()
 		if second != (reading{l: testNowMs, counter: 1}) {
 			t.Errorf("second tick = (%d, %d), want (%d, 1)", second.l, second.counter, testNowMs)
 		}
 	})
 	t.Run("InitialC seeds the counter: first tick strictly after the watermark", func(t *testing.T) {
 		t.Parallel()
-		clock := app.NewClock(fixedNow(testNowMs), testNowMs, 5, testDriftWarn)
+		clk := clock.NewClock(fixedNow(testNowMs), testNowMs, 5, testDriftWarn)
 		first := reading{}
-		first.l, first.counter, _ = clock.Tick()
+		first.l, first.counter, _ = clk.Tick()
 		if first != (reading{l: testNowMs, counter: 6}) {
 			t.Errorf("first tick = (%d, %d), want (%d, 6)", first.l, first.counter, testNowMs)
 		}
 		second := reading{}
-		second.l, second.counter, _ = clock.Tick()
+		second.l, second.counter, _ = clk.Tick()
 		if second != (reading{l: testNowMs, counter: 7}) {
 			t.Errorf("second tick = (%d, %d), want (%d, 7)", second.l, second.counter, testNowMs)
 		}
 	})
 	t.Run("InitialC at counterMax bumps l on the first tick", func(t *testing.T) {
 		t.Parallel()
-		clock := app.NewClock(fixedNow(testNowMs), testNowMs, testCounterMax, testDriftWarn)
+		clk := clock.NewClock(fixedNow(testNowMs), testNowMs, testCounterMax, testDriftWarn)
 		got := reading{}
-		got.l, got.counter, _ = clock.Tick()
+		got.l, got.counter, _ = clk.Tick()
 		want := reading{l: testNowMs + 1, counter: 0}
 		if got != want {
 			t.Errorf("first tick = (%d, %d), want (%d, %d) through the overflow rule",
@@ -390,9 +421,9 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 	})
 	t.Run("wall clock ahead of the watermark starts from the wall clock", func(t *testing.T) {
 		t.Parallel()
-		clock := app.NewClock(fixedNow(testNowMs+10), testNowMs, 5, testDriftWarn)
+		clk := clock.NewClock(fixedNow(testNowMs+10), testNowMs, 5, testDriftWarn)
 		got := reading{}
-		got.l, got.counter, _ = clock.Tick()
+		got.l, got.counter, _ = clk.Tick()
 		if got != (reading{l: testNowMs + 10, counter: 0}) {
 			t.Errorf("first tick = (%d, %d), want (%d, 0)", got.l, got.counter, testNowMs+10)
 		}
@@ -404,9 +435,9 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 	})
 	t.Run("out-of-range InitialC is masked to the 12-bit domain", func(t *testing.T) {
 		t.Parallel()
-		clock := app.NewClock(fixedNow(testNowMs), testNowMs, testCounterMax+6, testDriftWarn)
+		clk := clock.NewClock(fixedNow(testNowMs), testNowMs, testCounterMax+6, testDriftWarn)
 		got := reading{}
-		got.l, got.counter, _ = clock.Tick()
+		got.l, got.counter, _ = clk.Tick()
 		if got != (reading{l: testNowMs, counter: 6}) {
 			t.Errorf("first tick = (%d, %d), want (%d, 6) with the seed 4101 masked to 5",
 				got.l, got.counter, testNowMs)
@@ -480,13 +511,13 @@ func TestClock_driftSignal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clock := app.NewClock(fixedNow(tt.nowMs), tt.initialL, 0, tt.warn)
+			clk := clock.NewClock(fixedNow(tt.nowMs), tt.initialL, 0, tt.warn)
 			var drift time.Duration
 			switch tt.op {
 			case "tick":
-				_, _, drift = clock.Tick()
+				_, _, drift = clk.Tick()
 			case "update":
-				_, _, drift = clock.Update(tt.nowMs, 0)
+				_, _, drift = clk.Update(tt.nowMs, 0)
 			default:
 				t.Fatalf("unknown op %q", tt.op)
 			}

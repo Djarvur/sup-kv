@@ -1,4 +1,14 @@
-package app
+// Package clock implements the sup-kv Hybrid Logical Clock (Kulkarni et
+// al., 2014): node state (l, c) where l is Unix-millisecond wall-clock time
+// and c counts events inside one millisecond. The wall clock enters through
+// exactly one seam — the now func() [time.Time] constructor parameter of
+// NewClock (D-02): production passes [time.Now], tests pass a controlled
+// function driving the adversarial scenarios. A restart seeds the clock with
+// the dump's full watermark so every post-restart reading dominates the dump
+// (VERS-04), and readings saturate at the 48-bit timestamp ceiling instead
+// of wrapping out of the version domain. The package depends on the
+// standard library only.
+package clock
 
 import (
 	"sync"
@@ -9,11 +19,12 @@ import (
 // counter holds — past it the clock bumps l by one millisecond instead of
 // wrapping — and maxL is the highest value the 48-bit unix_ts_ms holds — at
 // it the clock saturates, repeating the top reading instead of bumping l
-// past the domain, where PackVersion would silently wrap the timestamp to
-// zero.
+// past the domain, where the version package's PackVersion would silently
+// wrap the timestamp to zero.
 const (
-	counterMax = counterMask
-	maxL       = tsMask
+	counterMask = 0xFFF // the 12-bit counter domain of the version layout.
+	counterMax  = counterMask
+	maxL        = 1<<48 - 1
 )
 
 // Clock is a Hybrid Logical Clock (Kulkarni et al., 2014): node state (l, c)

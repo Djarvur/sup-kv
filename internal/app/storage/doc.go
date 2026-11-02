@@ -1,12 +1,13 @@
-// Package app is the sup-kv application core: a pure, I/O-free library
-// holding the LWW-Element-Map store, the hybrid logical clock and the record
-// versions. The lint gate forbids networking, filesystem, syscall and
+// Package storage is the sup-kv in-memory LWW-Element-Map store: a pure,
+// I/O-free library over records versioned by the sibling version package
+// and stamped by a hybrid logical clock built from the sibling clock
+// package. The lint gate forbids networking, filesystem, syscall and
 // gRPC/protobuf imports here — see the sup-kv-app-no-io depguard rule in
 // .golangci.yml.
 //
 // The store is a Last-Write-Wins-Element-Map CRDT: per key, the record with
-// the greater full RecordVersion wins on merge, so merge is commutative,
-// associative and idempotent — delivery order, duplicates and
+// the greater full version.RecordVersion wins on merge, so merge is
+// commutative, associative and idempotent — delivery order, duplicates and
 // retransmissions cannot affect the outcome.
 //
 // Tombstone visibility is deliberately asymmetric. Get treats a missing key
@@ -25,10 +26,10 @@
 // ErrAlreadyExists and ErrValueTooLarge are sentinels matched with
 // [errors.Is].
 //
-// Store is safe for concurrent use by multiple goroutines and Clock is
+// Store is safe for concurrent use by multiple goroutines and the clock is
 // independently safe; the store holds the write lock across each clock
 // advance, so versions match commit order. Record Data is defensively copied
 // on the way in and out — callers keep ownership of their slices.
 // RecordChecksum is corruption detection for the Phase 3 dump, never tamper
 // protection.
-package app
+package storage

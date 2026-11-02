@@ -1,10 +1,13 @@
-package app
+package storage
 
 import (
 	"bytes"
 	"hash/crc32"
 	"sync"
 	"time"
+
+	"github.com/Djarvur/sup-kv/internal/app/clock"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
 // Design defaults NewStore substitutes for zero Config fields, and the
@@ -35,7 +38,7 @@ type Config struct {
 // Record is one stored key's state. Data is defensively copied on the way
 // into and out of the store; callers keep ownership of their slices.
 type Record struct {
-	Version  RecordVersion
+	Version  version.RecordVersion
 	Data     []byte
 	Deleted  bool
 	Checksum uint32
@@ -46,19 +49,19 @@ type Record struct {
 // contract behind the Phase 4/6 conflict journal.
 type Conflict struct {
 	Key    string
-	Winner RecordVersion
-	Loser  RecordVersion
+	Winner version.RecordVersion
+	Loser  version.RecordVersion
 }
 
 // Store is the in-memory LWW-Element-Map: per key the record with the
-// greater full RecordVersion wins on merge. Store is safe for concurrent use
+// greater full version wins on merge. Store is safe for concurrent use
 // by multiple goroutines.
 type Store struct {
 	mu      sync.RWMutex
 	nodeID  uint16
 	cfg     Config
 	records map[string]Record
-	clock   *Clock
+	clock   *clock.Clock
 }
 
 // NewStore returns a store for nodeID with cfg normalized to the design
@@ -72,13 +75,13 @@ func NewStore(nodeID uint16, cfg Config, now func() time.Time) *Store {
 		nodeID:  nodeID,
 		cfg:     cfg,
 		records: make(map[string]Record),
-		clock:   NewClock(now, cfg.InitialL, cfg.InitialC, cfg.DriftWarn),
+		clock:   clock.NewClock(now, cfg.InitialL, cfg.InitialC, cfg.DriftWarn),
 	}
 }
 
 // normalized returns cfg with zero fields replaced by the design defaults.
 // A negative ValueMaxBytes is normalized too; a negative DriftWarn is kept
-// and disables the drift signal (see NewClock).
+// and disables the drift signal (see clock.NewClock).
 func (c Config) normalized() Config {
 	if c.ValueMaxBytes <= 0 {
 		c.ValueMaxBytes = defaultValueMaxBytes
@@ -104,7 +107,7 @@ func (f tombstoneFlag) checksumByte() byte {
 // RecordChecksum returns the CRC32 over the key bytes, the 16 version bytes,
 // the data bytes and one flag byte for deleted. It is corruption detection
 // for the Phase 3 dump, never tamper protection.
-func RecordChecksum(key string, ver RecordVersion, data []byte, deleted bool) uint32 {
+func RecordChecksum(key string, ver version.RecordVersion, data []byte, deleted bool) uint32 {
 	flag := tombstoneFlag(deleted).checksumByte()
 	sum := crc32.Update(0, crc32.IEEETable, []byte(key))
 	sum = crc32.Update(sum, crc32.IEEETable, ver[:])
@@ -132,9 +135,9 @@ func (s *Store) Get(key string) (Record, error) {
 // returns the freshly stamped version and the drift signal observed at the
 // clock Tick. Values over Config.ValueMaxBytes are rejected with
 // ErrValueTooLarge before any copy is made.
-func (s *Store) Set(key string, data []byte) (RecordVersion, time.Duration, error) {
+func (s *Store) Set(key string, data []byte) (version.RecordVersion, time.Duration, error) {
 	if len(data) > s.cfg.ValueMaxBytes {
-		return RecordVersion{}, 0, ErrValueTooLarge
+		return version.RecordVersion{}, 0, ErrValueTooLarge
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,9 +148,9 @@ func (s *Store) Set(key string, data []byte) (RecordVersion, time.Duration, erro
 // write stamps a fresh version via the clock, defensively copies data and
 // stores the record; the caller must hold the write lock. It returns the new
 // version and the drift signal from the Tick.
-func (s *Store) write(key string, data []byte, deleted bool) (RecordVersion, time.Duration) {
+func (s *Store) write(key string, data []byte, deleted bool) (version.RecordVersion, time.Duration) {
 	l, counter, drift := s.clock.Tick()
-	ver := PackVersion(l, counter, s.nodeID)
+	ver := version.PackVersion(l, counter, s.nodeID)
 	stored := bytes.Clone(data)
 	s.records[key] = Record{
 		Version:  ver,
@@ -163,14 +166,14 @@ func (s *Store) write(key string, data []byte, deleted bool) (RecordVersion, tim
 // Delete-then-SetIfAbsent must not recreate the key. Values over
 // Config.ValueMaxBytes are rejected with ErrValueTooLarge before any copy
 // is made.
-func (s *Store) SetIfAbsent(key string, data []byte) (RecordVersion, time.Duration, error) {
+func (s *Store) SetIfAbsent(key string, data []byte) (version.RecordVersion, time.Duration, error) {
 	if len(data) > s.cfg.ValueMaxBytes {
-		return RecordVersion{}, 0, ErrValueTooLarge
+		return version.RecordVersion{}, 0, ErrValueTooLarge
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.records[key]; ok {
-		return RecordVersion{}, 0, ErrAlreadyExists
+		return version.RecordVersion{}, 0, ErrAlreadyExists
 	}
 	ver, drift := s.write(key, data, false)
 	return ver, drift, nil
@@ -179,11 +182,11 @@ func (s *Store) SetIfAbsent(key string, data []byte) (RecordVersion, time.Durati
 // Delete writes a fresh-version tombstone for key that merges like any
 // write; a missing key and an already-tombstoned key are both ErrNotFound
 // and write nothing, so no version is burned on a no-op.
-func (s *Store) Delete(key string) (RecordVersion, time.Duration, error) {
+func (s *Store) Delete(key string) (version.RecordVersion, time.Duration, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if rec, ok := s.records[key]; !ok || rec.Deleted {
-		return RecordVersion{}, 0, ErrNotFound
+		return version.RecordVersion{}, 0, ErrNotFound
 	}
 	ver, drift := s.write(key, nil, true)
 	return ver, drift, nil

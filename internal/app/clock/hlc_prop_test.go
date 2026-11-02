@@ -1,4 +1,4 @@
-package app_test
+package clock_test
 
 import (
 	"math/rand/v2"
@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Djarvur/sup-kv/internal/app"
+	"github.com/Djarvur/sup-kv/internal/app/clock"
+	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
 // expectedDrift is the documented drift convention as a model: evaluated on
@@ -34,10 +36,10 @@ func TestClock_monotonic(t *testing.T) {
 	t.Parallel()
 	t.Run("sequential adversarial walk", func(t *testing.T) {
 		t.Parallel()
-		rng := newRNG(t)
+		rng := testutil.NewRNG(t)
 		nowMs := testNowMs
 		now := func() time.Time { return time.UnixMilli(nowMs) }
-		clock := app.NewClock(now, 0, 0, testDriftWarn)
+		clk := clock.NewClock(now, 0, 0, testDriftWarn)
 		prev := reading{}
 		havePrev := false
 		for i := range 2000 {
@@ -46,10 +48,10 @@ func TestClock_monotonic(t *testing.T) {
 			got := reading{}
 			var drift time.Duration
 			if rng.IntN(2) == 0 {
-				got.l, got.counter, drift = clock.Tick()
+				got.l, got.counter, drift = clk.Tick()
 			} else {
 				remoteL := max(0, prev.l+rng.Int64N(5)-2)
-				got.l, got.counter, drift = clock.Update(remoteL, uint16(rng.IntN(testCounterMax+1)))
+				got.l, got.counter, drift = clk.Update(remoteL, uint16(rng.IntN(testCounterMax+1)))
 			}
 			if havePrev && !got.after(prev) {
 				t.Fatalf("step %d = (%d, %d), want strictly after (%d, %d) (replay with the property seed above)",
@@ -65,12 +67,12 @@ func TestClock_monotonic(t *testing.T) {
 	})
 	t.Run("concurrent tick and update callers stay monotonic and race-free", func(t *testing.T) {
 		t.Parallel()
-		rng := newRNG(t)
+		rng := testutil.NewRNG(t)
 		seedHi, seedLo := rng.Uint64(), rng.Uint64()
 		var nowMs atomic.Int64
 		nowMs.Store(testNowMs)
 		now := func() time.Time { return time.UnixMilli(nowMs.Load()) }
-		clock := app.NewClock(now, 0, 0, testDriftWarn)
+		clk := clock.NewClock(now, 0, 0, testDriftWarn)
 		var wg sync.WaitGroup
 		for worker := range 8 {
 			wg.Go(func() {
@@ -83,10 +85,10 @@ func TestClock_monotonic(t *testing.T) {
 					}
 					got := reading{}
 					if workerRng.IntN(2) == 0 {
-						got.l, got.counter, _ = clock.Tick()
+						got.l, got.counter, _ = clk.Tick()
 					} else {
 						remoteL := max(0, nowMs.Load()+workerRng.Int64N(5)-2)
-						got.l, got.counter, _ = clock.Update(remoteL, uint16(workerRng.IntN(testCounterMax+1)))
+						got.l, got.counter, _ = clk.Update(remoteL, uint16(workerRng.IntN(testCounterMax+1)))
 					}
 					if havePrev && !got.after(prev) {
 						t.Errorf("worker %d reading (%d, %d), want strictly after (%d, %d) (replay with the property seed above)",
@@ -108,13 +110,13 @@ func TestClock_monotonic(t *testing.T) {
 // overflows into an l bump and never wraps or repeats (VERS-02).
 func TestVersion_uniquePerWrite(t *testing.T) {
 	t.Parallel()
-	clock := app.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
+	clk := clock.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
 	const writes = 10000
-	seen := make(map[app.RecordVersion]bool, writes)
-	var prev app.RecordVersion
+	seen := make(map[version.RecordVersion]bool, writes)
+	var prev version.RecordVersion
 	for i := range writes {
-		l, counter, _ := clock.Tick()
-		ver := app.PackVersion(l, counter, testNodeID)
+		l, counter, _ := clk.Tick()
+		ver := version.PackVersion(l, counter, testNodeID)
 		if seen[ver] {
 			t.Fatalf("tick %d repeated version %x", i+1, ver[:])
 		}
@@ -134,27 +136,27 @@ func TestClock_postReceive(t *testing.T) {
 	t.Parallel()
 	t.Run("the next tick after Update beats the remote version", func(t *testing.T) {
 		t.Parallel()
-		rng := newRNG(t)
+		rng := testutil.NewRNG(t)
 		nowMs := testNowMs
 		now := func() time.Time { return time.UnixMilli(nowMs) }
-		clock := app.NewClock(now, 0, 0, testDriftWarn)
+		clk := clock.NewClock(now, 0, 0, testDriftWarn)
 		lastL := int64(0)
 		for i := range 1000 {
 			nowMs = nextWallTime(rng, nowMs)
 			var remoteL int64
 			var remoteC uint16
-			var remote app.RecordVersion
+			var remote version.RecordVersion
 			if rng.IntN(2) == 0 {
 				remoteL = max(0, max(lastL, nowMs)+rng.Int64N(3)-1)
 				remoteC = uint16(rng.IntN(testCounterMax + 1))
-				remote = app.PackVersion(remoteL, remoteC, uint16(rng.IntN(maxNodeID+1)))
+				remote = version.PackVersion(remoteL, remoteC, uint16(rng.IntN(maxNodeID+1)))
 			} else {
-				remote = randRecord(rng).Version
+				remote = testutil.RandRecord(rng).Version
 				remoteL, remoteC, _ = remote.Unpack()
 			}
-			clock.Update(remoteL, remoteC)
-			l, counter, _ := clock.Tick()
-			local := app.PackVersion(l, counter, testNodeID)
+			clk.Update(remoteL, remoteC)
+			l, counter, _ := clk.Tick()
+			local := version.PackVersion(l, counter, testNodeID)
 			if local.Compare(remote) <= 0 {
 				t.Fatalf("step %d local %x, want strictly greater than remote %x (replay with the property seed above)",
 					i+1, local[:], remote[:])
@@ -164,11 +166,11 @@ func TestClock_postReceive(t *testing.T) {
 	})
 	t.Run("a local write after Merge into a populated store supersedes the received version", func(t *testing.T) {
 		t.Parallel()
-		rng := newRNG(t)
+		rng := testutil.NewRNG(t)
 		for i := range 100 {
-			store := randStore(rng)
-			key := randKey(rng)
-			rec := randRecord(rng)
+			store := testutil.RandStore(rng)
+			key := testutil.RandKey(rng)
+			rec := testutil.RandRecord(rng)
 			_, _, err := store.Merge(key, rec)
 			if err != nil {
 				t.Fatalf("step %d Merge() error = %v, want nil", i, err)
@@ -179,7 +181,7 @@ func TestClock_postReceive(t *testing.T) {
 			}
 			if ver.Compare(rec.Version) <= 0 {
 				t.Fatalf("step %d local write %x, want strictly greater than received %x (replay with the property seed above)",
-					i, ver[:], rec.Version[:])
+					i+1, ver[:], rec.Version[:])
 			}
 		}
 	})
@@ -191,14 +193,14 @@ func TestClock_postReceive(t *testing.T) {
 // increases (TEST-02).
 func TestClock_counterReset(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	nowMs := testNowMs
 	now := func() time.Time { return time.UnixMilli(nowMs) }
-	clock := app.NewClock(now, 0, 0, testDriftWarn)
+	clk := clock.NewClock(now, 0, 0, testDriftWarn)
 	prev := reading{}
 	for i := range 2000 {
 		nowMs += rng.Int64N(3)
-		l, counter, _ := clock.Tick()
+		l, counter, _ := clk.Tick()
 		got := reading{l: l, counter: counter}
 		var want reading
 		switch {
@@ -235,22 +237,22 @@ func TestClock_counterReset(t *testing.T) {
 // which 02-VERIFICATION falsified.
 func TestClock_restartProperty(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	dumpMax := testNowMs + rng.Int64N(1_000_000)
 	watermarkC := uint16(1 + rng.IntN(testCounterMax))
 	nowMs := dumpMax - 1 - rng.Int64N(4*60*60*1000)
 	now := func() time.Time { return time.UnixMilli(nowMs) }
-	clock := app.NewClock(now, dumpMax, watermarkC, testDriftWarn)
-	dump := make([]app.RecordVersion, 0, 9)
+	clk := clock.NewClock(now, dumpMax, watermarkC, testDriftWarn)
+	dump := make([]version.RecordVersion, 0, 9)
 	for range 8 {
 		olderL := dumpMax - 1 - rng.Int64N(1_000_000)
-		dump = append(dump, app.PackVersion(olderL, uint16(rng.IntN(testCounterMax+1)), uint16(rng.IntN(maxNodeID+1))))
+		dump = append(dump, version.PackVersion(olderL, uint16(rng.IntN(testCounterMax+1)), uint16(rng.IntN(maxNodeID+1))))
 	}
-	dump = append(dump, app.PackVersion(dumpMax, watermarkC, testNodeID))
+	dump = append(dump, version.PackVersion(dumpMax, watermarkC, testNodeID))
 	prev := reading{l: dumpMax, counter: watermarkC}
 	for i := range 100 {
 		nowMs = nextWallTime(rng, nowMs)
-		l, counter, _ := clock.Tick()
+		l, counter, _ := clk.Tick()
 		got := reading{l: l, counter: counter}
 		if got.l < dumpMax {
 			t.Fatalf("tick %d l = %d, want at or above the dump max %d (replay with the property seed above)",
@@ -260,7 +262,7 @@ func TestClock_restartProperty(t *testing.T) {
 			t.Fatalf("tick %d = (%d, %d), want strictly after (%d, %d)",
 				i+1, got.l, got.counter, prev.l, prev.counter)
 		}
-		ver := app.PackVersion(l, counter, testNodeID)
+		ver := version.PackVersion(l, counter, testNodeID)
 		for _, dumpVer := range dump {
 			if ver.Compare(dumpVer) <= 0 {
 				t.Fatalf("tick %d version %x, want strictly greater than dump version %x (replay with the property seed above)",
@@ -277,10 +279,10 @@ func TestClock_restartProperty(t *testing.T) {
 // jump beyond it in either direction (VERS-05, TEST-02).
 func TestClock_driftUnderChaos(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	nowMs := testNowMs
 	now := func() time.Time { return time.UnixMilli(nowMs) }
-	clock := app.NewClock(now, 0, 0, testDriftWarn)
+	clk := clock.NewClock(now, 0, 0, testDriftWarn)
 	observedPositive := false
 	observedNegative := false
 	lastL := int64(0)
@@ -290,10 +292,10 @@ func TestClock_driftUnderChaos(t *testing.T) {
 		got := reading{}
 		var drift time.Duration
 		if rng.IntN(2) == 0 {
-			got.l, got.counter, drift = clock.Tick()
+			got.l, got.counter, drift = clk.Tick()
 		} else {
 			remoteL := max(0, lastL+rng.Int64N(5)-2)
-			got.l, got.counter, drift = clock.Update(remoteL, uint16(rng.IntN(testCounterMax+1)))
+			got.l, got.counter, drift = clk.Update(remoteL, uint16(rng.IntN(testCounterMax+1)))
 		}
 		if want := expectedDrift(lBefore, ptBefore, testDriftWarn); drift != want {
 			t.Fatalf("step %d drift = %v, want %v for pre-state (l=%d, pt=%d) (replay with the property seed above)",

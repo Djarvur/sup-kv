@@ -1,4 +1,4 @@
-package app_test
+package storage_test
 
 import (
 	"bytes"
@@ -8,16 +8,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Djarvur/sup-kv/internal/app"
+	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
 )
 
 // cloneStore returns a fresh store at the fixed wall clock holding exactly the
 // records of src, installed key by key via Merge so every record keeps its own
 // version: the laws drive stores exclusively through the exported Merge and
 // Records surface (research Pattern 2, clock-free).
-func cloneStore(t *testing.T, src *app.Store) *app.Store {
+func cloneStore(t *testing.T, src *storage.Store) *storage.Store {
 	t.Helper()
-	dst := app.NewStore(testNodeID, app.Config{}, fixedNow(testNowMs))
+	dst := newStore()
 	for key, rec := range src.Records() {
 		_, _, err := dst.Merge(key, rec)
 		if err != nil {
@@ -30,9 +31,9 @@ func cloneStore(t *testing.T, src *app.Store) *app.Store {
 // mergeAll applies every record of src into dst and returns the accumulated
 // conflicts — the D-01 return-value contract the laws account for: the losers
 // live in Merge's returned Conflicts, nothing accumulates inside the library.
-func mergeAll(t *testing.T, dst, src *app.Store) []app.Conflict {
+func mergeAll(t *testing.T, dst, src *storage.Store) []storage.Conflict {
 	t.Helper()
-	var conflicts []app.Conflict
+	var conflicts []storage.Conflict
 	for key, rec := range src.Records() {
 		got, _, err := dst.Merge(key, rec)
 		if err != nil {
@@ -45,7 +46,7 @@ func mergeAll(t *testing.T, dst, src *app.Store) []app.Conflict {
 
 // recordsEqual reports whether two record maps hold the same keys with
 // deep-equal records: version, deleted flag, checksum and data bytes.
-func recordsEqual(got, want map[string]app.Record) bool {
+func recordsEqual(got, want map[string]storage.Record) bool {
 	if len(got) != len(want) {
 		return false
 	}
@@ -62,9 +63,9 @@ func recordsEqual(got, want map[string]app.Record) bool {
 // sortedConflicts returns the conflicts canonically ordered by key, so sets
 // produced under nondeterministic map-iteration order compare element-wise;
 // each key contributes at most one conflict per whole-store merge.
-func sortedConflicts(conflicts []app.Conflict) []app.Conflict {
+func sortedConflicts(conflicts []storage.Conflict) []storage.Conflict {
 	sorted := slices.Clone(conflicts)
-	slices.SortFunc(sorted, func(a, b app.Conflict) int {
+	slices.SortFunc(sorted, func(a, b storage.Conflict) int {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return sorted
@@ -76,7 +77,7 @@ func sortedConflicts(conflicts []app.Conflict) []app.Conflict {
 // merging b then c into a equals merging a into (b merged with c); idempotence
 // — re-applying a store's own records changes nothing and reports no
 // conflicts.
-func assertMergeLaws(t *testing.T, step int, a, b, c *app.Store) {
+func assertMergeLaws(t *testing.T, step int, a, b, c *storage.Store) {
 	t.Helper()
 	ab, ba := cloneStore(t, a), cloneStore(t, b)
 	abConflicts := sortedConflicts(mergeAll(t, ab, b))
@@ -107,17 +108,17 @@ func assertMergeLaws(t *testing.T, step int, a, b, c *app.Store) {
 }
 
 // randTombStore returns a store whose records are tombstones seven times out
-// of eight — the mix inverted from randStore — so the laws also run over
+// of eight — the mix inverted from RandStore — so the laws also run over
 // deleted-dominated state.
-func randTombStore(rng *rand.Rand) *app.Store {
-	store := app.NewStore(uint16(rng.IntN(maxNodeID+1)), app.Config{}, fixedNow(testNowMs))
+func randTombStore(rng *rand.Rand) *storage.Store {
+	store := newStoreFor(uint16(rng.IntN(maxNodeID + 1)))
 	for range 1 + rng.IntN(16) {
-		rec := randRecord(rng)
+		rec := testutil.RandRecord(rng)
 		if rng.IntN(8) != 0 {
 			rec.Deleted = true
 			rec.Data = nil
 		}
-		_, _, _ = store.Merge(randKey(rng), rec)
+		_, _, _ = store.Merge(testutil.RandKey(rng), rec)
 	}
 	return store
 }
@@ -128,9 +129,9 @@ func randTombStore(rng *rand.Rand) *app.Store {
 // identical conflict sets in both merge directions (TEST-01, CORE-06).
 func TestMerge_laws(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	for step := range 500 {
-		assertMergeLaws(t, step, randStore(rng), randStore(rng), randStore(rng))
+		assertMergeLaws(t, step, testutil.RandStore(rng), testutil.RandStore(rng), testutil.RandStore(rng))
 	}
 }
 
@@ -142,35 +143,35 @@ func TestMerge_lawsTombstones(t *testing.T) {
 	t.Parallel()
 	t.Run("the three laws hold over tombstone-heavy stores", func(t *testing.T) {
 		t.Parallel()
-		rng := newRNG(t)
+		rng := testutil.NewRNG(t)
 		for step := range 500 {
 			assertMergeLaws(t, step, randTombStore(rng), randTombStore(rng), randTombStore(rng))
 		}
 	})
 	t.Run("an older live record after a newer tombstone loses without resurrection", func(t *testing.T) {
 		t.Parallel()
-		rng := newRNG(t)
-		tomb := randVersion(rng)
-		live := randVersion(rng)
+		rng := testutil.NewRNG(t)
+		tomb := testutil.RandVersion(rng)
+		live := testutil.RandVersion(rng)
 		for tomb.Compare(live) == cmpSame {
-			live = randVersion(rng)
+			live = testutil.RandVersion(rng)
 		}
 		if tomb.Compare(live) == cmpOlder {
 			tomb, live = live, tomb
 		}
-		store := app.NewStore(testNodeID, app.Config{}, fixedNow(testNowMs))
-		tombRec := app.Record{Version: tomb, Deleted: true}
+		store := newStore()
+		tombRec := storage.Record{Version: tomb, Deleted: true}
 		_, _, err := store.Merge("k", tombRec)
 		if err != nil {
 			t.Fatalf("seed Merge(tombstone) error = %v, want nil", err)
 		}
-		liveRec := app.Record{Version: live, Data: []byte("stale write")}
-		var conflicts []app.Conflict
+		liveRec := storage.Record{Version: live, Data: []byte("stale write")}
+		var conflicts []storage.Conflict
 		conflicts, _, err = store.Merge("k", liveRec)
 		if err != nil {
 			t.Fatalf("Merge(live) error = %v, want nil", err)
 		}
-		want := []app.Conflict{{Key: "k", Winner: tomb, Loser: live}}
+		want := []storage.Conflict{{Key: "k", Winner: tomb, Loser: live}}
 		if !conflictsEqual(conflicts, want) {
 			t.Errorf("Merge() conflicts = %v, want %v (replay with the property seed above)", conflicts, want)
 		}
@@ -180,7 +181,7 @@ func TestMerge_lawsTombstones(t *testing.T) {
 				rec.Version[:], rec.Deleted, ok, tomb[:])
 		}
 		_, err = store.Get("k")
-		if !errors.Is(err, app.ErrNotFound) {
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get() error = %v, want ErrNotFound (no resurrection)", err)
 		}
 	})
@@ -192,11 +193,11 @@ func TestMerge_lawsTombstones(t *testing.T) {
 // cannot fill with noise (CORE-06, research Pitfall 3).
 func TestMerge_duplicateDelivery(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	for step := range 200 {
-		key := randKey(rng)
-		rec := randRecord(rng)
-		store := app.NewStore(testNodeID, app.Config{}, fixedNow(testNowMs))
+		key := testutil.RandKey(rng)
+		rec := testutil.RandRecord(rng)
+		store := newStore()
 		first, _, err := store.Merge(key, rec)
 		if err != nil {
 			t.Fatalf("step %d first Merge() error = %v, want nil", step, err)
@@ -224,11 +225,11 @@ func TestMerge_duplicateDelivery(t *testing.T) {
 // versions yield none, and no Conflict ever pairs equal versions (CORE-07).
 func TestMerge_losersProperty(t *testing.T) {
 	t.Parallel()
-	rng := newRNG(t)
+	rng := testutil.NewRNG(t)
 	for step := range 500 {
-		key := randKey(rng)
-		stored, incoming := randRecord(rng), randRecord(rng)
-		store := app.NewStore(testNodeID, app.Config{}, fixedNow(testNowMs))
+		key := testutil.RandKey(rng)
+		stored, incoming := testutil.RandRecord(rng), testutil.RandRecord(rng)
+		store := newStore()
 		_, _, err := store.Merge(key, stored)
 		if err != nil {
 			t.Fatalf("step %d seed Merge() error = %v, want nil", step, err)
@@ -237,12 +238,12 @@ func TestMerge_losersProperty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("step %d Merge() error = %v, want nil", step, err)
 		}
-		var want []app.Conflict
+		var want []storage.Conflict
 		switch incoming.Version.Compare(stored.Version) {
 		case cmpNewer:
-			want = []app.Conflict{{Key: key, Winner: incoming.Version, Loser: stored.Version}}
+			want = []storage.Conflict{{Key: key, Winner: incoming.Version, Loser: stored.Version}}
 		case cmpOlder:
-			want = []app.Conflict{{Key: key, Winner: stored.Version, Loser: incoming.Version}}
+			want = []storage.Conflict{{Key: key, Winner: stored.Version, Loser: incoming.Version}}
 		case cmpSame:
 			want = nil
 		}
