@@ -30,6 +30,7 @@ const (
 	tracerDriftWarn = time.Minute
 	versionTag      = `"record_version":"`
 	hexVersionLen   = 32
+	dumpFileMode    = 0o600
 )
 
 // runEngine launches eng's single dumper goroutine (Run's lifecycle is the
@@ -606,4 +607,64 @@ func TestEngine_writeSurface(t *testing.T) {
 				ok, rec.Deleted, rec.Version == ver)
 		}
 	})
+}
+
+// TestEngine_restartDiscardsTornRecord proves the restart class separation
+// on the real filesystem (Pitfall 7): a torn record — a structurally valid
+// line whose checksum was corrupted on disk — is discarded and counted at
+// startup while its two siblings load byte-equal, and startup completes
+// instead of collapsing to the empty start.
+func TestEngine_restartDiscardsTornRecord(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	eng, _ := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	stop := runEngine(t, eng)
+	_, _, err := eng.Set("torn", []byte("torn-value"))
+	if err != nil {
+		t.Fatalf("Set(torn) error = %v, want nil", err)
+	}
+	_, _, err = eng.Set("sib-a", []byte("a-value"))
+	if err != nil {
+		t.Fatalf("Set(sib-a) error = %v, want nil", err)
+	}
+	_, _, err = eng.Set("sib-b", []byte("b-value"))
+	if err != nil {
+		t.Fatalf("Set(sib-b) error = %v, want nil", err)
+	}
+	stop()
+
+	dump, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read dump: %v", err)
+	}
+	tampered := rewriteLine(t, dump, "torn", func(rec *dumpLine) { rec.Checksum++ })
+	err = os.WriteFile(dumpPath, tampered, dumpFileMode)
+	if err != nil {
+		t.Fatalf("rewrite the torn dump: %v", err)
+	}
+
+	eng2, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	if discarded != 1 {
+		t.Errorf("Open() discarded = %d, want 1 (the torn record)", discarded)
+	}
+	_, err = eng2.Get("torn")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("Get(torn) after the torn restart = %v, want ErrNotFound", err)
+	}
+	for key, want := range map[string]string{"sib-a": "a-value", "sib-b": "b-value"} {
+		rec, err := eng2.Get(key)
+		if err != nil || string(rec.Data) != want {
+			t.Errorf("Get(%s) after the torn restart = (%q, %v), want (%q, nil)",
+				key, rec.Data, err, want)
+		}
+	}
+	if got := len(eng2.Records()); got != 2 {
+		t.Errorf("reloaded records = %d, want the two siblings only", got)
+	}
 }
