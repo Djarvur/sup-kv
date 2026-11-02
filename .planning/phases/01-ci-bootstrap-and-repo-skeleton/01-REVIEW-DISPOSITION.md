@@ -5,12 +5,16 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: fixed
-    title: "Dependabot will silently break the golangci-lint local/CI version-parity invariant"
+    disposition: open
+    title: "driftBetween overflows int64 at the domain ceiling, corrupting the drift signal exactly when the clock is pathological"
+  - id: WR-02
+    severity: warning
+    disposition: open
+    title: "NewClock never clamps initialL to the 48-bit domain — the one unclamped input silently defeats the documented wrap protection"
   - id: IN-01
     severity: info
     disposition: open
-    title: "AGENTS.md quotes an outdated go directive value"
+    title: "NewRNG doc comment overstates the printed-seed contract (\"on every run\")"
   - id: IN-02
     severity: info
     disposition: fixed
@@ -31,22 +35,23 @@ findings:
     severity: info
     disposition: open
     title: "CI's schema gate and CI's lint run use two separately-pinned binaries"
-open: 5
-total: 7
-recorded: 2026-11-01T00:00:00.000Z
+open: 7
+total: 8
+recorded: 2026-11-02T16:05:19.836Z
 ---
 
 # Phase 01: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | fixed | PR #12 |
+| WR-01 | warning | open | - |
+| WR-02 | warning | open | - |
 | IN-01 | info | open | - |
-| IN-02 | info | fixed | PR #20 — .claude/CLAUDE.md deferral parenthetical; confirmed by incremental review 85fa4dc |
-| IN-03 | info | open | - |
-| IN-04 | info | open | - |
-| IN-05 | info | open | - |
-| IN-06 | info | open | Increment 2 (PR #26 follow-up review, 2026-11-01) — new finding |
+| IN-02 | info | fixed | PR #20 — .claude/CLAUDE.md deferral parenthetical; confirmed by incremental review 85fa4dc (not in the current review) |
+| IN-03 | info | open | - (not in the current review) |
+| IN-04 | info | open | - (not in the current review) |
+| IN-05 | info | open | - (not in the current review) |
+| IN-06 | info | open | Increment 2 (PR #26 follow-up review, 2026-11-01) — new finding (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
