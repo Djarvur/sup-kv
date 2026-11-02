@@ -35,8 +35,6 @@ func newRNG(t *testing.T) *rand.Rand {
 // backward jump of up to four hours in milliseconds, one in ten a forward
 // jump of the same scale, two in ten stuck at the same millisecond, else a
 // 0..2 ms step (research "Code Examples", the TEST-02 chaos input).
-//
-//nolint:unused // consumed by hlc_prop_test.go (task 3); the suppression is removed when its call sites land.
 func nextWallTime(rng *rand.Rand, prev int64) int64 {
 	switch rng.IntN(10) {
 	case 0:
@@ -72,8 +70,6 @@ func randRawVersion(rng *rand.Rand) app.RecordVersion {
 
 // randRecord returns a record carrying a random version: roughly one third
 // tombstones with nil Data, the rest up to 63 random data bytes.
-//
-//nolint:unused // consumed by hlc_prop_test.go (task 3) and the merge laws (plan 02-03); removed when those land.
 func randRecord(rng *rand.Rand) app.Record {
 	if rng.IntN(3) == 0 {
 		return app.Record{Version: randVersion(rng), Deleted: true}
@@ -86,8 +82,6 @@ func randRecord(rng *rand.Rand) app.Record {
 }
 
 // randKey returns a random key from a small space so records collide.
-//
-//nolint:unused // consumed via randStore by hlc_prop_test.go (task 3); removed when its call sites land.
 func randKey(rng *rand.Rand) string {
 	return fmt.Sprintf("key-%d", rng.IntN(32))
 }
@@ -95,8 +89,6 @@ func randKey(rng *rand.Rand) string {
 // randStore returns a store pre-populated by Merge with randRecord records
 // over random keys: Merge installs externally versioned records, which is
 // how tests construct stores with arbitrary versions (research Pattern 2).
-//
-//nolint:unused // consumed by hlc_prop_test.go (task 3) and the merge laws (plan 02-03); removed when those land.
 func randStore(rng *rand.Rand) *app.Store {
 	store := app.NewStore(uint16(rng.IntN(maxNodeID+1)), app.Config{}, fixedNow(testNowMs))
 	for range 1 + rng.IntN(16) {
