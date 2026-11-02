@@ -22,4 +22,22 @@
 // starve confirmation. After a failed dump the next attempt starts one
 // debounce interval later — the re-armed timer, never a tight retry loop —
 // and it also carries the failed era's surviving records.
+//
+// Snapshots (PERS-05, D-08..D-10): Snapshot first forces the current dump
+// to complete — a clean engine skips the redundant dump, a dirty one is
+// dumped before anything is copied — then byte-copies the finished main
+// dump under the adapter-validated name, so the snapshot is byte-identical
+// to the confirmed on-disk state at creation; a failed flush aborts with
+// nothing copied. Restore decodes the snapshot with the same codec and
+// replays ONLY the snapshot's keys through the store's ordinary write path
+// with fresh versions: a snapshot-live value beats a current tombstone, a
+// snapshot tombstone beats a current live value, and keys absent from the
+// snapshot keep their state untouched; the snapshot's own versions are
+// never re-installed, so a restored state replicates and wins by normal LWW
+// like any write. Replaying the same snapshot twice converges to the
+// snapshot's values — the second restore's fresh versions beat the first's.
+// Tombstone no-ops (nothing to beat, no version burned) and values a
+// config-shrunk limit rejects are skipped, never errors. Both operations
+// require a running Run goroutine like every blocking engine call, and
+// both fail with the underlying error rather than degrading silently.
 package persist

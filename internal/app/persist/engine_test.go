@@ -784,7 +784,8 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 		}
 	}
 	// re-tomb: the snapshot's tombstone beats the post-snapshot live value.
-	if _, err := eng.Get("re-tomb"); !errors.Is(err, storage.ErrNotFound) {
+	_, err = eng.Get("re-tomb")
+	if !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("post-restore Get(re-tomb) error = %v, want ErrNotFound (the snapshot tombstone wins)", err)
 	}
 	if rec := restored["re-tomb"]; !rec.Deleted {
@@ -835,9 +836,9 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 		"keep-b":    "keep-b-value",
 		"resurrect": "resurrect-value",
 	} {
-		rec, err := eng3.Get(key)
-		if err != nil || string(rec.Data) != want {
-			t.Errorf("fresh-restored Get(%s) = (%q, %v), want (%q, nil)", key, rec.Data, err, want)
+		freshRec, freshErr := eng3.Get(key)
+		if freshErr != nil || string(freshRec.Data) != want {
+			t.Errorf("fresh-restored Get(%s) = (%q, %v), want (%q, nil)", key, freshRec.Data, freshErr, want)
 		}
 	}
 	for _, key := range []string{"re-tomb", "gone", "post-key"} {
@@ -846,7 +847,10 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 			t.Errorf("fresh-restored Get(%s) error = %v, want ErrNotFound", key, err)
 		}
 	}
-	if got := len(eng3.Records()); got != len(seeds) {
-		t.Errorf("fresh-restored records = %d, want the %d snapshot keys", got, len(seeds))
+	// The snapshot's tombstones replay as ErrNotFound no-ops on the fresh
+	// engine — nothing to beat, nothing written — so exactly the three
+	// live keys exist.
+	if got := len(eng3.Records()); got != 3 {
+		t.Errorf("fresh-restored records = %d, want the 3 live snapshot keys (tombstones are no-ops here)", got)
 	}
 }

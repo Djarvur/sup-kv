@@ -3,6 +3,8 @@ package persist
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -139,11 +141,13 @@ func mergeRecords(store *storage.Store, records map[string]storage.Record) {
 // timer is armed from the clean-to-dirty transition timestamp and is never
 // reset by later changes, only the debounce timer resets, so a 1 ms write
 // cadence can never push the dump start past the bound (D-04, Pitfall 2).
-// flushCh requests force a dump immediately and receive its error after it
-// completed (the D-10 snapshot flush seam; plan 03-02 wires the sender).
-// Go 1.23+ timer semantics apply: plain Reset, no drain selects (Pitfall 9).
-// Run exits when ctx is cancelled, sweeping every stranded waiter with
-// ErrClosed, and returns ctx's error.
+// flushCh requests force a dump immediately — bypassing the debounce quiet
+// window — and receive the dump's error after it completed; a clean engine
+// has nothing unconfirmed on disk and replies nil without a redundant save
+// (the D-10 snapshot flush seam Snapshot and Restore drive). Go 1.23+ timer
+// semantics apply: plain Reset, no drain selects (Pitfall 9). Run exits
+// when ctx is cancelled, sweeping every stranded waiter with ErrClosed, and
+// returns ctx's error.
 func (e *Engine) Run(ctx context.Context) error {
 	var debounce, deadline *time.Timer
 	for {
@@ -162,13 +166,27 @@ func (e *Engine) Run(ctx context.Context) error {
 			deadline = nil
 			fired = true
 		case reply := <-e.flushCh:
-			reply <- e.runDump()
+			reply <- e.flushDump()
 		}
 		if fired {
 			_ = e.runDump() // the error belongs to the waiters; nobody is left to report to.
 		}
 		debounce, deadline = e.rearm(debounce, deadline)
 	}
+}
+
+// flushDump services a flushCh request: a dirty engine dumps immediately —
+// the forced dump that must complete before a snapshot copies the main file
+// (D-10) — while a clean engine has nothing unconfirmed on disk and replies
+// nil without a redundant save.
+func (e *Engine) flushDump() error {
+	e.mu.Lock()
+	dirty := e.dirty
+	e.mu.Unlock()
+	if !dirty {
+		return nil
+	}
+	return e.runDump()
 }
 
 // rearm re-syncs the debounce and deadline timers with the engine's dirty
@@ -199,7 +217,9 @@ func (e *Engine) rearm(debounce, deadline *time.Timer) (nextDebounce, nextDeadli
 // sweepClosed is Run's exit sweep: under the same mutex hold the write
 // paths check, closed flips before the waiters are taken, so no writer can
 // register after the sweep and block forever; every stranded waiter then
-// resolves with ErrClosed (Pitfall 4).
+// resolves with ErrClosed, as does every flush request already handed to
+// the exiting Run — the reply channels are buffered, so the sends never
+// block (Pitfall 4).
 func (e *Engine) sweepClosed() {
 	e.mu.Lock()
 	e.closed = true
@@ -211,6 +231,14 @@ func (e *Engine) sweepClosed() {
 	e.mu.Unlock()
 	for _, w := range stranded {
 		close(w.done)
+	}
+	for {
+		select {
+		case reply := <-e.flushCh:
+			reply <- ErrClosed
+		default:
+			return
+		}
 	}
 }
 
@@ -385,16 +413,103 @@ func (e *Engine) Records() map[string]storage.Record {
 	return e.store.Records()
 }
 
-// Snapshot forces the current dump to complete, then byte-copies the
-// finished main dump under name (D-10, PERS-05). RED-phase stub: the
-// behavior lands with the tracer test.
-func (*Engine) Snapshot(string) error {
-	return nil
+// Snapshot forces the current dump to complete — every confirmed write is
+// on disk — then byte-copies the finished main dump under name through the
+// adapter (D-10, PERS-05): the snapshot file is byte-identical to the main
+// dump at creation, and a flush triggered while state is dirty forces a new
+// dump before the copy. A flush error aborts with nothing copied: state
+// that is not confirmed on disk must never become a recovery point. Safe
+// against a dump running concurrently with the copy — the adapter's atomic
+// rename means it always reads one complete generation. Requires a running
+// Run goroutine like every blocking engine call.
+func (e *Engine) Snapshot(name string) error {
+	err := e.flush()
+	if err != nil {
+		return err
+	}
+	return e.dumps.CreateSnapshot(name)
 }
 
-// Restore replays the named snapshot's records as ordinary writes with
-// fresh versions (D-09, PERS-05). RED-phase stub: the behavior lands with
-// the tracer test.
-func (*Engine) Restore(string) error {
-	return nil
+// Restore replays the named snapshot's records as ordinary writes and
+// deletes with fresh versions (D-09, PERS-05): a snapshot-live record is a
+// fresh Set that beats any current tombstone, a snapshot tombstone a fresh
+// Delete that beats any current live value, and keys absent from the
+// snapshot keep their state untouched — the snapshot's own versions are
+// never re-installed (no Merge); fresh versions are what make the restore
+// replicate and win by normal LWW. The replay runs in deterministic
+// sorted-key order through the store's write path, and the call returns
+// only after one final flush whose dump covers every replayed write — the
+// same write-confirmation contract as Set, batched into one flush because
+// the per-key semantics are identical while sequential per-write blocking
+// would serialize N writes at one debounce each. Errors surface unchanged
+// — a missing snapshot, a generation-level decode fault, a store rejection
+// or a failed confirming dump — never a silent empty success.
+func (e *Engine) Restore(name string) error {
+	data, err := e.dumps.ReadSnapshot(name)
+	if err != nil {
+		return err
+	}
+	records, _, err := Decode(data)
+	if err != nil {
+		return err
+	}
+	for _, key := range slices.Sorted(maps.Keys(records)) {
+		err = replayRecord(e.store, key, records[key])
+		if err != nil {
+			return err
+		}
+	}
+	e.markDirty()
+	return e.flush()
+}
+
+// replayRecord installs one snapshot record through the store's ordinary
+// write path (D-09): a tombstone replays as a fresh-version Delete whose
+// ErrNotFound is a skip — a missing or already-tombstoned key has nothing
+// to beat, and Delete writes nothing there anyway — and a live record as a
+// fresh-version Set whose ErrValueTooLarge is a skip, mirroring Open, so a
+// config-shrunk value limit never aborts a restore.
+func replayRecord(store *storage.Store, key string, rec storage.Record) error {
+	if rec.Deleted {
+		_, _, err := store.Delete(key)
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	_, _, err := store.Set(key, rec.Data)
+	if errors.Is(err, storage.ErrValueTooLarge) {
+		return nil
+	}
+	return err
+}
+
+// flush forces the dumper to complete one dump covering every unconfirmed
+// write and returns that dump's error: it hands a reply channel to Run
+// through flushCh, which Run services immediately — bypassing the debounce
+// quiet window, D-10's "forces the current dump to complete" — replying
+// after the forced dump completed. ErrClosed when Run has already exited.
+func (e *Engine) flush() error {
+	reply := make(chan error, 1)
+	e.mu.Lock()
+	closed := e.closed
+	e.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	e.flushCh <- reply
+	return <-reply
+}
+
+// markDirty marks the engine dirty from a fresh epoch without registering
+// a waiter: the restore replay's store writes are unconfirmed until the
+// final flush's covering dump — the cover discipline of await without the
+// per-write blocking.
+func (e *Engine) markDirty() {
+	e.mu.Lock()
+	if !e.dirty {
+		e.oldest = time.Now()
+	}
+	e.dirty = true
+	e.mu.Unlock()
 }
