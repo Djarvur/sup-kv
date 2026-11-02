@@ -36,6 +36,15 @@ type Record struct {
 	Checksum uint32
 }
 
+// Conflict reports one displaced version from a Merge: the greater version
+// that won and the version it beat or rejected. It is the D-01 return-value
+// contract behind the Phase 4/6 conflict journal.
+type Conflict struct {
+	Key    string
+	Winner RecordVersion
+	Loser  RecordVersion
+}
+
 // Store is the in-memory LWW-Element-Map: per key the record with the
 // greater full RecordVersion wins on merge. Store is safe for concurrent use
 // by multiple goroutines.
@@ -133,4 +142,37 @@ func (s *Store) write(key string, data []byte, deleted bool) (RecordVersion, tim
 		Checksum: RecordChecksum(key, ver, stored, deleted),
 	}
 	return ver, drift
+}
+
+// SetIfAbsent stores data under key only when the key holds no record,
+// including no tombstone: any existing record is ErrAlreadyExists, so a
+// Delete-then-SetIfAbsent must not recreate the key. Values over
+// Config.ValueMaxBytes are rejected with ErrValueTooLarge before any copy
+// is made.
+func (*Store) SetIfAbsent(_ string, _ []byte) (RecordVersion, time.Duration, error) {
+	return RecordVersion{}, 0, nil
+}
+
+// Delete writes a fresh-version tombstone for key that merges like any
+// write; a missing key and an already-tombstoned key are both ErrNotFound
+// and write nothing, so no version is burned on a no-op.
+func (*Store) Delete(_ string) (RecordVersion, time.Duration, error) {
+	return RecordVersion{}, 0, nil
+}
+
+// Merge joins an externally versioned record for key: the remote record
+// keeps its own version, only a strictly greater full 16-byte version
+// displaces the stored record, and an equal version is a full no-op. Every
+// displaced or rejected version is returned exactly once as a Conflict.
+// Values over Config.ValueMaxBytes are rejected with ErrValueTooLarge and
+// nothing is stored.
+func (*Store) Merge(_ string, _ Record) (conflicts []Conflict, drift time.Duration, err error) {
+	return nil, 0, nil
+}
+
+// Records returns a full snapshot of the map, tombstones included, with Data
+// defensively copied. This is the Phase 3 dump source; Get cannot see
+// tombstones by design.
+func (*Store) Records() map[string]Record {
+	return nil
 }
