@@ -15,15 +15,14 @@ type RecordVersion [16]byte
 // variant bits and the node ID in the high 16 bits of rand_b (octets 8-10);
 // the remaining 46 rand_b bits are zero filler.
 const (
-	uuidVerBits    = 0x70      // version 7 nibble in octet 6.
-	uuidVarBits    = 0x80      // variant 0b10 in the top two bits of octet 8.
-	counterMask    = 0xFFF     // the 12-bit counter kept from octets 6-7.
-	varPayloadMask = 0x3F      // the nodeID bits kept from octet 8.
-	nodeLsbMask    = 0x3       // the nodeID bits relocated into octet 10.
-	lPadding       = 16        // l occupies the low 48 bits of the first octet pair.
-	tsMask         = 1<<48 - 1 // the 48-bit timestamp domain, proving l&tsMask non-negative.
-	nodeLsbDrop    = 2         // the nodeID's low 2 bits live in octet 10.
-	fillerShift    = 6         // octet 10 carries the nodeID tail in its top bits.
+	uuidVerBits = 0x70      // version 7 nibble in octet 6.
+	uuidVarBits = 0x80      // variant 0b10 in the top two bits of octet 8.
+	counterMask = 0xFFF     // the 12-bit counter kept from octets 6-7.
+	nodeLsbMask = 0x3       // the nodeID bits relocated into octet 10.
+	lPadding    = 16        // l occupies the low 48 bits of the first octet pair.
+	tsMask      = 1<<48 - 1 // the 48-bit timestamp domain, proving l&tsMask non-negative.
+	nodeLsbDrop = 2         // the nodeID's low 2 bits live in octet 10.
+	fillerShift = 6         // octet 10 carries the nodeID tail in its top bits.
 )
 
 // PackVersion packs a hybrid logical clock reading and node ID into the RFC
@@ -43,7 +42,8 @@ func PackVersion(l int64, counter uint16, nodeID uint16) RecordVersion {
 
 // Unpack returns the hybrid logical clock reading and node ID packed into v.
 // It is total: pure masking arithmetic over every possible bit pattern, it
-// never panics.
+// never panics. The variant bits of octet 8 carry no explicit mask here: the
+// nodeID's left shift truncates them out of the uint16.
 func (v RecordVersion) Unpack() (l int64, counter uint16, nodeID uint16) {
 	l = int64(binary.BigEndian.Uint64(v[0:8]) >> lPadding)
 	counter = binary.BigEndian.Uint16(v[6:8]) & counterMask
