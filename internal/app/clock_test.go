@@ -110,7 +110,7 @@ func TestClock_tick(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clock := app.NewClock(seqNow(tt.nows...), tt.initialL, testDriftWarn)
+			clock := app.NewClock(seqNow(tt.nows...), tt.initialL, 0, testDriftWarn)
 			for i, want := range tt.want {
 				l, counter, _ := clock.Tick()
 				got := reading{l: l, counter: counter}
@@ -205,7 +205,7 @@ func TestClock_update(t *testing.T) {
 			t.Parallel()
 			nows := ticks(tt.initialL, tt.preTicks)
 			nows = append(nows, tt.updNow)
-			clock := app.NewClock(seqNow(nows...), tt.initialL, testDriftWarn)
+			clock := app.NewClock(seqNow(nows...), tt.initialL, 0, testDriftWarn)
 			for range tt.preTicks {
 				clock.Tick()
 			}
@@ -230,7 +230,7 @@ func TestClock_update(t *testing.T) {
 // counter to 0 (VERS-03, TEST-02 boundary).
 func TestClock_counterOverflowBoundary(t *testing.T) {
 	t.Parallel()
-	clock := app.NewClock(fixedNow(testNowMs), 0, testDriftWarn)
+	clock := app.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
 	seen := make(map[reading]bool, testCounterMax+2)
 	for i := 1; i <= testCounterMax+1; i++ {
 		l, counter, _ := clock.Tick()
@@ -266,7 +266,7 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 		initialL := testNowMs + int64(time.Hour/time.Millisecond)
 		nowMs := testNowMs
 		now := func() time.Time { return time.UnixMilli(nowMs) }
-		clock := app.NewClock(now, initialL, testDriftWarn)
+		clock := app.NewClock(now, initialL, 0, testDriftWarn)
 		nowMs = testNowMs - 3*int64(time.Hour/time.Millisecond)
 		prev := reading{l: initialL, counter: 0}
 		for i := 1; i <= 100; i++ {
@@ -285,7 +285,7 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 	})
 	t.Run("InitialL zero starts from the wall clock", func(t *testing.T) {
 		t.Parallel()
-		clock := app.NewClock(fixedNow(testNowMs), 0, testDriftWarn)
+		clock := app.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
 		first := reading{}
 		first.l, first.counter, _ = clock.Tick()
 		if first != (reading{l: testNowMs, counter: 0}) {
@@ -419,7 +419,7 @@ func TestClock_driftSignal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clock := app.NewClock(fixedNow(tt.nowMs), tt.initialL, tt.warn)
+			clock := app.NewClock(fixedNow(tt.nowMs), tt.initialL, 0, tt.warn)
 			var drift time.Duration
 			switch tt.op {
 			case "tick":

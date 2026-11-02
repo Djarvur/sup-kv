@@ -21,14 +21,23 @@ type Clock struct {
 	driftWarn time.Duration
 }
 
-// NewClock returns a clock driven by now; now must be non-nil. initialL
-// seeds l for a restart from a dump (VERS-04): pass the dump's maximum l, or
-// zero to start from the wall clock on the first Tick. driftWarn bounds the
+// NewClock returns a clock driven by now; now must be non-nil. A restart
+// from a dump passes the dump's FULL maximum reading (VERS-04): initialL
+// the dump's maximum l, initialC the dump's maximum counter at that l. The
+// first Tick then returns a reading strictly greater than (initialL,
+// initialC) — (initialL, initialC+1), or (initialL+1, 0) through the
+// existing counterMax overflow rule, or (pt, 0) when the wall clock
+// already runs ahead — so every emitted version strictly dominates every
+// version in that dump. Seeding initialL alone is insufficient whenever
+// any dump version carries counter >= 1 at the watermark millisecond.
+// initialL zero and initialC zero start from the wall clock on the first
+// Tick. initialC values above the 12-bit counter range are masked, so the
+// constructor is total over any uint16 input. driftWarn bounds the
 // tolerated divergence between l and the wall clock before Tick and Update
 // report a drift signal; driftWarn less than or equal to zero disables the
 // signal.
-func NewClock(now func() time.Time, initialL int64, driftWarn time.Duration) *Clock {
-	return &Clock{l: initialL, now: now, driftWarn: driftWarn}
+func NewClock(now func() time.Time, initialL int64, initialC uint16, driftWarn time.Duration) *Clock {
+	return &Clock{l: initialL, c: initialC & counterMask, now: now, driftWarn: driftWarn}
 }
 
 // Tick advances the clock for a local event and returns the new reading plus

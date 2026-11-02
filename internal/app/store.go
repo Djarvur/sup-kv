@@ -18,13 +18,18 @@ const (
 
 // Config holds the store tuning parameters; it is immutable once handed to
 // NewStore. Zero fields are normalized to the design defaults:
-// ValueMaxBytes 61440 and DriftWarn 60s. InitialL seeds the hybrid logical
-// clock from a dump's maximum l (VERS-04); zero means start from the wall
-// clock. A negative DriftWarn is passed through and disables the signal.
+// ValueMaxBytes 61440 and DriftWarn 60s. A restart passes the dump's full
+// watermark (VERS-04): InitialL the dump's maximum l and InitialC the
+// dump's maximum counter at that l. InitialL zero means start from the
+// wall clock; InitialC zero means no counter seed — seeding InitialL alone
+// is insufficient whenever any dump version carries counter >= 1 at the
+// watermark millisecond. A negative DriftWarn is passed through and
+// disables the signal.
 type Config struct {
 	ValueMaxBytes int
 	DriftWarn     time.Duration
 	InitialL      int64
+	InitialC      uint16
 }
 
 // Record is one stored key's state. Data is defensively copied on the way
@@ -57,15 +62,17 @@ type Store struct {
 }
 
 // NewStore returns a store for nodeID with cfg normalized to the design
-// defaults and a clock built from cfg.InitialL, cfg.DriftWarn and now
-// (D-02: the single wall-clock seam). now must be non-nil.
+// defaults and a clock built from cfg.InitialL, cfg.InitialC, cfg.DriftWarn
+// and now (D-02: the single wall-clock seam — the restart seed is
+// constructor state flowing through this construction, not a clock read).
+// now must be non-nil.
 func NewStore(nodeID uint16, cfg Config, now func() time.Time) *Store {
 	cfg = cfg.normalized()
 	return &Store{
 		nodeID:  nodeID,
 		cfg:     cfg,
 		records: make(map[string]Record),
-		clock:   NewClock(now, cfg.InitialL, cfg.DriftWarn),
+		clock:   NewClock(now, cfg.InitialL, cfg.InitialC, cfg.DriftWarn),
 	}
 }
 

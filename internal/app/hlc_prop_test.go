@@ -37,7 +37,7 @@ func TestClock_monotonic(t *testing.T) {
 		rng := newRNG(t)
 		nowMs := testNowMs
 		now := func() time.Time { return time.UnixMilli(nowMs) }
-		clock := app.NewClock(now, 0, testDriftWarn)
+		clock := app.NewClock(now, 0, 0, testDriftWarn)
 		prev := reading{}
 		havePrev := false
 		for i := range 2000 {
@@ -70,7 +70,7 @@ func TestClock_monotonic(t *testing.T) {
 		var nowMs atomic.Int64
 		nowMs.Store(testNowMs)
 		now := func() time.Time { return time.UnixMilli(nowMs.Load()) }
-		clock := app.NewClock(now, 0, testDriftWarn)
+		clock := app.NewClock(now, 0, 0, testDriftWarn)
 		var wg sync.WaitGroup
 		for worker := range 8 {
 			wg.Go(func() {
@@ -108,7 +108,7 @@ func TestClock_monotonic(t *testing.T) {
 // overflows into an l bump and never wraps or repeats (VERS-02).
 func TestVersion_uniquePerWrite(t *testing.T) {
 	t.Parallel()
-	clock := app.NewClock(fixedNow(testNowMs), 0, testDriftWarn)
+	clock := app.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
 	const writes = 10000
 	seen := make(map[app.RecordVersion]bool, writes)
 	var prev app.RecordVersion
@@ -137,7 +137,7 @@ func TestClock_postReceive(t *testing.T) {
 		rng := newRNG(t)
 		nowMs := testNowMs
 		now := func() time.Time { return time.UnixMilli(nowMs) }
-		clock := app.NewClock(now, 0, testDriftWarn)
+		clock := app.NewClock(now, 0, 0, testDriftWarn)
 		lastL := int64(0)
 		for i := range 1000 {
 			nowMs = nextWallTime(rng, nowMs)
@@ -194,7 +194,7 @@ func TestClock_counterReset(t *testing.T) {
 	rng := newRNG(t)
 	nowMs := testNowMs
 	now := func() time.Time { return time.UnixMilli(nowMs) }
-	clock := app.NewClock(now, 0, testDriftWarn)
+	clock := app.NewClock(now, 0, 0, testDriftWarn)
 	prev := reading{}
 	for i := range 2000 {
 		nowMs += rng.Int64N(3)
@@ -233,7 +233,7 @@ func TestClock_restartProperty(t *testing.T) {
 	dumpMax := testNowMs + rng.Int64N(1_000_000)
 	nowMs := dumpMax - 1 - rng.Int64N(4*60*60*1000)
 	now := func() time.Time { return time.UnixMilli(nowMs) }
-	clock := app.NewClock(now, dumpMax, testDriftWarn)
+	clock := app.NewClock(now, dumpMax, 0, testDriftWarn)
 	dump := make([]app.RecordVersion, 0, 9)
 	for range 8 {
 		olderL := dumpMax - 1 - rng.Int64N(1_000_000)
@@ -273,7 +273,7 @@ func TestClock_driftUnderChaos(t *testing.T) {
 	rng := newRNG(t)
 	nowMs := testNowMs
 	now := func() time.Time { return time.UnixMilli(nowMs) }
-	clock := app.NewClock(now, 0, testDriftWarn)
+	clock := app.NewClock(now, 0, 0, testDriftWarn)
 	observedPositive := false
 	observedNegative := false
 	lastL := int64(0)
