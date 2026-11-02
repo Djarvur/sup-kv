@@ -1,9 +1,34 @@
-// Package app will hold the sup-kv application core: the pure decision
-// logic — the LWW-Element-Map CRDT store, hybrid logical clock and record
-// versions — with no I/O of its own.
+// Package app is the sup-kv application core: a pure, I/O-free library
+// holding the LWW-Element-Map store, the hybrid logical clock and the record
+// versions. The lint gate forbids networking, filesystem, syscall and
+// gRPC/protobuf imports here — see the sup-kv-app-no-io depguard rule in
+// .golangci.yml.
 //
-// This is the Phase 1 skeleton placeholder. The package carries no code yet;
-// the engine lands in Phase 2. The lint gate forbids networking, filesystem,
-// syscall and gRPC/protobuf imports here — see the sup-kv-app-no-io depguard
-// rule in .golangci.yml.
+// The store is a Last-Write-Wins-Element-Map CRDT: per key, the record with
+// the greater full RecordVersion wins on merge, so merge is commutative,
+// associative and idempotent — delivery order, duplicates and
+// retransmissions cannot affect the outcome.
+//
+// Tombstone visibility is deliberately asymmetric. Get treats a missing key
+// and a tombstoned key alike as ErrNotFound, while SetIfAbsent treats any
+// existing record, including a tombstone, as ErrAlreadyExists, so a delete
+// followed by a create-if-absent cannot resurrect the key. Tombstones stay
+// in the map forever and merge like any other write.
+//
+// The package has no side effects: Merge reports every displaced or rejected
+// version by returning it as a Conflict value, and every clock-advancing
+// operation returns a drift signal as a signed [time.Duration] — zero within
+// the Config.DriftWarn tolerance, positive when the logical clock runs ahead
+// of the wall clock beyond it, negative when the wall clock jumped forward
+// past it. Callers decide where losers and drift warnings are recorded;
+// nothing is logged or emitted inside this package. The errors ErrNotFound,
+// ErrAlreadyExists and ErrValueTooLarge are sentinels matched with
+// [errors.Is].
+//
+// Store is safe for concurrent use by multiple goroutines and Clock is
+// independently safe; the store holds the write lock across each clock
+// advance, so versions match commit order. Record Data is defensively copied
+// on the way in and out — callers keep ownership of their slices.
+// RecordChecksum is corruption detection for the Phase 3 dump, never tamper
+// protection.
 package app
