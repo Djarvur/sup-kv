@@ -60,7 +60,7 @@ Plans:
   2. Property tests prove merge is commutative, associative and idempotent — including tombstoned entries — so delivery order, duplicates and retransmissions cannot affect the outcome, and every version displaced by a merge is recorded in the conflict journal
   3. Byte-wise UUIDv7 comparison equals `(l, c, NodeID)` order and versions are unique per write by construction — both property-tested
   4. The HLC stays monotonic under adversarial clock input (backward and forward jumps, stuck clock, counter overflow, restart initialized from the dump's max `l` rather than the wall clock), and drift beyond `drift_warn` is logged as a warning
-**Plans**: 2/3 plans executed
+**Plans**: 3/3 plans executed
 Plans:
 **Wave 1**
 - [x] 02-01-PLAN.md — Tracer: engine core wired end-to-end — errors, UUIDv7 RecordVersion, HLC clock with now seam, LWW store with merge losers returned (CORE-01..CORE-07)
@@ -69,7 +69,7 @@ Plans:
 - [x] 02-02-PLAN.md — Clock and version hardening: Kulkarni unit tables, RFC 9562 layout proofs, seeded replayable TEST-02 property suite (VERS-01..VERS-05, TEST-02)
 
 **Wave 3** *(blocked on Wave 2)*
-- [ ] 02-03-PLAN.md — TEST-01 merge-law property suite (tombstone-inclusive, exact loser accounting) + concurrency hammer + full phase gate (TEST-01, CORE-06, CORE-07)
+- [x] 02-03-PLAN.md — TEST-01 merge-law property suite (tombstone-inclusive, exact loser accounting) + concurrency hammer + full phase gate (TEST-01, CORE-06, CORE-07)
 
 ### Phase 3: Persistence — Dump and Write Confirmation
 **Goal**: State survives restarts and a client-confirmed write is always on disk — the write-confirmation contract that makes every later phase strictly additive
@@ -135,7 +135,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | 6/6 | In Progress | - |
-| 2. Engine — HLC Versioning and LWW Store | 2/3 | In Progress | - |
+| 2. Engine — HLC Versioning and LWW Store | 3/3 | In Progress | - |
 | 3. Persistence — Dump and Write Confirmation | 0/TBD | Not started | - |
 | 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
 | 5. gRPC API and Binary | 0/TBD | Not started | - |

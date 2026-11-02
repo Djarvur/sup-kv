@@ -14,8 +14,8 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **CORE-03**: User can create a key only if absent (create-if-absent) for seeding build-time defaults; an existing key returns AlreadyExists
 - [x] **CORE-04**: User can Delete a key; the tombstone is written with a fresh version and replicates like any write
 - [x] **CORE-05**: Values larger than `value_max_bytes` (default 60 KiB) are rejected with InvalidArgument
-- [ ] **CORE-06**: Merge follows LWW-Element-Map laws — per key the greater RecordVersion wins; merge is commutative, associative and idempotent, so delivery order, duplicates and retransmissions cannot affect the outcome
-- [ ] **CORE-07**: Every version displaced by a merge conflict is recorded in the conflict journal (the merge exposes the loser, not just the winner)
+- [x] **CORE-06**: Merge follows LWW-Element-Map laws — per key the greater RecordVersion wins; merge is commutative, associative and idempotent, so delivery order, duplicates and retransmissions cannot affect the outcome
+- [x] **CORE-07**: Every version displaced by a merge conflict is recorded in the conflict journal (the merge exposes the loser, not just the winner)
 
 ### Versioning
 
@@ -64,7 +64,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Testing
 
-- [ ] **TEST-01**: CRDT property tests prove merge is commutative, associative and idempotent
+- [x] **TEST-01**: CRDT property tests prove merge is commutative, associative and idempotent
 - [x] **TEST-02**: HLC property tests prove monotonicity under adversarial clock input, post-receive ordering and version uniqueness; counter-reset and restart-from-dump-max cases included
 - [ ] **TEST-03**: A deterministic multi-node simulation runs 2..N nodes over a virtual network that loses, duplicates and reorders datagrams and simulates partitions, with seeded runs
 - [ ] **TEST-04**: Every documented failure scenario is an automated test demonstrating convergence within the documented bounds: datagram loss; Ack loss; duplicates/reordering/own-broadcast echo; partition for seconds and for days (both sides serving writes, deterministic winner, conflict-journal entries); one-way connectivity; node restart (RunID change triggers resync); empty-disk recovery at `sync_response_rate`; both-nodes-down restart; corrupted dump records; wall-clock jumps live and between restarts; a node's clock far ahead; ~1000 writes/s bursts; duplicate `node_id`; protocol version mismatch
@@ -145,14 +145,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CORE-03 | Phase 2 | Complete |
 | CORE-04 | Phase 2 | Complete |
 | CORE-05 | Phase 2 | Complete |
-| CORE-06 | Phase 2 | Pending |
-| CORE-07 | Phase 2 | Pending |
+| CORE-06 | Phase 2 | Complete |
+| CORE-07 | Phase 2 | Complete |
 | VERS-01 | Phase 2 | Complete |
 | VERS-02 | Phase 2 | Complete |
 | VERS-03 | Phase 2 | Complete |
 | VERS-04 | Phase 2 | Complete |
 | VERS-05 | Phase 2 | Complete |
-| TEST-01 | Phase 2 | Pending |
+| TEST-01 | Phase 2 | Complete |
 | TEST-02 | Phase 2 | Complete |
 | PERS-01 | Phase 3 | Pending |
 | PERS-02 | Phase 3 | Pending |
