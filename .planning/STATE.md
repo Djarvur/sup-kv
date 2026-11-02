@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 3
 current_phase_name: Persistence — Dump and Write Confirmation
-status: executing
-stopped_at: Completed 03-01-PLAN.md — persistence core (codec, engine, port seam, file adapter); next 03-02 snapshots
-last_updated: "2026-11-02T23:16:44.818Z"
+status: verifying
+stopped_at: Completed 03-02-PLAN.md — snapshots complete; Phase 3 PERS-01..PERS-05 covered, ready for verification
+last_updated: "2026-11-02T23:38:06.185Z"
 last_activity: 2026-11-03
 last_activity_desc: Phase 3 execution started
-state_head: 143a09bec093bf69938c19808e97c15bcbbf3449
+state_head: c34d8c5677bcd80de8ad153ec5e2d568e75914cc
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 12
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 
 Phase: 3 (Persistence — Dump and Write Confirmation) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-03 — Phase 3 execution started
 
 Progress: [███░░░░░░░] 29%
@@ -68,6 +68,7 @@ Progress: [███░░░░░░░] 29%
 | Phase 02 P03 | 14min | 2 tasks | 2 files |
 | Phase 02 P04 | 8min | 2 tasks | 5 files |
 | Phase 03 P01 | 35min | 3 tasks | 12 files |
+| Phase 03 P02 | 16min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,9 @@ Recent decisions affecting current work:
 - [Phase 03]: Dump failure retry cadence per A8: dirty re-arms from a fresh epoch, debounce timer starts the next attempt one interval later, never a tight loop (plan 03-01)
 - [Phase 03]: Engine cover discipline (PERS-04): lastLocal captured under mu before Records(); a waiter resolves only from a dump whose snapshot contains its record — confirmation means on-disk containment (plan 03-01)
 - [Phase 03]: Five documented nolint suppressions where no code-direction fix exists: gosec G304 on the adapter's variable-path reads, iface on the port seam consumed cross-package (AGENTS.md sanctioned form) (plan 03-01)
+- [Phase 03]: Snapshot flush semantics (plan 03-02): Run services flushCh with an immediate dump only when dirty — a clean engine replies nil without a redundant save; the exit sweep resolves stranded flush requests with ErrClosed
+- [Phase 03]: Restore is semantics-level D-09 (plan 03-02): per-key ordinary store writes with fresh versions, one batched confirming flush — flagged assumption 1 for phase verification
+- [Phase 03]: Snapshot overwrite atomically in place with no .prev of its own (plan 03-02) — flagged assumption 2 for phase verification
 
 ### Pending Todos
 
@@ -139,6 +143,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T23:16:44.707Z
-Stopped at: Completed 03-01-PLAN.md — persistence core (codec, engine, port seam, file adapter); next 03-02 snapshots
-Resume file: .planning/phases/03-persistence-dump-and-write-confirmation/03-02-PLAN.md
+Last session: 2026-11-02T23:38:06.095Z
+Stopped at: Completed 03-02-PLAN.md — snapshots complete; Phase 3 PERS-01..PERS-05 covered, ready for verification
+Resume file: None

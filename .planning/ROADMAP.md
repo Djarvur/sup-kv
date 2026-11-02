@@ -83,13 +83,13 @@ Plans:
   2. A write returns OK only after a dump containing it completed (version watermark); on dump failure it returns Unavailable while staying in memory; kill −9 and restart recovers via the fallback chain main → `.prev` → empty start, discarding bad-checksum records
   3. A sustained burst of ~1000 writes/s still sees every write confirmed within bounded latency — debounced dumps coalesce but never starve
   4. Named snapshots can be created and loaded, and restore replays the snapshot as ordinary writes/deletes with fresh versions so it replicates and wins by normal LWW
-**Plans**: 1/2 plans executed
+**Plans**: 2/2 plans executed
 Plans:
 **Wave 1**
 - [x] 03-01-PLAN.md — Tracer: write-confirmed JSONL dump, atomic write with `.prev` fallback chain, restart watermark via persist.Open, engine confirmation/burst/failure synctest suite (PERS-01, PERS-02, PERS-03, PERS-04)
 
 **Wave 2** *(blocked on Wave 1)*
-- [ ] 03-02-PLAN.md — Snapshots: flush-forced byte-copy create, restore-as-writes with fresh dominating versions, name-validation security table (PERS-05)
+- [x] 03-02-PLAN.md — Snapshots: flush-forced byte-copy create, restore-as-writes with fresh dominating versions, name-validation security table (PERS-05)
 
 ### Phase 4: Replication and Deterministic Simulator
 **Goal**: Nodes converge to identical state — the pointwise supremum of all writes — over a lossy UDP broadcast segment, with convergence under chaos proven by the deterministic simulator
@@ -145,7 +145,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 |-------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | 6/6 | Complete    | 2026-11-02 |
 | 2. Engine — HLC Versioning and LWW Store | 4/4 | Complete    | 2026-11-02 |
-| 3. Persistence — Dump and Write Confirmation | 1/2 | In Progress | - |
+| 3. Persistence — Dump and Write Confirmation | 2/2 | In Progress | - |
 | 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
 | 5. gRPC API and Binary | 0/TBD | Not started | - |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | 0/TBD | Not started | - |
