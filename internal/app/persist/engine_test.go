@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,9 +247,10 @@ type fakeSave struct {
 // records every save's virtual timestamp and bytes, counts attempts
 // separately from completed saves, and fails the leading failSaves saves.
 // It never touches the filesystem — real I/O inside a synctest bubble is
-// not durably blocking and deadlock-panics the bubble (Pitfall 6). Snapshot
-// methods are trivial in-memory stubs; full snapshot behavior is plan
-// 03-02's subject.
+// not durably blocking and deadlock-panics the bubble (Pitfall 6). The
+// snapshot methods mirror the adapter's semantics in memory: CreateSnapshot
+// byte-copies the latest completed save under the name, missing snapshots
+// read as an error.
 type fakeDumpPort struct {
 	mu        sync.Mutex
 	attempts  int
@@ -274,7 +276,8 @@ func (f *fakeDumpPort) Save(dump []byte) error {
 // Load is the empty start; the synctest suite never restarts.
 func (*fakeDumpPort) Load(_ func([]byte) error) ([]byte, bool) { return nil, false }
 
-// CreateSnapshot stores an in-memory copy under the name.
+// CreateSnapshot stores an in-memory copy of the latest completed save
+// under the name.
 func (f *fakeDumpPort) CreateSnapshot(name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -282,7 +285,7 @@ func (f *fakeDumpPort) CreateSnapshot(name string) error {
 		f.snapshots = make(map[string][]byte)
 	}
 	if len(f.saves) == 0 {
-		return persist.ErrDumpFailed // no dump to snapshot — never exercised in this suite.
+		return persist.ErrDumpFailed // nothing on disk to copy — ErrNoDump's in-memory stand-in.
 	}
 	f.snapshots[name] = bytes.Clone(f.saves[len(f.saves)-1].dump)
 	return nil
@@ -297,6 +300,13 @@ func (f *fakeDumpPort) ReadSnapshot(name string) ([]byte, error) {
 		return nil, errFakeSave
 	}
 	return bytes.Clone(data), nil
+}
+
+// snapshot returns the in-memory copy recorded under name.
+func (f *fakeDumpPort) snapshot(name string) []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snapshots[name]
 }
 
 // saveCount returns the number of completed saves.
@@ -852,5 +862,97 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	// live keys exist.
 	if got := len(eng3.Records()); got != 3 {
 		t.Errorf("fresh-restored records = %d, want the 3 live snapshot keys (tombstones are no-ops here)", got)
+	}
+}
+
+// TestEngine_snapshotFlushForcesDump pins D-10's "forces the current dump
+// to complete" against the real dumper loop under exact virtual time with
+// no real I/O inside the bubble (PERS-05): a dirty engine — its one save
+// failed, the write returned ErrDumpFailed — must complete a NEW dump
+// before the snapshot copies, observable as the fake's attempt count (the
+// forced save is attempt two) and the copied bytes carrying the record;
+// a Snapshot on the fully-confirmed engine that follows adds no save at
+// all (not dirty: no dump, straight copy).
+func TestEngine_snapshotFlushForcesDump(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		dumps.failSaves = 1
+		defer startDumper(t, eng)()
+		setErr := make(chan error, 1)
+		go func() {
+			_, _, err := eng.Set("forced", []byte("forced-value"))
+			setErr <- err
+		}()
+		err := <-setErr
+		if !errors.Is(err, persist.ErrDumpFailed) {
+			t.Fatalf("Set() error = %v, want ErrDumpFailed (the dirty state)", err)
+		}
+		if got := dumps.saveCount(); got != 0 {
+			t.Fatalf("completed saves before the snapshot = %d, want 0", got)
+		}
+		err = eng.Snapshot("s")
+		if err != nil {
+			t.Fatalf("Snapshot(s) error = %v, want nil", err)
+		}
+		if got := dumps.saveAttempts(); got != 2 {
+			t.Fatalf("save attempts = %d, want exactly 2 (one failed, one forced by the snapshot)", got)
+		}
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("completed saves = %d, want 1", got)
+		}
+		copied := dumps.snapshot("s")
+		if !bytes.Equal(copied, dumps.save(0).dump) {
+			t.Error("snapshot copy differs from the forced save's bytes")
+		}
+		records, discarded, err := persist.Decode(copied)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode(snapshot) = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		if rec, ok := records["forced"]; !ok || string(rec.Data) != "forced-value" {
+			t.Errorf("snapshot lacks the forced record: (%q, %t), want the written value", rec.Data, ok)
+		}
+
+		// Fully confirmed now: the second Snapshot is a straight copy —
+		// no save beyond what the dirty state required.
+		err = eng.Snapshot("s2")
+		if err != nil {
+			t.Fatalf("Snapshot(s2) error = %v, want nil", err)
+		}
+		if got := dumps.saveAttempts(); got != 2 {
+			t.Errorf("save attempts after the confirmed snapshot = %d, want still 2 (no extra save)", got)
+		}
+		if !bytes.Equal(dumps.snapshot("s2"), dumps.save(0).dump) {
+			t.Error("second snapshot copy differs from the confirmed save's bytes")
+		}
+	})
+}
+
+// TestEngine_restoreMissingSnapshot proves the missing-snapshot error class
+// on the real adapter (PERS-05): Restore of a name with no snapshot file
+// surfaces the wrapped fs.ErrNotExist error — never a silent empty success
+// — and leaves the engine's records untouched.
+func TestEngine_restoreMissingSnapshot(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	eng, _ := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	runEngine(t, eng)
+	_, _, err := eng.Set("stable", []byte("stable-value"))
+	if err != nil {
+		t.Fatalf("seed Set(stable) error = %v, want nil", err)
+	}
+	before := eng.Records()
+	err = eng.Restore("nope")
+	if err == nil {
+		t.Fatal("Restore(nope) = nil, want the missing-snapshot error")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Restore(nope) error = %v, want one wrapping fs.ErrNotExist", err)
+	}
+	if !recordsEqual(eng.Records(), before) {
+		t.Error("records changed across the failed restore")
 	}
 }
