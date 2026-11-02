@@ -50,7 +50,14 @@ type Clock struct {
 // any dump version carries counter >= 1 at the watermark millisecond.
 // initialL zero and initialC zero start from the wall clock on the first
 // Tick. initialC values above the 12-bit counter range are masked, so the
-// constructor is total over any uint16 input. The version domain ends at
+// constructor is total over any uint16 input; initialL is clamped into the
+// [0, maxL] version domain the same way — a watermark beyond the ceiling
+// (a corrupted restart dump, an input the intended Unpack pipeline can
+// never produce) saturates at maxL rather than persisting outside the
+// domain, where the version package's PackVersion would silently wrap
+// every subsequent write to the bottom of the stream, and a negative
+// watermark reads as zero, starting from the wall clock. The version
+// domain ends at
 // (maxL, counterMax): a now seam beyond maxL — possible only with a clock
 // lying past year ~8921 — saturates l at maxL, and once the counter also
 // exhausts at the ceiling Tick and Update repeat the top reading (maxL,
@@ -61,7 +68,7 @@ type Clock struct {
 // report a drift signal; driftWarn less than or equal to zero disables the
 // signal.
 func NewClock(now func() time.Time, initialL int64, initialC uint16, driftWarn time.Duration) *Clock {
-	return &Clock{l: initialL, c: initialC & counterMask, now: now, driftWarn: driftWarn}
+	return &Clock{l: min(max(initialL, 0), maxL), c: initialC & counterMask, now: now, driftWarn: driftWarn}
 }
 
 // Tick advances the clock for a local event and returns the new reading plus

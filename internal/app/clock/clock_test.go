@@ -1,6 +1,7 @@
 package clock_test
 
 import (
+	"math"
 	"math/rand/v2"
 	"testing"
 	"time"
@@ -440,6 +441,53 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 		got.l, got.counter, _ = clk.Tick()
 		if got != (reading{l: testNowMs, counter: 6}) {
 			t.Errorf("first tick = (%d, %d), want (%d, 6) with the seed 4101 masked to 5",
+				got.l, got.counter, testNowMs)
+		}
+	})
+}
+
+// TestClock_watermarkClampedIntoDomain covers the constructor's watermark
+// clamp (WR-02): an InitialL beyond the 48-bit domain ceiling — a corrupted
+// dump watermark, the one input the intended Unpack pipeline can never
+// produce — saturates at maxL instead of persisting outside the domain,
+// where PackVersion's tsMask would silently wrap every subsequent write to
+// the bottom of the version stream, and a negative watermark reads as zero,
+// starting from the wall clock like an unseeded restart.
+func TestClock_watermarkClampedIntoDomain(t *testing.T) {
+	t.Parallel()
+	t.Run("watermark above the ceiling saturates at maxL", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(testNowMs), maxL+5, 0, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clk.Tick()
+		want := reading{l: maxL, counter: 1}
+		if got != want {
+			t.Errorf("first tick = (%d, %d), want the clamped (%d, %d)",
+				got.l, got.counter, want.l, want.counter)
+		}
+		ver := version.PackVersion(got.l, got.counter, testNodeID)
+		top := version.PackVersion(maxL, 0, testNodeID)
+		if ver.Compare(top) < 0 {
+			t.Errorf("packed version %x reads below the domain top %x — the stream wrapped to the bottom",
+				ver[:], top[:])
+		}
+	})
+	t.Run("an int64-extreme watermark still lands inside the domain", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(testNowMs), math.MaxInt64, 0, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clk.Tick()
+		if got.l != maxL {
+			t.Errorf("first tick l = %d, want the saturated ceiling %d", got.l, maxL)
+		}
+	})
+	t.Run("a negative watermark reads as zero and adopts the wall clock", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(testNowMs), -3600_000, 0, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clk.Tick()
+		if got != (reading{l: testNowMs, counter: 0}) {
+			t.Errorf("first tick = (%d, %d), want the wall reading (%d, 0)",
 				got.l, got.counter, testNowMs)
 		}
 	})
