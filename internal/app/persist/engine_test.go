@@ -1,6 +1,7 @@
 package persist_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -18,8 +19,8 @@ import (
 )
 
 // Tracer-test constants: the shared node ID and drift tolerance of the
-// real-filesystem engines, and the JSONL field tag the file-shape assertions
-// anchor on.
+// real-filesystem engines, the JSONL field tag the file-shape assertions
+// anchor on, and the hex length of a record_version value.
 const (
 	tracerNodeID    = uint16(0x0301)
 	tracerDriftWarn = time.Minute
@@ -41,7 +42,8 @@ func runEngine(t *testing.T, eng *persist.Engine) (stop func()) {
 	stop = func() {
 		once.Do(func() {
 			cancel()
-			if err := <-done; !errors.Is(err, context.Canceled) {
+			err := <-done
+			if !errors.Is(err, context.Canceled) {
 				t.Errorf("Run() error = %v, want context.Canceled", err)
 			}
 		})
@@ -59,22 +61,34 @@ func recordsEqual(got, want map[string]storage.Record) bool {
 	for key, wantRec := range want {
 		gotRec, ok := got[key]
 		if !ok || gotRec.Version != wantRec.Version || gotRec.Deleted != wantRec.Deleted ||
-			gotRec.Checksum != wantRec.Checksum || string(gotRec.Data) != string(wantRec.Data) {
+			gotRec.Checksum != wantRec.Checksum || !bytes.Equal(gotRec.Data, wantRec.Data) {
 			return false
 		}
 	}
 	return true
 }
 
-// recordLine returns the dump line carrying key, or nil when absent.
-func recordLine(t *testing.T, dump []byte, key string) string {
-	t.Helper()
-	for _, line := range strings.Split(string(dump), "\n") {
+// recordLine returns the dump line carrying key, or the empty string when
+// absent.
+func recordLine(dump []byte, key string) string {
+	for line := range strings.SplitSeq(string(dump), "\n") {
 		if strings.Contains(line, `"key":"`+key+`"`) {
 			return line
 		}
 	}
 	return ""
+}
+
+// hexVersion reports whether line carries a record_version whose value is
+// a 32-character hex string — the UUID-shaped, greppable spelling of the 16
+// version bytes.
+func hexVersion(line string) bool {
+	_, value, found := strings.Cut(line, versionTag)
+	if !found || len(value) < hexVersionLen {
+		return false
+	}
+	_, err := hex.DecodeString(value[:hexVersionLen])
+	return err == nil
 }
 
 // TestEngine_endToEndRestart is the Phase 3 tracer: a confirmed local write
@@ -96,16 +110,20 @@ func TestEngine_endToEndRestart(t *testing.T) {
 	}
 	stop := runEngine(t, eng)
 
-	if _, _, err := eng.Set("alpha", []byte("alpha-value")); err != nil {
+	_, _, err := eng.Set("alpha", []byte("alpha-value"))
+	if err != nil {
 		t.Fatalf("Set(alpha) error = %v, want nil", err)
 	}
-	if _, _, err := eng.Set("beta", []byte("beta-value")); err != nil {
+	_, _, err = eng.Set("beta", []byte("beta-value"))
+	if err != nil {
 		t.Fatalf("Set(beta) error = %v, want nil", err)
 	}
-	if _, _, err := eng.Set("gamma", []byte("gamma-value")); err != nil {
+	_, _, err = eng.Set("gamma", []byte("gamma-value"))
+	if err != nil {
 		t.Fatalf("Set(gamma) error = %v, want nil", err)
 	}
-	if _, _, err := eng.Delete("gamma"); err != nil {
+	_, _, err = eng.Delete("gamma")
+	if err != nil {
 		t.Fatalf("Delete(gamma) error = %v, want nil", err)
 	}
 
@@ -123,7 +141,7 @@ func TestEngine_endToEndRestart(t *testing.T) {
 			t.Errorf("dump line %q carries the record_version as a JSON number array", line)
 		}
 	}
-	alphaLine := recordLine(t, dump, "alpha")
+	alphaLine := recordLine(dump, "alpha")
 	if alphaLine == "" {
 		t.Fatalf("dump carries no line for key alpha: %q", dump)
 	}
@@ -147,16 +165,18 @@ func TestEngine_endToEndRestart(t *testing.T) {
 	}
 	reloaded := eng2.Records()
 	if !recordsEqual(reloaded, before) {
-		t.Fatalf("reloaded records differ from engine 1's Records()")
+		t.Fatal("reloaded records differ from engine 1's Records()")
 	}
-	if rec, err := eng2.Get("alpha"); err != nil || string(rec.Data) != "alpha-value" {
+	rec, err := eng2.Get("alpha")
+	if err != nil || string(rec.Data) != "alpha-value" {
 		t.Errorf("reloaded Get(alpha) = (%q, %v), want (alpha-value, nil)", rec.Data, err)
 	}
-	if _, err := eng2.Get("gamma"); !errors.Is(err, storage.ErrNotFound) {
+	_, err = eng2.Get("gamma")
+	if !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("reloaded Get(gamma) error = %v, want ErrNotFound (tombstone)", err)
 	}
-	if rec, ok := reloaded["gamma"]; !ok || !rec.Deleted {
-		t.Errorf("reloaded records lack the gamma tombstone: (%v, deleted=%t)", ok, rec.Deleted)
+	if tomb, ok := reloaded["gamma"]; !ok || !tomb.Deleted {
+		t.Errorf("reloaded records lack the gamma tombstone: (present=%t, deleted=%t)", ok, tomb.Deleted)
 	}
 
 	// VERS-04: a fresh post-restart write strictly dominates every reloaded
@@ -174,22 +194,6 @@ func TestEngine_endToEndRestart(t *testing.T) {
 	}
 }
 
-// hexVersion reports whether line carries a record_version whose value is a
-// 32-character hex string — the UUID-shaped, greppable spelling of the 16
-// version bytes.
-func hexVersion(line string) bool {
-	i := strings.Index(line, versionTag)
-	if i < 0 {
-		return false
-	}
-	value := line[i+len(versionTag):]
-	if len(value) < hexVersionLen {
-		return false
-	}
-	_, err := hex.DecodeString(value[:hexVersionLen])
-	return err == nil
-}
-
 // TestEngine_openEmptyStart proves the empty start: with no dump files
 // present, Open returns an engine over an empty store and the first Set
 // works without error.
@@ -202,11 +206,13 @@ func TestEngine_openEmptyStart(t *testing.T) {
 	if discarded != 0 {
 		t.Errorf("Open() discarded = %d, want 0", discarded)
 	}
-	if _, err := eng.Get("missing"); !errors.Is(err, storage.ErrNotFound) {
+	_, err := eng.Get("missing")
+	if !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("Get() on the empty start error = %v, want ErrNotFound", err)
 	}
 	runEngine(t, eng)
-	if _, _, err := eng.Set("first", []byte("value")); err != nil {
+	_, _, err = eng.Set("first", []byte("value"))
+	if err != nil {
 		t.Fatalf("first Set() error = %v, want nil", err)
 	}
 }

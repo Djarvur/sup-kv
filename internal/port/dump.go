@@ -5,6 +5,8 @@ package port
 // (internal/persistfile) implements; tests may substitute in-memory fakes.
 // The seam carries whole dump bytes, never records — D-01/D-02: the adapter
 // knows nothing about record structure, the engine knows nothing about files.
+//
+//nolint:iface // port seams exist for other packages: the engine consumes and the adapter implements DumpStore, so no same-package usage is possible or wanted (D-01).
 type DumpStore interface {
 	// Save durably writes dump as the new main generation, rotating the old
 	// main generation to .prev.
