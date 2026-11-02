@@ -60,7 +60,7 @@ Plans:
   2. Property tests prove merge is commutative, associative and idempotent — including tombstoned entries — so delivery order, duplicates and retransmissions cannot affect the outcome, and every version displaced by a merge is recorded in the conflict journal
   3. Byte-wise UUIDv7 comparison equals `(l, c, NodeID)` order and versions are unique per write by construction — both property-tested
   4. The HLC stays monotonic under adversarial clock input (backward and forward jumps, stuck clock, counter overflow, restart initialized from the dump's max `l` rather than the wall clock), and drift beyond `drift_warn` is logged as a warning
-**Plans**: 4 plans (3 executed, 1 gap-closure)
+**Plans**: 4/4 plans executed (3 executed, 1 gap-closure)
 Plans:
 **Wave 1**
 - [x] 02-01-PLAN.md — Tracer: engine core wired end-to-end — errors, UUIDv7 RecordVersion, HLC clock with now seam, LWW store with merge losers returned (CORE-01..CORE-07)
@@ -72,7 +72,7 @@ Plans:
 - [x] 02-03-PLAN.md — TEST-01 merge-law property suite (tombstone-inclusive, exact loser accounting) + concurrency hammer + full phase gate (TEST-01, CORE-06, CORE-07)
 
 **Wave 4** *(gap closure — blocked on Waves 1-3)*
-- [ ] 02-04-PLAN.md — Gap closure G-02-VERS04-DOMINANCE / WR-01: counter-seeded restart seam (NewClock initialC, Config.InitialC) with strict dominance over the full dump watermark (VERS-02, VERS-04, TEST-02)
+- [x] 02-04-PLAN.md — Gap closure G-02-VERS04-DOMINANCE / WR-01: counter-seeded restart seam (NewClock initialC, Config.InitialC) with strict dominance over the full dump watermark (VERS-02, VERS-04, TEST-02)
 
 ### Phase 3: Persistence — Dump and Write Confirmation
 **Goal**: State survives restarts and a client-confirmed write is always on disk — the write-confirmation contract that makes every later phase strictly additive
@@ -138,7 +138,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | 6/6 | In Progress | - |
-| 2. Engine — HLC Versioning and LWW Store | 3/3 | In Progress | - |
+| 2. Engine — HLC Versioning and LWW Store | 4/4 | In Progress | - |
 | 3. Persistence — Dump and Write Confirmation | 0/TBD | Not started | - |
 | 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
 | 5. gRPC API and Binary | 0/TBD | Not started | - |
