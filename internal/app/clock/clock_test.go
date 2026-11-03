@@ -1,6 +1,7 @@
 package clock_test
 
 import (
+	"math"
 	"math/rand/v2"
 	"testing"
 	"time"
@@ -445,6 +446,52 @@ func TestClock_restartFromDumpMax(t *testing.T) {
 	})
 }
 
+// TestClock_watermarkClampedIntoDomain covers the constructor's watermark
+// clamp (WR-02): an InitialL beyond the 48-bit domain ceiling — a corrupted
+// dump watermark, the one input the intended Unpack pipeline can never
+// produce — saturates at maxL instead of persisting outside the domain,
+// where PackVersion's tsMask would silently wrap every subsequent write to
+// the bottom of the version stream, and a negative watermark reads as zero,
+// starting from the wall clock like an unseeded restart.
+func TestClock_watermarkClampedIntoDomain(t *testing.T) {
+	t.Parallel()
+	t.Run("watermark above the ceiling saturates at maxL", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(testNowMs), maxL+5, 0, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clk.Tick()
+		want := reading{l: maxL, counter: 1}
+		if got != want {
+			t.Errorf("first tick = (%d, %d), want the clamped (%d, %d)",
+				got.l, got.counter, want.l, want.counter)
+		}
+		ver := version.PackVersion(got.l, got.counter, testNodeID)
+		top := version.PackVersion(maxL, 0, testNodeID)
+		if ver.Compare(top) < 0 {
+			t.Errorf("packed version %x reads below the domain top %x — the stream wrapped to the bottom",
+				ver[:], top[:])
+		}
+	})
+	t.Run("an int64-extreme watermark still lands inside the domain", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(testNowMs), math.MaxInt64, 0, testDriftWarn)
+		l, _, _ := clk.Tick()
+		if l != maxL {
+			t.Errorf("first tick l = %d, want the saturated ceiling %d", l, maxL)
+		}
+	})
+	t.Run("a negative watermark reads as zero and adopts the wall clock", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(testNowMs), -3600_000, 0, testDriftWarn)
+		got := reading{}
+		got.l, got.counter, _ = clk.Tick()
+		if got != (reading{l: testNowMs, counter: 0}) {
+			t.Errorf("first tick = (%d, %d), want the wall reading (%d, 0)",
+				got.l, got.counter, testNowMs)
+		}
+	})
+}
+
 // TestClock_driftSignal covers the signed drift contract: zero within
 // tolerance including exactly DriftWarn out, positive when l runs ahead of
 // the wall clock beyond DriftWarn, negative on a forward wall-clock jump
@@ -526,4 +573,45 @@ func TestClock_driftSignal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClock_driftSignalSaturates covers the drift signal at divergences a
+// time.Duration cannot represent (WR-01): the raw (l - ptMs) * Millisecond
+// product wraps int64 past ~292 years, flipping the magnitude — and on some
+// operand pairs the sign — of exactly the worst drift the signal exists to
+// report: the VERS-05 diagnostic reads a bogus ~96-year drift on a clock one
+// maxL peer record saturated, and a pre-epoch wall reading reads negative.
+// The saturated signal keeps the correct sign at a magnitude no smaller than
+// the band left after the wall offset, never a wrapped one.
+func TestClock_driftSignalSaturates(t *testing.T) {
+	t.Parallel()
+	// The floor the saturated readings must clear: both operands clamp into
+	// the ±driftMsMax band before the nanosecond conversion, so a wall
+	// offset of testNowMs still leaves ~237 years of the ~292-year band.
+	floor := 200 * 365 * 24 * time.Hour
+	t.Run("tick after a maxL Merge reports a saturated positive drift", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
+		clk.Update(maxL, 0)
+		_, _, drift := clk.Tick()
+		if drift <= 0 || drift < floor {
+			t.Errorf("drift after a maxL Merge = %v, want a saturated reading >= %v", drift, floor)
+		}
+	})
+	t.Run("update from a saturated clock reports a saturated positive drift", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(testNowMs), maxL, 0, testDriftWarn)
+		_, _, drift := clk.Update(testNowMs, 0)
+		if drift <= 0 || drift < floor {
+			t.Errorf("drift at maxL = %v, want a saturated reading >= %v", drift, floor)
+		}
+	})
+	t.Run("a pre-epoch wall reading reads positive, not sign-flipped", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewClock(fixedNow(-maxL), maxL, 0, testDriftWarn)
+		_, _, drift := clk.Tick()
+		if drift <= 0 || drift < floor {
+			t.Errorf("drift over a pre-epoch wall = %v, want a saturated reading >= %v", drift, floor)
+		}
+	})
 }

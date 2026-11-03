@@ -5,11 +5,11 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "driftBetween overflows int64 at the domain ceiling, corrupting the drift signal exactly when the clock is pathological"
   - id: WR-02
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "NewClock never clamps initialL to the 48-bit domain — the one unclamped input silently defeats the documented wrap protection"
   - id: IN-01
     severity: info
@@ -35,17 +35,17 @@ findings:
     severity: info
     disposition: open
     title: "CI's schema gate and CI's lint run use two separately-pinned binaries"
-open: 7
+open: 5
 total: 8
-recorded: 2026-11-02T16:05:19.836Z
+recorded: 2026-11-02T19:25:41.714Z
 ---
 
 # Phase 01: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
+| WR-01 | warning | fixed | fix bcaf033 (branch fix/clock-review-warnings): driftBetween clamps into the ±driftMsMax band; regression test TestClock_driftSignalSaturates |
+| WR-02 | warning | fixed | fix 64f2d24 (branch fix/clock-review-warnings): NewClock clamps initialL into [0, maxL]; regression test TestClock_watermarkClampedIntoDomain |
 | IN-01 | info | open | - |
 | IN-02 | info | fixed | PR #20 — .claude/CLAUDE.md deferral parenthetical; confirmed by incremental review 85fa4dc (not in the current review) |
 | IN-03 | info | open | - (not in the current review) |

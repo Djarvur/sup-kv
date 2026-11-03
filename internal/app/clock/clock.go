@@ -11,6 +11,7 @@
 package clock
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -25,6 +26,14 @@ const (
 	counterMask = 0xFFF // the 12-bit counter domain of the version layout.
 	counterMax  = counterMask
 	maxL        = 1<<48 - 1
+
+	// driftMsMax is the widest millisecond divergence that still converts
+	// to nanoseconds inside a [time.Duration]: at or beyond it the drift
+	// signal saturates instead of wrapping. The unsaturated (l - ptMs) *
+	// Millisecond product wraps int64 past ~292 years of divergence,
+	// flipping the sign of exactly the worst drift the signal exists to
+	// report (WR-01).
+	driftMsMax = math.MaxInt64 / int64(time.Millisecond)
 )
 
 // Clock is a Hybrid Logical Clock (Kulkarni et al., 2014): node state (l, c)
@@ -50,7 +59,14 @@ type Clock struct {
 // any dump version carries counter >= 1 at the watermark millisecond.
 // initialL zero and initialC zero start from the wall clock on the first
 // Tick. initialC values above the 12-bit counter range are masked, so the
-// constructor is total over any uint16 input. The version domain ends at
+// constructor is total over any uint16 input; initialL is clamped into the
+// [0, maxL] version domain the same way — a watermark beyond the ceiling
+// (a corrupted restart dump, an input the intended Unpack pipeline can
+// never produce) saturates at maxL rather than persisting outside the
+// domain, where the version package's PackVersion would silently wrap
+// every subsequent write to the bottom of the stream, and a negative
+// watermark reads as zero, starting from the wall clock. The version
+// domain ends at
 // (maxL, counterMax): a now seam beyond maxL — possible only with a clock
 // lying past year ~8921 — saturates l at maxL, and once the counter also
 // exhausts at the ceiling Tick and Update repeat the top reading (maxL,
@@ -61,7 +77,7 @@ type Clock struct {
 // report a drift signal; driftWarn less than or equal to zero disables the
 // signal.
 func NewClock(now func() time.Time, initialL int64, initialC uint16, driftWarn time.Duration) *Clock {
-	return &Clock{l: initialL, c: initialC & counterMask, now: now, driftWarn: driftWarn}
+	return &Clock{l: min(max(initialL, 0), maxL), c: initialC & counterMask, now: now, driftWarn: driftWarn}
 }
 
 // Tick advances the clock for a local event and returns the new reading plus
@@ -135,15 +151,31 @@ func (c *Clock) Update(remoteL int64, remoteC uint16) (l int64, counter uint16, 
 // driftBetween returns the signed divergence between the logical time l and
 // the physical time ptMs: zero when within warn, positive milliseconds when
 // l runs ahead beyond warn, negative when ptMs jumped past l beyond warn.
-// The divergence is evaluated before any clamping. warn less than or equal
-// to zero disables the signal.
+// The divergence is evaluated before any clamping, saturating at
+// ±driftMsMax milliseconds — the widest value a Duration holds — so a
+// divergence past ~292 years reads as a saturated reading of the correct
+// sign, never a wrapped one. warn less than or equal to zero disables the
+// signal.
 func driftBetween(l, ptMs int64, warn time.Duration) time.Duration {
 	if warn <= 0 {
 		return 0
 	}
-	d := (l - ptMs) * int64(time.Millisecond)
-	if d > int64(warn) || d < -int64(warn) {
-		return time.Duration(d)
+	// Clamp both operands into the representable band first: the raw
+	// difference of arbitrary int64 operands can itself wrap, and even a
+	// difference that fits overflows below when scaled to nanoseconds.
+	// Clamping never distorts a representable divergence — both operands
+	// saturate to the same bound, so only already-unrepresentable readings
+	// change.
+	l = clampDriftRange(l)
+	ptMs = clampDriftRange(ptMs)
+	drift := time.Duration(clampDriftRange(l-ptMs)) * time.Millisecond
+	if drift > warn || drift < -warn {
+		return drift
 	}
 	return 0
+}
+
+// clampDriftRange saturates v into the ±driftMsMax band.
+func clampDriftRange(v int64) int64 {
+	return max(-driftMsMax, min(driftMsMax, v))
 }
