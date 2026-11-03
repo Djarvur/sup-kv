@@ -229,13 +229,14 @@ func TestEngine_openEmptyStart(t *testing.T) {
 }
 
 // Synctest-suite constants: the engine timing under test (the design
-// defaults, D-04) and the fake port's node identity.
+// defaults, D-04), the fake port's node identity and the flush-race width.
 const (
 	synctestNodeID   = uint16(0x0302)
 	synctestDebounce = 50 * time.Millisecond
 	synctestMaxWait  = time.Second
 	burstWrites      = 1000
 	fanoutWaiters    = 5
+	flushRaceRounds  = 100
 )
 
 // errFakeSave is the fake port's injected Save failure.
@@ -251,21 +252,31 @@ type fakeSave struct {
 // records every save's virtual timestamp and bytes, counts attempts
 // separately from completed saves, and fails the leading failSaves saves.
 // It never touches the filesystem — real I/O inside a synctest bubble is
-// not durably blocking and deadlock-panics the bubble (Pitfall 6). The
-// snapshot methods mirror the adapter's semantics in memory: CreateSnapshot
-// byte-copies the latest completed save under the name, missing snapshots
-// read as an error.
+// not durably blocking and deadlock-panics the bubble (Pitfall 6). A
+// non-nil gate parks every Save before it records anything — the hold
+// point that keeps one dump in flight while the exit-race tests cancel.
+// The snapshot methods mirror the adapter's semantics in memory:
+// CreateSnapshot byte-copies the latest completed save under the name,
+// missing snapshots read as an error.
 type fakeDumpPort struct {
 	mu        sync.Mutex
 	attempts  int
 	saves     []fakeSave
 	failSaves int
 	snapshots map[string][]byte
+	gate      chan struct{}
 }
 
 // Save records the dump at the current virtual time, failing the leading
-// configured saves.
+// configured saves; a configured gate parks the save before it records —
+// the dump is in flight, not attempted, while parked.
 func (f *fakeDumpPort) Save(dump []byte) error {
+	f.mu.Lock()
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts++
@@ -555,6 +566,126 @@ func TestEngine_runExitClosesWaiters(t *testing.T) {
 		err = <-done
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Run() error = %v, want context.Canceled", err)
+		}
+		synctest.Wait()
+	})
+}
+
+// TestEngine_flushRacesRunExit is CR-01's regression: the flush-path
+// callers Snapshot and Restore race Run's exit across many interleavings,
+// and every call must return promptly with nil or ErrClosed. A flush that
+// passed its closed-check before the exit sweep and landed its flushCh
+// send after the sweep's one-shot drain parks on the reply forever under
+// the pre-fix code; inside the bubble that is an all-goroutines-asleep
+// deadlock synctest fails loudly — the same post-close contract
+// TestEngine_closeSurface pins, extended to the exit race itself (Pitfall
+// 4).
+func TestEngine_flushRacesRunExit(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		for i := range flushRaceRounds {
+			eng, _ := newFakeEngine()
+			ctx, cancel := context.WithCancel(t.Context())
+			runDone := make(chan error, 1)
+			go func() { runDone <- eng.Run(ctx) }()
+			// One confirmed write and a copied snapshot: the raced calls
+			// have real work — the restore replays, the snapshot copies.
+			_, _, err := eng.Set("k", []byte("v"))
+			if err != nil {
+				t.Fatalf("round %d: seed Set(k) error = %v, want nil", i, err)
+			}
+			err = eng.Snapshot("seed")
+			if err != nil {
+				t.Fatalf("round %d: seed Snapshot(seed) error = %v, want nil", i, err)
+			}
+			raced := make(chan error, 1)
+			go func() {
+				var err error
+				if i%2 == 0 {
+					err = eng.Snapshot("raced")
+				} else {
+					err = eng.Restore("seed")
+				}
+				raced <- err
+			}()
+			if i%2 == 1 {
+				synctest.Sleep(time.Millisecond) // vary the interleaving
+			}
+			cancel()
+			// A flush stranded between its closed-check and its flushCh
+			// send deadlocks the bubble at this receive, not just this
+			// goroutine — that is the failure being guarded against.
+			err = <-raced
+			if err != nil && !errors.Is(err, persist.ErrClosed) {
+				t.Errorf("round %d: raced call error = %v, want nil or ErrClosed", i, err)
+			}
+			err = <-runDone
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("round %d: Run() error = %v, want context.Canceled", i, err)
+			}
+		}
+	})
+}
+
+// TestEngine_flushRacesExitMidDump walks the exit sweep through a dump held
+// in flight with every flush shape stranded at once: a Set awaiting the
+// held dump's confirmation, one snapshot whose flush request sits in the
+// flushCh buffer, and two parked on the flushCh send itself (the buffer
+// holds the first's request). Cancelling and releasing the gate together
+// must resolve every call promptly — nil from the completed dump or
+// ErrClosed from the sweep — and Run must return the context error: the
+// sweep's drain answers the buffered and the parked senders, runDone
+// releases what the drain cannot have seen, nothing hangs (CR-01, Pitfall
+// 4).
+func TestEngine_flushRacesExitMidDump(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		dumps.gate = make(chan struct{})
+		ctx, cancel := context.WithCancel(t.Context())
+		runErr := make(chan error, 1)
+		go func() { runErr <- eng.Run(ctx) }()
+
+		setErr := make(chan error, 1)
+		go func() {
+			_, _, err := eng.Set("k", []byte("v"))
+			setErr <- err
+		}()
+		// Quiescence parks Run inside the gated Save of the debounced dump
+		// — the dump is held in flight, the Set awaits its confirmation.
+		synctest.Wait()
+		// Flush shapes against the held dump: one request buffered in
+		// flushCh, then senders parked on the full buffer.
+		queued := make(chan error, 1)
+		go func() { queued <- eng.Snapshot("queued") }()
+		parkedA := make(chan error, 1)
+		go func() { parkedA <- eng.Snapshot("parked-a") }()
+		parkedB := make(chan error, 1)
+		go func() { parkedB <- eng.Snapshot("parked-b") }()
+		synctest.Wait()
+
+		cancel()          // the exit sweep must not strand anyone mid-dump
+		close(dumps.gate) // the held dump completes and the dumper exits
+		results := []struct {
+			name string
+			err  error
+		}{
+			{"Set", <-setErr},
+			{"queued", <-queued},
+			{"parked-a", <-parkedA},
+			{"parked-b", <-parkedB},
+		}
+		for _, res := range results {
+			if res.err != nil && !errors.Is(res.err, persist.ErrClosed) {
+				t.Errorf("%s error = %v, want nil or ErrClosed", res.name, res.err)
+			}
+		}
+		err := <-runErr
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run() error = %v, want context.Canceled", err)
+		}
+		if got := dumps.saveCount(); got != 1 {
+			t.Errorf("completed saves = %d, want exactly the one held dump", got)
 		}
 		synctest.Wait()
 	})

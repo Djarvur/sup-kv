@@ -72,6 +72,7 @@ type Engine struct {
 	oldest    time.Time
 	changed   chan struct{}
 	flushCh   chan chan error
+	runDone   chan struct{}
 	closed    bool
 }
 
@@ -85,6 +86,7 @@ func New(store *storage.Store, dumps port.DumpStore, cfg Config) *Engine {
 		cfg:     cfg.normalized(),
 		changed: make(chan struct{}, 1),
 		flushCh: make(chan chan error, 1),
+		runDone: make(chan struct{}),
 	}
 }
 
@@ -146,8 +148,10 @@ func mergeRecords(store *storage.Store, records map[string]storage.Record) {
 // has nothing unconfirmed on disk and replies nil without a redundant save
 // (the D-10 snapshot flush seam Snapshot and Restore drive). Go 1.23+ timer
 // semantics apply: plain Reset, no drain selects (Pitfall 9). Run exits
-// when ctx is cancelled, sweeping every stranded waiter with ErrClosed, and
-// returns ctx's error.
+// when ctx is cancelled, sweeping every stranded waiter with ErrClosed,
+// closing runDone — the exit signal flush races its flushCh send and reply
+// against, so a request stranding between the closed-check and the send can
+// never hang — and returns ctx's error.
 func (e *Engine) Run(ctx context.Context) error {
 	var debounce, deadline *time.Timer
 	for {
@@ -157,6 +161,7 @@ func (e *Engine) Run(ctx context.Context) error {
 			stopTimer(debounce)
 			stopTimer(deadline)
 			e.sweepClosed()
+			close(e.runDone)
 			return ctx.Err()
 		case <-e.changed:
 		case <-timerChan(debounce):
@@ -219,7 +224,9 @@ func (e *Engine) rearm(debounce, deadline *time.Timer) (nextDebounce, nextDeadli
 // register after the sweep and block forever; every stranded waiter then
 // resolves with ErrClosed, as does every flush request already handed to
 // the exiting Run — the reply channels are buffered, so the sends never
-// block (Pitfall 4).
+// block (Pitfall 4). Run closes runDone only after the sweep returns: a
+// reply observed once runDone is closed is exactly one the sweep answered,
+// so flush can tell the answered from the stranded apart.
 func (e *Engine) sweepClosed() {
 	e.mu.Lock()
 	e.closed = true
@@ -489,6 +496,14 @@ func replayRecord(store *storage.Store, key string, rec storage.Record) error {
 // through flushCh, which Run services immediately — bypassing the debounce
 // quiet window, D-10's "forces the current dump to complete" — replying
 // after the forced dump completed. ErrClosed when Run has already exited.
+// The closed check under the mutex and the flushCh send cannot be one
+// atomic step — the send must happen outside mu — so a flush passing the
+// check while Run's exit sweep completes in between would strand its send
+// with no receiver forever. Both the send and the reply wait therefore
+// also race runDone, the channel Run closes after the sweep: a reply found
+// after runDone closed is exactly one the sweep answered (program order in
+// Run), an absent one is the stranded case, and flush returns ErrClosed
+// instead of hanging.
 func (e *Engine) flush() error {
 	reply := make(chan error, 1)
 	e.mu.Lock()
@@ -497,8 +512,22 @@ func (e *Engine) flush() error {
 	if closed {
 		return ErrClosed
 	}
-	e.flushCh <- reply
-	return <-reply
+	select {
+	case e.flushCh <- reply:
+	case <-e.runDone:
+		return ErrClosed
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-e.runDone:
+		select {
+		case err := <-reply: // the exit sweep answered us after all
+			return err
+		default:
+			return ErrClosed
+		}
+	}
 }
 
 // markDirty marks the engine dirty from a fresh epoch without registering
