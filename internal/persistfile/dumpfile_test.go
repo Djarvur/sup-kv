@@ -3,9 +3,11 @@ package persistfile_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Djarvur/sup-kv/internal/persistfile"
@@ -219,5 +221,78 @@ func TestFileStore_snapshotSmoke(t *testing.T) {
 	_, err = store.ReadSnapshot("missing")
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("ReadSnapshot(missing) = %v, want an error wrapping fs.ErrNotExist", err)
+	}
+}
+
+// Concurrency-stress constants: the savers keep rotating generations while
+// the snapshotters hammer the copy against those rotations — sized small
+// on purpose, every save and snapshot fsyncs, so the deterministic
+// white-box test carries the regression proof and this one only exercises
+// the live overlap.
+const (
+	concurrentSavers      = 2
+	concurrentSnappers    = 2
+	savesPerSaver         = 20
+	hotSnapshotName       = "hot"
+	settledSnapshotName   = "settled"
+	firstConfirmedGen     = "confirmed-first-generation"
+	concurrentSavePattern = "generation-%03d"
+)
+
+// TestFileStore_snapshotConcurrentWithSave is WR-01's concurrent half:
+// with a confirmed generation on disk from the seed save on, savers keep
+// rotating generations — every Save's placeFile briefly leaves the main
+// path absent between its two renames — while snapshotters hammer
+// CreateSnapshot, and no snapshot may ever surface ErrNoDump: the store
+// mutex serializes the copy against the rotation window. The concurrent
+// Saves themselves serialize on the same mutex, so the run also pins
+// Save's own added concurrency safety.
+func TestFileStore_snapshotConcurrentWithSave(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	store := persistfile.New(dumpPath)
+	err := store.Save([]byte(firstConfirmedGen))
+	if err != nil {
+		t.Fatalf("seed Save() error = %v, want nil", err)
+	}
+	var savers, snappers sync.WaitGroup
+	stop := make(chan struct{})
+	for range concurrentSnappers {
+		snappers.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				err := store.CreateSnapshot(hotSnapshotName)
+				if err != nil {
+					if errors.Is(err, persistfile.ErrNoDump) {
+						t.Error("CreateSnapshot() = ErrNoDump despite the confirmed dump on disk (rotate-window race)")
+					} else {
+						t.Errorf("concurrent CreateSnapshot() error = %v, want nil", err)
+					}
+					return
+				}
+			}
+		})
+	}
+	for range concurrentSavers {
+		savers.Go(func() {
+			for i := range savesPerSaver {
+				err := store.Save([]byte(fmt.Sprintf(concurrentSavePattern, i)))
+				if err != nil {
+					t.Errorf("concurrent Save() error = %v, want nil", err)
+					return
+				}
+			}
+		})
+	}
+	savers.Wait()
+	close(stop)
+	snappers.Wait()
+	err = store.CreateSnapshot(settledSnapshotName)
+	if err != nil {
+		t.Errorf("settled CreateSnapshot() error = %v, want nil", err)
 	}
 }

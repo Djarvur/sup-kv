@@ -426,9 +426,11 @@ func (e *Engine) Records() map[string]storage.Record {
 // dump at creation, and a flush triggered while state is dirty forces a new
 // dump before the copy. A flush error aborts with nothing copied: state
 // that is not confirmed on disk must never become a recovery point. Safe
-// against a dump running concurrently with the copy — the adapter's atomic
-// rename means it always reads one complete generation. Requires a running
-// Run goroutine like every blocking engine call.
+// against a dump running concurrently with the copy: the adapter's atomic
+// renames mean no torn read, and its save-snapshot serialization closes
+// the rotate window in which the main path is briefly absent — the copy
+// always reads one complete generation. Requires a running Run goroutine
+// like every blocking engine call.
 func (e *Engine) Snapshot(name string) error {
 	err := e.flush()
 	if err != nil {

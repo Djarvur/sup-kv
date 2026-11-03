@@ -1,14 +1,19 @@
 // Package persistfile is the sup-kv dump file adapter: the only
 // os-importing persistence code, implementing port.DumpStore with atomic
-// writes, .prev rotation and the fallback chain (D-01/D-02). Save is not
-// safe for concurrent use against one path — the engine's single dumper
-// goroutine serializes every save; concurrent saves would race the .prev
-// rotation and corrupt the fallback chain.
+// writes, .prev rotation and the fallback chain (D-01/D-02). The store
+// mutex serializes Save against CreateSnapshot: the rotate-first order
+// that keeps the crash chain correct (D-02) briefly leaves the main path
+// absent between the two renames, and a concurrent snapshot copy must
+// never observe that window as ErrNoDump. Concurrent Save calls serialize
+// on the same mutex; the engine's single dumper goroutine remains the
+// design's serializer. Load and ReadSnapshot stay lock-free — every
+// observable generation is always complete bytes.
 package persistfile
 
 import (
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/Djarvur/sup-kv/internal/port"
 )
@@ -29,6 +34,12 @@ const (
 // .prev generation and the .snapshots directory from it (D-08).
 type FileStore struct {
 	path string
+	// mu serializes Save against CreateSnapshot (and concurrent Saves):
+	// between placeFile's two renames the main path is briefly absent, and
+	// a snapshot copy racing that window would report ErrNoDump despite
+	// confirmed data on disk. Load and ReadSnapshot need no lock — each
+	// rename leaves every observable generation complete.
+	mu sync.Mutex
 }
 
 // FileStore implements the whole-dump persistence seam.
@@ -45,8 +56,12 @@ func New(dumpPath string) *FileStore {
 // EXDEV — write, fsync the data before any rename can be durable, rotate,
 // rename, then fsync the parent directory so the rename itself becomes
 // durable. The rotate-first order leaves a crash window where main is
-// absent — exactly the residue the fallback chain absorbs.
+// absent — exactly the residue the fallback chain absorbs — and the store
+// mutex closes that window against a concurrent CreateSnapshot: the copy
+// must never see the absent main as ErrNoDump.
 func (f *FileStore) Save(dump []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return saveAtomically(f.path, f.path+prevSuffix, dump)
 }
 

@@ -31,12 +31,17 @@ var (
 // the .snapshots directory beside the dump (D-08), atomically overwriting
 // an earlier snapshot of the same name with no .prev of its own —
 // snapshots are operator-named recovery points, not crash generations; the
-// dump's own .prev chain is the crash mechanism.
+// dump's own .prev chain is the crash mechanism. The copy runs under the
+// store mutex, serialized against Save: the rotate window between a save's
+// two renames briefly leaves the main path absent, and a read landing
+// there would turn confirmed on-disk data into a spurious ErrNoDump.
 func (f *FileStore) CreateSnapshot(name string) error {
 	err := validateName(name)
 	if err != nil {
 		return err
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	snapshotDir := f.path + snapshotDirSuffix
 	err = os.MkdirAll(snapshotDir, dirMode)
 	if err != nil {
