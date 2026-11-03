@@ -5,11 +5,11 @@ titles: json
 findings:
   - id: CR-01
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "`flush()` can block forever when Run exits between the closed-check and the flushCh send — permanent goroutine hang on shutdown"
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "`CreateSnapshot` can spuriously fail with `ErrNoDump` during a concurrent `Save`'s rotate window; the engine's concurrency-safety claim is incorrect"
   - id: IN-01
     severity: info
@@ -29,15 +29,15 @@ findings:
     title: "`CreateSnapshot` creates the `.snapshots` directory even when it then fails with `ErrNoDump`"
 open: 6
 total: 6
-recorded: 2026-11-03T00:17:22.234Z
+recorded: 2026-11-03T00:17:40.050Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
-| WR-01 | warning | open | - |
+| CR-01 | critical | fixed | fix e9e3d7d: runDone closed after the exit sweep, flush selects against it with reply re-check; regression TestEngine_flushRacesRunExit + TestEngine_flushRacesExitMidDump |
+| WR-01 | warning | fixed | fix e1cfb72: FileStore mutex serializes CreateSnapshot against Save's rotate window; regression TestFileStore_snapshotWaitsOutSaveWindow + TestFileStore_snapshotConcurrentWithSave |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
