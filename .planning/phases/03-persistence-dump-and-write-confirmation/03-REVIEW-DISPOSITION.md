@@ -27,7 +27,7 @@ findings:
     severity: info
     disposition: open
     title: "`CreateSnapshot` creates the `.snapshots` directory even when it then fails with `ErrNoDump`"
-open: 6
+open: 4
 total: 6
 recorded: 2026-11-03T00:17:40.050Z
 ---
