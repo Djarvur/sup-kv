@@ -1,20 +1,20 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 3
-current_phase_name: Persistence — Dump and Write Confirmation
+current_phase: 4
+current_phase_name: Replication and Deterministic Simulator
 status: planning
-stopped_at: Phase 01 complete, ready to plan Phase 3
-last_updated: "2026-11-02T16:11:29.566Z"
-last_activity: 2026-11-02
-last_activity_desc: Phase 01 complete, transitioned to Phase 3
-state_head: 821338a730b1a54b810058b80da5a809b855f2ef
+stopped_at: Phase 3 complete, ready to plan Phase 4
+last_updated: "2026-11-03T00:26:11.421Z"
+last_activity: 2026-11-03
+last_activity_desc: Phase 3 complete, transitioned to Phase 4
+state_head: 8c16e575ed37609183bb662b41d163f2d9d30232
 progress:
   total_phases: 7
-  completed_phases: 2
-  total_plans: 10
-  completed_plans: 10
-  percent: 29
+  completed_phases: 3
+  total_plans: 12
+  completed_plans: 12
+  percent: 43
 ---
 
 # Project State
@@ -28,17 +28,17 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 
 ## Current Position
 
-Phase: 3 — Persistence — Dump and Write Confirmation
+Phase: 4 — Replication and Deterministic Simulator
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-11-02 — Phase 01 complete, transitioned to Phase 3
+Last activity: 2026-11-03 — Phase 3 complete, transitioned to Phase 4
 
-Progress: [███░░░░░░░] 29%
+Progress: [████░░░░░░] 43%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10
+- Total plans completed: 12
 - Average duration: 10min
 - Total execution time: ~1 hour (60 min of plan execution)
 
@@ -48,6 +48,7 @@ Progress: [███░░░░░░░] 29%
 |-------|-------|-------|----------|
 | 02 | 4 | - | - |
 | 01 | 6 | - | - |
+| 3 | 2 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -68,6 +69,8 @@ Progress: [███░░░░░░░] 29%
 | Phase 02 P02 | 17min | 3 tasks | 4 files |
 | Phase 02 P03 | 14min | 2 tasks | 2 files |
 | Phase 02 P04 | 8min | 2 tasks | 5 files |
+| Phase 03 P01 | 35min | 3 tasks | 12 files |
+| Phase 03 P02 | 16min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -114,6 +117,14 @@ Recent decisions affecting current work:
 - [Phase 02]: Plan 02-04: initialC parameter over dumpMax+1 — the restart seam expresses an exact restart (constructor state equals the dump's full watermark); a dumpMax+1 convention stays unenforceable at NewClock level and discards the counter (WR-01 mechanism)
 - [Phase 02]: Plan 02-04: Tick/Update stayed byte-identical — the seeded state routes the first Tick through the existing increment, counterMax overflow and wall-ahead paths, so the 02-02 Kulkarni proofs carry over unmodified
 - [Phase 02]: Plan 02-04: WR-01 dominance proofs are mutation-checked regression locks — stripping the seed reproduces the verifier's probe failures (tick 1 subordinate, peer revert, equal-version drop), proving the tests bind on the initialC seam
+- [Phase 03]: Parse-oracle Load settled per D-02-literal recommendation (A6/Open Q1): engine hands codec.Parse to the adapter, which stays record-blind (plan 03-01)
+- [Phase 03]: Dump/snapshot files keep CreateTemp 0600, directories 0700 — values privacy over non-owner readability; flagged for phase-verification ratification (plan 03-01)
+- [Phase 03]: Dump failure retry cadence per A8: dirty re-arms from a fresh epoch, debounce timer starts the next attempt one interval later, never a tight loop (plan 03-01)
+- [Phase 03]: Engine cover discipline (PERS-04): lastLocal captured under mu before Records(); a waiter resolves only from a dump whose snapshot contains its record — confirmation means on-disk containment (plan 03-01)
+- [Phase 03]: Five documented nolint suppressions where no code-direction fix exists: gosec G304 on the adapter's variable-path reads, iface on the port seam consumed cross-package (AGENTS.md sanctioned form) (plan 03-01)
+- [Phase 03]: Snapshot flush semantics (plan 03-02): Run services flushCh with an immediate dump only when dirty — a clean engine replies nil without a redundant save; the exit sweep resolves stranded flush requests with ErrClosed
+- [Phase 03]: Restore is semantics-level D-09 (plan 03-02): per-key ordinary store writes with fresh versions, one batched confirming flush — flagged assumption 1 for phase verification
+- [Phase 03]: Snapshot overwrite atomically in place with no .prev of its own (plan 03-02) — flagged assumption 2 for phase verification
 
 ### Pending Todos
 
@@ -134,6 +145,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02
-Stopped at: Phases 1–2 complete (PR #28 merged), ready to discuss Phase 3
+Last session: 2026-11-02T23:38:06.095Z
+Stopped at: Phase 3 complete, ready to plan Phase 4
 Resume file: None

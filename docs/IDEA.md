@@ -145,7 +145,7 @@ sync).
 `value_max_bytes` 61440; `sync_chunk_bytes` 1400; `hello_interval` 1s;
 `peer_timeout` 5s; `ack_timeout` 200ms; `ack_timeout_max` 5s;
 `retransmit_interval` 100ms; `sync_interval` 30s; `sync_response_rate` 500/s;
-`startup_gate` 1s; `dump_debounce` 50ms; `drift_warn` 60s.
+`startup_gate` 1s; `dump_debounce` 50ms; `dump_max_wait` 1s; `drift_warn` 60s.
 
 ### Trust model (accepted limitation)
 

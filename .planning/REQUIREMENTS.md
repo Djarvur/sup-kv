@@ -40,11 +40,11 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Persistence
 
-- [ ] **PERS-01**: The dump is a human-readable JSON file of the full map (format version + records with base64 Data, RecordVersion, Deleted, Checksum) — greppable with standard tools
-- [ ] **PERS-02**: Dumps are atomic (temp file in the target directory, fsync, rename, parent-directory fsync) with the previous generation kept as `.prev`; fallback chain main → `.prev` → empty start; records with a bad Checksum are discarded
-- [ ] **PERS-03**: Dumps are debounced (`dump_debounce`) with a bounded max wait, so write bursts cannot starve dump completion
-- [ ] **PERS-04**: A write returns OK only after a dump containing it completed (version watermark) — confirmed writes are always on disk; dump failure returns Unavailable while the write stays in memory and replicates
-- [ ] **PERS-05**: User can create named snapshots (copies of the dump) and load them; restore replays the snapshot as ordinary writes/deletes with fresh versions so it replicates and wins by normal LWW
+- [x] **PERS-01**: The dump is a human-readable JSON file of the full map (format version + records with base64 Data, RecordVersion, Deleted, Checksum) — greppable with standard tools
+- [x] **PERS-02**: Dumps are atomic (temp file in the target directory, fsync, rename, parent-directory fsync) with the previous generation kept as `.prev`; fallback chain main → `.prev` → empty start; records with a bad Checksum are discarded
+- [x] **PERS-03**: Dumps are debounced (`dump_debounce`) with a bounded max wait, so write bursts cannot starve dump completion
+- [x] **PERS-04**: A write returns OK only after a dump containing it completed (version watermark) — confirmed writes are always on disk; dump failure returns Unavailable while the write stays in memory and replicates
+- [x] **PERS-05**: User can create named snapshots (copies of the dump) and load them; restore replays the snapshot as ordinary writes/deletes with fresh versions so it replicates and wins by normal LWW
 
 ### API
 
@@ -154,11 +154,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | VERS-05 | Phase 2 | Complete |
 | TEST-01 | Phase 2 | Complete |
 | TEST-02 | Phase 2 | Complete |
-| PERS-01 | Phase 3 | Pending |
-| PERS-02 | Phase 3 | Pending |
-| PERS-03 | Phase 3 | Pending |
-| PERS-04 | Phase 3 | Pending |
-| PERS-05 | Phase 3 | Pending |
+| PERS-01 | Phase 3 | Complete |
+| PERS-02 | Phase 3 | Complete |
+| PERS-03 | Phase 3 | Complete |
+| PERS-04 | Phase 3 | Complete |
+| PERS-05 | Phase 3 | Complete |
 | REPL-01 | Phase 4 | Pending |
 | REPL-02 | Phase 4 | Pending |
 | REPL-03 | Phase 4 | Pending |
