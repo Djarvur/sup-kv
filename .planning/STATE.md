@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 4
 current_phase_name: Replication and Deterministic Simulator
-status: executing
-stopped_at: Completed 04-05-PLAN.md (deterministic simulator, bound tests, seeded chaos)
-last_updated: "2026-11-06T19:42:43.079Z"
+status: verifying
+stopped_at: Completed 04-06-PLAN.md (discard classification completion, ApplyRemote seam, real-socket smoke test)
+last_updated: "2026-11-06T20:11:29.986Z"
 last_activity: 2026-11-06
 last_activity_desc: Phase 4 execution started
-state_head: 84e0ce0a4874f1a216548ce0e4f967b600b1b76b
+state_head: 6e3bb655ff7f18c96dff681a128c521069e3286a
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 18
-  completed_plans: 17
+  completed_plans: 18
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 
 Phase: 4 (Replication and Deterministic Simulator) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-06 — Phase 4 execution started
 
 Progress: [████░░░░░░] 43%
@@ -75,6 +75,7 @@ Progress: [████░░░░░░] 43%
 | Phase 04 P03 | 19 min | 3 tasks | 5 files |
 | Phase 04 P04 | 9 min | 2 tasks | 2 files |
 | Phase 04 P05 | 24 min | 3 tasks | 4 files |
+| Phase 4 P06 | 15 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -150,6 +151,9 @@ Recent decisions affecting current work:
 - [Phase 04]: Simulator determinism kept total: deterministic per-node run ids (decimal-digit rendering, no crypto/rand anywhere), send-time fault draws through the one injected rng in a fixed draw order, (Time, Seq) insertion tie-breaks, registered-node slice iteration for broadcast fan-out (plan 04-05) — Simulator determinism kept total: deterministic per-node run ids (decimal-digit rendering, no crypto/rand anywhere), send-time fault draws through the one injected rng in a fixed draw order, (Time, Seq) insertion tie-breaks, registered-node slice iteration for broadcast fan-out (plan 04-05)
 - [Phase 04]: D-06 flag-vs-env reconciliation delivered as pinned: SUPKV_SIM_SEED is the chaos replay hook (the only one that works when the test binary runs without -args), every run prints the copy-paste replay command, testutil's -seed flag remains the property-test hook (plan 04-05) — D-06 flag-vs-env reconciliation delivered as pinned: SUPKV_SIM_SEED is the chaos replay hook (the only one that works when the test binary runs without -args), every run prints the copy-paste replay command, testutil's -seed flag remains the property-test hook (plan 04-05)
 - [Phase 04]: REPL-10 bounds asserted inclusively with negative probes; the loss bound models its loss episode as a directed time-window partition dropping the initial send plus the +200/+600ms ladder attempts and delivering +1400ms — flagged assumption #21's pinned window reading (plan 04-05) — REPL-10 bounds asserted inclusively with negative probes; the loss bound models its loss episode as a directed time-window partition dropping the initial send plus the +200/+600ms ladder attempts and delivering +1400ms — flagged assumption #21's pinned window reading (plan 04-05)
+- [Phase 4]: [Phase 04]: The duplicate-node_id second variant keys on remembered-run_id equality plus a differing source handle, so run_id inequality is always the restart path — the classifier never pre-empts the plan-04-04 restart branch; both variants log a configuration error naming node_id and both handles (plan 04-06) — Two sources claiming one identity is a misconfiguration (REPL-08); a changed run_id is a restart (REPL-07) — the equality test keeps the branches disjoint by construction
+- [Phase 4]: [Phase 04]: Engine.ApplyRemote = Merge + markDirty + the non-blocking changed nudge (an idle dumper parked in its select would never arm timers without the wake); no waiter, no flush, errors unchanged, REPL-03's memory-apply contract (plan 04-06) — markDirty alone mutates state nobody polls — remote merges on a clean engine would never reach disk, the Phase-3 reserved seam's exact gap
+- [Phase 4]: [Phase 04]: No-waiter dump paths in synctest advance the bubble clock with synctest.Sleep — synctest.Wait returns without firing timers; waiter-based tests never hit this because their blocked calls hold the test goroutine until the dump resolves (plan 04-06) — The first persist GREEN run failed only on harness timing; pinned so future no-waiter timing tests use Sleep from the start
 
 ### Pending Todos
 
@@ -169,6 +173,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-06T19:42:42.955Z
-Stopped at: Completed 04-05-PLAN.md (deterministic simulator, bound tests, seeded chaos)
+Last session: 2026-11-06T20:11:29.881Z
+Stopped at: Completed 04-06-PLAN.md (discard classification completion, ApplyRemote seam, real-socket smoke test)
 Resume file: None

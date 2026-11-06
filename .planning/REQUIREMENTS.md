@@ -27,15 +27,15 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Replication
 
-- [ ] **REPL-01**: Nodes discover peers via broadcast Hello (`node_id` + `run_id`) with no configuration beyond `broadcast_addr`
+- [x] **REPL-01**: Nodes discover peers via broadcast Hello (`node_id` + `run_id`) with no configuration beyond `broadcast_addr`
 - [x] **REPL-02**: Every local change is broadcast as DataReplication and tracked per-peer (key, version) until Ack or supersession; retransmission uses exponential backoff `ack_timeout` → `ack_timeout_max`, suspended while no peer is known
 - [x] **REPL-03**: A receiver Acks each (key, version) after applying the record to memory (not waiting for the dump)
 - [x] **REPL-04**: A node can request a missing/stale key via unicast DataRequest; no reply if the key is unknown
 - [x] **REPL-05**: Every node sends chunked DataSync (sorted key→version listing, chunks self-sufficient, `sync_chunk_bytes`) on the `sync_interval` timer, at startup, and on neighbor restart; receivers answer with DataRequest (missing/stale) or unicast DataReplication (newer), rate-limited by `sync_response_rate`
 - [x] **REPL-06**: The peer table handles N nodes from day one — a peer is known after its first Hello and considered gone after `peer_timeout`; ack tracking is per-peer
 - [x] **REPL-07**: A Hello with a new `run_id` from a known node (restart) triggers full sync toward it
-- [ ] **REPL-08**: Datagrams with a duplicate `node_id` are dropped and logged as a configuration error
-- [ ] **REPL-09**: Own broadcast echo and datagrams with bad CRC or bad proto version are dropped, with each discard class distinguishable
+- [x] **REPL-08**: Datagrams with a duplicate `node_id` are dropped and logged as a configuration error
+- [x] **REPL-09**: Own broadcast echo and datagrams with bad CRC or bad proto version are dropped, with each discard class distinguishable
 - [x] **REPL-10**: Documented convergence bounds hold and are proven in simulation: normal operation one RTT; datagram loss ≤ `ack_timeout_max`; after a partition heals ≤ 2 × `sync_interval` + response time
 
 ### Persistence
@@ -159,15 +159,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERS-03 | Phase 3 | Complete |
 | PERS-04 | Phase 3 | Complete |
 | PERS-05 | Phase 3 | Complete |
-| REPL-01 | Phase 4 | Pending |
+| REPL-01 | Phase 4 | Complete |
 | REPL-02 | Phase 4 | Complete |
 | REPL-03 | Phase 4 | Complete |
 | REPL-04 | Phase 4 | Complete |
 | REPL-05 | Phase 4 | Complete |
 | REPL-06 | Phase 4 | Complete |
 | REPL-07 | Phase 4 | Complete |
-| REPL-08 | Phase 4 | Pending |
-| REPL-09 | Phase 4 | Pending |
+| REPL-08 | Phase 4 | Complete |
+| REPL-09 | Phase 4 | Complete |
 | REPL-10 | Phase 4 | Complete |
 | TEST-03 | Phase 4 | Complete |
 | API-01 | Phase 5 | Pending |
