@@ -229,8 +229,17 @@ func TestRetransmit_backoffLadder(t *testing.T) {
 			{off: 6200 * time.Millisecond, wantFire: true},
 			{off: 11200 * time.Millisecond, wantFire: true},
 		}
+		nextHelloOff := time.Second
 		for _, probe := range probes {
 			off, wantFire := probe.off, probe.wantFire
+			// Keep the peer alive across the 11.2-second span: it re-Hellos
+			// every hello_interval, the wire behavior whose liveness the
+			// peer-timeout scan (plan 04-02 Task 3) now enforces.
+			for nextHelloOff < off {
+				core.HandleDatagram(at(nextHelloOff), helloFrom(peerID1), &out)
+				out.Drain()
+				nextHelloOff += time.Second
+			}
 			next := core.Advance(at(off), &out)
 			if !next.After(at(off)) {
 				t.Fatalf("Advance at t0+%v returned deadline %v, want strictly future", off, next)

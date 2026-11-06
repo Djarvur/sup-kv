@@ -367,21 +367,49 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 	out.Broadcast(port.DataReplication{Key: key, Record: own})
 }
 
-// Advance fires the due timers — the hello timer and the retransmission
-// scan at this stage — and returns the next deadline for the driver to
-// sleep on: the minimum of the following hello deadline and, while any
-// pending entry exists, the retransmit scan ceiling now+RetransmitInterval
-// clamped by the earliest pending nextRetry when the scanner is armed (the
-// scan-granularity reading of retransmit_interval, research A5). The
-// returned deadline is always strictly future: work due at now fires inside
-// this same call.
+// Advance fires the due timers — the hello timer, the peer-timeout
+// eviction scan and the retransmission scan at this stage — and returns the
+// next deadline for the driver to sleep on: the minimum of the following
+// hello deadline, the earliest peer expiry and, while any pending entry
+// exists, the retransmit scan deadline (the scan-granularity reading of
+// retransmit_interval, research A5). The returned deadline is always
+// strictly future: work due at now fires inside this same call. Eviction
+// runs before the retransmit scan so a peer expiring at now is already gone
+// when the scanner asks whether any peer remains.
 func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 	if !now.Before(c.nextHello) {
 		out.Broadcast(port.Hello{})
 		c.nextHello = now.Add(c.cfg.HelloInterval)
 	}
+	c.evictPeers(now)
 	c.scanRetransmit(now, out)
 	return c.nextDeadline(now)
+}
+
+// evictPeers removes every peer whose liveness expired (REPL-06): the first
+// Advance with now at or after lastHello+cfg.PeerTimeout evicts — the
+// at-or-after boundary, probe #18 — and eviction removes the peer from the
+// table AND from every pending entry's wait-set in the same event. It never
+// drains an entry by itself: with the drain rule, an entry whose every
+// waiter was evicted is retained in suspension until a future Hello
+// re-adds waiters via the flush rule. Only a Hello ever refreshed lastHello
+// (handleHello), so this scan is exactly the gone-after-peer_timeout
+// reading. An evicted peer is re-learned by its next Hello exactly like a
+// first Hello — there is no blacklist state of any kind, and the table
+// holds any number of peers (N nodes from day one).
+func (c *Core) evictPeers(now time.Time) {
+	expired := make([]uint16, 0, len(c.peers))
+	for id := range c.peers {
+		if !now.Before(c.peers[id].lastHello.Add(c.cfg.PeerTimeout)) {
+			expired = append(expired, id)
+		}
+	}
+	for _, id := range expired {
+		delete(c.peers, id)
+		for key := range c.pending {
+			delete(c.pending[key].waitSet, id)
+		}
+	}
 }
 
 // scanRetransmit fires every due pending entry's retransmission (REPL-02).
@@ -425,17 +453,35 @@ func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
 }
 
 // nextDeadline returns the earliest strictly-future deadline over the armed
-// timers: the hello timer and, while any pending entry exists, the
-// retransmit scan deadline. After scanRetransmit has fired everything due,
-// every contribution is strictly future.
+// timers: the hello timer, the earliest peer expiry and, while any pending
+// entry exists, the retransmit scan deadline. After evictPeers and
+// scanRetransmit have fired everything due, every contribution is strictly
+// future.
 func (c *Core) nextDeadline(now time.Time) time.Time {
-	if len(c.pending) == 0 {
-		return c.nextHello
+	deadline := c.nextHello
+	if len(c.pending) > 0 {
+		if scan := c.retransmitDeadline(now); scan.Before(deadline) {
+			deadline = scan
+		}
 	}
-	if scan := c.retransmitDeadline(now); scan.Before(c.nextHello) {
-		return scan
+	if expiry := c.earliestPeerExpiry(); !expiry.IsZero() && expiry.Before(deadline) {
+		deadline = expiry
 	}
-	return c.nextHello
+	return deadline
+}
+
+// earliestPeerExpiry returns the earliest lastHello+cfg.PeerTimeout over
+// the known peers — the eviction scan's deadline contribution — and the
+// zero time when the table is empty (never a deadline).
+func (c *Core) earliestPeerExpiry() time.Time {
+	var earliest time.Time
+	for id := range c.peers {
+		expiry := c.peers[id].lastHello.Add(c.cfg.PeerTimeout)
+		if earliest.IsZero() || expiry.Before(earliest) {
+			earliest = expiry
+		}
+	}
+	return earliest
 }
 
 // retransmitDeadline returns the retransmit scan's deadline contribution:
