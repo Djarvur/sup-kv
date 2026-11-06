@@ -333,13 +333,16 @@ func simRunID(nodeID uint16) [16]byte {
 }
 
 // clusterNode is one simulated node: a real storage.Store whose clock reads
-// the scheduler's virtual time (the D-02 seam), and a real repl.Core.
+// the scheduler's virtual time (the D-02 seam), and a real repl.Core. The
+// timerGen counter is the live-timer generation drive's scheduling
+// discipline.
 type clusterNode struct {
-	id     uint16
-	runID  [16]byte
-	handle string
-	store  *storage.Store
-	core   *repl.Core
+	id       uint16
+	runID    [16]byte
+	handle   string
+	store    *storage.Store
+	core     *repl.Core
+	timerGen uint64
 }
 
 // Cluster is the N-node harness: n repl.Core instances over n real stores,
@@ -406,15 +409,32 @@ func (c *Cluster) deliver(i int, in port.InboundDatagram) {
 // goroutines (D-04). The cores' strictly-future deadline contract makes the
 // loop exit on its first iteration; the repetition is the harness refusing
 // to depend on that invariant.
+//
+// The scheduled timer carries a generation counter (the node's timerGen at
+// scheduling): every drive call supersedes the node's previously scheduled
+// timer, so exactly one live timer exists per node and a superseded timer's
+// fire is a no-op. Without it every event would arm another timer at the
+// same deadline and the outstanding-timer count would grow linearly with
+// virtual time — quadratically many no-op Advance calls over a long run.
+// Semantics are unchanged: a superseded timer's deadline is never earlier
+// than the live one's, so no due wakeup is ever missed.
 func (c *Cluster) drive(i int, now time.Time) {
 	for {
 		var out port.Outbox
 		deadline := c.nodes[i].core.Advance(now, &out)
 		c.route(i, out.Drain())
-		if deadline.After(now) {
-			c.sched.Schedule(deadline, func() { c.drive(i, c.sched.Now()) })
-			return
+		if !deadline.After(now) {
+			continue
 		}
+		c.nodes[i].timerGen++
+		gen := c.nodes[i].timerGen
+		c.sched.Schedule(deadline, func() {
+			if c.nodes[i].timerGen != gen {
+				return
+			}
+			c.drive(i, c.sched.Now())
+		})
+		return
 	}
 }
 
