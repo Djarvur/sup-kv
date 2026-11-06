@@ -64,6 +64,13 @@ const (
 // its own on the wire schema.
 var errNoStandaloneBody = errors.New("udprepl: message has no standalone datagram body")
 
+// ErrRunLoopExited is the NotifyLocalWrite verdict once the adapter's event
+// loop has returned: nothing drains the notify queue any more, so the
+// notification is dropped rather than enqueued — the caller (Phase 5's
+// gRPC write path) fails the write visibly instead of the call blocking
+// forever on a queue nobody serves.
+var ErrRunLoopExited = errors.New("udprepl: replication event loop has exited")
+
 // inboundEvent is one received datagram on the event loop's inbound queue,
 // with the bytes defensively copied off the read buffer (which is reused on
 // the next read) and the sender's address as the opaque handle string
@@ -210,9 +217,14 @@ func (a *Adapter) Run(ctx context.Context) error {
 // NotifyLocalWrite enqueues the explicit post-write replication call
 // (D-05) for the event loop: it defensively copies the record and returns
 // without doing any protocol work, so the write path stays available. The
-// event loop's core handler broadcasts the DataReplication.
-func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) {
-	a.notify <- localWrite{
+// event loop's core handler broadcasts the DataReplication. The send is
+// guarded by the loop's done channel (the readLoop exit-guard precedent):
+// while Run is active it enqueues and reports nil; once Run has returned,
+// nothing drains the queue, so the notification is dropped and reported as
+// [ErrRunLoopExited] — a writer never blocks forever on a loop that no
+// longer receives, and the drop is surfaced to the author, never silent.
+func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) error {
+	lw := localWrite{
 		key: key,
 		rec: storage.Record{
 			Version:  rec.Version,
@@ -220,6 +232,21 @@ func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) {
 			Deleted:  rec.Deleted,
 			Checksum: rec.Checksum,
 		},
+	}
+	// The closed-loop pre-check makes the post-Run contract deterministic:
+	// without it a buffered send could still win the select's uniform
+	// random choice and report success for a notification nobody will ever
+	// drain.
+	select {
+	case <-a.done:
+		return ErrRunLoopExited
+	default:
+	}
+	select {
+	case a.notify <- lw:
+		return nil
+	case <-a.done:
+		return ErrRunLoopExited
 	}
 }
 

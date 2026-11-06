@@ -273,7 +273,10 @@ func TestSmoke_twoNodesUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node A store Get(%q): %v", smokeKey, err)
 	}
-	adapterA.NotifyLocalWrite(smokeKey, rec)
+	err = adapterA.NotifyLocalWrite(smokeKey, rec)
+	if err != nil {
+		t.Fatalf("node A NotifyLocalWrite(%q): %v", smokeKey, err)
+	}
 	waitFor(t, visibilityDeadline, "node B serving the record byte-equal", func() bool {
 		got, err := storeB.Get(smokeKey)
 		return err == nil && got.Version == ver && bytes.Equal(got.Data, smokeValue)

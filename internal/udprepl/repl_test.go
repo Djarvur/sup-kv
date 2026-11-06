@@ -2,6 +2,9 @@ package udprepl_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -189,4 +192,59 @@ func recordsEqual(a, b map[string]storage.Record) bool {
 		}
 	}
 	return true
+}
+
+// Post-Run NotifyLocalWrite constants: the call count must cross the
+// adapter's 1024-entry notify buffer (the WR-01 window — an unguarded send
+// swallows the first 1024 post-Run notifications and blocks forever on the
+// 1025th), and the per-call deadline converts that block into a test
+// failure instead of a hung run.
+const (
+	postRunNotifyCalls = 1100
+	postRunDeadline    = 2 * time.Second
+)
+
+// TestNotifyLocalWrite_afterRunReturns proves the NotifyLocalWrite exit
+// guard (WR-01): once Run has returned — context cancelled, the deferred
+// close(a.done) done — the public write-path seam never blocks and never
+// panics, however many calls arrive; every call returns promptly with
+// ErrRunLoopExited so a caller (Phase 5's gRPC write handler) fails the
+// write visibly instead of wedging on a queue nobody drains.
+func TestNotifyLocalWrite_afterRunReturns(t *testing.T) {
+	t.Parallel()
+	udpPort := freeUDPPort(t)
+	adapter, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", udpPort),
+		fmt.Sprintf("127.255.255.255:%d", udpPort),
+		nodeIDA, newTestStore(nodeIDA), repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("adapter New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runReturned := make(chan error, 1)
+	go func() { runReturned <- adapter.Run(ctx) }()
+	cancel()
+	err = <-runReturned
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+
+	// Run has returned, so its deferred close(a.done) has run — every
+	// NotifyLocalWrite, past the buffered cap included, must report the
+	// drop instead of blocking.
+	rec := storage.Record{Data: []byte("post-run write")}
+	for call := range postRunNotifyCalls {
+		got := make(chan error, 1)
+		go func() { got <- adapter.NotifyLocalWrite("post-run/key", rec) }()
+		select {
+		case err := <-got:
+			if !errors.Is(err, udprepl.ErrRunLoopExited) {
+				t.Fatalf("post-Run NotifyLocalWrite call %d = %v, want ErrRunLoopExited", call+1, err)
+			}
+		case <-time.After(postRunDeadline):
+			t.Fatalf("post-Run NotifyLocalWrite call %d blocked past %v — the write path wedged after Run exited", call+1, postRunDeadline)
+		}
+	}
 }
