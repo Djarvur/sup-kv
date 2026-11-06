@@ -29,6 +29,15 @@ const (
 	keyAlpha = "cfg/alpha"
 	keyBeta  = "cfg/beta"
 	keyGamma = "cfg/gamma"
+
+	// Ladder timings from docs/IDEA.md §Parameters (the normalized Config
+	// defaults): the per-key backoff starts at ack_timeout, doubles per
+	// retry and saturates at ack_timeout_max; retransmit_interval is the
+	// scan granularity. The suspension window is the long empty-table
+	// stretch TestRetransmit_suspendAndFlush drives across.
+	ackTimeout    = 200 * time.Millisecond
+	ackTimeoutMax = 5 * time.Second
+	suspendWindow = 60 * time.Second
 )
 
 // testRunID returns a per-node deterministic 16-byte run ID; distinctness
@@ -146,6 +155,188 @@ func assertPending(t *testing.T, snap map[string]repl.PendingInfo, key string, v
 	}
 	if !slices.Equal(info.WaitingOn, want) {
 		t.Fatalf("PendingSnapshot[%q].WaitingOn = %v, want %v", key, info.WaitingOn, want)
+	}
+}
+
+// pendingVersion returns the exact tracked version of core's pending entry
+// under key.
+func pendingVersion(t *testing.T, core *repl.Core, key string) version.RecordVersion {
+	t.Helper()
+	info, ok := core.PendingSnapshot()[key]
+	if !ok {
+		t.Fatalf("PendingSnapshot holds no entry for key %q", key)
+	}
+	return info.Version
+}
+
+// broadcastRepls returns every broadcast DataReplication in drained, in
+// emission order — the ladder tests' emission probe (Hello broadcasts and
+// unicast Acks are filtered out).
+func broadcastRepls(drained []port.Outbound) []port.DataReplication {
+	var repls []port.DataReplication
+	for _, ob := range drained {
+		if !ob.Broadcast {
+			continue
+		}
+		if msg, ok := ob.Msg.(port.DataReplication); ok {
+			repls = append(repls, msg)
+		}
+	}
+	return repls
+}
+
+// replKeys returns the keys of msgs in order.
+func replKeys(msgs []port.DataReplication) []string {
+	keys := make([]string, 0, len(msgs))
+	for _, msg := range msgs {
+		keys = append(keys, msg.Key)
+	}
+	return keys
+}
+
+// TestRetransmit_backoffLadder proves the retransmission ladder (REPL-02,
+// the pinned A5 reading): one known peer, one write at t0 — retries fire at
+// exactly the cumulative deadlines 200/600/1400/3000/6200ms (backoff
+// doubling 200→400→800→1600→3200ms) and then every 5000ms at the
+// ack_timeout_max saturation cap, never between steps, never early; and
+// every multi-key emission is sorted by key (probe #9).
+func TestRetransmit_backoffLadder(t *testing.T) {
+	t.Parallel()
+	t.Run("the ladder fires exactly at the cumulative steps, then repeats at the cap", func(t *testing.T) {
+		t.Parallel()
+		t.Helper()
+		now0 := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now0, &out) // startup Hello (plan 04-01)
+		out.Drain()
+		core.HandleDatagram(now0, helloFrom(peerID1), &out)
+		out.Drain()
+		ver := localWrite(t, core, st, now0, keyAlpha, "one")
+
+		// Probes interleaved with the ladder steps, in virtual-time order:
+		// t0+100ms and t0+5000ms are off-ladder and must emit nothing.
+		probes := []struct {
+			off      time.Duration
+			wantFire bool
+		}{
+			{off: 100 * time.Millisecond, wantFire: false},
+			{off: 200 * time.Millisecond, wantFire: true},
+			{off: 600 * time.Millisecond, wantFire: true},
+			{off: 1400 * time.Millisecond, wantFire: true},
+			{off: 3000 * time.Millisecond, wantFire: true},
+			{off: 5000 * time.Millisecond, wantFire: false},
+			{off: 6200 * time.Millisecond, wantFire: true},
+			{off: 11200 * time.Millisecond, wantFire: true},
+		}
+		for _, probe := range probes {
+			off, wantFire := probe.off, probe.wantFire
+			next := core.Advance(at(off), &out)
+			if !next.After(at(off)) {
+				t.Fatalf("Advance at t0+%v returned deadline %v, want strictly future", off, next)
+			}
+			repls := broadcastRepls(out.Drain())
+			if !wantFire {
+				if len(repls) != 0 {
+					t.Fatalf("off-ladder probe at t0+%v emitted DataReplication for %v, want none", off, replKeys(repls))
+				}
+				continue
+			}
+			if len(repls) != 1 || repls[0].Key != keyAlpha || repls[0].Record.Version != ver {
+				t.Fatalf("ladder step at t0+%v emitted %v, want exactly one DataReplication for (%s, %x)",
+					off, repls, keyAlpha, ver[:])
+			}
+		}
+		// Two consecutive cap steps fired (6200ms and 11200ms); the ladder
+		// keeps saturating — the next retry lands one ack_timeout_max later.
+		wantNext := at(11200 * time.Millisecond).Add(ackTimeoutMax)
+		if got := core.PendingSnapshot()[keyAlpha].NextRetry; !got.Equal(wantNext) {
+			t.Fatalf("post-cap NextRetry = %v, want the next cap step %v (retries continue until Ack)", got, wantNext)
+		}
+	})
+	t.Run("multi-key emissions are sorted by key at every fire point", func(t *testing.T) {
+		t.Parallel()
+		t.Helper()
+		now0 := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now0, &out)
+		out.Drain()
+		core.HandleDatagram(now0, helloFrom(peerID1), &out)
+		out.Drain()
+		localWrite(t, core, st, now0, keyGamma, "g")
+		localWrite(t, core, st, now0, keyAlpha, "a")
+		localWrite(t, core, st, now0, keyBeta, "b")
+
+		core.Advance(at(200*time.Millisecond), &out)
+		if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha, keyBeta, keyGamma}) {
+			t.Fatalf("first ladder step emitted keys %v, want ascending [cfg/alpha cfg/beta cfg/gamma]", got)
+		}
+
+		// keyBeta Acks between the steps; the next fire point emits only the
+		// not-yet-drained keys, still ascending.
+		core.HandleDatagram(at(250*time.Millisecond), ackFrom(peerID1, keyBeta, pendingVersion(t, core, keyBeta)), &out)
+		out.Drain()
+		core.Advance(at(600*time.Millisecond), &out)
+		if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha, keyGamma}) {
+			t.Fatalf("second ladder step emitted keys %v, want ascending [cfg/alpha cfg/gamma]", got)
+		}
+	})
+}
+
+// TestRetransmit_suspendAndFlush proves the suspension and flush-on-discovery
+// semantics (REPL-02, the pinned A6 reading): with no known peer the
+// retransmission scanner fires nothing and advances no timer across a long
+// virtual window — the entry and its ladder state are retained, not dropped
+// — and the first Hello that ends the empty table flushes every pending
+// entry in that same event, adds the peer to the wait-set and restarts the
+// ladder at ack_timeout.
+func TestRetransmit_suspendAndFlush(t *testing.T) {
+	t.Parallel()
+	t.Helper()
+	now0 := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now0, &out)
+	out.Drain()
+	ver := localWrite(t, core, st, now0, keyAlpha, "one")
+
+	snap := core.PendingSnapshot()
+	assertPending(t, snap, keyAlpha, ver, nil)
+	if got := snap[keyAlpha].NextRetry; !got.Equal(now0.Add(ackTimeout)) {
+		t.Fatalf("entry NextRetry = %v, want the first ladder step %v", got, now0.Add(ackTimeout))
+	}
+
+	// 60 virtual seconds of empty-table Advance: zero DataReplication
+	// emissions, the entry retained with its ladder state unchanged.
+	for off := time.Second; off <= suspendWindow; off += time.Second {
+		next := core.Advance(at(off), &out)
+		if !next.After(at(off)) {
+			t.Fatalf("Advance at t0+%v returned deadline %v, want strictly future", off, next)
+		}
+		if repls := broadcastRepls(out.Drain()); len(repls) != 0 {
+			t.Fatalf("suspended scanner emitted DataReplication for %v at t0+%v, want none", replKeys(repls), off)
+		}
+	}
+	snap = core.PendingSnapshot()
+	assertPending(t, snap, keyAlpha, ver, nil)
+	if got := snap[keyAlpha].NextRetry; !got.Equal(now0.Add(ackTimeout)) {
+		t.Fatalf("suspension moved NextRetry to %v, want it retained at %v", got, now0.Add(ackTimeout))
+	}
+
+	// The first Hello ends the empty table: the same HandleDatagram call
+	// broadcasts the pending record, gains the peer as its only waiter and
+	// restarts the ladder at ack_timeout.
+	helloAt := at(suspendWindow + time.Second)
+	core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
+	repls := broadcastRepls(out.Drain())
+	if len(repls) != 1 || repls[0].Key != keyAlpha || repls[0].Record.Version != ver {
+		t.Fatalf("discovery flush emitted %v, want exactly one DataReplication for (%s, %x)", repls, keyAlpha, ver[:])
+	}
+	snap = core.PendingSnapshot()
+	assertPending(t, snap, keyAlpha, ver, []uint16{peerID1})
+	if got := snap[keyAlpha].NextRetry; !got.Equal(helloAt.Add(ackTimeout)) {
+		t.Fatalf("post-flush NextRetry = %v, want the restarted ladder step %v", got, helloAt.Add(ackTimeout))
 	}
 }
 
