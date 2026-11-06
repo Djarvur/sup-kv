@@ -2,26 +2,29 @@ package repl_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
-// runIDFor returns the run ID of generation gen for nodeID: byte 14 carries
-// the generation, so the restart tests can hand one node several distinct run
-// ids (R1/R2/R3 of a stale return and rapid double restarts) while byte 0
-// keeps every generation distinct from every other node's testRunID.
-func runIDFor(nodeID uint16, gen byte) [16]byte {
-	id := testRunID(nodeID)
+// runIDFor returns the run ID of generation gen for the restarted peer B
+// (peerID1): byte 14 carries the generation, so the restart tests can hand B
+// several distinct run ids (R1/R2/R3 of a stale return and rapid double
+// restarts) while byte 0 keeps every generation distinct from every other
+// node's testRunID.
+func runIDFor(gen byte) [16]byte {
+	id := testRunID(peerID1)
 	id[14] = gen
 	return id
 }
 
-// helloFromRun builds a decoded Hello datagram from peerID announcing runID —
-// the run-id-parameterized discovery input the restart tests drive (REPL-07;
-// helloFrom itself carries only the node's default testRunID).
-func helloFromRun(peerID uint16, runID [16]byte) port.InboundDatagram {
-	in := helloFrom(peerID)
+// helloFromRun builds a decoded Hello datagram from the restarted peer B
+// (peerID1) announcing runID — the run-id-parameterized discovery input the
+// restart tests drive (REPL-07; helloFrom itself carries only the node's
+// default testRunID).
+func helloFromRun(runID [16]byte) port.InboundDatagram {
+	in := helloFrom(peerID1)
 	in.RunID = runID
 	return in
 }
@@ -102,13 +105,13 @@ func TestRestart_runIDChangeTriggersFullSync(t *testing.T) {
 	seedGraduatedKeys(t, st)
 	want := freshListing(t, st)
 
-	r1, r2 := runIDFor(peerID1, 1), runIDFor(peerID1, 2)
-	core.HandleDatagram(now, helloFromRun(peerID1, r1), &out)
+	r1, r2 := runIDFor(1), runIDFor(2)
+	core.HandleDatagram(now, helloFromRun(r1), &out)
 	if got := len(out.Drain()); got != 0 {
 		t.Fatalf("the learn Hello from the unknown node emitted %d messages, want 0 — no targeted listing before the node is known", got)
 	}
 
-	core.HandleDatagram(now, helloFromRun(peerID1, r2), &out)
+	core.HandleDatagram(now, helloFromRun(r2), &out)
 	drained := out.Drain()
 	got := targetedSyncs(t, drained, handleFor(peerID1))
 	if len(drained) != len(got) {
@@ -128,7 +131,7 @@ func TestRestart_runIDChangeTriggersFullSync(t *testing.T) {
 		t.Fatalf("the restarted peer's row = (run %x, handle %q), want (run %x, handle %q)", p.RunID[:], p.Handle, r2[:], handleFor(peerID1))
 	}
 
-	core.HandleDatagram(now, helloFromRun(peerID1, r2), &out)
+	core.HandleDatagram(now, helloFromRun(r2), &out)
 	if got := len(out.Drain()); got != 0 {
 		t.Fatalf("a repeat Hello with the already-remembered run_id emitted %d messages, want 0 — idempotence: refresh only, never a second listing", got)
 	}
@@ -175,4 +178,153 @@ func TestRestart_newPeerNoFullSync(t *testing.T) {
 	if q := core.QueuedResponses(); q != 0 {
 		t.Fatalf("after the learn QueuedResponses() = %d, want 0", q)
 	}
+}
+
+// TestRestart_staleRunIdAndInFlight pins the three adversarial run_id edges
+// of probe #19: a stale run_id returning after a newer one was seen is just
+// another change (inequality with the remembered value is the only test —
+// random 16-byte run_ids carry no temporal order), in-flight protocol
+// datagrams from the old run process normally on their (key, version)
+// merits outside the Hello handler, and a rapid double restart updates the
+// one row in place with exactly one full listing per change.
+func TestRestart_staleRunIdAndInFlight(t *testing.T) {
+	t.Parallel()
+	t.Run("a stale run_id returning is just another change: idempotent second listing, one row", func(t *testing.T) {
+		t.Parallel()
+		t.Helper()
+		now := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+		seedGraduatedKeys(t, st)
+		want := freshListing(t, st)
+
+		r1, r2 := runIDFor(1), runIDFor(2)
+		core.HandleDatagram(now, helloFromRun(r1), &out)
+		out.Drain() // learn only
+		core.HandleDatagram(now, helloFromRun(r2), &out)
+		first := targetedSyncs(t, out.Drain(), handleFor(peerID1))
+		if !dataSyncsEqual(first, want) {
+			t.Fatalf("the R1→R2 reaction = %v, want the full fresh listing %v", first, want)
+		}
+
+		// A delayed Hello from the old run's R1 arrives: inequality with the
+		// remembered R2 is indistinguishable from a fresh restart, so the
+		// entry flips back and one more full listing fires — idempotent,
+		// safe (reconciliation no-ops on equal state).
+		core.HandleDatagram(now, helloFromRun(r1), &out)
+		second := targetedSyncs(t, out.Drain(), handleFor(peerID1))
+		if !dataSyncsEqual(second, want) {
+			t.Fatalf("the stale-return reaction = %v, want the same full fresh listing %v again", second, want)
+		}
+		if got := len(first) + len(second); got != 2*len(want) {
+			t.Fatalf("the two changes emitted %d targeted chunks in total, want exactly two full listings (%d)", got, 2*len(want))
+		}
+		snap := core.PeerSnapshot()
+		if len(snap) != 1 {
+			t.Fatalf("PeerSnapshot holds %d rows for the one node_id, want exactly 1 — a run_id change never forks the table", len(snap))
+		}
+		if p := snap[peerID1]; p.RunID != r1 {
+			t.Fatalf("the row's run_id after the stale return = %x, want the last-announced R1 %x", p.RunID[:], r1[:])
+		}
+	})
+	t.Run("in-flight old-run traffic processes on (key, version) merits", func(t *testing.T) {
+		t.Parallel()
+		t.Helper()
+		now := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+		core.HandleDatagram(now, helloFromRun(runIDFor(1)), &out)
+		out.Drain()
+
+		ver := localWrite(t, core, st, now, keyAlpha, "one")
+		assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1})
+		core.HandleDatagram(now, helloFromRun(runIDFor(2)), &out)
+		out.Drain() // the targeted listing; this sequence is about what follows it
+
+		// An in-flight Ack from the old run for the still-pending version
+		// drains its waiter normally — the Ack path never looks at run_id.
+		core.HandleDatagram(now, ackFrom(peerID1, keyAlpha, ver), &out)
+		out.Drain()
+		if _, ok := core.PendingSnapshot()[keyAlpha]; ok {
+			t.Fatal("an in-flight Ack from the old run failed to drain the pending entry")
+		}
+
+		// An in-flight DataReplication from the old run carrying a strictly
+		// greater version supersedes a pending entry normally and is Acked.
+		ver2 := localWrite(t, core, st, now, keyBeta, "two")
+		greater := remoteRecord(testNowMs+1, 0, peerID1, "remote wins")
+		if greater.Version.Compare(ver2) <= 0 {
+			t.Fatalf("test remote version %x not strictly greater than the tracked %x", greater.Version[:], ver2[:])
+		}
+		core.HandleDatagram(now, replFrom(peerID1, keyBeta, greater), &out)
+		drained := out.Drain()
+		if _, ok := core.PendingSnapshot()[keyBeta]; ok {
+			t.Fatal("an in-flight strictly-greater DataReplication from the old run failed to supersede the pending entry")
+		}
+		got, err := st.store.Get(keyBeta)
+		if err != nil || got.Version != greater.Version {
+			t.Fatalf("store Get(%q) after the old-run DataReplication = (%x, %v), want the remote version %x", keyBeta, got.Version[:], err, greater.Version[:])
+		}
+		acked := false
+		for _, ob := range drained {
+			if ack, ok := ob.Msg.(port.Ack); ok && !ob.Broadcast && ob.To == handleFor(peerID1) &&
+				ack.Key == keyBeta && ack.Version == greater.Version {
+				acked = true
+			}
+		}
+		if !acked {
+			t.Fatalf("the old-run DataReplication was not Acked: drained %v", drained)
+		}
+	})
+	t.Run("rapid double restart updates in place: one listing per change, never two rows", func(t *testing.T) {
+		t.Parallel()
+		t.Helper()
+		now0 := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now0, &out)
+		out.Drain()
+		seedGraduatedKeys(t, st)
+		want := freshListing(t, st)
+		r1, r2, r3 := runIDFor(1), runIDFor(2), runIDFor(3)
+
+		core.HandleDatagram(now0, helloFromRun(r1), &out)
+		if got := len(out.Drain()); got != 0 {
+			t.Fatalf("the learn Hello emitted %d messages, want 0", got)
+		}
+		core.Advance(at(100*time.Millisecond), &out)
+		if got := len(out.Drain()); got != 0 {
+			t.Fatalf("the Advance after the learn emitted %d messages, want 0", got)
+		}
+		core.HandleDatagram(at(200*time.Millisecond), helloFromRun(r2), &out)
+		first := targetedSyncs(t, out.Drain(), handleFor(peerID1))
+		core.Advance(at(300*time.Millisecond), &out)
+		if got := len(out.Drain()); got != 0 {
+			t.Fatalf("the Advance between the restarts emitted %d messages, want 0", got)
+		}
+		core.HandleDatagram(at(400*time.Millisecond), helloFromRun(r3), &out)
+		second := targetedSyncs(t, out.Drain(), handleFor(peerID1))
+		core.Advance(at(500*time.Millisecond), &out)
+		if got := len(out.Drain()); got != 0 {
+			t.Fatalf("the Advance after the second restart emitted %d messages, want 0", got)
+		}
+
+		if len(first) != len(want) || !dataSyncsEqual(first, want) {
+			t.Fatalf("the R1→R2 reaction = %v, want exactly one full fresh listing %v", first, want)
+		}
+		if len(second) != len(want) || !dataSyncsEqual(second, want) {
+			t.Fatalf("the R2→R3 reaction = %v, want exactly one full fresh listing %v", second, want)
+		}
+		snap := core.PeerSnapshot()
+		if len(snap) != 1 {
+			t.Fatalf("PeerSnapshot holds %d rows for the one node_id, want exactly 1", len(snap))
+		}
+		if p := snap[peerID1]; p.RunID != r3 {
+			t.Fatalf("the row's run_id after the double restart = %x, want the last-announced R3 %x", p.RunID[:], r3[:])
+		}
+	})
 }
