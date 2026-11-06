@@ -17,6 +17,8 @@ import (
 	"bytes"
 	"crypto/rand"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/storage"
@@ -154,15 +156,20 @@ type peer struct {
 	lastHello time.Time
 }
 
-// pendingEntry is one local write awaiting peer Acks: the record the core
-// keeps for later retransmission plans (04-02), with its own defensive copy
-// of the data (the storage.install precedent — the author may reuse its
-// buffer after NotifyLocalWrite returns), plus the backoff state the
-// retransmission ladder will consume.
+// pendingEntry is one local write awaiting peer Acks (REPL-02): a
+// defensive copy of the written record (the storage.install precedent — the
+// author may reuse its buffer after NotifyLocalWrite returns), the exact
+// tracked version, the wait-set of known peers that have not yet Acked that
+// version, the retransmission ladder state (next retry time and current
+// backoff — the ladder itself fires from Advance, plan 04-02 Task 2), and
+// the creation time behind UnackedStats' oldest age.
 type pendingEntry struct {
-	rec     storage.Record
-	nextAt  time.Time
-	backoff time.Duration
+	rec       storage.Record
+	version   version.RecordVersion
+	waitSet   map[uint16]struct{}
+	nextRetry time.Time
+	backoff   time.Duration
+	createdAt time.Time
 }
 
 // Core is the replication decision state machine for one node. Not safe for
@@ -208,10 +215,9 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // robust own-echo test — the sender's own broadcast really does loop back)
 // and DuplicateNodeID — a logged configuration error — when it differs.
 // Everything else reaches protocol processing: Hello upserts the peer
-// table, DataReplication applies the record and Acks it, and Ack is
-// accepted and ignored at this stage (the pending drain lands in plan
-// 04-02). DataRequest and DataSync arrive with their later plans and are
-// ignored meanwhile.
+// table, DataReplication applies the record and Acks it, and Ack drains
+// the pending-set wait-set (REPL-02). DataRequest and DataSync arrive with
+// their later plans and are ignored meanwhile.
 func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	switch in.Status {
 	case port.BadCRC:
@@ -249,7 +255,7 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 	case port.DataReplication:
 		c.applyRemote(in.Source, msg, out)
 	case port.Ack:
-		// Accepted and ignored: the pending-set drain lands in plan 04-02.
+		c.handleAck(in.NodeID, msg)
 	case port.DataRequest, port.DataSync, port.SyncEntry, nil:
 		// DataRequest/DataSync processing lands with plans 04-03/04-04; a
 		// nil Msg on a Decoded verdict violates the adapter contract and
@@ -269,15 +275,46 @@ func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Ou
 	if err != nil {
 		c.cfg.Log(fmt.Sprintf("sup-kv: applying replicated record for key %q from handle %q: %v", msg.Key, source, err))
 	}
+	// Remote supersession: a strictly greater remote version under the same
+	// key fulfills the tracking promise by winning — the same byte order
+	// storage.Merge joins by; an equal version (a redelivery) leaves
+	// tracking unchanged (REPL-02).
+	if entry, ok := c.pending[msg.Key]; ok && msg.Record.Version.Compare(entry.version) > 0 {
+		delete(c.pending, msg.Key)
+	}
 	out.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})
+}
+
+// handleAck drains one waiter of the pending entry matching the Ack's
+// (key, version) exactly: the sender leaves the entry's wait-set, and the
+// entry leaves tracking only when its wait-set empties while at least one
+// peer is known — the promise is until-Ack-or-supersession, never a timeout
+// (REPL-02). A stale Ack (version mismatch), an Ack for an unknown key and
+// an Ack from a peer outside the wait-set are silent no-ops — no counter,
+// no log (probe #2). The empty-table guard is load-bearing: an entry whose
+// every waiter was evicted stays retained in suspension, and an Ack can
+// only drain when peers actually exist. The peer is identified by the
+// datagram's NodeID alone; nothing here writes the peer table.
+func (c *Core) handleAck(peerID uint16, ack port.Ack) {
+	entry, ok := c.pending[ack.Key]
+	if !ok || entry.version != ack.Version {
+		return
+	}
+	delete(entry.waitSet, peerID)
+	if len(entry.waitSet) == 0 && len(c.peers) > 0 {
+		delete(c.pending, ack.Key)
+	}
 }
 
 // NotifyLocalWrite is the explicit call a write's author makes after the
 // store write (D-05: no store subscriptions, no observers, no callbacks —
 // tests now, the gRPC handler in Phase 5). The core keeps a defensive copy
-// of rec (the storage.install precedent) as the pending entry the later
-// retransmission plans consume, and broadcasts the record as a
-// DataReplication datagram.
+// of rec (the storage.install precedent) as the pending entry — wait-set
+// seeded with every currently-known peer, ladder armed at cfg.AckTimeout —
+// and broadcasts the record as a DataReplication datagram. A newer local
+// write under the same key REPLACES the entry: fresh wait-set, ladder reset
+// — local supersession (REPL-02). Replication progress is never a
+// precondition of the write path: this enqueues-and-returns (D-05).
 func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
 	own := storage.Record{
 		Version:  rec.Version,
@@ -285,7 +322,18 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 		Deleted:  rec.Deleted,
 		Checksum: rec.Checksum,
 	}
-	c.pending[key] = pendingEntry{rec: own, nextAt: now.Add(c.cfg.AckTimeout), backoff: c.cfg.AckTimeout}
+	waitSet := make(map[uint16]struct{}, len(c.peers))
+	for id := range c.peers {
+		waitSet[id] = struct{}{}
+	}
+	c.pending[key] = pendingEntry{
+		rec:       own,
+		version:   own.Version,
+		waitSet:   waitSet,
+		nextRetry: now.Add(c.cfg.AckTimeout),
+		backoff:   c.cfg.AckTimeout,
+		createdAt: now,
+	}
 	out.Broadcast(port.DataReplication{Key: key, Record: own})
 }
 
@@ -329,20 +377,46 @@ type PendingInfo struct {
 	NextRetry time.Time
 }
 
-// PendingSnapshot returns a copy of the pending set keyed by key.
-func (*Core) PendingSnapshot() map[string]PendingInfo {
-	return nil // stub: the pending-set semantics land with plan 04-02 Task 1.
+// PendingSnapshot returns a copy of the pending set keyed by key — the
+// observability seam Phase 5's wait_for_replication and Phase 6's OBS-01
+// consume. Keys are iterated sorted and every WaitingOn is sorted ascending:
+// no map-iteration order reaches a read path either (probe #9 discipline).
+func (c *Core) PendingSnapshot() map[string]PendingInfo {
+	out := make(map[string]PendingInfo, len(c.pending))
+	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
+		entry := c.pending[key]
+		out[key] = PendingInfo{
+			Version:   entry.version,
+			WaitingOn: slices.Sorted(maps.Keys(entry.waitSet)),
+			NextRetry: entry.nextRetry,
+		}
+	}
+	return out
 }
 
 // UnackedStats is the pending-set gauge: the unacked entry count and the age
-// of the oldest entry.
+// of the oldest entry — the Phase 6 OBS-01 observability seam.
 type UnackedStats struct {
 	Count     int
 	OldestAge time.Duration
 }
 
-// UnackedStats returns the pending-set gauge observed at now.
-func (*Core) UnackedStats(now time.Time) UnackedStats {
-	_ = now // stub: the pending-set semantics land with plan 04-02 Task 1.
-	return UnackedStats{}
+// UnackedStats returns the pending-set gauge observed at now: the unacked
+// entry count and, with at least one entry, now minus the oldest entry's
+// creation time. A pure read; the wall clock enters through the now
+// parameter (the D-02 seam — the core never reads a clock itself).
+func (c *Core) UnackedStats(now time.Time) UnackedStats {
+	stats := UnackedStats{Count: len(c.pending)}
+	if stats.Count == 0 {
+		return stats
+	}
+	var oldest time.Time
+	for key := range c.pending {
+		createdAt := c.pending[key].createdAt
+		if oldest.IsZero() || createdAt.Before(oldest) {
+			oldest = createdAt
+		}
+	}
+	stats.OldestAge = now.Sub(oldest)
+	return stats
 }

@@ -238,18 +238,21 @@ func TestRetransmit_ackDrainSemantics(t *testing.T) {
 				return version.RecordVersion{}
 			}
 
-			for i, key := range []string{keyBeta, keyGamma, keyAlpha} { // Acks arrive B, C, A (probe #10).
+			remaining := make(map[string]version.RecordVersion, len(written))
+			for _, w := range written {
+				remaining[w.key] = w.ver
+			}
+			for _, key := range []string{keyBeta, keyGamma, keyAlpha} { // Acks arrive B, C, A (probe #10).
 				core.HandleDatagram(now, ackFrom(peerID1, key, versionOf(key)), &out)
 				out.Drain()
+				delete(remaining, key)
 				snap := core.PendingSnapshot()
-				if want := len(written) - i - 1; len(snap) != want {
-					t.Fatalf("after Ack %d (key %q) PendingSnapshot holds %d entries, want %d", i+1, key, len(snap), want)
+				if len(snap) != len(remaining) {
+					t.Fatalf("after Ack of key %q PendingSnapshot holds %d entries, want %d: %v",
+						key, len(snap), len(remaining), snap)
 				}
-				for _, w := range written {
-					if w.key == key {
-						continue
-					}
-					assertPending(t, snap, w.key, w.ver, []uint16{peerID1})
+				for wantKey, wantVer := range remaining {
+					assertPending(t, snap, wantKey, wantVer, []uint16{peerID1})
 				}
 			}
 		}},
