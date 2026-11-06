@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -317,4 +318,31 @@ func (c *Core) PeerSnapshot() map[uint16]PeerInfo {
 		out[id] = PeerInfo{Handle: p.handle, RunID: p.runID, LastHello: p.lastHello}
 	}
 	return out
+}
+
+// PendingInfo is one pending entry as exposed by PendingSnapshot: the exact
+// tracked version, the known peers that have not yet Acked it (sorted
+// ascending) and the retransmission ladder's next retry time.
+type PendingInfo struct {
+	Version   version.RecordVersion
+	WaitingOn []uint16
+	NextRetry time.Time
+}
+
+// PendingSnapshot returns a copy of the pending set keyed by key.
+func (*Core) PendingSnapshot() map[string]PendingInfo {
+	return nil // stub: the pending-set semantics land with plan 04-02 Task 1.
+}
+
+// UnackedStats is the pending-set gauge: the unacked entry count and the age
+// of the oldest entry.
+type UnackedStats struct {
+	Count     int
+	OldestAge time.Duration
+}
+
+// UnackedStats returns the pending-set gauge observed at now.
+func (*Core) UnackedStats(now time.Time) UnackedStats {
+	_ = now // stub: the pending-set semantics land with plan 04-02 Task 1.
+	return UnackedStats{}
 }
