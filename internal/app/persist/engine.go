@@ -408,6 +408,15 @@ func (e *Engine) await(ver version.RecordVersion) error {
 	return w.err
 }
 
+// ApplyRemote joins one remotely replicated record into the store — the
+// seam await's doc reserved for Phase 4 ("remote merges will reuse the dirty
+// path without waiters"). RED-phase stub: it merges but does not yet dirty
+// the engine, so a remote merge triggers no dump — the GREEN step adds the
+// dirty-marking (REPL-03's memory-apply contract, plan 04-06).
+func (e *Engine) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
+	return e.store.Merge(key, rec)
+}
+
 // Get returns a copy of the live record for key — reads are never gated on
 // dumps, and a failed dump leaves every record readable in memory (D-05).
 func (e *Engine) Get(key string) (storage.Record, error) {

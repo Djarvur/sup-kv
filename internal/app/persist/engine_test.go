@@ -37,6 +37,11 @@ const (
 	// installs: values over it stay codec-legal (envelope 61440) but the
 	// store rejects them.
 	shrunkValueLimit = 16
+
+	// applyRemoteOversize is one byte over the design-default value limit
+	// (docs/IDEA.md §Parameters): the wire-side oversize class whose
+	// ErrValueTooLarge must pass through ApplyRemote unchanged (T-04-04).
+	applyRemoteOversize = 61441
 )
 
 // runEngine launches eng's single dumper goroutine (Run's lifecycle is the
@@ -1217,6 +1222,87 @@ func TestEngine_restoreCorruptSnapshot(t *testing.T) {
 	if !recordsEqual(eng2.Records(), before) {
 		t.Error("records changed across the corrupt-snapshot restore")
 	}
+}
+
+// TestEngine_applyRemoteTriggersDump proves the REPL-03 memory-apply contract
+// at the persist seam plan 04-06 lands (the seam await's doc reserved in
+// Phase 3: "only local writes register waiters, and Phase 4's remote merges
+// will reuse the dirty path without waiters"): ApplyRemote merges the remote
+// record into the store, marks the engine dirty with NO waiter — the call
+// returns at the apply instant, strictly before the debounced dump — and the
+// running Run completes exactly one save whose bytes decode to the merged
+// record. An oversize record's ErrValueTooLarge passes through unchanged and
+// the engine keeps serving (T-04-04).
+func TestEngine_applyRemoteTriggersDump(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		remote := storage.Record{
+			Version: version.PackVersion(1, 1, synctestNodeID+1),
+			Data:    []byte("remote-value"),
+		}
+		returned := make(chan time.Time, 1)
+		go func() {
+			conflicts, _, err := eng.ApplyRemote("remote", remote)
+			if err != nil {
+				t.Errorf("ApplyRemote() error = %v, want nil", err)
+			}
+			if len(conflicts) != 0 {
+				t.Errorf("ApplyRemote() conflicts = %v, want none on a fresh key", conflicts)
+			}
+			returned <- time.Now()
+		}()
+		returnedAt := <-returned
+		synctest.Wait()
+
+		got, err := eng.Get("remote")
+		if err != nil || string(got.Data) != "remote-value" || got.Version != remote.Version {
+			t.Errorf("post-ApplyRemote Get() = (%q, %x, %v), want the merged record", got.Data, got.Version[:], err)
+		}
+		if saves := dumps.saveCount(); saves != 1 {
+			t.Fatalf("completed saves = %d, want exactly one dump for the remote merge", saves)
+		}
+		save := dumps.save(0)
+		if !returnedAt.Before(save.at) {
+			t.Errorf("ApplyRemote returned at %v, not before the dump at %v — it registered a waiter",
+				returnedAt, save.at)
+		}
+		records, discarded, err := persist.Decode(save.dump)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		if merged, ok := records["remote"]; !ok || merged.Version != remote.Version || string(merged.Data) != "remote-value" {
+			t.Errorf("the save carries remote = (%t, %x, %q), want the merged record", ok, merged.Version[:], merged.Data)
+		}
+
+		// Oversize passthrough (T-04-04): nothing merges, nothing dirties,
+		// the error surfaces unchanged and the next good merge still dumps.
+		huge := storage.Record{
+			Version: version.PackVersion(2, 1, synctestNodeID+1),
+			Data:    bytes.Repeat([]byte("x"), applyRemoteOversize),
+		}
+		_, _, err = eng.ApplyRemote("huge", huge)
+		if !errors.Is(err, storage.ErrValueTooLarge) {
+			t.Errorf("oversize ApplyRemote() error = %v, want ErrValueTooLarge unchanged", err)
+		}
+		if _, err = eng.Get("huge"); !errors.Is(err, storage.ErrNotFound) {
+			t.Errorf("oversize Get(huge) error = %v, want ErrNotFound", err)
+		}
+		good := storage.Record{
+			Version: version.PackVersion(3, 1, synctestNodeID+1),
+			Data:    []byte("still-serving"),
+		}
+		_, _, err = eng.ApplyRemote("second", good)
+		if err != nil {
+			t.Fatalf("post-error ApplyRemote() error = %v, want nil", err)
+		}
+		synctest.Wait()
+		if saves := dumps.saveCount(); saves != 2 {
+			t.Fatalf("completed saves after the oversize error = %d, want 2 (the engine kept serving)", saves)
+		}
+	})
 }
 
 // TestEngine_configShrunkValueLimits pins the config-shrink resilience
