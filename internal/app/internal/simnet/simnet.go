@@ -2,23 +2,26 @@
 // convergence proofs: a discrete-event scheduler ordered by (Time, Seq), a
 // fault-injecting virtual network, and an N-node cluster harness driving the
 // same repl.Core handlers the production UDP adapter drives (no simulation
-// mode anywhere — the determinism argument IS that the same handlers run).
-// It is a normal package linked only into test binaries (the testutil
-// precedent); unlike testutil its directory name does not match the
-// no-test-libs-in-prod glob, so the non-test files here must not import Go's
-// testing package — assertions live only in _test.go files.
-//
-// RED-phase state: the Scheduler and Network below are compile stubs whose
-// behavior is unimplemented — scheduled events are discarded and nothing is
-// ever delivered — so the simnet_test.go suite fails on its assertions; the
-// GREEN commit implements them. The Cluster harness is already the real
-// shape (real storage.Store nodes, real repl.Core instances) because the
-// failing tests build whole clusters as their fixtures.
+// mode anywhere — the determinism argument IS that the same handlers run;
+// a sim-side reimplementation of any protocol decision would prove nothing
+// about production). It is a normal package linked only into test binaries
+// (the internal/app/internal/testutil precedent); unlike testutil its
+// directory name does not match the no-test-libs-in-prod glob, so the
+// non-test files here must not import Go's testing package — assertions live
+// only in _test.go files. The package starts no goroutines, takes no locks
+// and never reads a wall clock or sleeps: virtual time is the only time
+// (D-06/D-07, RESEARCH Pitfall 9), every time value is built from
+// [time.UnixMilli] arithmetic — no monotonic reading anywhere (the D-02 seam
+// discipline) — and every random draw flows through the one rng injected at
+// construction, drawn at send time, so the same seed reproduces the whole
+// run byte for byte.
 package simnet
 
 import (
+	"container/heap"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/clock"
@@ -31,30 +34,99 @@ import (
 // (the docs/IDEA.md design default; the sim never reads the drift signal).
 const clusterDriftWarn = time.Minute
 
-// Scheduler is the discrete-event virtual clock: events execute in
-// (Time, Seq) total order. RED stub — Schedule discards its event and
-// RunUntil only advances the clock, so equal-time ordering is unobservable
-// until the GREEN implementation lands.
-type Scheduler struct{ now time.Time }
+// event is one scheduled callback at a virtual time; seq is the insertion
+// counter that totally orders events sharing a time.
+type event struct {
+	at  time.Time
+	seq uint64
+	fn  func()
+}
+
+// eventHeap orders events by the (at, seq) total order — time first, then
+// insertion order (container/heap is the RESEARCH "Don't Hand-Roll" pick for
+// the deterministic priority queue).
+type eventHeap []event
+
+// Len implements [heap.Interface].
+func (h *eventHeap) Len() int { return len(*h) }
+
+// Less implements [heap.Interface]: strictly earlier times first; equal
+// times break on the insertion counter, never on heap layout.
+func (h *eventHeap) Less(i, j int) bool {
+	if !(*h)[i].at.Equal((*h)[j].at) {
+		return (*h)[i].at.Before((*h)[j].at)
+	}
+	return (*h)[i].seq < (*h)[j].seq
+}
+
+// Swap implements [heap.Interface].
+func (h *eventHeap) Swap(i, j int) { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
+
+// Push implements [heap.Interface].
+func (h *eventHeap) Push(x any) { *h = append(*h, x.(event)) }
+
+// Pop implements [heap.Interface].
+func (h *eventHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+// Scheduler is the discrete-event virtual clock (D-06/D-07, RESEARCH Pattern
+// 4): events execute in the strict (Time, Seq) total order — every event
+// with an earlier virtual time first, and events scheduled at the same
+// virtual time in Schedule-call (insertion) order, the tie-break contract
+// same-seed determinism is built on. Now advances only as RunUntil executes
+// events; nothing here reads a wall clock, sleeps or launches a goroutine.
+type Scheduler struct {
+	now  time.Time
+	seq  uint64
+	pend eventHeap
+}
 
 // NewScheduler returns a scheduler whose virtual clock starts at start.
 func NewScheduler(start time.Time) *Scheduler {
-	return &Scheduler{now: start}
+	return &Scheduler{now: start, pend: eventHeap{}}
 }
 
-// Schedule enqueues fn at virtual time t. RED stub: the event is discarded.
-func (*Scheduler) Schedule(time.Time, func()) {}
+// Schedule enqueues fn at virtual time t, assigning it the next monotonically
+// increasing insertion counter. An event scheduled at or before the current
+// virtual time is simply due: the next RunUntil covering its time executes
+// it, ordered before any later-time event.
+func (s *Scheduler) Schedule(t time.Time, fn func()) {
+	s.seq++
+	heap.Push(&s.pend, event{at: t, seq: s.seq, fn: fn})
+}
 
-// RunUntil executes every event at or before t. RED stub: only Now advances.
-func (s *Scheduler) RunUntil(t time.Time) { s.now = t }
+// RunUntil executes every event with (Time, Seq) at or before t, in that
+// total order, advancing the virtual clock to each event's time before it
+// runs — so handlers observe exactly the event's scheduled time. Events
+// scheduled by executed events (network deliveries at now+delay, timer
+// pumps) join the same order and fire inside this same call whenever their
+// time is at or before t. Afterwards the clock rests at t whether or not any
+// event ran.
+func (s *Scheduler) RunUntil(t time.Time) {
+	for s.pend.Len() > 0 && !s.pend[0].at.After(t) {
+		ev := heap.Pop(&s.pend).(event)
+		s.now = ev.at
+		ev.fn()
+	}
+	s.now = t
+}
 
 // Now returns the current virtual time.
 func (s *Scheduler) Now() time.Time { return s.now }
 
 // Policy is the fault-injection profile, pure data injected by each test:
 // drop and duplicate probabilities, the one-way delay draw and the partition
-// predicate. simnet draws randomness only through the injected rng, so the
-// same seed reproduces every fate decision (D-06/D-07).
+// predicate. A nil Delay means zero delay and a nil Partition means nothing
+// is ever blocked (the fixed-delay profile of the bound tests and the
+// loss-free default). simnet draws randomness only through the injected rng,
+// at send time, in a fixed draw order — drop, then duplicate, then each
+// delivery's delay — so the same seed reproduces every fate decision
+// (D-06/D-07).
 type Policy struct {
 	DropProb  float64
 	DupProb   float64
@@ -62,7 +134,24 @@ type Policy struct {
 	Partition func(from, to string, now time.Time) bool
 }
 
-// FaultStats counts the fault injector's observed classes.
+// delay draws one one-way delay (nil policy Delay: zero).
+func (p Policy) delay(rng *rand.Rand) time.Duration {
+	if p.Delay == nil {
+		return 0
+	}
+	return p.Delay(rng)
+}
+
+// blocked consults the partition predicate (nil policy Partition: open).
+func (p Policy) blocked(from, to string, now time.Time) bool {
+	return p.Partition != nil && p.Partition(from, to, now)
+}
+
+// FaultStats counts the fault injector's observed classes (the coverage
+// teeth the chaos test asserts on): sends dropped at send time, sends
+// duplicated into two deliveries, deliveries arriving after a later-sent
+// sibling of the same directed pair, and sends blocked by the partition
+// predicate.
 type FaultStats struct {
 	Dropped     uint64
 	Duplicated  uint64
@@ -70,37 +159,149 @@ type FaultStats struct {
 	Partitioned uint64
 }
 
-// Network is the fault-injecting virtual datagram network. RED stub — every
-// send is silently discarded, every counter stays zero, the trace stays
-// empty.
-type Network struct{}
+// netNode is one registered cluster member: the envelope identity (node id,
+// run id) its datagrams carry, its handle, and the delivery function — the
+// cluster wires it to the node's core handler followed by the drive loop.
+type netNode struct {
+	id      uint16
+	runID   [16]byte
+	handle  string
+	deliver func(port.InboundDatagram)
+}
 
-// NewNetwork returns the network over sched, rng and policy. RED stub.
-func NewNetwork(*Scheduler, *rand.Rand, Policy) *Network { return &Network{} }
+// pairKey identifies one directed (from, to) handle pair — the granularity
+// of the send-sequence tracking behind the reorder observation.
+type pairKey struct{ from, to string }
 
-// Register makes (nodeID, runID, handle) a reachable delivery target. RED
-// stub: registrations are discarded.
-func (*Network) Register(uint16, [16]byte, string, func(port.InboundDatagram)) {}
+// Network is the fault-injecting virtual datagram network (RESEARCH Pattern
+// 4): every Send consults the partition policy, then draws the datagram's
+// fate AT SEND TIME from the injected rng — drop (counted), duplicate (two
+// deliveries at independently drawn delays), or a single delivery at
+// now+delay — and every delivery is a scheduler event that hands the
+// recipient's delivery function a Decoded InboundDatagram carrying the
+// sender's envelope identity. Broadcast fans out to every registered node
+// INCLUDING the sender (own echo is real; plan 01's OwnEcho class fires in
+// simulation too), one independent fate draw per recipient, in registration
+// order. Registered nodes iterate a slice, never a map, so fan-out order —
+// and therefore rng draw order — is deterministic.
+type Network struct {
+	sched      *Scheduler
+	rng        *rand.Rand
+	policy     Policy
+	nodes      []netNode
+	byHandle   map[string]int
+	sendSeq    map[pairKey]uint64
+	lastByPair map[pairKey]uint64
+	faults     FaultStats
+	pending    int
+	trace      strings.Builder
+}
 
-// Send injects one datagram between two handles. RED stub: never delivered.
-func (*Network) Send(string, string, port.Message) {}
+// NewNetwork returns the network over sched, drawing every fault from rng
+// under policy.
+func NewNetwork(sched *Scheduler, rng *rand.Rand, policy Policy) *Network {
+	return &Network{
+		sched:      sched,
+		rng:        rng,
+		policy:     policy,
+		byHandle:   make(map[string]int),
+		sendSeq:    make(map[pairKey]uint64),
+		lastByPair: make(map[pairKey]uint64),
+	}
+}
 
-// Broadcast fans one datagram out to every registered node including the
-// sender. RED stub: never delivered.
-func (*Network) Broadcast(string, port.Message) {}
+// Register makes (nodeID, runID, handle) a reachable delivery target whose
+// inbound datagrams invoke deliver.
+func (n *Network) Register(nodeID uint16, runID [16]byte, handle string, deliver func(port.InboundDatagram)) {
+	n.byHandle[handle] = len(n.nodes)
+	n.nodes = append(n.nodes, netNode{id: nodeID, runID: runID, handle: handle, deliver: deliver})
+}
 
-// FaultStats returns the fault counters. RED stub: all zero.
-func (*Network) FaultStats() FaultStats { return FaultStats{} }
+// Send injects one datagram from fromHandle toward toHandle (D-06/D-07): a
+// blocked pair counts partitioned and drops the send; otherwise the fate is
+// drawn at send time — drop, duplicate or deliver — with the delays drawn
+// from the policy. Sends addressed to unregistered handles are discarded
+// silently (they model addresses that no longer exist).
+func (n *Network) Send(fromHandle, toHandle string, msg port.Message) {
+	from, ok := n.byHandle[fromHandle]
+	if !ok {
+		return
+	}
+	to, ok := n.byHandle[toHandle]
+	if !ok {
+		return
+	}
+	now := n.sched.Now()
+	if n.policy.blocked(fromHandle, toHandle, now) {
+		n.faults.Partitioned++
+		return
+	}
+	pair := pairKey{from: fromHandle, to: toHandle}
+	n.sendSeq[pair]++
+	seq := n.sendSeq[pair]
+	switch {
+	case n.rng.Float64() < n.policy.DropProb:
+		n.faults.Dropped++
+	case n.rng.Float64() < n.policy.DupProb:
+		n.faults.Duplicated++
+		n.scheduleDelivery(n.nodes[from], n.nodes[to], msg, seq, n.policy.delay(n.rng))
+		n.scheduleDelivery(n.nodes[from], n.nodes[to], msg, seq, n.policy.delay(n.rng))
+	default:
+		n.scheduleDelivery(n.nodes[from], n.nodes[to], msg, seq, n.policy.delay(n.rng))
+	}
+}
 
-// PendingDeliveries returns scheduled-but-undelivered network events. RED
-// stub: always zero.
-func (*Network) PendingDeliveries() int { return 0 }
+// Broadcast fans one datagram out to every registered node INCLUDING the
+// sender — the sender's own broadcast really does loop back (plan 01's
+// OwnEcho discard class), and every recipient's fate is drawn independently
+// in registration order.
+func (n *Network) Broadcast(fromHandle string, msg port.Message) {
+	for i := range n.nodes {
+		n.Send(fromHandle, n.nodes[i].handle, msg)
+	}
+}
 
-// TraceDigest returns the ordered delivery trace. RED stub: always empty.
-func (*Network) TraceDigest() string { return "" }
+// scheduleDelivery books one delivery event at now+delay: at fire time the
+// pair's reorder observation updates (a delivery whose send sequence is older
+// than the pair's highest delivered sequence arrives after a later-sent
+// sibling — Pitfall 1's measurable), the tuple joins the ordered trace, and
+// the recipient's delivery function receives the decoded datagram.
+func (n *Network) scheduleDelivery(from, to netNode, msg port.Message, seq uint64, delay time.Duration) {
+	pair := pairKey{from: from.handle, to: to.handle}
+	n.pending++
+	n.sched.Schedule(n.sched.Now().Add(delay), func() {
+		n.pending--
+		if seq < n.lastByPair[pair] {
+			n.faults.Reordered++
+		} else {
+			n.lastByPair[pair] = seq
+		}
+		fmt.Fprintf(&n.trace, "%d|%s|%s|%T\n", n.sched.Now().UnixMilli(), from.handle, to.handle, msg)
+		to.deliver(port.InboundDatagram{
+			Source:       from.handle,
+			Status:       port.Decoded,
+			ProtoVersion: repl.SupportedProtoVersion,
+			NodeID:       from.id,
+			RunID:        from.runID,
+			Msg:          msg,
+		})
+	})
+}
+
+// FaultStats returns the fault counters — a value copy.
+func (n *Network) FaultStats() FaultStats { return n.faults }
+
+// PendingDeliveries returns the number of scheduled-but-undelivered network
+// events — one of the simulator's three quiescence signals.
+func (n *Network) PendingDeliveries() int { return n.pending }
+
+// TraceDigest returns the ordered delivery trace as one string — every
+// (virtual time, from, to, message type) tuple in execution order, the
+// same-seed comparison artifact.
+func (n *Network) TraceDigest() string { return n.trace.String() }
 
 // LoggedWrite is one captured cluster write — the model input the caller's
-// pointwise-suprememum store merges over (merge order is irrelevant,
+// pointwise-supremum store merges over (merge order is irrelevant,
 // CORE-06).
 type LoggedWrite struct {
 	Key string
@@ -155,7 +356,9 @@ type Cluster struct {
 // — over sched, each a real storage.Store whose clock now func returns the
 // scheduler's current virtual time (the D-02 fake-clock idiom) and a
 // repl.Core built with cfg; rng is the network's fault-draw source, policy
-// its fault profile.
+// its fault profile. Construction schedules each node's first timer pump at
+// the scheduler's current time, so the first RunUntil fires every node's
+// startup Hello and DataSync (the adapter's Run-startup mirror).
 func NewCluster(sched *Scheduler, rng *rand.Rand, n int, cfg repl.Config, policy Policy) *Cluster {
 	c := &Cluster{
 		sched: sched,
@@ -200,7 +403,9 @@ func (c *Cluster) deliver(i int, in port.InboundDatagram) {
 // at or before now must fire inside this same call (the next Advance
 // iteration does), never be re-scheduled as an event whose time already
 // passed — mirroring the production adapter's event loop without its
-// goroutines (D-04).
+// goroutines (D-04). The cores' strictly-future deadline contract makes the
+// loop exit on its first iteration; the repetition is the harness refusing
+// to depend on that invariant.
 func (c *Cluster) drive(i int, now time.Time) {
 	for {
 		var out port.Outbox
