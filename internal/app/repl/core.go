@@ -282,9 +282,10 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // and DuplicateNodeID — a logged configuration error — when it differs.
 // Everything else reaches protocol processing: Hello upserts the peer
 // table, DataReplication applies the record and Acks it, Ack drains
-// the pending-set wait-set (REPL-02), and DataRequest answers through the
-// rate-limited egress queue (REPL-04). DataSync arrives with this plan's
-// Task 3 and is ignored meanwhile.
+// the pending-set wait-set (REPL-02), DataRequest answers through the
+// rate-limited egress queue (REPL-04), and DataSync compares against the
+// store snapshot and queues DataRequest / unicast DataReplication
+// responses on the same queue (REPL-05).
 func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	switch in.Status {
 	case port.BadCRC:
@@ -325,11 +326,12 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 		c.handleAck(in.NodeID, msg)
 	case port.DataRequest:
 		c.handleDataRequest(now, in.Source, msg.Key)
-	case port.DataSync, port.SyncEntry, nil:
-		// DataSync compare lands with this plan's Task 3; a standalone
-		// SyncEntry never travels (it lives inside DataSync), and a nil Msg
-		// on a Decoded verdict violates the adapter contract — nothing to
-		// do for either.
+	case port.DataSync:
+		c.handleDataSync(now, in.Source, msg.Entries)
+	case port.SyncEntry, nil:
+		// A standalone SyncEntry never travels (it lives inside DataSync),
+		// and a nil Msg on a Decoded verdict violates the adapter contract
+		// — nothing to do for either.
 	}
 }
 
@@ -419,6 +421,33 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 		return
 	}
 	c.enqueueResponse(now, source, port.DataReplication{Key: key, Record: rec})
+}
+
+// handleDataSync compares one received DataSync listing against the local
+// store (REPL-05): a single Records() snapshot serves the whole handler
+// call, and each listing entry compares per key by the full record-version
+// order — version.Compare, the same order storage.Merge joins by. A
+// locally absent key or a strictly newer listing version enqueues a
+// unicast DataRequest to the sender's handle; a strictly newer local
+// record — tombstones included, so a local delete heals the sender's live
+// copy through the reply — enqueues a unicast exact-record
+// DataReplication; equal versions produce silence. Entries are processed
+// in received order (senders emit sorted, but the compare is per key and
+// order-independent by construction) and every response flows through the
+// single rate-limited egress queue — the scope pin; no reactive unicast
+// has a bypass path, which is what survives empty-node recovery (T-04-07).
+func (c *Core) handleDataSync(now time.Time, source string, entries []port.SyncEntry) {
+	snapshot := c.store.Records()
+	for _, entry := range entries {
+		local, present := snapshot[entry.Key]
+		cmp := local.Version.Compare(entry.Version)
+		switch {
+		case !present || cmp < 0:
+			c.enqueueResponse(now, source, port.DataRequest{Key: entry.Key})
+		case cmp > 0:
+			c.enqueueResponse(now, source, port.DataReplication{Key: entry.Key, Record: local})
+		}
+	}
 }
 
 // enqueueResponse appends one reactive unicast to the egress queue
