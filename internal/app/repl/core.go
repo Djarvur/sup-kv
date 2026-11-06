@@ -42,6 +42,11 @@ const (
 	defaultSyncInterval       = 30 * time.Second
 	defaultSyncChunkBytes     = 1400
 	defaultSyncResponseRate   = 500
+
+	// backoffGrowth is the retransmission ladder's doubling factor: each
+	// retry doubles the previous delay from ack_timeout up to the
+	// ack_timeout_max saturation cap (REPL-02, docs/IDEA.md §Parameters).
+	backoffGrowth = 2
 )
 
 // Config holds the replication timing parameters; it is immutable once
@@ -49,9 +54,9 @@ const (
 // §Parameters defaults, and a nil Log normalizes to a no-op: the core is
 // total over any Config. RetransmitInterval bounds how long the driver may
 // sleep while any pending entry exists (the scan-granularity reading of
-// IDEA.md's parameter list); the per-key backoff ladder itself doubles from
-// AckTimeout and saturates at AckTimeoutMax — documented with the ladder in
-// plan 04-02, where retransmission lands.
+// IDEA.md's parameter list, research A5); the per-key backoff ladder itself
+// doubles from AckTimeout and saturates at AckTimeoutMax — documented with
+// every step at Core.scanRetransmit.
 type Config struct {
 	HelloInterval      time.Duration
 	PeerTimeout        time.Duration
@@ -251,7 +256,7 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	switch msg := in.Msg.(type) {
 	case port.Hello:
-		c.peers[in.NodeID] = peer{handle: in.Source, runID: in.RunID, lastHello: now}
+		c.handleHello(now, in, out)
 	case port.DataReplication:
 		c.applyRemote(in.Source, msg, out)
 	case port.Ack:
@@ -260,6 +265,31 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 		// DataRequest/DataSync processing lands with plans 04-03/04-04; a
 		// nil Msg on a Decoded verdict violates the adapter contract and
 		// matches no case — either way there is nothing to do yet.
+	}
+}
+
+// handleHello upserts the peer-table row from one Hello datagram (REPL-01):
+// only a Hello refreshes lastHello — the field's name is the liveness
+// contract, and no other datagram type ever touches it. A Hello that ends
+// an empty table is discovery: in this same event the core flushes every
+// pending entry — one broadcast DataReplication per entry in sorted key
+// order, the new peer added to every wait-set, every ladder restarted at
+// cfg.AckTimeout — so a brand-new peer receives the pending set promptly,
+// not at the next backoff expiry (research A6). A Hello that does not end
+// an empty table modifies no wait-set: only discovery adds waiters.
+func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Outbox) {
+	discovery := len(c.peers) == 0
+	c.peers[in.NodeID] = peer{handle: in.Source, runID: in.RunID, lastHello: now}
+	if !discovery {
+		return
+	}
+	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
+		entry := c.pending[key]
+		entry.waitSet[in.NodeID] = struct{}{}
+		entry.backoff = c.cfg.AckTimeout
+		entry.nextRetry = now.Add(c.cfg.AckTimeout)
+		c.pending[key] = entry
+		out.Broadcast(port.DataReplication{Key: key, Record: entry.rec})
 	}
 }
 
@@ -337,17 +367,106 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 	out.Broadcast(port.DataReplication{Key: key, Record: own})
 }
 
-// Advance fires the due timers — the hello timer at this stage — and
-// returns the next deadline for the driver to sleep on. The zero initial
-// hello deadline makes the very first Advance emit the startup Hello
-// (docs/IDEA.md §Node lifecycle); every later one repeats every
-// cfg.HelloInterval.
+// Advance fires the due timers — the hello timer and the retransmission
+// scan at this stage — and returns the next deadline for the driver to
+// sleep on: the minimum of the following hello deadline and, while any
+// pending entry exists, the retransmit scan ceiling now+RetransmitInterval
+// clamped by the earliest pending nextRetry when the scanner is armed (the
+// scan-granularity reading of retransmit_interval, research A5). The
+// returned deadline is always strictly future: work due at now fires inside
+// this same call.
 func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 	if !now.Before(c.nextHello) {
 		out.Broadcast(port.Hello{})
 		c.nextHello = now.Add(c.cfg.HelloInterval)
 	}
+	c.scanRetransmit(now, out)
+	return c.nextDeadline(now)
+}
+
+// scanRetransmit fires every due pending entry's retransmission (REPL-02).
+// An entry is due when now is at or after its nextRetry AND the peer table
+// is non-empty; while the table is empty the scanner is suspended — it
+// fires nothing and advances no nextRetry or backoff, so entries and their
+// ladder state are retained (suspending, not dropping; the first Hello that
+// ends an empty table flushes them, see handleHello).
+//
+// The backoff ladder, with the design defaults of docs/IDEA.md §Parameters:
+// after each firing, backoff doubles from the initial cfg.AckTimeout and
+// saturates at cfg.AckTimeoutMax — saturate, never wrap (the clock's
+// counter-overflow saturation precedent, clock.go). The ladder delays from
+// a write at t0 are therefore exactly 200ms, 400ms, 800ms, 1600ms, 3200ms,
+// then 5000ms repeated forever — cumulative retries at t0+200, +600,
+// +1400, +3000, +6200ms and every 5000ms after that, until the entry drains
+// on full Ack coverage or leaves on supersession (REPL-02's "until").
+// Firing is one broadcast DataReplication per entry: every peer shares each
+// send, and peers that already Acked re-merge idempotently and re-Ack (the
+// always-Ack-on-duplicate truth of plan 04-01). retransmit_interval is the
+// scan granularity — while any entry is pending, Advance's returned
+// deadline is never more than cfg.RetransmitInterval past now, so a due
+// retry is honored at scan granularity (research A5); with no pending
+// entries this scanner contributes no deadline. Emission order is keys
+// sorted ascending: no map-iteration order ever reaches an emit path
+// (REPL-02, research Pitfall 1 / probe #9).
+func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
+	if len(c.peers) == 0 || len(c.pending) == 0 {
+		return
+	}
+	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
+		entry := c.pending[key]
+		if now.Before(entry.nextRetry) {
+			continue
+		}
+		out.Broadcast(port.DataReplication{Key: key, Record: entry.rec})
+		entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
+		entry.nextRetry = now.Add(entry.backoff)
+		c.pending[key] = entry
+	}
+}
+
+// nextDeadline returns the earliest strictly-future deadline over the armed
+// timers: the hello timer and, while any pending entry exists, the
+// retransmit scan deadline. After scanRetransmit has fired everything due,
+// every contribution is strictly future.
+func (c *Core) nextDeadline(now time.Time) time.Time {
+	if len(c.pending) == 0 {
+		return c.nextHello
+	}
+	if scan := c.retransmitDeadline(now); scan.Before(c.nextHello) {
+		return scan
+	}
 	return c.nextHello
+}
+
+// retransmitDeadline returns the retransmit scan's deadline contribution:
+// the granularity ceiling now+cfg.RetransmitInterval (research A5 — while
+// any entry is pending, the driver never sleeps longer than this), clamped
+// by the earliest pending nextRetry when the scanner is armed. During
+// suspension (an empty peer table) the ladder is paused — its stale retry
+// times must not leak into the deadline — so the ceiling alone bounds the
+// sleep.
+func (c *Core) retransmitDeadline(now time.Time) time.Time {
+	ceiling := now.Add(c.cfg.RetransmitInterval)
+	if len(c.peers) == 0 {
+		return ceiling
+	}
+	if earliest := c.earliestRetry(); earliest.Before(ceiling) {
+		return earliest
+	}
+	return ceiling
+}
+
+// earliestRetry returns the earliest pending nextRetry (the zero time when
+// nothing is pending); callers reach it only with a non-empty pending set.
+func (c *Core) earliestRetry() time.Time {
+	var earliest time.Time
+	for key := range c.pending {
+		nextRetry := c.pending[key].nextRetry
+		if earliest.IsZero() || nextRetry.Before(earliest) {
+			earliest = nextRetry
+		}
+	}
+	return earliest
 }
 
 // Discards returns the discard-class counters (D-02) — a value copy, safe
