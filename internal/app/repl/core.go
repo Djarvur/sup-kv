@@ -56,7 +56,9 @@ const (
 // sleep while any pending entry exists (the scan-granularity reading of
 // IDEA.md's parameter list, research A5); the per-key backoff ladder itself
 // doubles from AckTimeout and saturates at AckTimeoutMax — documented with
-// every step at Core.scanRetransmit.
+// every step at Core.scanRetransmit. SyncResponseRate paces the egress
+// queue: responses are spaced floor(1s/SyncResponseRate) nanoseconds apart
+// by integer division (probe #16), the first response immediate.
 type Config struct {
 	HelloInterval      time.Duration
 	PeerTimeout        time.Duration
@@ -161,6 +163,19 @@ type peer struct {
 	lastHello time.Time
 }
 
+// queuedUnicast is one reactive unicast response waiting in the egress
+// queue (REPL-05's rate limiter): the destination's opaque address handle
+// (D-03) and the message. Exactly three producer sites exist — DataRequest
+// emissions, DataRequest replies and DataSync-newer responses (the
+// egress-limiter scope pin) — and nothing else ever queues: proactive
+// traffic (Hello, retransmits, the timer/startup DataSync itself) bypasses
+// the limiter, which is what bounds an empty node's recovery instead of
+// letting it become a flood (T-04-07).
+type queuedUnicast struct {
+	handle string
+	msg    port.Message
+}
+
 // pendingEntry is one local write awaiting peer Acks (REPL-02): a
 // defensive copy of the written record (the storage.install precedent — the
 // author may reuse its buffer after NotifyLocalWrite returns), the exact
@@ -192,7 +207,21 @@ type Core struct {
 	peers     map[uint16]peer
 	pending   map[string]pendingEntry
 	nextHello time.Time
-	discards  DiscardStats
+	egress    []queuedUnicast
+
+	// nextSendAt is the earliest virtual time the next queued response may
+	// emit; it is meaningful exactly while the egress queue is non-empty
+	// (enqueueResponse arms it, the drain advances it).
+	nextSendAt time.Time
+
+	// syncResponseInterval is the egress queue's per-response spacing,
+	// derived once at construction by the pinned deterministic integer
+	// arithmetic: floor(1s/SyncResponseRate) nanoseconds by integer
+	// division — exactly 2ms at the 500/s default and 3333333ns at 300/s
+	// (probe #16, echoed in docs/IDEA.md §Parameters).
+	syncResponseInterval time.Duration
+
+	discards DiscardStats
 }
 
 // New returns a core for nodeID with the per-process runID. ownHandle is
@@ -200,14 +229,16 @@ type Core struct {
 // string) — opaque to the core (D-03), kept for the later own-echo and
 // duplicate-node_id classification work. store must be non-nil.
 func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg Config) *Core {
+	cfg = cfg.normalized()
 	return &Core{
-		nodeID:    nodeID,
-		runID:     runID,
-		ownHandle: ownHandle,
-		store:     store,
-		cfg:       cfg.normalized(),
-		peers:     make(map[uint16]peer),
-		pending:   make(map[string]pendingEntry),
+		nodeID:               nodeID,
+		runID:                runID,
+		ownHandle:            ownHandle,
+		store:                store,
+		cfg:                  cfg,
+		peers:                make(map[uint16]peer),
+		pending:              make(map[string]pendingEntry),
+		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
 }
 
@@ -220,9 +251,10 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // robust own-echo test — the sender's own broadcast really does loop back)
 // and DuplicateNodeID — a logged configuration error — when it differs.
 // Everything else reaches protocol processing: Hello upserts the peer
-// table, DataReplication applies the record and Acks it, and Ack drains
-// the pending-set wait-set (REPL-02). DataRequest and DataSync arrive with
-// their later plans and are ignored meanwhile.
+// table, DataReplication applies the record and Acks it, Ack drains
+// the pending-set wait-set (REPL-02), and DataRequest answers through the
+// rate-limited egress queue (REPL-04). DataSync arrives with this plan's
+// Task 3 and is ignored meanwhile.
 func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	switch in.Status {
 	case port.BadCRC:
@@ -261,10 +293,13 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 		c.applyRemote(in.Source, msg, out)
 	case port.Ack:
 		c.handleAck(in.NodeID, msg)
-	case port.DataRequest, port.DataSync, port.SyncEntry, nil:
-		// DataRequest/DataSync processing lands with plans 04-03/04-04; a
-		// nil Msg on a Decoded verdict violates the adapter contract and
-		// matches no case — either way there is nothing to do yet.
+	case port.DataRequest:
+		c.handleDataRequest(now, in.Source, msg.Key)
+	case port.DataSync, port.SyncEntry, nil:
+		// DataSync compare lands with this plan's Task 3; a standalone
+		// SyncEntry never travels (it lives inside DataSync), and a nil Msg
+		// on a Decoded verdict violates the adapter contract — nothing to
+		// do for either.
 	}
 }
 
@@ -336,6 +371,60 @@ func (c *Core) handleAck(peerID uint16, ack port.Ack) {
 	}
 }
 
+// handleDataRequest answers one DataRequest (REPL-04): a single Records()
+// snapshot serves the whole handler call — the snapshot discipline every
+// sync path of this plan reuses, never one snapshot per response — and a
+// key present in the snapshot (tombstones included, so deletes heal
+// through the same LWW path as writes) enqueues one unicast
+// DataReplication carrying the exact snapshot record on the egress queue,
+// which Advance drains at the sync_response_rate cadence. A key absent
+// from the snapshot produces nothing at all — no error reply, no nack,
+// nothing enqueued, ever. The reply addresses the datagram's source handle
+// regardless of peer-table membership: a stranger's DataRequest is still
+// protocol traffic from a live node, and replies are unicast only — a
+// broadcast reply would amplify one request into N datagrams.
+func (c *Core) handleDataRequest(now time.Time, source, key string) {
+	rec, ok := c.store.Records()[key]
+	if !ok {
+		return
+	}
+	c.enqueueResponse(now, source, port.DataReplication{Key: key, Record: rec})
+}
+
+// enqueueResponse appends one reactive unicast to the egress queue
+// (REPL-05): the FIFO drains inside Advance at exactly one
+// syncResponseInterval per response, enqueue order IS drain order, and the
+// first response after an idle queue emits immediately — nextSendAt clamps
+// to this call's now, so no head-of-line delay ever applies to the first
+// datagram of a burst.
+func (c *Core) enqueueResponse(now time.Time, handle string, msg port.Message) {
+	if len(c.egress) == 0 {
+		c.nextSendAt = now
+	}
+	c.egress = append(c.egress, queuedUnicast{handle: handle, msg: msg})
+}
+
+// drainEgress emits every due queued response (REPL-05): while nextSendAt
+// is at or before now, the FIFO's head emits unicast and the next slot
+// moves one syncResponseInterval ahead — the spacing uses no map state and
+// no re-sorting; the producers iterate sorted listings or arrival order,
+// so enqueue order is already deterministic (probe #9 discipline). An
+// Advance that arrives late (past several slots) still emits only one
+// response per call of this loop's steady state: the slot advances from
+// the actual emission time, never bursting a backlog in one tick — the
+// limiter is what survives empty-node recovery (T-04-07).
+func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
+	for len(c.egress) > 0 && !now.Before(c.nextSendAt) {
+		q := c.egress[0]
+		c.egress = c.egress[1:]
+		out.Unicast(q.handle, q.msg)
+		if now.After(c.nextSendAt) {
+			c.nextSendAt = now
+		}
+		c.nextSendAt = c.nextSendAt.Add(c.syncResponseInterval)
+	}
+}
+
 // NotifyLocalWrite is the explicit call a write's author makes after the
 // store write (D-05: no store subscriptions, no observers, no callbacks —
 // tests now, the gRPC handler in Phase 5). The core keeps a defensive copy
@@ -368,14 +457,17 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 }
 
 // Advance fires the due timers — the hello timer, the peer-timeout
-// eviction scan and the retransmission scan at this stage — and returns the
-// next deadline for the driver to sleep on: the minimum of the following
-// hello deadline, the earliest peer expiry and, while any pending entry
-// exists, the retransmit scan deadline (the scan-granularity reading of
-// retransmit_interval, research A5). The returned deadline is always
-// strictly future: work due at now fires inside this same call. Eviction
-// runs before the retransmit scan so a peer expiring at now is already gone
-// when the scanner asks whether any peer remains.
+// eviction scan, the retransmission scan and the rate-limited egress drain
+// at this stage — and returns the next deadline for the driver to sleep
+// on: the minimum of the following hello deadline, the earliest peer
+// expiry, while any pending entry exists the retransmit scan deadline (the
+// scan-granularity reading of retransmit_interval, research A5), and while
+// any response is queued the next egress slot. The returned deadline is
+// always strictly future: work due at now fires inside this same call.
+// Eviction runs before the retransmit scan so a peer expiring at now is
+// already gone when the scanner asks whether any peer remains; the egress
+// drain runs last so a tick's reactive responses follow its proactive
+// emissions.
 func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 	if !now.Before(c.nextHello) {
 		out.Broadcast(port.Hello{})
@@ -383,6 +475,7 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 	}
 	c.evictPeers(now)
 	c.scanRetransmit(now, out)
+	c.drainEgress(now, out)
 	return c.nextDeadline(now)
 }
 
@@ -453,9 +546,10 @@ func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
 }
 
 // nextDeadline returns the earliest strictly-future deadline over the armed
-// timers: the hello timer, the earliest peer expiry and, while any pending
-// entry exists, the retransmit scan deadline. After evictPeers and
-// scanRetransmit have fired everything due, every contribution is strictly
+// timers: the hello timer, the earliest peer expiry, while any pending
+// entry exists the retransmit scan deadline, and while any response is
+// queued the next egress slot. After evictPeers, scanRetransmit and
+// drainEgress have fired everything due, every contribution is strictly
 // future.
 func (c *Core) nextDeadline(now time.Time) time.Time {
 	deadline := c.nextHello
@@ -466,6 +560,9 @@ func (c *Core) nextDeadline(now time.Time) time.Time {
 	}
 	if expiry := c.earliestPeerExpiry(); !expiry.IsZero() && expiry.Before(deadline) {
 		deadline = expiry
+	}
+	if len(c.egress) > 0 && c.nextSendAt.Before(deadline) {
+		deadline = c.nextSendAt
 	}
 	return deadline
 }
@@ -567,12 +664,11 @@ type UnackedStats struct {
 }
 
 // QueuedResponses returns the number of reactive unicast responses waiting
-// in the sync egress queue (REPL-05's rate limiter) — the simulator and
-// observability seam plan 04-05's quiescence check reads. RED-phase compile
-// stub of plan 04-03 Task 1: the queue itself lands with the task's GREEN
-// step.
-func (*Core) QueuedResponses() int {
-	return 0
+// in the egress queue (REPL-05's rate limiter) — the simulator and
+// observability seam plan 04-05's quiescence check reads: a node whose
+// queue is empty has finished answering its sync round.
+func (c *Core) QueuedResponses() int {
+	return len(c.egress)
 }
 
 // UnackedStats returns the pending-set gauge observed at now: the unacked
