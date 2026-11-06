@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 4
 current_phase_name: Replication and Deterministic Simulator
 status: executing
-stopped_at: Completed 04-04-PLAN.md (restart semantics — run_id-change targeted full listing)
-last_updated: "2026-11-06T19:06:09.429Z"
+stopped_at: Completed 04-05-PLAN.md (deterministic simulator, bound tests, seeded chaos)
+last_updated: "2026-11-06T19:42:43.079Z"
 last_activity: 2026-11-06
 last_activity_desc: Phase 4 execution started
-state_head: b3ee2ceaa689df4937cd003edbfa1e1df33bac9f
+state_head: 84e0ce0a4874f1a216548ce0e4f967b600b1b76b
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 18
-  completed_plans: 15
+  completed_plans: 17
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 ## Current Position
 
 Phase: 4 (Replication and Deterministic Simulator) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
 Last activity: 2026-11-06 — Phase 4 execution started
 
@@ -74,6 +74,7 @@ Progress: [████░░░░░░] 43%
 | Phase 4 P02 | 19 min | 3 tasks | 3 files |
 | Phase 04 P03 | 19 min | 3 tasks | 5 files |
 | Phase 04 P04 | 9 min | 2 tasks | 2 files |
+| Phase 04 P05 | 24 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -145,6 +146,10 @@ Recent decisions affecting current work:
 - [Phase 04]: [Phase 04]: REPL-07 trigger pinned as pure inequality with the remembered run_id: random 16-byte run_ids carry no order, so a stale return is just another change (entry flip plus one idempotent re-sync listing, single table row); in-flight Ack/DataReplication/DataSync from the old run process run_id-agnostically on (key, version) merits (plan 04-04, probe #19)
 - [Phase 04]: [Phase 04]: The restart-targeted listing bypasses the egress limiter (proactive, once per detected change — the plan-04-03 egress-scope pin) while the replay traffic it solicits stays limiter-gated; a detected restart never re-adds wait-sets nor touches the ladder — reconciliation heals a restarted peer, retransmission does not (plan 04-04)
 - [Phase 04]: [Phase 04]: The restart reaction reuses the plan-04-03 listing verbatim through the extracted listingChunks build (one snapshot, sorted, chunked) shared with syncListing — no second listing implementation, no new exported symbols (plan 04-04)
+- [Phase 04]: One live timer per node in simnet's drive() via a generation counter: every drive supersedes the node's previously scheduled timer, else outstanding timers grow linearly with virtual time (quadratic no-op Advances over a long run) — 66 virtual seconds cost 9ms of CPU instead of 73ms, semantics and delivery trace unchanged (plan 04-05) — One live timer per node in simnet's drive() via a generation counter: every drive supersedes the node's previously scheduled timer, else outstanding timers grow linearly with virtual time (quadratic no-op Advances over a long run) — 66 virtual seconds cost 9ms of CPU instead of 73ms, semantics and delivery trace unchanged (plan 04-05)
+- [Phase 04]: Simulator determinism kept total: deterministic per-node run ids (decimal-digit rendering, no crypto/rand anywhere), send-time fault draws through the one injected rng in a fixed draw order, (Time, Seq) insertion tie-breaks, registered-node slice iteration for broadcast fan-out (plan 04-05) — Simulator determinism kept total: deterministic per-node run ids (decimal-digit rendering, no crypto/rand anywhere), send-time fault draws through the one injected rng in a fixed draw order, (Time, Seq) insertion tie-breaks, registered-node slice iteration for broadcast fan-out (plan 04-05)
+- [Phase 04]: D-06 flag-vs-env reconciliation delivered as pinned: SUPKV_SIM_SEED is the chaos replay hook (the only one that works when the test binary runs without -args), every run prints the copy-paste replay command, testutil's -seed flag remains the property-test hook (plan 04-05) — D-06 flag-vs-env reconciliation delivered as pinned: SUPKV_SIM_SEED is the chaos replay hook (the only one that works when the test binary runs without -args), every run prints the copy-paste replay command, testutil's -seed flag remains the property-test hook (plan 04-05)
+- [Phase 04]: REPL-10 bounds asserted inclusively with negative probes; the loss bound models its loss episode as a directed time-window partition dropping the initial send plus the +200/+600ms ladder attempts and delivering +1400ms — flagged assumption #21's pinned window reading (plan 04-05) — REPL-10 bounds asserted inclusively with negative probes; the loss bound models its loss episode as a directed time-window partition dropping the initial send plus the +200/+600ms ladder attempts and delivering +1400ms — flagged assumption #21's pinned window reading (plan 04-05)
 
 ### Pending Todos
 
@@ -164,6 +169,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-06T19:05:45.345Z
-Stopped at: Completed 04-04-PLAN.md (restart semantics — run_id-change targeted full listing)
+Last session: 2026-11-06T19:42:42.955Z
+Stopped at: Completed 04-05-PLAN.md (deterministic simulator, bound tests, seeded chaos)
 Resume file: None

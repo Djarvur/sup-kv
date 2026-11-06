@@ -36,7 +36,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **REPL-07**: A Hello with a new `run_id` from a known node (restart) triggers full sync toward it
 - [ ] **REPL-08**: Datagrams with a duplicate `node_id` are dropped and logged as a configuration error
 - [ ] **REPL-09**: Own broadcast echo and datagrams with bad CRC or bad proto version are dropped, with each discard class distinguishable
-- [ ] **REPL-10**: Documented convergence bounds hold and are proven in simulation: normal operation one RTT; datagram loss ≤ `ack_timeout_max`; after a partition heals ≤ 2 × `sync_interval` + response time
+- [x] **REPL-10**: Documented convergence bounds hold and are proven in simulation: normal operation one RTT; datagram loss ≤ `ack_timeout_max`; after a partition heals ≤ 2 × `sync_interval` + response time
 
 ### Persistence
 
@@ -66,7 +66,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **TEST-01**: CRDT property tests prove merge is commutative, associative and idempotent
 - [x] **TEST-02**: HLC property tests prove monotonicity under adversarial clock input, post-receive ordering and version uniqueness; counter-reset and restart-from-dump-max cases included
-- [ ] **TEST-03**: A deterministic multi-node simulation runs 2..N nodes over a virtual network that loses, duplicates and reorders datagrams and simulates partitions, with seeded runs
+- [x] **TEST-03**: A deterministic multi-node simulation runs 2..N nodes over a virtual network that loses, duplicates and reorders datagrams and simulates partitions, with seeded runs
 - [ ] **TEST-04**: Every documented failure scenario is an automated test demonstrating convergence within the documented bounds: datagram loss; Ack loss; duplicates/reordering/own-broadcast echo; partition for seconds and for days (both sides serving writes, deterministic winner, conflict-journal entries); one-way connectivity; node restart (RunID change triggers resync); empty-disk recovery at `sync_response_rate`; both-nodes-down restart; corrupted dump records; wall-clock jumps live and between restarts; a node's clock far ahead; ~1000 writes/s bursts; duplicate `node_id`; protocol version mismatch
 - [ ] **TEST-05**: Benchmarks cover dump at 10k keys and replication throughput (burst writes), with bounded confirmation latency under bursts
 
@@ -168,8 +168,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REPL-07 | Phase 4 | Complete |
 | REPL-08 | Phase 4 | Pending |
 | REPL-09 | Phase 4 | Pending |
-| REPL-10 | Phase 4 | Pending |
-| TEST-03 | Phase 4 | Pending |
+| REPL-10 | Phase 4 | Complete |
+| TEST-03 | Phase 4 | Complete |
 | API-01 | Phase 5 | Pending |
 | API-02 | Phase 5 | Pending |
 | API-03 | Phase 5 | Pending |

@@ -101,7 +101,7 @@ Plans:
   3. Full reconciliation works in both directions: chunked DataSync runs on the sync timer, at startup and on neighbor restart; receivers answer with DataRequest or unicast DataReplication rate-limited by `sync_response_rate`; a DataRequest for an unknown key gets no reply; a Hello with a new `run_id` triggers full sync toward the restarted node
   4. Malformed traffic is dropped with distinguishable classes: duplicate `node_id` logged as a configuration error, plus own broadcast echo, bad CRC and bad proto version each identifiable
   5. The deterministic simulator runs 2..N nodes over a seeded virtual network that loses, duplicates, reorders and partitions datagrams, and asserts convergence within the documented bounds — normal one RTT, datagram loss ≤ `ack_timeout_max`, partition heal ≤ 2 × `sync_interval` + response time — printing the seed on failure
-**Plans**: 4/6 plans executed
+**Plans**: 5/6 plans executed
 Plans:
 **Wave 1**
 - [x] 04-01-PLAN.md — Tracer: port seam + wire schema + minimal event-loop core + UDP adapter; one write replicated node-to-node end-to-end (REPL-03)
@@ -116,7 +116,7 @@ Plans:
 - [x] 04-04-PLAN.md — Restart semantics: new run_id from a known node triggers the targeted full listing; stale-run_id and in-flight-traffic edges pinned (REPL-07)
 
 **Wave 5** *(blocked on Wave 4)*
-- [ ] 04-05-PLAN.md — Deterministic simulator: simnet discrete-event virtual network, the three named convergence bound tests, seeded chaos test with SUPKV_SIM_SEED replay; phase gate (TEST-03, REPL-10)
+- [x] 04-05-PLAN.md — Deterministic simulator: simnet discrete-event virtual network, the three named convergence bound tests, seeded chaos test with SUPKV_SIM_SEED replay; phase gate (TEST-03, REPL-10)
 - [ ] 04-06-PLAN.md — Expansion sibling of the tracer (parallel with 04-05): full discard classification with adversarial totality, persist.Engine.ApplyRemote seam, real-socket two-node smoke (REPL-01, REPL-08, REPL-09)
 
 ### Phase 5: gRPC API and Binary
@@ -162,7 +162,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 1. CI Bootstrap and Repo Skeleton | 6/6 | Complete    | 2026-11-02 |
 | 2. Engine — HLC Versioning and LWW Store | 4/4 | Complete    | 2026-11-02 |
 | 3. Persistence — Dump and Write Confirmation | 2/2 | Complete    | 2026-11-03 |
-| 4. Replication and Deterministic Simulator | 4/6 | Planning complete | - |
+| 4. Replication and Deterministic Simulator | 5/6 | In Progress | - |
 | 5. gRPC API and Binary | 0/TBD | Not started | - |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | 0/TBD | Not started | - |
 | 7. v1.0 — Docs, Examples and Release | 0/TBD | Not started | - |
