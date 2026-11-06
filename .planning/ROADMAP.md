@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: CI Bootstrap and Repo Skeleton** - Quality gates, 4-OS CI matrix, Dependabot/govulncheck and the machine-enforced architecture boundary, before any feature code (completed 2026-11-02)
 - [x] **Phase 2: Engine — HLC Versioning and LWW Store** - Pure in-memory decision core: UUIDv7-packed HLC versions, LWW-Element-Map with tombstones and conflict journal, proven by property tests (completed 2026-11-02)
 - [x] **Phase 3: Persistence — Dump and Write Confirmation** - Human-readable JSON dumps with atomic write, `.prev` fallback chain and snapshots; a confirmed write is always on disk (completed 2026-11-03)
-- [ ] **Phase 4: Replication and Deterministic Simulator** - UDP broadcast replication (Hello, DataReplication/Ack, DataSync) with N-peer tracking, plus the seeded-chaos simulator that proves the convergence bounds
+- [x] **Phase 4: Replication and Deterministic Simulator** - UDP broadcast replication (Hello, DataReplication/Ack, DataSync) with N-peer tracking, plus the seeded-chaos simulator that proves the convergence bounds (completed 2026-11-07)
 - [ ] **Phase 5: gRPC API and Binary** - The user-facing surface: Get/Set/Delete/List/Watch, startup gate, `wait_for_replication`, health endpoint, snapshots, single static binary
 - [ ] **Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks** - Every documented failure scenario as an automated test (simulator plus real sockets), metrics endpoint, structured logs, benchmarks
 - [ ] **Phase 7: v1.0 — Docs, Examples and Release** - Verified quickstart, ops docs with trust model and drift runbook, API examples, release tag
@@ -101,7 +101,7 @@ Plans:
   3. Full reconciliation works in both directions: chunked DataSync runs on the sync timer, at startup and on neighbor restart; receivers answer with DataRequest or unicast DataReplication rate-limited by `sync_response_rate`; a DataRequest for an unknown key gets no reply; a Hello with a new `run_id` triggers full sync toward the restarted node
   4. Malformed traffic is dropped with distinguishable classes: duplicate `node_id` logged as a configuration error, plus own broadcast echo, bad CRC and bad proto version each identifiable
   5. The deterministic simulator runs 2..N nodes over a seeded virtual network that loses, duplicates, reorders and partitions datagrams, and asserts convergence within the documented bounds — normal one RTT, datagram loss ≤ `ack_timeout_max`, partition heal ≤ 2 × `sync_interval` + response time — printing the seed on failure
-**Plans**: 6/6 plans executed
+**Plans**: 6/6 plans complete
 Plans:
 **Wave 1**
 - [x] 04-01-PLAN.md — Tracer: port seam + wire schema + minimal event-loop core + UDP adapter; one write replicated node-to-node end-to-end (REPL-03)
@@ -162,7 +162,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 1. CI Bootstrap and Repo Skeleton | 6/6 | Complete    | 2026-11-02 |
 | 2. Engine — HLC Versioning and LWW Store | 4/4 | Complete    | 2026-11-02 |
 | 3. Persistence — Dump and Write Confirmation | 2/2 | Complete    | 2026-11-03 |
-| 4. Replication and Deterministic Simulator | 6/6 | In Progress | - |
+| 4. Replication and Deterministic Simulator | 6/6 | Complete    | 2026-11-07 |
 | 5. gRPC API and Binary | 0/TBD | Not started | - |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | 0/TBD | Not started | - |
 | 7. v1.0 — Docs, Examples and Release | 0/TBD | Not started | - |

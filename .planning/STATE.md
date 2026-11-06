@@ -1,43 +1,44 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 4
-current_phase_name: Replication and Deterministic Simulator
-status: verifying
-stopped_at: Completed 04-06-PLAN.md (discard classification completion, ApplyRemote seam, real-socket smoke test)
-last_updated: "2026-11-06T20:11:29.986Z"
-last_activity: 2026-11-06
-last_activity_desc: Phase 4 execution started
-state_head: 6e3bb655ff7f18c96dff681a128c521069e3286a
+current_phase: 5
+current_phase_name: gRPC API and Binary
+status: planning
+stopped_at: Phase 4 complete, ready to plan Phase 5
+last_updated: "2026-11-06T21:54:04.299Z"
+last_activity: 2026-11-07
+last_activity_desc: Phase 4 complete, transitioned to Phase 5
+state_head: 5d66ede759982aa9e9bde03037b78f57a327af62
 progress:
   total_phases: 7
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 18
   completed_plans: 18
+  percent: 57
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-11-02)
+See: .planning/PROJECT.md (updated 2026-11-07)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 4 — Replication and Deterministic Simulator
+**Current focus:** Phase 5 — gRPC API and Binary
 
 ## Current Position
 
-Phase: 4 (Replication and Deterministic Simulator) — EXECUTING
-Plan: 6 of 6
-Status: Phase complete — ready for verification
-Last activity: 2026-11-06 — Phase 4 execution started
+Phase: 5 — gRPC API and Binary
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-07 — Phase 4 complete, transitioned to Phase 5
 
-Progress: [████░░░░░░] 43%
+Progress: [██████░░░░] 57%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 12
+- Total plans completed: 18
 - Average duration: 10min
 - Total execution time: ~1 hour (60 min of plan execution)
 
@@ -48,6 +49,7 @@ Progress: [████░░░░░░] 43%
 | 02 | 4 | - | - |
 | 01 | 6 | - | - |
 | 3 | 2 | - | - |
+| 4 | 6 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -162,6 +164,8 @@ None yet.
 ### Blockers/Concerns
 
 - Phase 3 (Persistence): open planning decision — macOS F_FULLFSYNC durability policy (verify in Phase 6 crash scenarios).
+- Phase 5: D-08 macOS smoke outcome is empirical until the first macOS CI run (Linux green; macOS loud-skip path code-verified; UAT item 2 passed 2026-11-07).
+- Phase 4 review: info-level findings IN-01 (write-only ownHandle dead state) and IN-02 (simnet Cluster.Write ignores store Set error) remain open by triage — see 04-REVIEW-DISPOSITION.md.
 
 ## Deferred Items
 
@@ -174,5 +178,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-11-06T20:11:29.881Z
-Stopped at: Completed 04-06-PLAN.md (discard classification completion, ApplyRemote seam, real-socket smoke test)
+Stopped at: Phase 4 complete, ready to plan Phase 5
 Resume file: None

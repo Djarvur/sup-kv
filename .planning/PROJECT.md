@@ -19,16 +19,17 @@ Every node stays writable at all times with no coordination, and a write confirm
 - ✓ **Core store** — Phase 2 (LWW-Element-Map in `internal/app/storage`; Get/Set/Delete/SetIfAbsent; tombstones; 60 KiB limit; conflict journal via Merge-returned losers)
 - ✓ **Versioning** — Phase 2 (HLC in `internal/app/clock` with UUIDv7 packing in `internal/app/version`; byte-order comparison = `(l, c, NodeID)`; monotonic under adversarial clocks incl. restart watermark seeding and 48-bit ceiling saturation; drift signal both directions)
 - ✓ **Property tests** — Phase 2 (merge laws incl. tombstones; HLC monotonicity, uniqueness, restart dominance — seeded, replayable, 100% statement coverage)
+- ✓ **Persistence** — Phase 3 (JSON dump, atomic write with `.prev` fallback, debounced dumps, write-confirmed-after-dump guarantee; snapshots create/load)
+- ✓ **Replication** — Phase 4 (protobuf UDP envelope; Hello discovery; DataReplication/Ack with retransmission backoff; DataRequest replies; chunked DataSync full reconciliation with rate-limited responses; N-peer table with per-peer ack tracking; restart resync on run_id change)
+- ✓ **Deterministic simulator** — Phase 4 (simnet: goroutine-free discrete-event virtual network with loss/duplication/reordering/partition; convergence bounds proven on the virtual clock; chaos suite seeded and replayable via `SUPKV_SIM_SEED`)
 
 ### Active
 
 All Active requirements are hypotheses until shipped and validated.
 
-- [ ] **Replication**: UDP envelope; Hello discovery; DataReplication/Ack with retransmission backoff; DataRequest; chunked DataSync full reconciliation with rate-limited responses; N-peer table and per-peer ack tracking
-- [ ] **Persistence**: JSON dump, atomic write with `.prev` fallback, debounced dumps, write-confirmed-after-dump guarantee; snapshots create/load
 - [ ] **API**: gRPC service + protobuf definitions; Watch stream; startup gate; `wait_for_replication`
 - [ ] **Observability**: metrics endpoint; structured logs; discarded-datagram counters
-- [ ] **Testing (remaining)**: deterministic multi-node simulation with lossy/duplicating/reordering/partitioning virtual network; failure-scenario suite; benchmarks (dump at 10k keys, replication throughput)
+- [ ] **Testing (remaining)**: failure-scenario suite for the documented scenarios; benchmarks (dump at 10k keys, replication throughput)
 - [ ] **Tooling**: single static binary, flags/env config, `--version`, systemd-friendly
 
 ### Out of Scope
@@ -85,12 +86,12 @@ Target workloads: service configuration (writes/hour, KiB values, hundreds of ke
 |----------|-----------|---------|
 | LWW-Element-Map CRDT as the store | Strong eventual consistency; merge is commutative/associative/idempotent, so UDP loss/duplication/reordering cannot affect outcome | ✓ Validated (Phase 2)
 | HLC packed into UUIDv7 as `RecordVersion` | Byte-wise comparison = `(l, c, NodeID)` order; unique per write; no clock-sync protocol needed | ✓ Validated (Phase 2)
-| UDP broadcast replication: ack + retransmit + periodic chunked DataSync anti-entropy | Fits a single trusted segment; bounded convergence (loss ≤ `ack_timeout_max`, partition heal ≤ 2 × `sync_interval`) | — Pending |
-| Human-readable JSON dump; atomic write with `.prev` fallback; write confirmed only after dump | Inspectable state; confirmed writes always on disk | — Pending |
-| gRPC API with Watch stream and `wait_for_replication` | Typed clients, streaming change notifications, optional replication confirmation | — Pending |
-| Trusted-segment trust model in v1 (CRC32 only, no HMAC) | Accepted limitation; HMAC is documented future work | — Pending |
+| UDP broadcast replication: ack + retransmit + periodic chunked DataSync anti-entropy | Fits a single trusted segment; bounded convergence (loss ≤ `ack_timeout_max`, partition heal ≤ 2 × `sync_interval`) | ✓ Validated (Phase 4)
+| Human-readable JSON dump; atomic write with `.prev` fallback; write confirmed only after dump | Inspectable state; confirmed writes always on disk | ✓ Validated (Phase 3)
+| gRPC API with Watch stream and `wait_for_replication` | Typed clients, streaming change notifications, optional replication confirmation | — Pending
+| Trusted-segment trust model in v1 (CRC32 only, no HMAC) | Accepted limitation; HMAC is documented future work | ✓ Validated (Phase 4 — accepted risks AR-04-01..03 in 04-SECURITY.md)
 | Quality gates from first commit (strict golangci-lint + go-ultimate, PR-only, CI matrix, Dependabot, govulncheck) | Correctness-critical infrastructure; gates are cheaper the earlier they land | ✓ Validated (Phase 1)
-| Deterministic simulation testing as a first-class feature | Replication correctness under chaos cannot be shown by unit tests alone | — Pending |
+| Deterministic simulation testing as a first-class feature | Replication correctness under chaos cannot be shown by unit tests alone | ✓ Validated (Phase 4) |
 
 ## Evolution
 
@@ -110,4 +111,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-02 after Phases 1–2*
+*Last updated: 2026-11-07 after Phase 4*
