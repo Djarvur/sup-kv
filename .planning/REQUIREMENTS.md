@@ -29,7 +29,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **REPL-01**: Nodes discover peers via broadcast Hello (`node_id` + `run_id`) with no configuration beyond `broadcast_addr`
 - [ ] **REPL-02**: Every local change is broadcast as DataReplication and tracked per-peer (key, version) until Ack or supersession; retransmission uses exponential backoff `ack_timeout` → `ack_timeout_max`, suspended while no peer is known
-- [ ] **REPL-03**: A receiver Acks each (key, version) after applying the record to memory (not waiting for the dump)
+- [x] **REPL-03**: A receiver Acks each (key, version) after applying the record to memory (not waiting for the dump)
 - [ ] **REPL-04**: A node can request a missing/stale key via unicast DataRequest; no reply if the key is unknown
 - [ ] **REPL-05**: Every node sends chunked DataSync (sorted key→version listing, chunks self-sufficient, `sync_chunk_bytes`) on the `sync_interval` timer, at startup, and on neighbor restart; receivers answer with DataRequest (missing/stale) or unicast DataReplication (newer), rate-limited by `sync_response_rate`
 - [ ] **REPL-06**: The peer table handles N nodes from day one — a peer is known after its first Hello and considered gone after `peer_timeout`; ack tracking is per-peer
@@ -161,7 +161,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERS-05 | Phase 3 | Complete |
 | REPL-01 | Phase 4 | Pending |
 | REPL-02 | Phase 4 | Pending |
-| REPL-03 | Phase 4 | Pending |
+| REPL-03 | Phase 4 | Complete |
 | REPL-04 | Phase 4 | Pending |
 | REPL-05 | Phase 4 | Pending |
 | REPL-06 | Phase 4 | Pending |

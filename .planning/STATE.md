@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 4
 current_phase_name: Replication and Deterministic Simulator
 status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-11-06T15:55:28.551Z"
-last_activity: 2026-11-03
-last_activity_desc: Phase 3 complete, transitioned to Phase 4
-state_head: fc0366490ffa9909d9f32a4d72c9571a60809627
+stopped_at: Completed 04-01-PLAN.md (replication tracer)
+last_updated: "2026-11-06T17:53:09.694Z"
+last_activity: 2026-11-06
+last_activity_desc: Phase 4 execution started
+state_head: ebd95673c2e165f0291b85faf2934da0e2e47e5e
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 18
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-02)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 3 — Persistence — Dump and Write Confirmation
+**Current focus:** Phase 4 — Replication and Deterministic Simulator
 
 ## Current Position
 
-Phase: 4 (Replication and Deterministic Simulator) — READY TO EXECUTE
-Plan: Not started
+Phase: 4 (Replication and Deterministic Simulator) — EXECUTING
+Plan: 2 of 6
 Status: Ready to execute
-Last activity: 2026-11-03 — Phase 3 complete, transitioned to Phase 4
+Last activity: 2026-11-06 — Phase 4 execution started
 
 Progress: [████░░░░░░] 43%
 
@@ -70,6 +70,7 @@ Progress: [████░░░░░░] 43%
 | Phase 02 P04 | 8min | 2 tasks | 5 files |
 | Phase 03 P01 | 35min | 3 tasks | 12 files |
 | Phase 03 P02 | 16min | 2 tasks | 4 files |
+| Phase 4 P01 | 21 min | 1 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -124,6 +125,12 @@ Recent decisions affecting current work:
 - [Phase 03]: Snapshot flush semantics (plan 03-02): Run services flushCh with an immediate dump only when dirty — a clean engine replies nil without a redundant save; the exit sweep resolves stranded flush requests with ErrClosed
 - [Phase 03]: Restore is semantics-level D-09 (plan 03-02): per-key ordinary store writes with fresh versions, one batched confirming flush — flagged assumption 1 for phase verification
 - [Phase 03]: Snapshot overwrite atomically in place with no .prev of its own (plan 03-02) — flagged assumption 2 for phase verification
+- [Phase 4]: Own-echo classification keys on run_id equality (impostor cannot guess 16 random bytes); same nodeID+different runID is the logged DuplicateNodeID config error (plan 04-01)
+- [Phase 4]: Envelope-domain validation (node_id 16-bit, run_id exactly 16 bytes) classifies Undecodable before the CRC gate — research ASVS V5 field validation (plan 04-01)
+- [Phase 4]: go mod tidy (go1.27) extracts a sole direct require into a single-line directive; CI tidy gate makes that the only shippable go.mod form, plan's tab-indented grep verified via tidy-stable equivalent (plan 04-01)
+- [Phase 4]: Plan-prescribed nolint:iface dropped: iface does not fire on Message/StateStore and nolintlint forbids unused directives; one sanctioned gosec G115 nolint guards the range-checked uint16 node_id conversion (plan 04-01)
+- [Phase 4]: Adapter NotifyLocalWrite enqueues into a 1024-deep buffer: never blocks on replication progress (D-05), bounded backpressure on a wedged loop, never silent loss (plan 04-01)
+- [Phase 4]: Encode/decode stay unexported in udprepl; the external tracer test reaches them through exported test-binary-only helpers in repl_internal_test.go (dumpfile_internal_test.go precedent) (plan 04-01)
 
 ### Pending Todos
 
@@ -131,7 +138,6 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 4 (Replication): flagged by research as the one phase needing deeper research during planning — UDP broadcast cross-platform behavior, own-echo semantics, 60 KiB datagram fragmentation, loopback broadcast addressing. Recommend `/gsd:plan-phase --research-phase 4`.
 - Phase 3 (Persistence): open planning decision — macOS F_FULLFSYNC durability policy (verify in Phase 6 crash scenarios).
 
 ## Deferred Items
@@ -144,6 +150,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-03T17:47:11.429Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-replication-and-deterministic-simulator/04-CONTEXT.md
+Last session: 2026-11-06T17:53:09.577Z
+Stopped at: Completed 04-01-PLAN.md (replication tracer)
+Resume file: None
