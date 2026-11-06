@@ -431,13 +431,20 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 // it immediately after the in-memory apply — nothing here waits for a dump
 // (REPL-03). A store error (for example a value over the configured limit)
 // is surfaced through Log, never a panic: a hostile or oversized datagram
-// must not take the node down, and merge idempotence makes the duplicate
-// delivery of the same record a no-op that still Acks (REPL-09's adjacency
+// must not take the node down, and a record the store refused is never
+// confirmed — no Ack and no supersession of pending tracking, so the sender
+// keeps retransmitting and the unacked gauge keeps climbing: the truthful
+// signal of divergence, never a "delivered" report for a record that was
+// never stored. Merge idempotence keeps the error-free duplicate delivery
+// of an already-stored record a no-op that still Acks (REPL-09's adjacency
 // edge).
 func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Outbox) {
 	_, _, err := c.store.ApplyRemote(msg.Key, msg.Record)
 	if err != nil {
 		c.cfg.Log(fmt.Sprintf("sup-kv: applying replicated record for key %q from handle %q: %v", msg.Key, source, err))
+		// Not applied: no Ack, no supersession — never confirm a record the
+		// store refused.
+		return
 	}
 	// Remote supersession: a strictly greater remote version under the same
 	// key fulfills the tracking promise by winning — the same byte order

@@ -85,6 +85,18 @@ func newTestCore() (*repl.Core, *stateStore) {
 	return repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{}), st
 }
 
+// newLimitedTestCore returns the local node's core over a real store whose
+// ValueMaxBytes is valueMax — the heterogeneous-limit shape the failed-apply
+// regression drives: a replicated record whose Data exceeds the local limit
+// is rejected by Merge with ErrValueTooLarge — with Config.Log appending to
+// logs, the newDiscardCore observation seam.
+func newLimitedTestCore(valueMax int, logs *[]string) (*repl.Core, *stateStore) {
+	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
+	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{ValueMaxBytes: valueMax})}
+	cfg := repl.Config{Log: func(msg string) { *logs = append(*logs, msg) }}
+	return repl.New(localID, testRunID(localID), handleFor(localID), st, cfg), st
+}
+
 // helloFrom builds a decoded Hello datagram from peerID arriving from its
 // handle (REPL-01 discovery).
 func helloFrom(peerID uint16) port.InboundDatagram {
@@ -167,6 +179,23 @@ func pendingVersion(t *testing.T, core *repl.Core, key string) version.RecordVer
 		t.Fatalf("PendingSnapshot holds no entry for key %q", key)
 	}
 	return info.Version
+}
+
+// assertAck fails unless drained is exactly one unicast Ack to handle for
+// (key, ver) — the applyRemote confirmation contract: an Ack only ever
+// follows a successful in-memory apply.
+func assertAck(t *testing.T, drained []port.Outbound, handle, key string, ver version.RecordVersion) {
+	t.Helper()
+	if len(drained) != 1 || drained[0].Broadcast || drained[0].To != handle {
+		t.Fatalf("applyRemote drained %d outbound messages, want exactly 1 unicast Ack to %q: %+v", len(drained), handle, drained)
+	}
+	ack, ok := drained[0].Msg.(port.Ack)
+	if !ok {
+		t.Fatalf("applyRemote emitted %T, want port.Ack", drained[0].Msg)
+	}
+	if ack.Key != key || ack.Version != ver {
+		t.Fatalf("applyRemote Ack = (%q, %x), want (%q, %x)", ack.Key, ack.Version[:], key, ver[:])
+	}
 }
 
 // broadcastRepls returns every broadcast DataReplication in drained, in
@@ -505,6 +534,77 @@ func TestRetransmit_ackDrainSemantics(t *testing.T) {
 			if err != nil || got.Version != greater.Version {
 				t.Fatalf("store Get(%q) after supersession = (%x, %v), want the remote version %x", keyAlpha, got.Version[:], err, greater.Version[:])
 			}
+		}},
+		{"a store-rejected apply is never Acked and never supersedes tracking — retransmission continues", func(t *testing.T) {
+			t.Helper()
+			now := at(0)
+			var logs []string
+			core, st := newLimitedTestCore(8, &logs)
+			var out port.Outbox
+			core.HandleDatagram(now, helloFrom(peerID1), &out)
+			core.HandleDatagram(now, helloFrom(peerID2), &out)
+			out.Drain()
+
+			ver := localWrite(t, core, st, now, keyAlpha, "one")
+			assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1, peerID2})
+
+			// A strictly greater remote version whose oversized Data the
+			// store rejects with ErrValueTooLarge — the heterogeneous-limit
+			// shape: the version would win the merge, but the store refuses
+			// the record outright. It arrives from the second waited-on
+			// peer, proving the rejection holds regardless of sender.
+			rejected := remoteRecord(testNowMs+1, 0, peerID2, "remote payload over the local limit")
+			if rejected.Version.Compare(ver) <= 0 {
+				t.Fatalf("test remote version %x not strictly greater than the tracked %x", rejected.Version[:], ver[:])
+			}
+			core.HandleDatagram(now, replFrom(peerID2, keyAlpha, rejected), &out)
+
+			if got := len(out.Drain()); got != 0 {
+				t.Fatalf("a store-rejected apply emitted %d messages, want 0 — a refused record is never confirmed", got)
+			}
+			assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1, peerID2})
+			served, err := st.store.Get(keyAlpha)
+			if err != nil || served.Version != ver {
+				t.Fatalf("store Get(%q) after the rejected apply = (%x, %v), want the local write (%x)", keyAlpha, served.Version[:], err, ver[:])
+			}
+			if len(logs) == 0 {
+				t.Fatal("the failed apply surfaced nothing through Config.Log")
+			}
+
+			// Retransmission continues: the ladder still fires for the
+			// tracked record at its armed retry time.
+			core.Advance(now.Add(ackTimeout), &out)
+			repls := broadcastRepls(out.Drain())
+			if len(repls) != 1 || repls[0].Key != keyAlpha || repls[0].Record.Version != ver {
+				t.Fatalf("post-rejection retransmit emitted %v, want exactly one DataReplication for (%s, %x)", repls, keyAlpha, ver[:])
+			}
+		}},
+		{"an error-free duplicate redelivery of an already-stored record still Acks", func(t *testing.T) {
+			t.Helper()
+			now := at(0)
+			core, st := newTestCore()
+			var out port.Outbox
+			core.HandleDatagram(now, helloFrom(peerID1), &out)
+			core.HandleDatagram(now, helloFrom(peerID2), &out)
+			out.Drain()
+
+			ver := localWrite(t, core, st, now, keyAlpha, "one")
+			served, err := st.store.Get(keyAlpha)
+			if err != nil {
+				t.Fatalf("store Get(%q): %v", keyAlpha, err)
+			}
+
+			// The peer's echo of our own write: an equal-version no-op merge
+			// that still Acks, never superseding the tracked entry.
+			core.HandleDatagram(now, replFrom(peerID1, keyAlpha, served), &out)
+			assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, ver)
+			assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1, peerID2})
+
+			// The duplicate redelivery of the same datagram: the merge is
+			// again a no-op, and the Ack is emitted again.
+			core.HandleDatagram(now, replFrom(peerID1, keyAlpha, served), &out)
+			assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, ver)
+			assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1, peerID2})
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
