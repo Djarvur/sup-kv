@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 4
 current_phase_name: Replication and Deterministic Simulator
 status: executing
-stopped_at: Completed 04-02-PLAN.md (replication reliability layer)
-last_updated: "2026-11-06T18:23:03.066Z"
+stopped_at: Completed 04-03-PLAN.md (DataRequest replies + chunked DataSync + rate-limited egress)
+last_updated: "2026-11-06T18:53:51.375Z"
 last_activity: 2026-11-06
 last_activity_desc: Phase 4 execution started
-state_head: 81d460b4bc63d67eac3609a0a6c1f3aaebc0292f
+state_head: 32b22ce6f26c6d7472f664daf1e1fe6707c25a7e
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 18
-  completed_plans: 13
+  completed_plans: 14
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 ## Current Position
 
 Phase: 4 (Replication and Deterministic Simulator) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
 Last activity: 2026-11-06 — Phase 4 execution started
 
@@ -72,6 +72,7 @@ Progress: [████░░░░░░] 43%
 | Phase 03 P02 | 16min | 2 tasks | 4 files |
 | Phase 4 P01 | 21 min | 1 tasks | 11 files |
 | Phase 4 P02 | 19 min | 3 tasks | 3 files |
+| Phase 04 P03 | 19 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -136,6 +137,10 @@ Recent decisions affecting current work:
 - [Phase 4]: Suspension is total: an empty peer table freezes nextRetry/backoff (never advanced); during suspension Advance's retransmit deadline keeps only the now+retransmit_interval ceiling — a stale past retry time never leaks into the deadline (plan 04-02) — Keeps the strictly-future deadline invariant while entries are suspended; caught live by TestRetransmit_suspendAndFlush's futurity assertion when the peer-timeout scan landed
 - [Phase 4]: Flush-on-discovery fires only on the empty-to-non-empty table transition: the Hello ending an empty table broadcasts every pending entry, adds the peer to every wait-set and resets ladders; a Hello into a non-empty table (including a re-learned evicted peer) adds no waiters (plan 04-02) — Research A6 reading: brand-new peers need prompt catch-up, but re-learned peers regain coverage through the ladder's next fire — avoids wait-set churn on every periodic Hello
 - [Phase 4]: UnackedStats takes now as a parameter (the D-02 seam) rather than reading a clock — a pure read inside the core; the earliest-peer-expiry zero time is guarded so an empty table never mins into the deadline (plan 04-02) — No wall-clock reads inside internal/app/repl (depguard-plus-discipline); the zero-guard is a regression lock from the Task-3 integration
+- [Phase 04]: Egress-limiter scope pin implemented as ONE FIFO over all reactive unicasts (exactly three enqueue sites: DataRequest emission, DataRequest reply, DataSync-newer response; Hello/retransmits/DataSync never queue), spacing floor(1s/rate) integer nanoseconds — 2ms at 500/s, 3333333ns at 300/s — first response immediate, drain order equals enqueue order (plan 04-03, probe #16, T-04-07)
+- [Phase 04]: Chunk budget is enforced by conservative core-side estimate constants (entryOverheadBytes 24, chunkOverheadBytes 64) because protobuf is adapter-side (D-01); the real-codec guarantee is proven cross-seam by udprepl's white-box TestSync_chunkWireBudget — a codec change that shrinks the slack breaks the test, not production (plan 04-03)
+- [Phase 04]: Startup emission order Hello-then-DataSync pinned by TestSync_triggers (IDEA §Node lifecycle); plan 04-01's tracer startup assertion updated for the designed startup DataSync — Rule 1 prior-plan test adjustment, the 04-02 eviction/ladder precedent (plan 04-03)
+- [Phase 04]: The egress queue machinery landed in Task 1's GREEN (the plan sketched it under Task 3) because Task 1's reply-drain assertions require enqueue+drain; Task 3 then added the two DataSync-compare enqueue sites and pinned the spacing arithmetic (plan 04-03)
 
 ### Pending Todos
 
@@ -155,6 +160,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-06T18:23:02.961Z
-Stopped at: Completed 04-02-PLAN.md (replication reliability layer)
+Last session: 2026-11-06T18:53:51.203Z
+Stopped at: Completed 04-03-PLAN.md (DataRequest replies + chunked DataSync + rate-limited egress)
 Resume file: None
