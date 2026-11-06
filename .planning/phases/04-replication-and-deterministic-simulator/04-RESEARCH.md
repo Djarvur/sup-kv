@@ -547,14 +547,17 @@ The engine seam to add this phase (shape per that comment): an exported `ApplyRe
 | A7 | `broadcast_addr` config string is `ip:port`; all nodes listen on the same UDP port (the broadcast's destination port) | Patterns 3, Pitfall 2 | If per-node ports were intended, same-host semantics change entirely; IDEA's single `broadcast_addr` strongly implies shared port |
 | A8 | `run_id` is 16 random bytes (UUIDv4-shaped or plain random) generated at process start | Pattern "Don't Hand-Roll" | Cosmetic; any unique-per-start value satisfies REPL-07 |
 
-## Open Questions
+## Open Questions (all three RESOLVED — Q1 with deferred empirical outcome; settled by plans 04-02/04-05/04-06, back-annotated 2026-11-06)
 
 1. **macOS smoke-test delivery path**
    - What we know: Linux behavior fully probed; lo0 lacks BROADCAST on Darwin; BSD-classic semantics say subnet broadcast fans out to REUSEADDR sockets.
    - What's unclear: whether `macos-15` runners' network filtering lets two processes exchange subnet broadcast on en0.
    - Recommendation: ship the pre-flight probe + fallback + loud skip (Pitfall 3); first CI run is the experiment; record the outcome in PHASE.md for Phase 6.
+   - **(RESOLVED — deferred empirical outcome)** Pre-flight capability probe + subnet-broadcast fallback + loud documented skip shipped as recommended; the smoke test lands in plan 04-06 (Task 2), which additionally pins the Linux assertion (the probe must succeed there — SKIP fails the gate). Whether macOS en0 subnet broadcast reaches REUSEADDR sockets stays empirical until the first macos-15 CI run; the outcome is to be recorded for Phase 6 per the roadmap split (real-network hostile scenarios are Phase 6 territory).
 2. **`retransmit_interval` semantics** (A5) — planner picks one reading and documents it next to the backoff table; the bounds tests are phrased on `ack_timeout_max` either way.
+   - **(RESOLVED)** Scan-granularity reading: `retransmit_interval` bounds how long Advance's returned deadline may sleep while any entry is pending, while the per-key ladder doubles from `ack_timeout` to the `ack_timeout_max` saturation cap (200/400/800/1600/3200ms, then 5000ms repeated). Documented next to the ladder in the core's doc comment; bounds tests phrase on `ack_timeout_max`. Settled in plan 04-02 (Task 2 action + the A5 flagged assumption).
 3. **Seed re-run hook: flag vs env var** (Pattern 4) — D-06 says "environment variable"; the testutil precedent is the `-seed` flag. Recommend following testutil (flag) since D-06's own text says "following the property-test precedent"; if the chaos test lives in a package where a flag is awkward, an env var read in the test is fine — the binding requirement is the printed, copy-paste re-run command.
+   - **(RESOLVED)** Both hooks, env var primary: the chaos test honors `SUPKV_SIM_SEED` (D-06's locked text — and the only hook that works when the test binary runs without `-args`), while testutil's `-seed` flag remains the property-test hook; every run prints the copy-paste env-var replay command. Settled in plan 04-05 (Task 3 + the D-06 flag-vs-env flagged assumption).
 
 ## Environment Availability
 

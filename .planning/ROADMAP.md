@@ -101,10 +101,10 @@ Plans:
   3. Full reconciliation works in both directions: chunked DataSync runs on the sync timer, at startup and on neighbor restart; receivers answer with DataRequest or unicast DataReplication rate-limited by `sync_response_rate`; a DataRequest for an unknown key gets no reply; a Hello with a new `run_id` triggers full sync toward the restarted node
   4. Malformed traffic is dropped with distinguishable classes: duplicate `node_id` logged as a configuration error, plus own broadcast echo, bad CRC and bad proto version each identifiable
   5. The deterministic simulator runs 2..N nodes over a seeded virtual network that loses, duplicates, reorders and partitions datagrams, and asserts convergence within the documented bounds — normal one RTT, datagram loss ≤ `ack_timeout_max`, partition heal ≤ 2 × `sync_interval` + response time — printing the seed on failure
-**Plans**: 5 plans
+**Plans**: 6 plans
 Plans:
 **Wave 1**
-- [ ] 04-01-PLAN.md — Tracer: port seam + wire schema + minimal core + UDP adapter; one write replicated node-to-node; full discard classification; real-socket two-node smoke (REPL-01, REPL-03, REPL-08, REPL-09)
+- [ ] 04-01-PLAN.md — Tracer: port seam + wire schema + minimal event-loop core + UDP adapter; one write replicated node-to-node end-to-end (REPL-03)
 
 **Wave 2** *(blocked on Wave 1)*
 - [ ] 04-02-PLAN.md — Reliability layer: per-peer (key, version) ack tracking, exponential-backoff retransmission, suspension and flush-on-discovery, peer table lifecycle with peer_timeout eviction (REPL-02, REPL-06)
@@ -117,6 +117,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4)*
 - [ ] 04-05-PLAN.md — Deterministic simulator: simnet discrete-event virtual network, the three named convergence bound tests, seeded chaos test with SUPKV_SIM_SEED replay; phase gate (TEST-03, REPL-10)
+- [ ] 04-06-PLAN.md — Expansion sibling of the tracer (parallel with 04-05): full discard classification with adversarial totality, persist.Engine.ApplyRemote seam, real-socket two-node smoke (REPL-01, REPL-08, REPL-09)
 
 ### Phase 5: gRPC API and Binary
 **Goal**: sup-kv becomes a usable product — a single static binary exposing the typed gRPC surface with Watch, startup gate, `wait_for_replication` and standard health checking
