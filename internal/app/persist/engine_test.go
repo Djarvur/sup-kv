@@ -1255,7 +1255,12 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 			returned <- time.Now()
 		}()
 		returnedAt := <-returned
-		synctest.Wait()
+		// Advance the fake clock past the debounce fire: unlike the waiter
+		// tests (where the blocked Set call itself holds the test goroutine
+		// until the dump resolves), this no-waiter path needs an explicit
+		// Sleep to move time to the timer (synctest.Wait alone does not
+		// advance the bubble clock).
+		synctest.Sleep(2 * synctestDebounce)
 
 		got, err := eng.Get("remote")
 		if err != nil || string(got.Data) != "remote-value" || got.Version != remote.Version {
@@ -1287,7 +1292,8 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 		if !errors.Is(err, storage.ErrValueTooLarge) {
 			t.Errorf("oversize ApplyRemote() error = %v, want ErrValueTooLarge unchanged", err)
 		}
-		if _, err = eng.Get("huge"); !errors.Is(err, storage.ErrNotFound) {
+		_, err = eng.Get("huge")
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("oversize Get(huge) error = %v, want ErrNotFound", err)
 		}
 		good := storage.Record{
@@ -1298,7 +1304,7 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 		if err != nil {
 			t.Fatalf("post-error ApplyRemote() error = %v, want nil", err)
 		}
-		synctest.Wait()
+		synctest.Sleep(2 * synctestDebounce)
 		if saves := dumps.saveCount(); saves != 2 {
 			t.Fatalf("completed saves after the oversize error = %d, want 2 (the engine kept serving)", saves)
 		}

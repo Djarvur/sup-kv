@@ -143,9 +143,9 @@ func TestDiscard_classes(t *testing.T) {
 			wantPeer:    &repl.PeerInfo{Handle: handleFor(peerID1), RunID: testRunID(peerID1), LastHello: now},
 		},
 		{
-			name: "a valid Hello from a stranger moves no counter and learns the peer",
-			in:   helloFrom(strangerID),
-			want: repl.DiscardStats{},
+			name:       "a valid Hello from a stranger moves no counter and learns the peer",
+			in:         helloFrom(strangerID),
+			want:       repl.DiscardStats{},
 			wantPeerID: strangerID,
 			wantPeer:   &repl.PeerInfo{Handle: handleFor(strangerID), RunID: testRunID(strangerID), LastHello: now},
 		},
@@ -200,23 +200,32 @@ func TestDiscard_classes(t *testing.T) {
 				t.Errorf("discarded datagram reached protocol processing: PeerSnapshot holds %d peers", len(snap))
 			}
 			if row.wantLogged {
-				if len(logs) == 0 {
-					t.Fatal("no line logged through Config.Log for a duplicate node_id (REPL-08 requires surfacing)")
-				}
-				line := logs[len(logs)-1]
-				if !strings.Contains(line, "configuration error") {
-					t.Errorf("log line %q lacks the configuration-error marker", line)
-				}
-				for _, name := range row.logMustName {
-					if !strings.Contains(line, name) {
-						t.Errorf("log line %q does not name %q", line, name)
-					}
-				}
+				assertConfigErrorLog(t, logs, row.logMustName)
 			} else if len(logs) != 0 {
 				t.Errorf("healthy datagram logged %d line(s), want none (no spurious configuration errors): %v",
 					len(logs), logs)
 			}
 		})
+	}
+}
+
+// assertConfigErrorLog pins the REPL-08 surfacing half for one duplicate
+// row: the latest Config.Log line carries the configuration-error marker and
+// names every given identity (the node_id's decimal spelling and each
+// conflicting handle).
+func assertConfigErrorLog(t *testing.T, logs, mustName []string) {
+	t.Helper()
+	if len(logs) == 0 {
+		t.Fatal("no line logged through Config.Log for a duplicate node_id (REPL-08 requires surfacing)")
+	}
+	line := logs[len(logs)-1]
+	if !strings.Contains(line, "configuration error") {
+		t.Errorf("log line %q lacks the configuration-error marker", line)
+	}
+	for _, name := range mustName {
+		if !strings.Contains(line, name) {
+			t.Errorf("log line %q does not name %q", line, name)
+		}
 	}
 }
 

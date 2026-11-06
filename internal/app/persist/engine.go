@@ -408,13 +408,30 @@ func (e *Engine) await(ver version.RecordVersion) error {
 	return w.err
 }
 
-// ApplyRemote joins one remotely replicated record into the store — the
-// seam await's doc reserved for Phase 4 ("remote merges will reuse the dirty
-// path without waiters"). RED-phase stub: it merges but does not yet dirty
-// the engine, so a remote merge triggers no dump — the GREEN step adds the
-// dirty-marking (REPL-03's memory-apply contract, plan 04-06).
+// ApplyRemote joins one remotely replicated record into the store and marks
+// the engine dirty with NO waiter — REPL-03's memory-apply contract, the
+// seam await's doc reserved in Phase 3 ("only local writes register waiters,
+// and Phase 4's remote merges will reuse the dirty path without waiters"):
+// the replication core Acks a DataReplication as soon as the record is
+// applied to memory, and the dump that persists it is asynchronous to that
+// confirmation — the running Run picks the dirty flag up and dumps on the
+// debounce schedule, so the changed e.changed nudge (the same non-blocking
+// signal await sends) is what wakes an idle dumper to re-arm its timers.
+// Store errors surface unchanged: an oversize record's ErrValueTooLarge
+// merges nothing, dirties nothing and never wedges the engine (T-04-04).
+// Not gated on Run's exit: the merge keeps the store converging even while
+// the dumper is gone, exactly like reads keep serving (Get).
 func (e *Engine) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
-	return e.store.Merge(key, rec)
+	conflicts, drift, err := e.store.Merge(key, rec)
+	if err != nil {
+		return conflicts, drift, err
+	}
+	e.markDirty()
+	select {
+	case e.changed <- struct{}{}:
+	default:
+	}
+	return conflicts, drift, nil
 }
 
 // Get returns a copy of the live record for key — reads are never gated on

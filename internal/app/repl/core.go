@@ -131,8 +131,9 @@ func (c Config) normalized() Config {
 // StateStore is the record source the replication core consumes: remote
 // records join the store through ApplyRemote and the sync paths read the
 // full snapshot through Records. The concrete engine (internal/app/persist
-// wrapping storage.Store; the ApplyRemote seam lands with plan 04-06) and
-// tests substituting storage.Store directly both satisfy it. Declared
+// wrapping storage.Store — its ApplyRemote is the remote-apply seam plan
+// 04-06 shipped) and tests adapting storage.Store through a Merge-delegating
+// wrapper both satisfy it. Declared
 // consumer-side here, per the storage.Clock precedent — internal/port holds
 // no interfaces.
 type StateStore interface {
@@ -280,7 +281,17 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // impostor cannot guess a 16-byte random run_id, so run_id equality is the
 // robust own-echo test — the sender's own broadcast really does loop back)
 // and DuplicateNodeID — a logged configuration error — when it differs.
-// Everything else reaches protocol processing: Hello upserts the peer
+// DuplicateNodeID has a second variant with the same evidence shape, two
+// sources claiming one identity: a foreign node_id the peer table already
+// remembers whose remembered run_id repeats verbatim from a DIFFERENT
+// source handle — a run's identity never migrates handles, so the second
+// claim is a misconfiguration, dropped and logged with the node_id and
+// both conflicting handles (REPL-08). The classifier never pre-empts the
+// restart branch (REPL-07, plan 04-04): this second variant requires run_id
+// EQUALITY with the remembered row, so a known node whose announced run_id
+// differs always reaches the Hello handler and fires its targeted-listing
+// restart reaction — a restart is never counted as a duplicate. Everything
+// else reaches protocol processing: Hello upserts the peer
 // table and — when a known node's run_id changed — answers with the
 // targeted full listing toward the restarted peer (REPL-07),
 // DataReplication applies the record and Acks it, Ack drains
@@ -310,6 +321,14 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		c.cfg.Log(fmt.Sprintf(
 			"sup-kv: configuration error: node_id %d announced by another run from handle %q, datagram discarded (REPL-08)",
 			in.NodeID, in.Source,
+		))
+		return
+	}
+	if known, ok := c.peers[in.NodeID]; ok && in.RunID == known.runID && in.Source != known.handle {
+		c.discards.DuplicateNodeID++
+		c.cfg.Log(fmt.Sprintf(
+			"sup-kv: configuration error: node_id %d known at handle %q announced again from handle %q, datagram discarded (REPL-08)",
+			in.NodeID, known.handle, in.Source,
 		))
 		return
 	}
@@ -345,7 +364,9 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // never a second listing (a per-Hello full listing at hello_interval cadence
 // would be a self-inflicted listing flood; the flap case is bounded by this
 // idempotence, not by rate limiting); a known node_id whose run_id differs
-// from the remembered one is a detected restart — the entry updates in place
+// from the remembered one is a detected restart — the duplicate-node_id
+// classifier never pre-empts this branch (HandleDatagram's second variant
+// requires run_id equality with the remembered row) — the entry updates in place
 // (handle, runID, lastHello; the table stays keyed by node_id, one row per
 // node — a change never forks a second row, which would fork ack tracking
 // and liveness) and the full current DataSync listing goes out UNICAST to

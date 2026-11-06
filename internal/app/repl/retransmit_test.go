@@ -61,8 +61,8 @@ func at(off time.Duration) time.Time {
 }
 
 // stateStore adapts *storage.Store to repl.StateStore — the Phase 4 consumer
-// seam — by delegating both methods (the persist engine's ApplyRemote seam
-// lands with plan 04-06).
+// seam — by delegating both methods (the production applier is the persist
+// engine's ApplyRemote, plan 04-06).
 type stateStore struct{ store *storage.Store }
 
 // ApplyRemote joins one replicated record through the store's LWW merge.
