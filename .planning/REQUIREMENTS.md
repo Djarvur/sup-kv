@@ -33,7 +33,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **REPL-04**: A node can request a missing/stale key via unicast DataRequest; no reply if the key is unknown
 - [x] **REPL-05**: Every node sends chunked DataSync (sorted key→version listing, chunks self-sufficient, `sync_chunk_bytes`) on the `sync_interval` timer, at startup, and on neighbor restart; receivers answer with DataRequest (missing/stale) or unicast DataReplication (newer), rate-limited by `sync_response_rate`
 - [x] **REPL-06**: The peer table handles N nodes from day one — a peer is known after its first Hello and considered gone after `peer_timeout`; ack tracking is per-peer
-- [ ] **REPL-07**: A Hello with a new `run_id` from a known node (restart) triggers full sync toward it
+- [x] **REPL-07**: A Hello with a new `run_id` from a known node (restart) triggers full sync toward it
 - [ ] **REPL-08**: Datagrams with a duplicate `node_id` are dropped and logged as a configuration error
 - [ ] **REPL-09**: Own broadcast echo and datagrams with bad CRC or bad proto version are dropped, with each discard class distinguishable
 - [ ] **REPL-10**: Documented convergence bounds hold and are proven in simulation: normal operation one RTT; datagram loss ≤ `ack_timeout_max`; after a partition heals ≤ 2 × `sync_interval` + response time
@@ -165,7 +165,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REPL-04 | Phase 4 | Complete |
 | REPL-05 | Phase 4 | Complete |
 | REPL-06 | Phase 4 | Complete |
-| REPL-07 | Phase 4 | Pending |
+| REPL-07 | Phase 4 | Complete |
 | REPL-08 | Phase 4 | Pending |
 | REPL-09 | Phase 4 | Pending |
 | REPL-10 | Phase 4 | Pending |
