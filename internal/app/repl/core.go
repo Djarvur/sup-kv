@@ -566,6 +566,15 @@ type UnackedStats struct {
 	OldestAge time.Duration
 }
 
+// QueuedResponses returns the number of reactive unicast responses waiting
+// in the sync egress queue (REPL-05's rate limiter) — the simulator and
+// observability seam plan 04-05's quiescence check reads. RED-phase compile
+// stub of plan 04-03 Task 1: the queue itself lands with the task's GREEN
+// step.
+func (*Core) QueuedResponses() int {
+	return 0
+}
+
 // UnackedStats returns the pending-set gauge observed at now: the unacked
 // entry count and, with at least one entry, now minus the oldest entry's
 // creation time. A pure read; the wall clock enters through the now
