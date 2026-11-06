@@ -4,6 +4,9 @@
 dist/
 *.exe
 
+# Locally built dev tools (the make proto plugin binary).
+.tmp/
+
 # Tests
 *.test
 *.out

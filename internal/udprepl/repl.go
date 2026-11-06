@@ -1,0 +1,493 @@
+// Package udprepl is the sup-kv UDP replication adapter: the only net- and
+// protobuf-importing replication code, mechanical per D-01/D-02 — it maps
+// the port message structs onto the wire schema, verifies the CRC before
+// any body decode, owns the socket, and feeds the pure core
+// (internal/app/repl) from one event-loop goroutine (D-04) — mirroring
+// persistfile's adapter role. It owns no protocol decision: discards,
+// the peer table and every timer live in the core. Same-host caveat: two
+// nodes sharing one UDP port with SO_REUSEADDR receive each other's
+// broadcasts, but unicast to the shared port is delivered to exactly one
+// socket, the kernel's choice — the real-socket smoke test (plan 04-06)
+// therefore asserts only broadcast-delivered behavior.
+package udprepl
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"hash/crc32"
+	"net"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
+	"github.com/Djarvur/sup-kv/internal/port"
+	"github.com/Djarvur/sup-kv/internal/udprepl/replproto"
+)
+
+// maxNodeIDWire is the highest node_id the 16-bit NodeID domain admits;
+// an envelope beyond it is schema-malformed and classifies Undecodable.
+const maxNodeIDWire = 0xFFFF
+
+// wireIDSize is the wire size of both the run_id and the RFC 9562
+// RecordVersion fields: exactly 16 bytes each.
+const wireIDSize = 16
+
+const (
+	// datagramBufSize is the one receive buffer size for the socket's
+	// lifetime: 65 507 bytes is the maximum IPv4 UDP payload (65 535 − 20
+	// IP − 8 UDP headers). A smaller buffer silently truncates reads — Go
+	// surfaces no MSG_TRUNC — so large records would arrive as quiet
+	// corruption surfacing only as bad-CRC discards (RESEARCH Pitfall 4).
+	datagramBufSize = 65507
+
+	// inboundQueue bounds the datagrams waiting for the event loop; beyond
+	// it the read goroutine blocks and the socket receive buffer
+	// backpressences the segment.
+	inboundQueue = 64
+
+	// notifyQueue bounds the local-write notifications waiting for the
+	// event loop. NotifyLocalWrite only enqueues and never blocks on
+	// replication progress (D-05 — the write path stays available); a
+	// wedged loop eventually fills the queue and blocks authors, a
+	// bounded backpressure that never silently drops a write.
+	notifyQueue = 1024
+)
+
+// errNoStandaloneBody rejects a port message that has no datagram body of
+// its own on the wire schema.
+var errNoStandaloneBody = errors.New("udprepl: message has no standalone datagram body")
+
+// inboundEvent is one received datagram on the event loop's inbound queue,
+// with the bytes defensively copied off the read buffer (which is reused on
+// the next read) and the sender's address as the opaque handle string
+// (src.String(), D-03).
+type inboundEvent struct {
+	datagram []byte
+	source   string
+}
+
+// localWrite is one author's NotifyLocalWrite notification on the event
+// loop's queue, with the record defensively copied at enqueue — the author
+// may reuse its buffer once the call returns.
+type localWrite struct {
+	key string
+	rec storage.Record
+}
+
+// Adapter is the UDP replication adapter for one node: it owns the bound
+// socket and drives one repl.Core. Exactly one goroutine — the caller's
+// Run — mutates core state (D-04); the read goroutine only queues inbound
+// datagrams, write authors only queue notifications, and the discard
+// counters and known-peer count are mirrored into atomics after every loop
+// iteration so cross-goroutine readers never touch core state.
+type Adapter struct {
+	conn          *net.UDPConn
+	broadcastAddr *net.UDPAddr
+	nodeID        uint16
+	runID         [16]byte
+	core          *repl.Core
+	log           func(msg string)
+	inbound       chan inboundEvent
+	notify        chan localWrite
+	done          chan struct{}
+
+	badCRC          atomic.Uint64
+	undecodable     atomic.Uint64
+	badProtoVersion atomic.Uint64
+	ownEcho         atomic.Uint64
+	duplicateNodeID atomic.Uint64
+	peerCount       atomic.Uint64
+}
+
+// New binds the node's udp4 socket and constructs the replication core over
+// it. bindAddr is the local bind address (for example "0.0.0.0:7900") and
+// broadcastAddr the segment broadcast address datagrams are sent to (for
+// example "127.255.255.255:7900"); the core's own opaque handle (D-03) is
+// taken from the bound socket's local address. The socket is created with
+// SO_REUSEADDR and SO_BROADCAST set before bind (RESEARCH Pattern 3):
+// same-host nodes share the port and broadcast sends are permitted.
+func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, cfg repl.Config) (*Adapter, error) {
+	packetConn, err := reuseAddrBroadcastListenPacket(bindAddr)
+	if err != nil {
+		return nil, fmt.Errorf("udprepl: bind udp4 %s: %w", bindAddr, err)
+	}
+	broadcast, err := net.ResolveUDPAddr("udp4", broadcastAddr)
+	if err != nil {
+		_ = packetConn.Close()
+		return nil, fmt.Errorf("udprepl: resolve broadcast %s: %w", broadcastAddr, err)
+	}
+	logFn := cfg.Log
+	if logFn == nil {
+		logFn = func(_ string) {}
+	}
+	runID := repl.NewRunID()
+	conn := packetConn.(*net.UDPConn)
+	return &Adapter{
+		conn:          conn,
+		broadcastAddr: broadcast,
+		nodeID:        nodeID,
+		runID:         runID,
+		core:          repl.New(nodeID, runID, conn.LocalAddr().String(), store, cfg),
+		log:           logFn,
+		inbound:       make(chan inboundEvent, inboundQueue),
+		notify:        make(chan localWrite, notifyQueue),
+		done:          make(chan struct{}),
+	}, nil
+}
+
+// reuseAddrBroadcastListenPacket binds the udp4 socket with SO_REUSEADDR
+// and SO_BROADCAST set before bind (RESEARCH Pattern 3, probe-verified):
+// the only combination that lets same-host nodes share the port while
+// still receiving broadcasts and permitting broadcast sends.
+func reuseAddrBroadcastListenPacket(bindAddr string) (net.PacketConn, error) {
+	var opErr error
+	lc := net.ListenConfig{
+		Control: func(_, _ string, c syscall.RawConn) error {
+			err := c.Control(func(fd uintptr) {
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				if opErr != nil {
+					return
+				}
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+			})
+			if err != nil {
+				return fmt.Errorf("socket control: %w", err)
+			}
+			if opErr != nil {
+				return fmt.Errorf("socket options: %w", opErr)
+			}
+			return nil
+		},
+	}
+	return lc.ListenPacket(context.Background(), "udp4", bindAddr)
+}
+
+// Run is the single event-loop goroutine the caller launches (D-04). It
+// starts the read goroutine, emits the startup Hello through the first
+// Advance (the core's zero initial hello deadline), then selects over
+// context cancellation, inbound datagrams, local-write notifications and
+// the timer channel re-armed from Advance's returned deadline. After every
+// event it calls the core handler with [time.Now] (the production now
+// seam), drains the shared Outbox through encode+send, and mirrors the
+// core's counters into atomics. Run returns ctx's error; closing the
+// context unblocks both the loop and the read goroutine.
+func (a *Adapter) Run(ctx context.Context) error {
+	go a.readLoop()
+	defer func() { _ = a.conn.Close() }() // unblocks the read goroutine's ReadFromUDP.
+	defer close(a.done)                   // unblocks the read goroutine's queued send.
+	var out port.Outbox
+	next := a.core.Advance(time.Now(), &out)
+	a.flush(&out)
+	var timer *time.Timer
+	for {
+		timer = armTimer(timer, next)
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			return ctx.Err()
+		case ev := <-a.inbound:
+			in := decode(ev.datagram)
+			in.Source = ev.source
+			a.core.HandleDatagram(time.Now(), in, &out)
+		case lw := <-a.notify:
+			a.core.NotifyLocalWrite(time.Now(), lw.key, lw.rec, &out)
+		case <-timerChan(timer):
+			// A due deadline — the Advance below fires the due timers.
+		}
+		next = a.core.Advance(time.Now(), &out)
+		a.flush(&out)
+		a.mirrorStats()
+	}
+}
+
+// NotifyLocalWrite enqueues the explicit post-write replication call
+// (D-05) for the event loop: it defensively copies the record and returns
+// without doing any protocol work, so the write path stays available. The
+// event loop's core handler broadcasts the DataReplication.
+func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) {
+	a.notify <- localWrite{
+		key: key,
+		rec: storage.Record{
+			Version:  rec.Version,
+			Data:     bytes.Clone(rec.Data),
+			Deleted:  rec.Deleted,
+			Checksum: rec.Checksum,
+		},
+	}
+}
+
+// Discards returns the discard-class counters (D-02) mirrored after the
+// latest event-loop iteration — safe from any goroutine.
+func (a *Adapter) Discards() repl.DiscardStats {
+	return repl.DiscardStats{
+		BadCRC:          a.badCRC.Load(),
+		Undecodable:     a.undecodable.Load(),
+		BadProtoVersion: a.badProtoVersion.Load(),
+		OwnEcho:         a.ownEcho.Load(),
+		DuplicateNodeID: a.duplicateNodeID.Load(),
+	}
+}
+
+// KnownPeers returns the known-peer count mirrored from the core's peer
+// table after the latest event-loop iteration — safe from any goroutine.
+func (a *Adapter) KnownPeers() uint64 {
+	return a.peerCount.Load()
+}
+
+// readLoop is the one read goroutine feeding the event loop's inbound queue
+// (D-04): it owns the socket's single 65 507-byte receive buffer for the
+// socket's lifetime and defensively copies every read's bytes before
+// handing them over, because the buffer is reused on the next read.
+func (a *Adapter) readLoop() {
+	buf := make([]byte, datagramBufSize)
+	for {
+		n, src, err := a.conn.ReadFromUDP(buf)
+		if err != nil {
+			return // the socket closed — Run's exit path.
+		}
+		ev := inboundEvent{datagram: bytes.Clone(buf[:n]), source: src.String()}
+		select {
+		case a.inbound <- ev:
+		case <-a.done:
+			return
+		}
+	}
+}
+
+// flush encodes and sends every outbound message the core emitted for the
+// just-handled event: broadcast to the configured broadcast address,
+// unicast to the handle resolved through [net.ResolveUDPAddr] — handles are
+// opaque to the core; only here do they become addresses (D-03). Failures
+// are logged, never panics: a transient send error must not take the node
+// down.
+func (a *Adapter) flush(out *port.Outbox) {
+	for _, ob := range out.Drain() {
+		datagram, err := encodeDatagram(a.nodeID, a.runID, ob.Msg)
+		if err != nil {
+			a.log(err.Error())
+			continue
+		}
+		if ob.Broadcast {
+			a.write(datagram, a.broadcastAddr)
+			continue
+		}
+		addr, err := net.ResolveUDPAddr("udp4", ob.To)
+		if err != nil {
+			a.log(fmt.Sprintf("udprepl: resolve unicast handle %q: %v", ob.To, err))
+			continue
+		}
+		a.write(datagram, addr)
+	}
+}
+
+// write sends one datagram to addr, logging (never panicking on) a failure.
+func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) {
+	_, err := a.conn.WriteToUDP(datagram, addr)
+	if err != nil {
+		a.log(fmt.Sprintf("udprepl: send to %s: %v", addr, err))
+	}
+}
+
+// mirrorStats copies the core's discard counters and known-peer count into
+// the atomics after each loop iteration (D-04): cross-goroutine readers —
+// the smoke test, later observability — never touch core state.
+func (a *Adapter) mirrorStats() {
+	d := a.core.Discards()
+	a.badCRC.Store(d.BadCRC)
+	a.undecodable.Store(d.Undecodable)
+	a.badProtoVersion.Store(d.BadProtoVersion)
+	a.ownEcho.Store(d.OwnEcho)
+	a.duplicateNodeID.Store(d.DuplicateNodeID)
+	a.peerCount.Store(uint64(len(a.core.PeerSnapshot())))
+}
+
+// armTimer re-arms (or first creates) t for the next deadline and returns
+// the timer to hold. Go 1.23+ timer semantics make Reset without draining
+// safe (the persist engine's timerChan/stopTimer precedent).
+func armTimer(t *time.Timer, next time.Time) *time.Timer {
+	d := time.Until(next)
+	if t == nil {
+		return time.NewTimer(d)
+	}
+	t.Reset(d)
+	return t
+}
+
+// timerChan returns t's channel, or nil for a nil timer — a nil channel
+// receives never, disabling that select case (the persist engine
+// precedent).
+func timerChan(t *time.Timer) <-chan time.Time {
+	if t == nil {
+		return nil
+	}
+	return t.C
+}
+
+// stopTimer stops t when non-nil. Go 1.23+ timer semantics make Stop safe
+// without draining.
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
+	}
+}
+
+// encodeDatagram frames msg as one full wire datagram from nodeID's runID
+// (D-01): the port struct maps onto the proto Body oneof, whose marshaled
+// bytes travel as the Envelope body under a CRC32 — corruption detection
+// only, never tamper protection, per the accepted trust model.
+func encodeDatagram(nodeID uint16, runID [16]byte, msg port.Message) ([]byte, error) {
+	body, err := protoBody(msg)
+	if err != nil {
+		return nil, err
+	}
+	bodyBytes, err := proto.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("udprepl: marshal body: %w", err)
+	}
+	env := &replproto.Envelope{
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeId:       uint32(nodeID),
+		RunId:        runID[:],
+		Crc32:        crc32.ChecksumIEEE(bodyBytes),
+		Body:         bodyBytes,
+	}
+	datagram, err := proto.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("udprepl: marshal envelope: %w", err)
+	}
+	return datagram, nil
+}
+
+// decode maps one raw datagram onto the port seam, mechanically per D-02:
+// an empty datagram or an envelope that fails to unmarshal classifies
+// Undecodable; envelope fields violating their wire domain — a node_id
+// beyond the 16-bit range, a run_id that is not 16 bytes — classify
+// Undecodable too; a CRC mismatch classifies BadCRC with the envelope
+// fields carried over and the body NOT unmarshaled; only a passing CRC is
+// the body decoded, and any body fault classifies Undecodable.
+func decode(datagram []byte) port.InboundDatagram {
+	var env replproto.Envelope
+	if len(datagram) == 0 || proto.Unmarshal(datagram, &env) != nil {
+		return port.InboundDatagram{Status: port.Undecodable}
+	}
+	if env.GetNodeId() > maxNodeIDWire || len(env.GetRunId()) != wireIDSize {
+		return port.InboundDatagram{Status: port.Undecodable}
+	}
+	in := port.InboundDatagram{
+		ProtoVersion: env.GetProtoVersion(),
+		NodeID:       uint16(env.GetNodeId()), //nolint:gosec // G115: the maxNodeIDWire check above proved the value fits 16 bits.
+	}
+	copy(in.RunID[:], env.GetRunId())
+	if crc32.ChecksumIEEE(env.GetBody()) != env.GetCrc32() {
+		in.Status = port.BadCRC
+		return in
+	}
+	var body replproto.Body
+	err := proto.Unmarshal(env.GetBody(), &body)
+	if err != nil {
+		return port.InboundDatagram{Status: port.Undecodable}
+	}
+	msg, ok := portMessage(&body)
+	if !ok {
+		return port.InboundDatagram{Status: port.Undecodable}
+	}
+	in.Status = port.Decoded
+	in.Msg = msg
+	return in
+}
+
+// protoBody maps one port message onto its wire Body oneof — constructed
+// via the generated wrapper types (RESEARCH Pitfall 6). A standalone
+// SyncEntry has no datagram body of its own — it only travels inside
+// DataSync — so it is rejected here.
+func protoBody(msg port.Message) (*replproto.Body, error) {
+	switch m := msg.(type) {
+	case port.Hello:
+		return &replproto.Body{Msg: &replproto.Body_Hello{Hello: &replproto.Hello{}}}, nil
+	case port.DataReplication:
+		return &replproto.Body{Msg: &replproto.Body_DataReplication{DataReplication: &replproto.DataReplication{
+			Key:      m.Key,
+			Version:  m.Record.Version[:],
+			Data:     m.Record.Data,
+			Deleted:  m.Record.Deleted,
+			Checksum: m.Record.Checksum,
+		}}}, nil
+	case port.Ack:
+		return &replproto.Body{Msg: &replproto.Body_Ack{Ack: &replproto.Ack{Key: m.Key, Version: m.Version[:]}}}, nil
+	case port.DataRequest:
+		return &replproto.Body{Msg: &replproto.Body_DataRequest{DataRequest: &replproto.DataRequest{Key: m.Key}}}, nil
+	case port.DataSync:
+		entries := make([]*replproto.SyncEntry, len(m.Entries))
+		for i, entry := range m.Entries {
+			entries[i] = &replproto.SyncEntry{Key: entry.Key, Version: entry.Version[:]}
+		}
+		return &replproto.Body{Msg: &replproto.Body_DataSync{DataSync: &replproto.DataSync{Entries: entries}}}, nil
+	default:
+		return nil, fmt.Errorf("%w: %T", errNoStandaloneBody, msg)
+	}
+}
+
+// portMessage maps a decoded wire Body onto its port message struct (D-01),
+// reporting false when a field violates its wire domain — a version that is
+// not exactly 16 bytes — which the caller classifies Undecodable.
+func portMessage(body *replproto.Body) (port.Message, bool) {
+	switch msg := body.GetMsg().(type) {
+	case *replproto.Body_Hello:
+		return port.Hello{}, true
+	case *replproto.Body_DataReplication:
+		dr := msg.DataReplication
+		ver, ok := recordVersion(dr.GetVersion())
+		if !ok {
+			return nil, false
+		}
+		return port.DataReplication{
+			Key: dr.GetKey(),
+			Record: storage.Record{
+				Version:  ver,
+				Data:     dr.GetData(),
+				Deleted:  dr.GetDeleted(),
+				Checksum: dr.GetChecksum(),
+			},
+		}, true
+	case *replproto.Body_Ack:
+		ver, ok := recordVersion(msg.Ack.GetVersion())
+		if !ok {
+			return nil, false
+		}
+		return port.Ack{Key: msg.Ack.GetKey(), Version: ver}, true
+	case *replproto.Body_DataRequest:
+		return port.DataRequest{Key: msg.DataRequest.GetKey()}, true
+	case *replproto.Body_DataSync:
+		wire := msg.DataSync.GetEntries()
+		entries := make([]port.SyncEntry, len(wire))
+		for i, entry := range wire {
+			ver, ok := recordVersion(entry.GetVersion())
+			if !ok {
+				return nil, false
+			}
+			entries[i] = port.SyncEntry{Key: entry.GetKey(), Version: ver}
+		}
+		return port.DataSync{Entries: entries}, true
+	default:
+		return nil, false
+	}
+}
+
+// recordVersion converts one wire version field into a RecordVersion,
+// reporting false unless it is exactly 16 bytes — RFC 9562's UUID size, the
+// full record-version domain.
+func recordVersion(b []byte) (version.RecordVersion, bool) {
+	var ver version.RecordVersion
+	if len(b) != len(ver) {
+		return version.RecordVersion{}, false
+	}
+	copy(ver[:], b)
+	return ver, true
+}
