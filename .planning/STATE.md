@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 4
 current_phase_name: Replication and Deterministic Simulator
 status: executing
-stopped_at: Completed 04-01-PLAN.md (replication tracer)
-last_updated: "2026-11-06T17:53:09.694Z"
+stopped_at: Completed 04-02-PLAN.md (replication reliability layer)
+last_updated: "2026-11-06T18:23:03.066Z"
 last_activity: 2026-11-06
 last_activity_desc: Phase 4 execution started
-state_head: ebd95673c2e165f0291b85faf2934da0e2e47e5e
+state_head: 81d460b4bc63d67eac3609a0a6c1f3aaebc0292f
 progress:
   total_phases: 7
   completed_phases: 3
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 ## Current Position
 
 Phase: 4 (Replication and Deterministic Simulator) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-11-06 — Phase 4 execution started
 
@@ -71,6 +71,7 @@ Progress: [████░░░░░░] 43%
 | Phase 03 P01 | 35min | 3 tasks | 12 files |
 | Phase 03 P02 | 16min | 2 tasks | 4 files |
 | Phase 4 P01 | 21 min | 1 tasks | 11 files |
+| Phase 4 P02 | 19 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -131,6 +132,10 @@ Recent decisions affecting current work:
 - [Phase 4]: Plan-prescribed nolint:iface dropped: iface does not fire on Message/StateStore and nolintlint forbids unused directives; one sanctioned gosec G115 nolint guards the range-checked uint16 node_id conversion (plan 04-01)
 - [Phase 4]: Adapter NotifyLocalWrite enqueues into a 1024-deep buffer: never blocks on replication progress (D-05), bounded backpressure on a wedged loop, never silent loss (plan 04-01)
 - [Phase 4]: Encode/decode stay unexported in udprepl; the external tracer test reaches them through exported test-binary-only helpers in repl_internal_test.go (dumpfile_internal_test.go precedent) (plan 04-01)
+- [Phase 4]: A5 scan-granularity reading implemented and documented at scanRetransmit: retransmit_interval bounds Advance's returned sleep while any entry is pending; the per-key ladder doubles from ack_timeout and saturates at ack_timeout_max with every step (200/400/800/1600/3200ms then 5000ms repeated) spelled out in the scan's doc comment (plan 04-02) — The research open question resolved by this plan; bounds tests (04-05) phrase on ack_timeout_max either way, and the doc comment is the single documented home of the ladder
+- [Phase 4]: Suspension is total: an empty peer table freezes nextRetry/backoff (never advanced); during suspension Advance's retransmit deadline keeps only the now+retransmit_interval ceiling — a stale past retry time never leaks into the deadline (plan 04-02) — Keeps the strictly-future deadline invariant while entries are suspended; caught live by TestRetransmit_suspendAndFlush's futurity assertion when the peer-timeout scan landed
+- [Phase 4]: Flush-on-discovery fires only on the empty-to-non-empty table transition: the Hello ending an empty table broadcasts every pending entry, adds the peer to every wait-set and resets ladders; a Hello into a non-empty table (including a re-learned evicted peer) adds no waiters (plan 04-02) — Research A6 reading: brand-new peers need prompt catch-up, but re-learned peers regain coverage through the ladder's next fire — avoids wait-set churn on every periodic Hello
+- [Phase 4]: UnackedStats takes now as a parameter (the D-02 seam) rather than reading a clock — a pure read inside the core; the earliest-peer-expiry zero time is guarded so an empty table never mins into the deadline (plan 04-02) — No wall-clock reads inside internal/app/repl (depguard-plus-discipline); the zero-guard is a regression lock from the Task-3 integration
 
 ### Pending Todos
 
@@ -150,6 +155,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-06T17:53:09.577Z
-Stopped at: Completed 04-01-PLAN.md (replication tracer)
+Last session: 2026-11-06T18:23:02.961Z
+Stopped at: Completed 04-02-PLAN.md (replication reliability layer)
 Resume file: None
