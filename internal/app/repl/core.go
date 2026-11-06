@@ -47,6 +47,30 @@ const (
 	// retry doubles the previous delay from ack_timeout up to the
 	// ack_timeout_max saturation cap (REPL-02, docs/IDEA.md §Parameters).
 	backoffGrowth = 2
+
+	// entryOverheadBytes is the conservative per-entry wire-size estimate
+	// the core adds to len(key) when budgeting DataSync chunks. The real
+	// proto cost of one SyncEntry inside a DataSync — the repeated-field
+	// tag and length varint around the entry, the key field's tag and
+	// length varint, and the version field's tag, length varint and 16
+	// payload bytes — is len(key)+20 inside the entry message proper and at
+	// most len(key)+23 with its outer framing, for every key that can share
+	// a chunk (a key whose estimate alone reaches the budget ships as an
+	// oversized single-entry chunk where the budget does not apply), so the
+	// estimate over-counts by at least 1 per entry. The core cannot call
+	// proto.Size — protobuf stays adapter-side (D-01) — so the budget is
+	// enforced by estimate, and the udprepl cross-seam test
+	// (TestSync_chunkWireBudget) keeps this constant honest against the
+	// real codec.
+	entryOverheadBytes = 24
+
+	// chunkOverheadBytes is the conservative fixed per-chunk estimate: the
+	// envelope fields (proto_version, node_id, run_id, crc32 and the body's
+	// tag plus length varint), the Body oneof wrapper and the DataSync
+	// repeated-field framing — roughly 45-50 bytes on the real wire. The
+	// stated guarantee of the two constants together: the real encoded
+	// datagram for any budgeted chunk is at most SyncChunkBytes.
+	chunkOverheadBytes = 64
 )
 
 // Config holds the replication timing parameters; it is immutable once
@@ -207,7 +231,13 @@ type Core struct {
 	peers     map[uint16]peer
 	pending   map[string]pendingEntry
 	nextHello time.Time
-	egress    []queuedUnicast
+
+	// nextSync is the next sync-timer deadline; the zero time until the
+	// first Advance, whose startup trigger fires the initial full listing
+	// alongside the startup Hello (IDEA §Node lifecycle).
+	nextSync time.Time
+
+	egress []queuedUnicast
 
 	// nextSendAt is the earliest virtual time the next queued response may
 	// emit; it is meaningful exactly while the egress queue is non-empty
@@ -456,11 +486,12 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 	out.Broadcast(port.DataReplication{Key: key, Record: own})
 }
 
-// Advance fires the due timers — the hello timer, the peer-timeout
-// eviction scan, the retransmission scan and the rate-limited egress drain
-// at this stage — and returns the next deadline for the driver to sleep
-// on: the minimum of the following hello deadline, the earliest peer
-// expiry, while any pending entry exists the retransmit scan deadline (the
+// Advance fires the due timers — the hello timer, the DataSync startup and
+// interval triggers, the peer-timeout eviction scan, the retransmission
+// scan and the rate-limited egress drain at this stage — and returns the
+// next deadline for the driver to sleep on: the minimum of the following
+// hello deadline, the next sync deadline, the earliest peer expiry, while
+// any pending entry exists the retransmit scan deadline (the
 // scan-granularity reading of retransmit_interval, research A5), and while
 // any response is queued the next egress slot. The returned deadline is
 // always strictly future: work due at now fires inside this same call.
@@ -473,10 +504,76 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 		out.Broadcast(port.Hello{})
 		c.nextHello = now.Add(c.cfg.HelloInterval)
 	}
+	c.syncListing(now, out)
 	c.evictPeers(now)
 	c.scanRetransmit(now, out)
 	c.drainEgress(now, out)
 	return c.nextDeadline(now)
+}
+
+// syncListing fires the DataSync full-listing emission (REPL-05): the
+// startup trigger on the first Advance — immediately after the startup
+// Hello, Hello first, both broadcast, the IDEA §Node lifecycle order
+// pinned by TestSync_triggers — and the timer trigger on every subsequent
+// Advance at or after lastSync+cfg.SyncInterval. The listing is one
+// Records() snapshot turned into entries for every record, tombstones
+// included (deletes reconcile through the same listing), sorted by key in
+// byte order and chunked by the conservative estimate; one broadcast
+// datagram per chunk leaves in chunk order. A store with zero records
+// still emits one DataSync with an empty entry list — an empty listing is
+// a valid sync round that invites newer-flooding from receivers (probe
+// #7). Neighbor-restart targeting is NOT here: a Hello carrying a new
+// run_id triggers a targeted full listing in plan 04-04 (REPL-07).
+func (c *Core) syncListing(now time.Time, out *port.Outbox) {
+	if !c.nextSync.IsZero() && now.Before(c.nextSync) {
+		return
+	}
+	c.nextSync = now.Add(c.cfg.SyncInterval)
+	snapshot := c.store.Records()
+	entries := make([]port.SyncEntry, 0, len(snapshot))
+	for _, key := range slices.Sorted(maps.Keys(snapshot)) {
+		entries = append(entries, port.SyncEntry{Key: key, Version: snapshot[key].Version})
+	}
+	for _, chunk := range chunkSyncEntries(entries, c.cfg.SyncChunkBytes) {
+		out.Broadcast(port.DataSync{Entries: chunk})
+	}
+}
+
+// chunkSyncEntries packs the sorted listing into self-sufficient chunks
+// (REPL-05, the A4 reading): the walk accumulates entries while the
+// conservative estimate usedEstimate + entryEstimate(next) stays at most
+// budget — a chunk filled to exactly the budget closes (probe #15), the
+// entry that would cross it opens the next chunk, and a single entry
+// whose own estimate already exceeds the budget ships alone as its own
+// oversized chunk — never dropped, never split, and carrying no
+// continuation state (no sequence numbers, no resumption cursor): any
+// single chunk is fully comparable alone. An empty listing yields one
+// empty chunk, so an empty store still announces itself (probe #7).
+// Identical store state produces the identical chunk sequence — the walk
+// is over the sorted listing, never a map (probe #11).
+func chunkSyncEntries(entries []port.SyncEntry, budget int) [][]port.SyncEntry {
+	var chunks [][]port.SyncEntry
+	// A budgeted chunk holds at most budget/entryOverheadBytes entries
+	// (every entry estimates at least entryOverheadBytes), so that is the
+	// capacity bound; a closed chunk's backing array is never reused —
+	// cur resets to nil, not cur[:0], or every chunk after the first would
+	// alias its predecessor's memory.
+	cur := make([]port.SyncEntry, 0, budget/entryOverheadBytes)
+	used := chunkOverheadBytes
+	for _, entry := range entries {
+		est := len(entry.Key) + entryOverheadBytes
+		if len(cur) > 0 && used+est > budget {
+			chunks = append(chunks, cur)
+			cur = nil
+			used = chunkOverheadBytes
+		}
+		cur = append(cur, entry)
+		used += est
+	}
+	if len(cur) > 0 || len(chunks) == 0 {
+		chunks = append(chunks, cur)
+	}
+	return chunks
 }
 
 // evictPeers removes every peer whose liveness expired (REPL-06): the first
@@ -546,13 +643,16 @@ func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
 }
 
 // nextDeadline returns the earliest strictly-future deadline over the armed
-// timers: the hello timer, the earliest peer expiry, while any pending
-// entry exists the retransmit scan deadline, and while any response is
-// queued the next egress slot. After evictPeers, scanRetransmit and
-// drainEgress have fired everything due, every contribution is strictly
-// future.
+// timers: the hello timer, the sync timer, the earliest peer expiry, while
+// any pending entry exists the retransmit scan deadline, and while any
+// response is queued the next egress slot. After syncListing, evictPeers,
+// scanRetransmit and drainEgress have fired everything due, every
+// contribution is strictly future.
 func (c *Core) nextDeadline(now time.Time) time.Time {
 	deadline := c.nextHello
+	if !c.nextSync.IsZero() && c.nextSync.Before(deadline) {
+		deadline = c.nextSync
+	}
 	if len(c.pending) > 0 {
 		if scan := c.retransmitDeadline(now); scan.Before(deadline) {
 			deadline = scan

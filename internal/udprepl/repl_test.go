@@ -58,8 +58,9 @@ func newTestStore(nodeID uint16) *stateStore {
 // goroutine inside the core, the whole path driven handler by handler. A
 // duplicate delivery of the same datagram is an idempotent no-op merge
 // that still Acks (REPL-09's adjacency edge), and the first Advance on
-// each core emits exactly one broadcast startup Hello (IDEA §Node
-// lifecycle).
+// each core emits exactly one broadcast startup Hello followed by the
+// startup DataSync listing (IDEA §Node lifecycle, plan 04-03's startup
+// trigger).
 func TestWire_twoNodeHandoff(t *testing.T) {
 	t.Parallel()
 
@@ -138,17 +139,20 @@ func TestWire_twoNodeHandoff(t *testing.T) {
 }
 
 // assertStartupHello fails unless next is the following hello deadline and
-// drained carries exactly one broadcast Hello.
+// drained carries exactly one broadcast Hello followed by the startup
+// DataSync (plan 04-03's startup trigger: the full listing fires alongside
+// the first Hello; both nodes' stores are empty here, so the listing is
+// one zero-entry chunk).
 func assertStartupHello(t *testing.T, node string, next time.Time, drained []port.Outbound, now time.Time) {
 	t.Helper()
-	if len(drained) != 1 {
-		t.Fatalf("node %s startup drained %d outbound messages, want exactly 1", node, len(drained))
-	}
-	if !drained[0].Broadcast {
-		t.Fatalf("node %s startup outbound is not a broadcast: %+v", node, drained[0])
+	if len(drained) != 2 || !drained[0].Broadcast || !drained[1].Broadcast {
+		t.Fatalf("node %s startup drained %d outbound messages, want exactly 2 broadcasts: Hello then the startup DataSync", node, len(drained))
 	}
 	if _, ok := drained[0].Msg.(port.Hello); !ok {
-		t.Fatalf("node %s startup emitted %T, want port.Hello", node, drained[0].Msg)
+		t.Fatalf("node %s startup emitted %T first, want port.Hello", node, drained[0].Msg)
+	}
+	if _, ok := drained[1].Msg.(port.DataSync); !ok {
+		t.Fatalf("node %s startup emitted %T second, want the startup port.DataSync", node, drained[1].Msg)
 	}
 	if want := now.Add(time.Second); !next.Equal(want) { // hello_interval default, IDEA §Parameters.
 		t.Fatalf("node %s next hello deadline %v, want %v", node, next, want)
