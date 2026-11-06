@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -468,4 +470,219 @@ func TestSync_triggers(t *testing.T) {
 	if syncs := dataSyncs(out.Drain()); len(syncs) != 1 {
 		t.Fatalf("the at-boundary Advance at t0+%v emitted %d DataSync messages, want exactly 1", syncInterval, len(syncs))
 	}
+}
+
+// keyDelta and keyTombstone extend the shared write keys for the compare
+// cases (equal version; local tombstone newer than the listing's live
+// entry).
+const (
+	keyDelta     = "cfg/delta"
+	keyTombstone = "cfg/tomb"
+)
+
+// syncFrom builds a decoded DataSync datagram from peerID carrying the
+// listing entries in the given (sender-sorted) order (REPL-05).
+func syncFrom(peerID uint16, entries ...port.SyncEntry) port.InboundDatagram {
+	return datagramFrom(peerID, port.DataSync{Entries: entries})
+}
+
+// newSyncCore returns the local node's core over a real store with cfg —
+// the newTestCore shape for the sync tests that need non-default rates
+// (the D-02 fixed clock and the store-test precedent unchanged).
+func newSyncCore(cfg repl.Config) (*repl.Core, *stateStore) {
+	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
+	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
+	return repl.New(localID, testRunID(localID), handleFor(localID), st, cfg), st
+}
+
+// TestSync_compare proves the DataSync receive path's per-key compare
+// (REPL-05): against ONE store snapshot, every listing entry compares by
+// the full record-version order — a key missing locally or a strictly
+// newer listing version queues a DataRequest, a strictly newer local
+// record queues a unicast exact-record DataReplication, equal versions
+// produce silence, and a local tombstone newer than the listing's live
+// entry travels as the reply (deletes heal through reconciliation).
+// Everything queues on the egress limiter in listing order and drains one
+// response per Advance.
+func TestSync_compare(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newSyncCore(repl.Config{})
+	var out port.Outbox
+	core.Advance(now, &out) // startup Hello + listing
+	out.Drain()
+
+	staleLocal := version.PackVersion(testNowMs, 0, localID)
+	staleListing := version.PackVersion(testNowMs+10, 0, peerID1)
+	newerLocal := version.PackVersion(testNowMs+20, 0, localID)
+	newerListing := version.PackVersion(testNowMs, 1, peerID1)
+	equalVer := version.PackVersion(testNowMs, 3, peerID1)
+	tombLocal := version.PackVersion(testNowMs+30, 0, localID)
+	tombListing := version.PackVersion(testNowMs, 5, peerID1)
+	if staleListing.Compare(staleLocal) <= 0 || newerLocal.Compare(newerListing) <= 0 || tombLocal.Compare(tombListing) <= 0 {
+		t.Fatal("test setup: the compare fixtures do not order as intended")
+	}
+	_, _, err := st.store.Merge(keyBeta, storage.Record{Version: staleLocal, Data: []byte("beta old")})
+	if err != nil {
+		t.Fatalf("store Merge(%q): %v", keyBeta, err)
+	}
+	_, _, err = st.store.Merge(keyGamma, storage.Record{Version: newerLocal, Data: []byte("gamma new")})
+	if err != nil {
+		t.Fatalf("store Merge(%q): %v", keyGamma, err)
+	}
+	_, _, err = st.store.Merge(keyDelta, storage.Record{Version: equalVer, Data: []byte("delta same")})
+	if err != nil {
+		t.Fatalf("store Merge(%q): %v", keyDelta, err)
+	}
+	_, _, err = st.store.Merge(keyTombstone, storage.Record{Version: tombLocal, Deleted: true})
+	if err != nil {
+		t.Fatalf("store Merge(%q): %v", keyTombstone, err)
+	}
+	snap := st.Records()
+
+	listing := []port.SyncEntry{
+		{Key: keyAlpha, Version: version.PackVersion(testNowMs, 9, peerID1)},
+		{Key: keyBeta, Version: staleListing},
+		{Key: keyDelta, Version: equalVer},
+		{Key: keyGamma, Version: newerListing},
+		{Key: keyTombstone, Version: tombListing},
+	}
+	core.HandleDatagram(now, syncFrom(peerID1, listing...), &out)
+	if got := len(out.Drain()); got != 0 {
+		t.Fatalf("the DataSync handler emitted %d messages directly, want 0 — responses leave only through the egress queue", got)
+	}
+	if got := core.QueuedResponses(); got != 4 {
+		t.Fatalf("after the DataSync QueuedResponses() = %d, want 4 (two requests, two replies; the equal version is silence)", got)
+	}
+
+	step := func(off time.Duration) port.Outbound {
+		t.Helper()
+		core.Advance(now.Add(off), &out)
+		uni := unicasts(out.Drain())
+		if len(uni) != 1 {
+			t.Fatalf("Advance at t0+%v drained %d unicasts, want exactly 1", off, len(uni))
+		}
+		return uni[0]
+	}
+	first := step(0)
+	if req, ok := first.Msg.(port.DataRequest); !ok || req.Key != keyAlpha {
+		t.Fatalf("the first response is %v, want a DataRequest for the locally missing key %q", first.Msg, keyAlpha)
+	}
+	second := step(responseSpacing)
+	if req, ok := second.Msg.(port.DataRequest); !ok || req.Key != keyBeta {
+		t.Fatalf("the second response is %v, want a DataRequest for the stale key %q", second.Msg, keyBeta)
+	}
+	third := step(2 * responseSpacing)
+	if reply, ok := third.Msg.(port.DataReplication); !ok || reply.Key != keyGamma || !recordsEqual(reply.Record, snap[keyGamma]) {
+		t.Fatalf("the third response is %v, want the exact-record newer reply for %q", third.Msg, keyGamma)
+	}
+	fourth := step(3 * responseSpacing)
+	if reply, ok := fourth.Msg.(port.DataReplication); !ok || reply.Key != keyTombstone || !recordsEqual(reply.Record, snap[keyTombstone]) || !reply.Record.Deleted {
+		t.Fatalf("the fourth response is %v, want the tombstone reply for %q carrying the local tombstone", fourth.Msg, keyTombstone)
+	}
+	for _, ob := range []port.Outbound{first, second, third, fourth} {
+		if ob.To != handleFor(peerID1) {
+			t.Fatalf("a compare response is addressed to %q, want the sender's handle %q", ob.To, handleFor(peerID1))
+		}
+	}
+	if got := core.QueuedResponses(); got != 0 {
+		t.Fatalf("after the drain QueuedResponses() = %d, want 0", got)
+	}
+}
+
+// TestSync_rateLimit proves the egress limiter's pinned arithmetic (probe
+// #16, REPL-05): responses drain at exactly floor(1s/rate) spacing by
+// integer nanosecond division — the first response immediate on the first
+// Advance at or after enqueue, then one per slot in listing order, never
+// before its slot — and QueuedResponses() reflects the queue exactly (the
+// simulator seam). The 300/s row pins the floor division at a rate that
+// does not divide the second evenly: 3333333ns.
+func TestSync_rateLimit(t *testing.T) {
+	t.Parallel()
+	t.Run("default 500/s: first immediate, then exactly one per 2ms in listing order", func(t *testing.T) {
+		t.Helper()
+		t.Parallel()
+		now := at(0)
+		core, _ := newSyncCore(repl.Config{})
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+		const k = 5
+		entries := make([]port.SyncEntry, 0, k)
+		for i := range k {
+			entries = append(entries, port.SyncEntry{
+				Key:     fmt.Sprintf("cfg/q%d", i),
+				Version: version.PackVersion(testNowMs+int64(i), 0, peerID1),
+			})
+		}
+		core.HandleDatagram(now, syncFrom(peerID1, entries...), &out)
+		out.Drain()
+		if got := core.QueuedResponses(); got != k {
+			t.Fatalf("after the DataSync QueuedResponses() = %d, want %d", got, k)
+		}
+		emitted := 0
+		for off := time.Duration(0); off <= (k-1)*responseSpacing; off += responseSpacing {
+			if off > 0 {
+				core.Advance(now.Add(off-responseSpacing/2), &out)
+				if uni := unicasts(out.Drain()); len(uni) != 0 {
+					t.Fatalf("the probe Advance one spacing-half before the t0+%v slot emitted %v, want nothing — no early emission", uni, off)
+				}
+			}
+			core.Advance(now.Add(off), &out)
+			uni := unicasts(out.Drain())
+			if len(uni) != 1 {
+				t.Fatalf("the slot Advance at t0+%v emitted %d unicasts, want exactly 1", off, len(uni))
+			}
+			req, ok := uni[0].Msg.(port.DataRequest)
+			if !ok {
+				t.Fatalf("the t0+%v slot emitted a %T, want a port.DataRequest", off, uni[0].Msg)
+			}
+			if uni[0].To != handleFor(peerID1) || req.Key != entries[emitted].Key {
+				t.Fatalf("the t0+%v slot requested (%q to %q), want (%q to %q) — listing order",
+					off, req.Key, uni[0].To, entries[emitted].Key, handleFor(peerID1))
+			}
+			emitted++
+		}
+		if emitted != k {
+			t.Fatalf("emitted %d responses over the window, want %d", emitted, k)
+		}
+		if got := core.QueuedResponses(); got != 0 {
+			t.Fatalf("after enqueue+(K-1)*spacing QueuedResponses() = %d, want 0 — the queue empties inside the window", got)
+		}
+	})
+	t.Run("300/s floor division: spacing exactly 3333333ns", func(t *testing.T) {
+		t.Helper()
+		t.Parallel()
+		const rate = 300
+		want := time.Second / rate
+		if want != 3333333*time.Nanosecond {
+			t.Fatalf("floor(1s/%d) = %v, want exactly 3333333ns (the pinned integer-nanosecond rounding rule)", rate, want)
+		}
+		now := at(0)
+		core, _ := newSyncCore(repl.Config{SyncResponseRate: rate})
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+		entries := []port.SyncEntry{
+			{Key: "cfg/one", Version: version.PackVersion(testNowMs, 0, peerID1)},
+			{Key: "cfg/two", Version: version.PackVersion(testNowMs+1, 0, peerID1)},
+		}
+		core.HandleDatagram(now, syncFrom(peerID1, entries...), &out)
+		out.Drain()
+		core.Advance(now, &out)
+		if uni := unicasts(out.Drain()); len(uni) != 1 {
+			t.Fatalf("the first response drained %d unicasts, want 1 — immediate after idle", len(uni))
+		}
+		core.Advance(now.Add(want-time.Nanosecond), &out)
+		if uni := unicasts(out.Drain()); len(uni) != 0 {
+			t.Fatalf("an Advance one nanosecond before the slot emitted %v, want nothing", uni)
+		}
+		core.Advance(now.Add(want), &out)
+		if uni := unicasts(out.Drain()); len(uni) != 1 {
+			t.Fatalf("the slot Advance at exactly floor(1s/300) emitted %d unicasts, want 1", len(uni))
+		}
+		if got := core.QueuedResponses(); got != 0 {
+			t.Fatalf("after both slots QueuedResponses() = %d, want 0", got)
+		}
+	})
 }
