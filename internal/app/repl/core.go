@@ -281,7 +281,9 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // robust own-echo test — the sender's own broadcast really does loop back)
 // and DuplicateNodeID — a logged configuration error — when it differs.
 // Everything else reaches protocol processing: Hello upserts the peer
-// table, DataReplication applies the record and Acks it, Ack drains
+// table and — when a known node's run_id changed — answers with the
+// targeted full listing toward the restarted peer (REPL-07),
+// DataReplication applies the record and Acks it, Ack drains
 // the pending-set wait-set (REPL-02), DataRequest answers through the
 // rate-limited egress queue (REPL-04), and DataSync compares against the
 // store snapshot and queues DataRequest / unicast DataReplication
@@ -335,18 +337,62 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 	}
 }
 
-// handleHello upserts the peer-table row from one Hello datagram (REPL-01):
-// only a Hello refreshes lastHello — the field's name is the liveness
-// contract, and no other datagram type ever touches it. A Hello that ends
-// an empty table is discovery: in this same event the core flushes every
-// pending entry — one broadcast DataReplication per entry in sorted key
-// order, the new peer added to every wait-set, every ladder restarted at
-// cfg.AckTimeout — so a brand-new peer receives the pending set promptly,
-// not at the next backoff expiry (research A6). A Hello that does not end
-// an empty table modifies no wait-set: only discovery adds waiters.
+// handleHello upserts the peer-table row from one Hello datagram (REPL-01)
+// and owns the restart discrimination (REPL-07, probe #19). Three cases,
+// pinned: an unknown node_id is learned — entry created, no targeted listing
+// (the peer's own startup DataSync and the periodic rounds reconcile it); a
+// known node_id repeating its remembered run_id refreshes lastHello only,
+// never a second listing (a per-Hello full listing at hello_interval cadence
+// would be a self-inflicted listing flood; the flap case is bounded by this
+// idempotence, not by rate limiting); a known node_id whose run_id differs
+// from the remembered one is a detected restart — the entry updates in place
+// (handle, runID, lastHello; the table stays keyed by node_id, one row per
+// node — a change never forks a second row, which would fork ack tracking
+// and liveness) and the full current DataSync listing goes out UNICAST to
+// the peer's handle, every chunk in chunk order through the same plan-04-03
+// listing/chunking machinery the sync timer uses. Inequality with the
+// remembered run_id is the only trigger: run_ids are 16 random bytes per
+// process start, so they carry no temporal order — a stale run_id returning
+// after a newer one was seen is indistinguishable from a fresh restart and
+// is handled as just another change (entry update plus one idempotent
+// re-sync; reconciliation no-ops on equal state). In-flight protocol
+// datagrams from the old run — Ack, DataReplication, DataSync — process
+// normally on their (key, version) merits, run_id-agnostic outside this
+// handler. The restart listing is proactive traffic and does NOT pass
+// through the sync_response_rate egress queue (the plan-04-03 egress-scope
+// pin): it is bounded by chunk framing and fires once per detected change,
+// while the heavy replay traffic it solicits IS limiter-gated — that flows
+// as DataRequest replies on the restarted node's side and newer-responses
+// on ours. A detected restart never re-adds the peer to any pending
+// wait-set and never touches the backoff ladder (the REPL-02 interplay):
+// the restarted node heals through reconciliation via the targeted listing,
+// not through retransmission, and an entry that already drained stays
+// drained — the dump/restart path, not retransmission, is the durability
+// story. Only a Hello refreshes lastHello — the field's name is the
+// liveness contract, and no other datagram type ever touches it. A Hello
+// that ends an empty table is discovery: in this same event the core
+// flushes every pending entry — one broadcast DataReplication per entry in
+// sorted key order, the new peer added to every wait-set, every ladder
+// restarted at cfg.AckTimeout — so a brand-new peer receives the pending
+// set promptly, not at the next backoff expiry (research A6). A Hello that
+// does not end an empty table modifies no wait-set: only discovery adds
+// waiters. Discovery and restart are mutually exclusive by construction —
+// a restart requires a remembered row, and an empty table remembers
+// nothing (an evicted peer's return Hello, whatever its run_id, is the
+// unknown-node case).
 func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	discovery := len(c.peers) == 0
+	restarted := false
+	if known, ok := c.peers[in.NodeID]; ok && known.runID != in.RunID {
+		restarted = true
+	}
 	c.peers[in.NodeID] = peer{handle: in.Source, runID: in.RunID, lastHello: now}
+	if restarted {
+		for _, chunk := range c.listingChunks() {
+			out.Unicast(in.Source, port.DataSync{Entries: chunk})
+		}
+		return
+	}
 	if !discovery {
 		return
 	}
@@ -551,21 +597,37 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 // datagram per chunk leaves in chunk order. A store with zero records
 // still emits one DataSync with an empty entry list — an empty listing is
 // a valid sync round that invites newer-flooding from receivers (probe
-// #7). Neighbor-restart targeting is NOT here: a Hello carrying a new
-// run_id triggers a targeted full listing in plan 04-04 (REPL-07).
+// #7). The neighbor-restart trigger — a Hello carrying a new run_id from
+// a known node — emits the same chunk sequence UNICAST toward the
+// restarted peer in handleHello (REPL-07, plan 04-04), through the shared
+// listingChunks build.
 func (c *Core) syncListing(now time.Time, out *port.Outbox) {
 	if !c.nextSync.IsZero() && now.Before(c.nextSync) {
 		return
 	}
 	c.nextSync = now.Add(c.cfg.SyncInterval)
+	for _, chunk := range c.listingChunks() {
+		out.Broadcast(port.DataSync{Entries: chunk})
+	}
+}
+
+// listingChunks builds the full DataSync listing chunk sequence from one
+// Records() snapshot (REPL-05): every record, tombstones included (deletes
+// reconcile through the same listing), sorted by key in byte order and
+// packed by the conservative-estimate chunker. One build serves both
+// emission triggers — the sync timer's broadcast (syncListing) and the
+// neighbor-restart unicast (handleHello, REPL-07) — so the restart
+// reaction reuses the plan-04-03 machinery verbatim, never a second
+// listing implementation. Identical store state produces the identical
+// chunk sequence: the walk is over the sorted listing, never a map (probe
+// #11), and an empty snapshot yields one empty chunk (probe #7).
+func (c *Core) listingChunks() [][]port.SyncEntry {
 	snapshot := c.store.Records()
 	entries := make([]port.SyncEntry, 0, len(snapshot))
 	for _, key := range slices.Sorted(maps.Keys(snapshot)) {
 		entries = append(entries, port.SyncEntry{Key: key, Version: snapshot[key].Version})
 	}
-	for _, chunk := range chunkSyncEntries(entries, c.cfg.SyncChunkBytes) {
-		out.Broadcast(port.DataSync{Entries: chunk})
-	}
+	return chunkSyncEntries(entries, c.cfg.SyncChunkBytes)
 }
 
 // chunkSyncEntries packs the sorted listing into self-sufficient chunks
