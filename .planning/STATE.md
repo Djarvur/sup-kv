@@ -163,7 +163,7 @@ None yet.
 ### Blockers/Concerns
 
 - Phase 3 (Persistence): open planning decision — macOS F_FULLFSYNC durability policy (verify in Phase 6 crash scenarios).
-- Phase 5: D-08 macOS smoke outcome is empirical until the first macOS CI run (Linux green; macOS loud-skip path code-verified; UAT item 2 passed 2026-11-07).
+- D-08 macOS smoke RESOLVED empirically (first macos-15 CI run 2026-11-08, PR #31): darwin refuses the shared wildcard bind (EADDRINUSE; SO_REUSEADDR does not share there) — fixed as a loud skip in 507228a; macos-15 cell expected green-with-skip on re-run.
 - Phase 4 review: info-level findings IN-01 (write-only ownHandle dead state) and IN-02 (simnet Cluster.Write ignores store Set error) remain open by triage — see 04-REVIEW-DISPOSITION.md.
 
 ## Deferred Items
