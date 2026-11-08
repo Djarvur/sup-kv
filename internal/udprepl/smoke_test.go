@@ -3,6 +3,7 @@ package udprepl_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"syscall"
@@ -87,6 +88,17 @@ func smokeSocket(bindAddr string) (*net.UDPConn, error) {
 // sends a probe datagram, the other must receive it within probeWait
 // (research Pattern 3's probed matrix; Pitfall 3's pre-flight). A bind or
 // send fault is an error, not evidence of unreachability.
+// errSharedWildcardBind marks the platform refusing the probe's second
+// wildcard bind to the same port: Linux lets two SO_REUSEADDR udp4 sockets
+// share one wildcard port, darwin requires SO_REUSEPORT for that (D-08's
+// empirical macOS outcome, first macos-15 CI run 2026-11-08: EADDRINUSE at
+// the rx bind). It is a capability gap — the loud-skip case the probe exists
+// to classify — never a test bug; on Linux the rx bind succeeds by
+// construction because the tx socket already holds the port.
+var errSharedWildcardBind = errors.New("second wildcard bind refused: platform does not share one wildcard UDP port between SO_REUSEADDR sockets (darwin requires SO_REUSEPORT)")
+
+// broadcastReachable probes whether a datagram sent to bcast is fan-out
+// delivered to a second socket sharing the same wildcard port.
 func broadcastReachable(port int, bcast *net.UDPAddr) (bool, error) {
 	tx, err := smokeSocket(fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
@@ -95,6 +107,9 @@ func broadcastReachable(port int, bcast *net.UDPAddr) (bool, error) {
 	defer func() { _ = tx.Close() }()
 	rx, err := smokeSocket(fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			return false, fmt.Errorf("%w: %w", errSharedWildcardBind, err)
+		}
 		return false, err
 	}
 	defer func() { _ = rx.Close() }()
@@ -189,6 +204,58 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 	t.Fatalf("timed out after %v waiting for %s", timeout, what)
 }
 
+// probeBroadcastAddr runs the capability probe — loopback broadcast first,
+// then one real-interface subnet broadcast — and returns the first address
+// whose datagrams reach the sharing socket. It calls t.Skipf (loud, naming
+// both addresses and the platform reason) whenever same-host broadcast is
+// unavailable, and t.Fatalf only for genuine setup breakage; it returns the
+// broadcast address the smoke nodes should use.
+func probeBroadcastAddr(t *testing.T, port int, loopback *net.UDPAddr) *net.UDPAddr {
+	t.Helper()
+	reachable, err := broadcastReachable(port, loopback)
+	if err != nil {
+		if errors.Is(err, errSharedWildcardBind) {
+			t.Skipf(
+				"same-host UDP broadcast unavailable: %v (probing %s and any subnet broadcast alike — both need the shared wildcard port; loopback broadcast fan-out is a Linux-only kernel behavior and darwin additionally refuses the shared bind without SO_REUSEPORT — research Pitfall 3, D-08 macOS CI outcome 2026-11-08); protocol correctness stays proven by the deterministic simulator (plans 04-02..04-05)",
+				err,
+				loopback,
+			)
+		}
+		t.Fatalf("loopback broadcast probe setup: %v", err)
+	}
+	if reachable {
+		return loopback
+	}
+	subnet := subnetBroadcast(port)
+	if subnet == nil {
+		t.Skipf(
+			"same-host UDP broadcast unavailable: %s did not reach the sharing socket and no broadcast-capable non-loopback IPv4 interface exists (loopback broadcast fan-out is a Linux-only kernel behavior; macOS lo0 carries no BROADCAST flag — research Pitfall 3); protocol correctness stays proven by the deterministic simulator (plans 04-02..04-05)",
+			loopback,
+		)
+	}
+	reachable, err = broadcastReachable(port, subnet)
+	if err != nil {
+		if errors.Is(err, errSharedWildcardBind) {
+			t.Skipf(
+				"same-host UDP broadcast unavailable: %v (probed %s then %s — both need the shared wildcard port; darwin refuses the shared bind without SO_REUSEPORT — D-08 macOS CI outcome 2026-11-08); protocol correctness stays proven by the deterministic simulator (plans 04-02..04-05)",
+				err,
+				loopback,
+				subnet,
+			)
+		}
+		t.Fatalf("subnet broadcast probe setup: %v", err)
+	}
+	if !reachable {
+		t.Skipf(
+			"same-host UDP broadcast unavailable: neither %s nor %s reached the sharing socket within %v (platform lacks broadcast fan-out to SO_REUSEADDR sockets — research Pitfall 3); protocol correctness stays proven by the deterministic simulator (plans 04-02..04-05)",
+			loopback,
+			subnet,
+			probeWait,
+		)
+	}
+	return subnet
+}
+
 // TestSmoke_twoNodesUDP is D-08's one real-socket smoke test: two nodes on
 // one host discover each other purely via broadcast Hello over genuine UDP
 // with no configuration beyond the broadcast address (REPL-01), one local
@@ -211,33 +278,7 @@ func TestSmoke_twoNodesUDP(t *testing.T) {
 	port := freeUDPPort(t)
 
 	loopback := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
-	broadcast := loopback
-	reachable, err := broadcastReachable(port, loopback)
-	if err != nil {
-		t.Fatalf("loopback broadcast probe setup: %v", err)
-	}
-	if !reachable {
-		subnet := subnetBroadcast(port)
-		if subnet == nil {
-			t.Skipf(
-				"same-host UDP broadcast unavailable: %s did not reach the sharing socket and no broadcast-capable non-loopback IPv4 interface exists (loopback broadcast fan-out is a Linux-only kernel behavior; macOS lo0 carries no BROADCAST flag — research Pitfall 3); protocol correctness stays proven by the deterministic simulator (plans 04-02..04-05)",
-				loopback,
-			)
-		}
-		reachable, err = broadcastReachable(port, subnet)
-		if err != nil {
-			t.Fatalf("subnet broadcast probe setup: %v", err)
-		}
-		if !reachable {
-			t.Skipf(
-				"same-host UDP broadcast unavailable: neither %s nor %s reached the sharing socket within %v (platform lacks broadcast fan-out to SO_REUSEADDR sockets — research Pitfall 3); protocol correctness stays proven by the deterministic simulator (plans 04-02..04-05)",
-				loopback,
-				subnet,
-				probeWait,
-			)
-		}
-		broadcast = subnet
-	}
+	broadcast := probeBroadcastAddr(t, port, loopback)
 
 	bind := fmt.Sprintf("0.0.0.0:%d", port)
 	cfg := repl.Config{Log: func(msg string) { t.Logf("%s", msg) }}
