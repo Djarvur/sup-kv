@@ -1,0 +1,9 @@
+# Buf codegen for the committed wire structs. The local plugin resolves
+# protoc-gen-go through the go.mod tool directive — no global PATH install,
+# no BSR remote plugins (D-05; .claude/CLAUDE.md tool policy).
+version: v2
+
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: .
+    opt: paths=source_relative

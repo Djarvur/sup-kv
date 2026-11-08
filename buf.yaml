@@ -1,0 +1,36 @@
+# Buf schema gates for the replication wire protocol (and the phase-5 gRPC
+# schema). Drives: make buf-lint / make buf-format / make buf-breaking and the
+# CI lint job's buf step — all via the go.mod-pinned `go tool buf` binary.
+version: v2
+
+modules:
+  # One root module covers both proto dirs — internal/udprepl/replproto now
+  # and internal/grpcapi/apiproto in phase 5 — with zero config change (D-06).
+  - path: .
+    # buf walks dot-directories by design; the repo-local module cache
+    # (.gomodcache, gitignored — CI never sees it) holds stray .proto files
+    # that would flood lint/format/breaking. This excludes entry exists only
+    # for local runs; buf v2 has no per-ignore field for this, so it lives on
+    # the module.
+    excludes:
+      - .gomodcache
+
+lint:
+  # STANDARD is buf v1.75's name for the DEFAULT rule set (rule lists verified
+  # identical via `buf config ls-lint-rules`); the DEFAULT spelling additionally
+  # prints a deprecation WARN on every invocation (D-02: DEFAULT rule set).
+  use:
+    - STANDARD
+  # The single DEFAULT/STANDARD finding on this repo: package supkv.v1 lives in
+  # internal/udprepl/replproto, not supkv/v1/. Moving the proto would churn
+  # phase-4 import paths for no gain, so the rule is waived for this one file
+  # only (D-06: documented exception over file moves).
+  ignore_only:
+    PACKAGE_DIRECTORY_MATCH:
+      - internal/udprepl/replproto/supkv.proto
+
+breaking:
+  # FILE policy: a deleted, renumbered or retyped field vs origin/master fails
+  # the gate (D-03) — cheap insurance for the replication wire protocol.
+  use:
+    - FILE

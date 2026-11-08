@@ -34,7 +34,7 @@ For service builders on small HA clusters (e.g. two management boards in one app
 |------------|---------|---------|-----------------|------------|
 | Go | 1.27 (`go 1.27` directive; current patch 1.27.1) | Language + stdlib | Latest stable (released 2026-08-19, verified locally). go-ultimate policy: applications pin **latest** stable Go. grpc-go v1.85 already requires `go >= 1.26.0`, so the floor is forced upward anyway. Bonus on 1.27: `encoding/json/v2` engine is now default under the v1 API, and `testing/synctest` (stable since 1.25) is available for the simulator. | HIGH |
 | google.golang.org/grpc | v1.85.0 (2026-10-27, latest stable) | Client/server API, Watch server-streaming | The decided API layer. Release notes verified current; v1.85 fixed control-buffer throttling defaults and `GracefulStop`-during-`Stop`. Its `go.mod` requires Go 1.26 and already depends on `github.com/google/uuid v1.6.0` and `golang.org/x/sync v0.23.0` (matters below). Enable `google.golang.org/grpc/reflection` (same module, zero cost) so `grpcurl` works for ops/debugging. | HIGH |
-| google.golang.org/protobuf | v1.36.12 (latest stable; `go >= 1.23`) | Message encoding for UDP envelopes and gRPC | The other half of the decided dependency bar. Also provides `cmd/protoc-gen-go` at the same version for codegen. | HIGH |
+| google.golang.org/protobuf | v1.36.13-0.20261016172727-e9ee2a76ab8e (latest line; `go >= 1.23`) | Message encoding for UDP envelopes and gRPC | The other half of the decided dependency bar. Also provides `cmd/protoc-gen-go` for codegen. Graph-bumped by the buf tool directive (MVS through buf's module graph — no replace, no downgrade); plugin and runtime remain one identical module, and `go tool protoc-gen-go --version` reports `v1.36.12-devel`. | HIGH |
 | github.com/google/uuid | v1.6.0 (latest, 2024-01-16) — **optional direct dep** | `RunID` generation, RFC 9562 test cross-checks | **Zero marginal cost**: grpc-go v1.85 already requires uuid v1.6.0 in its module graph, so promoting it to direct adds no new module to the build. v1.6.0 fixed `NewV7` monotonicity under concurrency (PR #150). RecordVersion packing stays in-repo regardless — `NewV7` does not implement the HLC counter-in-`rand_a` scheme sup-kv needs. Alternatively generate RunID from `crypto/rand` in ~10 in-repo lines; either is acceptable, do not vendor anything else for it. | HIGH |
 | golang.org/x/sync | v0.23.0 (match grpc's requirement) — **optional direct dep** | `errgroup` for fail-fast goroutine fan-out | **Zero marginal cost**: already in grpc-go's graph. go-ultimate mandates errgroup for parallel fan-out; for plain tracked goroutines `sync.WaitGroup.Go` (Go 1.25+) suffices with no dep at all. Allowed as a conscious exception to the "gRPC + protobuf only" bar only because it adds nothing new to `go.sum`. | HIGH |
 
@@ -64,7 +64,7 @@ For service builders on small HA clusters (e.g. two management boards in one app
 
 | Tool | Version | Purpose | Notes | Confidence |
 |------|---------|---------|-------|------------|
-| Buf CLI | v1.75.0 (2026-10-22, GitHub Releases API) | Protobuf codegen driver + `.proto` lint + breaking-change detection | **Buf over protoc** (rationale below). Not a Go module dependency — a CI/dev binary pinned by release tag. `buf.gen.yaml` v2 format with local plugins invoking the pinned Go plugins: `local: go tool protoc-gen-go`. Buf's breaking-change detection additionally guards the wire protocol (`proto_version` evolution, field renumbering mistakes) — cheap insurance for a replication protocol. | HIGH |
+| Buf CLI | v1.75.0 (2026-10-22, GitHub Releases API) | Protobuf codegen driver + `.proto` lint + breaking-change detection | **Buf over protoc** (rationale below). Pinned as the go.mod tool directive `github.com/bufbuild/buf/cmd/buf` v1.75.0 — invoked as `go tool buf` locally and in CI. `buf.gen.yaml` v2 format with local plugins invoking the pinned Go plugins: `local: ["go", "tool", "protoc-gen-go"]`. Buf's breaking-change detection additionally guards the wire protocol (`proto_version` evolution, field renumbering mistakes) — cheap insurance for a replication protocol. | HIGH |
 | `protoc-gen-go` | v1.36.12 (= protobuf module version) | Go message codegen | Pinned as a tool directive: `go get -tool google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12`; invoked by buf, never by hand. `paths=source_relative`. | HIGH |
 | `protoc-gen-go-grpc` | v1.6.2 (2026-05-07, latest) | gRPC service codegen | Same pinning pattern. v1.6.x generated code requires services to embed `Unimplemented<Service>Server` **by value** (opt-out exists but is not recommended). Watch streams, startup-gate errors, `wait_for_replication` are all plain generated-server work. | HIGH |
 | golangci-lint | v2.15.0 (latest, proxy-verified) | Lint gate | Config: **powerman/golangci-lint-strict** — publishes enable-nearly-all-linters configs pinned per exact golangci-lint version; latest config is 2.15.0, an exact match. Rules: fetch the config for the exact version, never edit upstream, put project overrides in an extending config; no `//nolint` without a written justification (matches the project's stated quality gate). This delivers "all applicable linters enabled" without hand-assembling a list. | HIGH |
@@ -83,9 +83,7 @@ For service builders on small HA clusters (e.g. two management boards in one app
 
 # Pinned dev tools (Go 1.24+ tool directives; recorded in go.mod, run via `go tool`)
 
-# Buf CLI (dev/CI binary, not a module): install pinned from GitHub releases
-
-# https://github.com/bufbuild/buf/releases/tag/v1.75.0 (checksums published on the release)
+# Buf CLI: pinned as the go.mod tool directive github.com/bufbuild/buf/cmd/buf v1.75.0 and run via `go tool buf` — no separate install step
 
 # Lint config: fetch the strict config for the EXACT golangci-lint version
 
@@ -109,7 +107,7 @@ For service builders on small HA clusters (e.g. two management boards in one app
 | Avoid | Why | Use Instead |
 |-------|-----|-------------|
 | `prometheus/client_golang` | Adds 3+ modules to `go.sum` — breaks the explicit "gRPC + protobuf only" bar for metrics that are all counters/gauges | In-repo text-format exporter (~100 lines, classic `text/plain; version=0.0.4`, sorted families/labels) at `/metrics` + stdlib `expvar` at `/debug/vars` |
-| `protoc` (C++ binary) | Stale distro packages, manual pinned downloads, no lint/breaking detection for the replication wire format | Buf CLI pinned by release tag |
+| `protoc` (C++ binary) | Stale distro packages, manual pinned downloads, no lint/breaking detection for the replication wire format | Buf CLI pinned as the go.mod tool directive `github.com/bufbuild/buf/cmd/buf` v1.75.0 (run via `go tool buf`) |
 | `tools.go` blank-import hack | Replaced by Go 1.24+ `tool` directives; causes phantom imports and version drift | `go get -tool ...` + `go tool ...` |
 | Assertion libraries (testify, go-testdeep) | go-ultimate: vanilla `testing` + table tests; assertion libs hide failure locality and add a public dep to test files | stdlib `testing` (+ `rapid` for properties) |
 | zap/zerolog/logrus | Non-stdlib logging with no advantage at this scale; logrus is unmaintained | `log/slog` |

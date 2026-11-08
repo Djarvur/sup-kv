@@ -1,4 +1,4 @@
-.PHONY: lint test generate build proto
+.PHONY: lint test generate build proto buf-lint buf-format buf-breaking
 
 ## lint: strict golangci-lint gate (same pinned binary as CI via the go.mod tool directive).
 ## config verify first: `run` silently ignores unknown top-level config keys (T-01-01),
@@ -21,9 +21,31 @@ build:
 
 ## proto: regenerate the committed replication wire code (dev machines only —
 ## CI never regenerates; internal/udprepl/replproto/supkv.pb.go is committed).
-## Builds the go.mod-pinned plugin, then runs system protoc (3.21.x) over the
-## schema with source-relative output paths.
+## Runs buf (go.mod-pinned via the tool directive) with the go-tool
+## protoc-gen-go plugin at source-relative paths (buf.gen.yaml) — no system
+## compiler needed.
 proto:
-	go build -o .tmp/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
-	protoc --plugin=.tmp/protoc-gen-go \
-	       --go_out=. --go_opt=paths=source_relative internal/udprepl/replproto/supkv.proto
+	go tool buf generate
+
+## buf-lint: lint the proto module with the STANDARD (DEFAULT) rule set and
+## the one documented PACKAGE_DIRECTORY_MATCH exception (buf.yaml).
+buf-lint:
+	go tool buf lint
+
+## buf-format: rewrite .proto files in place (local convenience only — CI
+## checks the canonical format with `buf format --diff --exit-code`, D-04).
+buf-format:
+	go tool buf format -w
+
+## buf-breaking: FILE-policy wire-schema comparison against origin/master.
+## The guard is required because buf v1.75 errors (exit 1) on a proto-less
+## against-ref instead of passing, while supkv.proto is not on origin/master
+## yet (probe-verified); it self-destructs the moment the proto lands there
+## and every later run does the real comparison (D-08).
+buf-breaking:
+	git fetch origin master
+	@if git cat-file -e refs/remotes/origin/master:internal/udprepl/replproto/supkv.proto; then \
+		go tool buf breaking --against '.git#ref=refs/remotes/origin/master'; \
+	else \
+		echo "buf breaking deferred: supkv.proto not on origin/master yet (D-08 guard)"; \
+	fi
