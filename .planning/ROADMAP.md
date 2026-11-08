@@ -129,7 +129,23 @@ Plans:
   3. Writes are rejected with Unavailable during the startup gate (until the first full sync round arrives or `startup_gate` elapses) while reads are served immediately, and the standard gRPC health endpoint reflects the gate state (NOT_SERVING until gated open)
   4. A write with `wait_for_replication` waits for peer Acks within a timeout, reports whether they arrived, and never changes the write outcome; snapshots can be created and loaded through the API
   5. The shipped artifact is a single static binary with flags/env config, `--version`, and systemd-friendly behavior
-**Plans**: TBD
+**Plans**: 6 plans
+Plans:
+**Wave 1**
+- [ ] 05-01-PLAN.md — Tracer: proto contract, grpc-go v1.85.0 + codegen, bufconn harness, Get/Set incl. create-if-absent/Delete with full error mapping, List under prefix (API-01, API-02)
+- [ ] 05-02-PLAN.md — Replication read seams: Core.SyncArrived (A1) + PendingInfo.Acked, mirrored cross-goroutine by udprepl atomics (API-04, API-05)
+
+**Wave 2** *(blocked on 05-01)*
+- [ ] 05-03-PLAN.md — Watch vertical: storage OnChange tap at install, WatchHub snapshot-then-live exact cut, prefix filter, disconnect-on-full (API-03)
+
+**Wave 3** *(blocked on 05-03: server.go file overlap)*
+- [ ] 05-04-PLAN.md — Startup gate + standard health endpoint NOT_SERVING→SERVING, write gating, SnapshotCreate/Load RPCs (API-04, API-06, API-07)
+
+**Wave 4** *(blocked on 05-02/05-04)*
+- [ ] 05-05-PLAN.md — wait_for_replication: aggregate report (D-08..D-11), appearance/drain two-phase wait, honest eviction/supersession handling (API-05)
+
+**Wave 5** *(blocked on all: wires the complete surface)*
+- [ ] 05-06-PLAN.md — Binary: Engine.Flush export, flags/env config (flag>env>default), --version ldflags, D-19 ordered SIGTERM shutdown, static build, real-process smoke (TOOL-01)
 
 ### Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks
 **Goal**: Every documented failure scenario is an automated passing test and the node is observable enough to operate — the evidence that the core value holds under chaos
