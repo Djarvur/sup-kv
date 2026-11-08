@@ -5,10 +5,10 @@ current_phase: 05
 current_phase_name: gRPC API and Binary
 status: executing
 stopped_at: Phase 04 complete, ready to execute Phase 05
-last_updated: "2026-11-08T21:11:34.978Z"
+last_updated: "2026-11-08T21:25:42.311Z"
 last_activity: 2026-11-09
 last_activity_desc: Phase 04 complete, transitioned to Phase 05
-state_head: 15213961ee1c9636e558b15286bc002db6d99124
+state_head: 9727c80a66c7228a605406a334b472ef391c9e1f
 progress:
   total_phases: 7
   completed_phases: 4
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-11-09)
 Phase: 05 — gRPC API and Binary
 Plan: Not started
 Status: Ready to execute
-Last activity: 2026-11-09 — Phase 04 complete, transitioned to Phase 05
+Last activity: 2026-11-09 — Completed quick task 261108-vxx: migrate proto codegen to buf
 
 Progress: [██████░░░░] 57%
 
@@ -166,6 +166,12 @@ None yet.
 - Phase 3 (Persistence): open planning decision — macOS F_FULLFSYNC durability policy (verify in Phase 6 crash scenarios).
 - D-08 macOS smoke RESOLVED empirically (first macos-15 CI run 2026-11-08, PR #31): darwin refuses the shared wildcard bind (EADDRINUSE; SO_REUSEADDR does not share there) — fixed as a loud skip in 507228a; macos-15 cell expected green-with-skip on re-run.
 - Phase 4 review: info-level findings IN-01 (write-only ownHandle dead state) and IN-02 (simnet Cluster.Write ignores store Set error) remain open by triage — see 04-REVIEW-DISPOSITION.md.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 261108-vxx | Migrate proto codegen to buf — pinned tool, lint/format/breaking gates | 2026-11-09 | 9727c80 | [261108-vxx-migratsiya-proto-codegen-na-buf-lint-bre](./quick/261108-vxx-migratsiya-proto-codegen-na-buf-lint-bre/) |
 
 ## Deferred Items
 
