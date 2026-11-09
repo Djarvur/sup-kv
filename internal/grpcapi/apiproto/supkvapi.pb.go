@@ -197,9 +197,10 @@ func (x *GetResponse) GetRecord() *Record {
 
 // SetRequest writes value under key. create_if_absent turns the write into
 // the create-if-absent variant (AlreadyExists for any existing record,
-// including a tombstone). wait_for_replication / wait_timeout_ms (D-09) ask
-// for the optional replication-ack report; until plan 05-05 they are
-// accepted but not acted on (D-08's report fields stay zero values).
+// including a tombstone). wait_for_replication asks the server to wait
+// after the confirmed write for the replication Acks; wait_timeout_ms
+// (D-09) bounds that wait per request (0 = the operator-tunable default).
+// The wait never changes the write outcome.
 type SetRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	Key                string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -279,8 +280,7 @@ func (x *SetRequest) GetWaitTimeoutMs() int64 {
 // SetResponse carries the stored record's 16-byte version and the D-08
 // aggregate replication report: acked plus acked_count/total_peers counts —
 // no per-peer breakdown. The report fields carry zero values when the write
-// did not request a wait (wait_for_replication=false) or while the wait is
-// not yet implemented (plan 05-05).
+// did not request a wait (wait_for_replication=false).
 type SetResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       []byte                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`

@@ -68,12 +68,18 @@ type Server struct {
 // the hub is constructed first because persist.Open threads the change tap
 // through storage.Config — and a nil hub keeps Watch answering
 // Unimplemented (the pre-Watch embed behavior). opts carries the
-// startup-gate wiring (gate.go): the gate starts closed with the health
-// endpoint at NOT_SERVING for the empty service name, and the caller
-// launches the resolver exactly once — go srv.RunGate(ctx) — to open both.
+// startup-gate wiring (gate.go) and the wait_for_replication seams
+// (wait.go): the gate starts closed with the health endpoint at
+// NOT_SERVING for the empty service name, and the caller launches the
+// resolver exactly once — go srv.RunGate(ctx) — to open both; a zero or
+// negative opts.WaitTimeout normalizes to the 1s design default (D-09,
+// A2), and nil wait seams mean zero peers (D-11).
 func NewServer(engine *persist.Engine, notify LocalNotify, hub *WatchHub, opts ServerOptions) *Server {
 	if hub != nil {
 		hub.attach(engine)
+	}
+	if opts.WaitTimeout <= 0 {
+		opts.WaitTimeout = defaultWaitTimeout
 	}
 	healthSrv := health.NewServer()
 	// The health protocol defaults the whole-server status to SERVING; the
@@ -112,12 +118,17 @@ func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.Get
 // before any validation, so even an empty key surfaces Unavailable, not
 // InvalidArgument, until the gate opens. An empty key is then rejected
 // with InvalidArgument before any engine call (A7: the store itself
-// permits empty keys, the API does not). wait_for_replication is accepted
-// but not acted on until plan 05-05 — the response's D-08 report fields
-// carry zero values. The replication notification is best-effort (D-05):
-// a dropped notification never fails the RPC, because the durable write
-// is already engine-confirmed.
-func (s *Server) Set(_ context.Context, req *apiproto.SetRequest) (*apiproto.SetResponse, error) {
+// permits empty keys, the API does not). wait_for_replication asks the
+// server to wait after the confirmed write for the replication Acks and
+// decorate the response with the D-08 aggregate report (wait.go): the wait
+// is bounded by the positive per-request wait_timeout_ms, else the
+// operator-tunable default (D-09), and never changes the write outcome —
+// it runs strictly after the engine confirmed the write, so no path below
+// can turn a confirmed write into an error. Without the flag the report
+// fields keep their zero values. The replication notification is
+// best-effort (D-05): a dropped notification never fails the RPC, because
+// the durable write is already engine-confirmed.
+func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.SetResponse, error) {
 	if s.gated() {
 		return nil, gateUnavailable()
 	}
@@ -137,7 +148,12 @@ func (s *Server) Set(_ context.Context, req *apiproto.SetRequest) (*apiproto.Set
 		return nil, mapError(err)
 	}
 	s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false)
-	return &apiproto.SetResponse{Version: ver[:]}, nil
+	resp := &apiproto.SetResponse{Version: ver[:]}
+	if req.GetWaitForReplication() {
+		timeout := s.waitTimeout(req.GetWaitTimeoutMs())
+		resp.Acked, resp.AckedCount, resp.TotalPeers = s.waitForReplication(ctx, req.GetKey(), ver, timeout)
+	}
+	return resp, nil
 }
 
 // Delete writes a fresh-version tombstone for one key and returns only
@@ -146,11 +162,13 @@ func (s *Server) Set(_ context.Context, req *apiproto.SetRequest) (*apiproto.Set
 // delete is a write). A missing or already-tombstoned key surfaces the
 // engine's NotFound through the shared mapper — a delete of nothing
 // happened. An empty key is rejected with InvalidArgument before any
-// engine call, like Set. The wait fields carry the same
-// accepted-but-deferred meaning as on Set (API-05: a delete is a write),
-// and the response's D-08 report fields carry zero values until plan
-// 05-05.
-func (s *Server) Delete(_ context.Context, req *apiproto.DeleteRequest) (*apiproto.DeleteResponse, error) {
+// engine call, like Set. The wait fields carry the same meaning as on Set
+// (API-05: a delete is a write): wait_for_replication waits for the
+// tombstone's replication Acks and decorates the response with the D-08
+// aggregate report, bounded by the positive per-request wait_timeout_ms
+// else the operator default (D-09), never changing the write outcome;
+// without the flag the report fields keep their zero values.
+func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apiproto.DeleteResponse, error) {
 	if s.gated() {
 		return nil, gateUnavailable()
 	}
@@ -162,7 +180,12 @@ func (s *Server) Delete(_ context.Context, req *apiproto.DeleteRequest) (*apipro
 		return nil, mapError(err)
 	}
 	s.notifyLocalWrite(req.GetKey(), ver, nil, true)
-	return &apiproto.DeleteResponse{Version: ver[:]}, nil
+	resp := &apiproto.DeleteResponse{Version: ver[:]}
+	if req.GetWaitForReplication() {
+		timeout := s.waitTimeout(req.GetWaitTimeoutMs())
+		resp.Acked, resp.AckedCount, resp.TotalPeers = s.waitForReplication(ctx, req.GetKey(), ver, timeout)
+	}
+	return resp, nil
 }
 
 // List returns the sorted live (non-tombstoned) keys under prefix in one
