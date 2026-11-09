@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: gRPC API and Binary
 status: executing
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-11-09T10:49:44.886Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-11-09T11:16:15.921Z"
 last_activity: 2026-11-09
 last_activity_desc: Phase 05 execution started
-state_head: bd8cf99b7183a590fd22464d6d536a86ec117dec
+state_head: d1026dcff8a90bac08160e37ccf0c60ec6cfc8d2
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 24
-  completed_plans: 19
+  completed_plans: 20
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-09)
 ## Current Position
 
 Phase: 05 (gRPC API and Binary) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-11-09 — Phase 05 execution started
 
@@ -78,6 +78,7 @@ Progress: [██████░░░░] 57%
 | Phase 04 P05 | 24 min | 3 tasks | 4 files |
 | Phase 4 P06 | 15 min | 2 tasks | 6 files |
 | Phase 05 P01 | 19 min | 3 tasks | 9 files |
+| Phase 05 P02 | 16 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -160,6 +161,9 @@ Recent decisions affecting current work:
 - [Phase 05]: protobuf stays at the buf-migration pseudo-version v1.36.13-0.20261016172727-e9ee2a76ab8e (plan's v1.36.12 pin superseded by the buf baseline); grpc v1.85.0 MVS sits below it — zero version churn (plan 05-01)
 - [Phase 05]: Delete notifies the tombstone through LocalNotify (API-05: a delete is a write; D-05 author contract) — Rule 2 addition beyond the task text, else deletes never replicate (plan 05-01)
 - [Phase 05]: LocalNotify record rebuilt from the write's own inputs + RecordChecksum so the notified record equals the stored one; receivers recompute checksums on merge regardless (plan 05-01)
+- [Phase 05]: mirrorState is one sibling call at the existing post-iteration stats site — sync flag and pending copy refresh together after every loop event, never torn (plan 05-02)
+- [Phase 05]: handleAck writes the pending entry back to the map (value copy) after appending to acked; evictPeers deliberately never touches acked — eviction stays distinguishable from an Ack by construction (T-05-04, plan 05-02)
+- [Phase 05]: udprepl pending mirror is copy-on-write: fresh map, every WaitingOn/Acked slice cloned, pointer replaced wholesale — published snapshots are immutable and stable across events (plan 05-02)
 
 ### Pending Todos
 
@@ -187,6 +191,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-09T10:49:44.718Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-11-09T11:16:15.770Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None
