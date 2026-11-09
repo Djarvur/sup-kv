@@ -1,5 +1,10 @@
 .PHONY: lint test generate build proto buf-lint buf-format buf-breaking
 
+# Version stamping for the build target (D-18): version from git describe,
+# commit from the short sha, "dev" when git is unavailable.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
 ## lint: strict golangci-lint gate (same pinned binary as CI via the go.mod tool directive).
 ## config verify first: `run` silently ignores unknown top-level config keys (T-01-01),
 ## so the vendored strict config is schema-checked on every gate invocation.
@@ -15,9 +20,12 @@ test:
 generate:
 	go generate ./...
 
-## build: compile all packages.
+## build: compile all packages, then produce the shippable artifact
+## bin/sup-kv (gitignored): one static binary (CGO_ENABLED=0 — pure-Go deps
+## only) with ldflags version/commit stamping (D-18).
 build:
 	go build ./...
+	CGO_ENABLED=0 go build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/sup-kv ./cmd/sup-kv
 
 ## proto: regenerate the committed replication wire code (dev machines only —
 ## CI never regenerates; internal/udprepl/replproto/supkv.pb.go is committed).
