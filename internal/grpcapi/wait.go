@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/repl"
@@ -14,6 +15,15 @@ const (
 	// negative ServerOptions.WaitTimeout so a misconfigured option can
 	// never mean "wait forever".
 	defaultWaitTimeout = time.Second
+
+	// maxWaitTimeoutMs is the largest wait_timeout_ms whose millisecond→
+	// nanosecond product cannot overflow int64 (WR-02): any per-request
+	// value above it is clamped here BEFORE the conversion, because the
+	// raw product of a hostile value wraps arbitrarily — negative (a
+	// deadline already in the past, an immediate wrong report) or huge
+	// positive (an effectively unbounded server-side wait holding the
+	// handler goroutine).
+	maxWaitTimeoutMs = math.MaxInt64 / int64(time.Millisecond)
 
 	// waitPoll is the pending-mirror poll period (the smoke waitFor
 	// pattern, production-side): the udprepl adapter refreshes its
@@ -181,10 +191,29 @@ func (s *Server) waitForDrain(ctx context.Context, key string, ver version.Recor
 
 // waitTimeout resolves the D-09 wait deadline for one write: a positive
 // per-request wait_timeout_ms wins over the operator-tunable default,
-// which NewServer already normalized to defaultWaitTimeout.
+// which NewServer already normalized to defaultWaitTimeout. The request
+// field is unvalidated remote input (WR-02), so two bounds apply before a
+// value becomes a duration: anything above maxWaitTimeoutMs clamps first —
+// its raw conversion would wrap the int64 product — and the resolved
+// duration then caps at ten times the operator default, so no client can
+// hold a write handler an order of magnitude beyond the operator's own
+// configuration (the cap clamps the request only; negative and zero keep
+// falling back to the default, D-09, and a rejection is never an option:
+// the write is already engine-confirmed when this resolves, and no path
+// may turn a confirmed write into an error).
 func (s *Server) waitTimeout(requestMs int64) time.Duration {
-	if requestMs > 0 {
-		return time.Duration(requestMs) * time.Millisecond
+	if requestMs <= 0 {
+		return s.opts.WaitTimeout
 	}
-	return s.opts.WaitTimeout
+	if requestMs > maxWaitTimeoutMs {
+		requestMs = maxWaitTimeoutMs
+	}
+	timeout := time.Duration(requestMs) * time.Millisecond
+	if ceiling := 10 * s.opts.WaitTimeout; ceiling > 0 && timeout > ceiling {
+		// The > 0 guard keeps an absurd operator default whose ×10
+		// overflows from inverting the comparison; such a default then
+		// stays bounded only by the conversion-safe ceiling.
+		return ceiling
+	}
+	return timeout
 }

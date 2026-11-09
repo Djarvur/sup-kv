@@ -1,6 +1,7 @@
 package grpcapi_test
 
 import (
+	"context"
 	"slices"
 	"sync"
 	"testing"
@@ -391,6 +392,93 @@ func TestWait_strangerAcksClampedToTotal(t *testing.T) {
 	if !resp.GetAcked() || resp.GetAckedCount() != 1 || resp.GetTotalPeers() != 1 {
 		t.Fatalf("stranger-ack report: want acked=true 1/1 with the count clamped to the write-time total, got acked=%v %d/%d",
 			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+}
+
+// overflowWrapMs is a wait_timeout_ms above the ms→ns conversion-safe
+// ceiling whose raw int64 product wraps to a known huge POSITIVE duration:
+// 18 446 744 173 910 ms × 1 000 000 ns/ms = 18 446 744 173 910 000 000 ns,
+// which reduced mod 2^64 reads back as +100 200 448 384 ns — a 100.2s
+// server-side wait from one hostile field value (WR-02). The negative-wrap
+// sibling is conversionCeiling+1 ms: its product wraps to −292y, a deadline
+// already in the past.
+const (
+	overflowWrapMs = int64(18446744173910)
+	negativeWrapMs = int64(9223372036855)
+)
+
+// TestWait_overflowingTimeoutClamped locks the WR-02 bounds on the
+// unvalidated remote wait_timeout_ms: a value whose ms→ns conversion wraps
+// to a huge positive duration cannot hold the handler for ~100s (the 3s
+// client deadline would sever the RPC first — the pre-fix failure), and a
+// value wrapping negative cannot dodge the wait with an already-expired
+// deadline (the pre-fix call returns immediately instead of running the
+// bounded wait). The resolved deadline clamps to ten times the operator
+// default (50ms here → 500ms), so both hostile values behave like an
+// ordinary bounded timeout: honest acked=false 0/1, the wait never changes
+// the write outcome.
+func TestWait_overflowingTimeoutClamped(t *testing.T) {
+	t.Parallel()
+
+	const (
+		keyWrap   = "wait/wrap-pos"
+		keyNeg    = "wait/wrap-neg"
+		opDefault = 50 * time.Millisecond
+	)
+	mirror := newFakeMirror(1)
+	ts := newWaitServer(t, mirror, opDefault)
+	ctx := t.Context()
+
+	// Both tracked entries stay unresolved (WaitingOn non-empty), so both
+	// waits run their drain phase to the resolved deadline.
+	go func() {
+		for _, key := range []string{keyWrap, keyNeg} {
+			if ver, ok := awaitWrittenVersion(ts, key); ok {
+				mirror.setPending(key, repl.PendingInfo{Version: ver, WaitingOn: []uint16{1}})
+			}
+		}
+	}()
+
+	start := time.Now()
+	wrapCtx, cancelWrap := context.WithTimeout(ctx, 3*time.Second)
+	resp, err := ts.client.Set(wrapCtx, &apiproto.SetRequest{
+		Key:                keyWrap,
+		Value:              []byte("v"),
+		WaitForReplication: true,
+		WaitTimeoutMs:      overflowWrapMs,
+	})
+	cancelWrap()
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Set %s: want OK within the client deadline (the ceiling caps the hostile value), got error: %v", keyWrap, err)
+	}
+	if resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 1 {
+		t.Fatalf("overflow-wrap report: want acked=false 0/1, got acked=%v %d/%d",
+			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("overflow-wrap Set took %v: want under 2s — the positive wrap must clamp to the 10x ceiling (500ms)", elapsed)
+	}
+
+	start = time.Now()
+	negCtx, cancelNeg := context.WithTimeout(ctx, 3*time.Second)
+	resp, err = ts.client.Set(negCtx, &apiproto.SetRequest{
+		Key:                keyNeg,
+		Value:              []byte("v"),
+		WaitForReplication: true,
+		WaitTimeoutMs:      negativeWrapMs,
+	})
+	cancelNeg()
+	elapsed = time.Since(start)
+	if err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", keyNeg, err)
+	}
+	if resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 1 {
+		t.Fatalf("negative-wrap report: want acked=false 0/1, got acked=%v %d/%d",
+			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+	if elapsed < 450*time.Millisecond {
+		t.Fatalf("negative-wrap Set returned in %v: want the bounded ~500ms wait — the negative wrap must clamp, not yield an already-expired deadline", elapsed)
 	}
 }
 
