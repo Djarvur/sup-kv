@@ -14,6 +14,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -115,6 +117,29 @@ func (s *Server) Delete(_ context.Context, req *apiproto.DeleteRequest) (*apipro
 	}
 	s.notifyLocalWrite(req.GetKey(), ver, nil, true)
 	return &apiproto.DeleteResponse{Version: ver[:]}, nil
+}
+
+// List returns the sorted live (non-tombstoned) keys under prefix in one
+// response (D-12): the empty prefix matches every key (D-15), tombstones
+// are never listed — List reflects live state, not history (D-14) — and
+// the response carries keys only; values are fetched via Get (D-13). The
+// engine's Records() snapshot is tombstone-inclusive by contract, so the
+// Deleted filter here is adapter-side. The scale envelope — tens of
+// thousands of keys — fits the gRPC 4 MiB default send limit (research
+// A6): grpc defaults are kept, and grpc.MaxSendMsgSize is the documented
+// growth knob if key names ever grow the envelope — pagination is
+// deliberately not hand-rolled (D-12).
+func (s *Server) List(_ context.Context, req *apiproto.ListRequest) (*apiproto.ListResponse, error) {
+	records := s.engine.Records()
+	keys := make([]string, 0, len(records))
+	for key, rec := range records {
+		if rec.Deleted || !strings.HasPrefix(key, req.GetPrefix()) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return &apiproto.ListResponse{Keys: keys}, nil
 }
 
 // notifyLocalWrite hands the just-confirmed write to the replication

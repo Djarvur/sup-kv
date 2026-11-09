@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -259,4 +260,57 @@ func TestServer_errorMapping(t *testing.T) {
 	ts.cancelEngine()
 	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "err/closed", Value: []byte("v")})
 	assertCode(t, "Set after engine close", err, codes.Unavailable)
+}
+
+// TestServer_list proves D-12..D-15: List returns the sorted live keys
+// under any prefix in one response, tombstoned keys never appear, a prefix
+// yields exactly its subset, and the empty prefix enumerates the whole
+// live state. slices.Equal is order-sensitive, so the want-list comparison
+// pins the strict ascending order.
+func TestServer_list(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	// Seed keys across two prefixes plus one key that gets tombstoned.
+	for _, key := range []string{"cfg/a", "cfg/b", "svc/a", "svc/b", "tmp/x"} {
+		_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: key, Value: []byte("v")})
+		if err != nil {
+			t.Fatalf("Set %s: want OK, got error: %v", key, err)
+		}
+	}
+	_, err := ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "tmp/x"})
+	if err != nil {
+		t.Fatalf("Delete tmp/x: want OK, got error: %v", err)
+	}
+
+	// Empty prefix returns every live key (D-15): strictly ascending,
+	// tombstone absent (D-14), keys only (D-13), single response (D-12).
+	all, err := ts.client.List(ctx, &apiproto.ListRequest{})
+	if err != nil {
+		t.Fatalf("List empty prefix: want OK, got error: %v", err)
+	}
+	wantAll := []string{"cfg/a", "cfg/b", "svc/a", "svc/b"}
+	if got := all.GetKeys(); !slices.Equal(got, wantAll) {
+		t.Fatalf("List empty prefix: want %v sorted and tombstone-free, got %v", wantAll, got)
+	}
+
+	// A prefix returns exactly its live subset.
+	cfg, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "cfg/"})
+	if err != nil {
+		t.Fatalf("List cfg/ prefix: want OK, got error: %v", err)
+	}
+	if got := cfg.GetKeys(); !slices.Equal(got, []string{"cfg/a", "cfg/b"}) {
+		t.Fatalf("List cfg/ prefix: want [cfg/a cfg/b], got %v", got)
+	}
+
+	// A prefix matching nothing returns an empty list, not an error.
+	none, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "zzz/"})
+	if err != nil {
+		t.Fatalf("List unmatched prefix: want OK, got error: %v", err)
+	}
+	if got := none.GetKeys(); len(got) != 0 {
+		t.Fatalf("List unmatched prefix: want 0 keys, got %v", got)
+	}
 }
