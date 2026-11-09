@@ -16,8 +16,11 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
 	"github.com/Djarvur/sup-kv/internal/app/persist"
@@ -46,6 +49,17 @@ type Server struct {
 	engine *persist.Engine
 	notify LocalNotify
 	hub    *WatchHub
+	opts   ServerOptions
+
+	// healthSrv is the standard gRPC health server whose empty-service
+	// status is bound 1:1 to the gate (API-06, gate.go); it starts at
+	// NOT_SERVING and only the gate resolver opens it.
+	healthSrv *health.Server
+
+	// gateOpen is the resolved startup-gate state (API-04): closed at
+	// construction, opened exactly once by RunGate. Write handlers read it
+	// through gated; reads never consult it.
+	gateOpen atomic.Bool
 }
 
 // NewServer returns the SupKV service over engine. notify may be nil: that
@@ -54,12 +68,26 @@ type Server struct {
 // WatchHub backing the Watch stream; NewServer attaches the engine to it —
 // the hub is constructed first because persist.Open threads the change tap
 // through storage.Config — and a nil hub keeps Watch answering
-// Unimplemented (the pre-Watch embed behavior).
-func NewServer(engine *persist.Engine, notify LocalNotify, hub *WatchHub) *Server {
+// Unimplemented (the pre-Watch embed behavior). opts carries the
+// startup-gate wiring (gate.go): the gate starts closed with the health
+// endpoint at NOT_SERVING for the empty service name, and the caller
+// launches the resolver exactly once — go srv.RunGate(ctx) — to open both.
+func NewServer(engine *persist.Engine, notify LocalNotify, hub *WatchHub, opts ServerOptions) *Server {
 	if hub != nil {
 		hub.attach(engine)
 	}
-	return &Server{engine: engine, notify: notify, hub: hub}
+	healthSrv := health.NewServer()
+	// The health protocol defaults the whole-server status to SERVING; the
+	// gate starts closed, so the binding begins at NOT_SERVING before any
+	// client can observe the endpoint (API-06).
+	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	return &Server{
+		engine:    engine,
+		notify:    notify,
+		hub:       hub,
+		opts:      opts,
+		healthSrv: healthSrv,
+	}
 }
 
 // Get returns the live record for one key. Reads are never gated on dumps
@@ -80,14 +108,20 @@ func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.Get
 // Set writes value under key — the create/update write, or its
 // create-if-absent variant — and returns only after the engine confirmed
 // the write on disk (PERS-04 inside the RPC): a nil error means a dump
-// containing the record completed. An empty key is rejected with
-// InvalidArgument before any engine call (A7: the store itself permits
-// empty keys, the API does not). wait_for_replication is accepted but not
-// acted on until plan 05-05 — the response's D-08 report fields carry zero
-// values. The replication notification is best-effort (D-05): a dropped
-// notification never fails the RPC, because the durable write is already
-// engine-confirmed.
+// containing the record completed. The startup gate is checked first
+// (API-04): while it is closed every write is Unavailable, full stop —
+// before any validation, so even an empty key surfaces Unavailable, not
+// InvalidArgument, until the gate opens. An empty key is then rejected
+// with InvalidArgument before any engine call (A7: the store itself
+// permits empty keys, the API does not). wait_for_replication is accepted
+// but not acted on until plan 05-05 — the response's D-08 report fields
+// carry zero values. The replication notification is best-effort (D-05):
+// a dropped notification never fails the RPC, because the durable write
+// is already engine-confirmed.
 func (s *Server) Set(_ context.Context, req *apiproto.SetRequest) (*apiproto.SetResponse, error) {
+	if s.gated() {
+		return nil, gateUnavailable()
+	}
 	if req.GetKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
 	}
@@ -109,13 +143,18 @@ func (s *Server) Set(_ context.Context, req *apiproto.SetRequest) (*apiproto.Set
 
 // Delete writes a fresh-version tombstone for one key and returns only
 // after the engine confirmed the tombstone on disk (PERS-04 inside the
-// RPC). A missing or already-tombstoned key surfaces the engine's NotFound
-// through the shared mapper — a delete of nothing happened. An empty key
-// is rejected with InvalidArgument before any engine call, like Set. The
-// wait fields carry the same accepted-but-deferred meaning as on Set
-// (API-05: a delete is a write), and the response's D-08 report fields
-// carry zero values until plan 05-05.
+// RPC). The startup gate is checked first, exactly like Set (API-04: a
+// delete is a write). A missing or already-tombstoned key surfaces the
+// engine's NotFound through the shared mapper — a delete of nothing
+// happened. An empty key is rejected with InvalidArgument before any
+// engine call, like Set. The wait fields carry the same
+// accepted-but-deferred meaning as on Set (API-05: a delete is a write),
+// and the response's D-08 report fields carry zero values until plan
+// 05-05.
 func (s *Server) Delete(_ context.Context, req *apiproto.DeleteRequest) (*apiproto.DeleteResponse, error) {
+	if s.gated() {
+		return nil, gateUnavailable()
+	}
 	if req.GetKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
 	}

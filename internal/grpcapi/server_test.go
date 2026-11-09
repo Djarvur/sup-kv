@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
 	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // testValueLimit is the shrunken value limit the harness runs the store
@@ -91,49 +93,96 @@ func (*fakeDumpStore) ReadSnapshot(_ string) ([]byte, error) {
 	return nil, errFakeSnapshot
 }
 
-// testHarness bundles one running engine, its watch hub and the
-// bufconn-dialed client.
+// testHarness bundles one running engine, its watch hub, the
+// bufconn-dialed client and the health client.
 type testHarness struct {
 	client       apiproto.SupKVClient
+	health       healthpb.HealthClient
 	engine       *persist.Engine
 	hub          *grpcapi.WatchHub
-	dumps        *fakeDumpStore
+	dumps        *fakeDumpStore // nil on the file-backed harness
 	cancelEngine context.CancelFunc
 }
 
-// newTestServer builds the harness with the default watch hub.
-func newTestServer(t *testing.T) *testHarness {
-	t.Helper()
-	return newTestServerWithWatchBuffer(t, 0)
+// testServerConfig holds the harness knobs the test families vary: the
+// watch hub's per-subscriber buffer, the DumpStore backing the engine and
+// the startup-gate wiring.
+type testServerConfig struct {
+	// watchBuffer is the hub's per-subscriber buffer; 0 means the package
+	// default through NewWatchHub.
+	watchBuffer int
+
+	// dumps backs the engine; nil means the in-memory fakeDumpStore.
+	dumps port.DumpStore
+
+	// gate is the ServerOptions the api server is constructed with. The
+	// builder always launches the gate resolver; tests that need an open
+	// gate pass always-open wiring and call awaitGateOpen.
+	gate grpcapi.ServerOptions
 }
 
-// newTestServerWithWatchBuffer builds the reusable bufconn harness with the
-// watch hub's per-subscriber buffer set to subscriberBuffer (0 = the
-// package default through NewWatchHub) — the shrink-to-2 knob the overflow
-// tests need to force the disconnect path deterministically. The hub is
-// constructed FIRST — persist.Open threads the change tap through
+// openGateOptions returns the gate wiring the open-gate harnesses use: the
+// sync fake always answers true, so the resolver opens on its first poll
+// (at most gatePollInterval after construction).
+func openGateOptions() grpcapi.ServerOptions {
+	return grpcapi.ServerOptions{SyncArrived: func() bool { return true }}
+}
+
+// newTestServer builds the harness with the default watch hub and an open
+// gate.
+func newTestServer(t *testing.T) *testHarness {
+	t.Helper()
+	h := buildTestServer(t, testServerConfig{gate: openGateOptions()})
+	awaitGateOpen(t, h)
+	return h
+}
+
+// newTestServerWithWatchBuffer builds the harness with the watch hub's
+// per-subscriber buffer set to subscriberBuffer (0 = the package default
+// through NewWatchHub) — the shrink-to-2 knob the overflow tests need to
+// force the disconnect path deterministically — and an open gate.
+func newTestServerWithWatchBuffer(t *testing.T, subscriberBuffer int) *testHarness {
+	t.Helper()
+	h := buildTestServer(t, testServerConfig{
+		watchBuffer: subscriberBuffer,
+		gate:        openGateOptions(),
+	})
+	awaitGateOpen(t, h)
+	return h
+}
+
+// buildTestServer assembles the full bufconn harness from the config. The
+// hub is constructed FIRST — persist.Open threads the change tap through
 // storage.Config (OnChange: hub.Ingest, no persist change) — then the
 // engine, then go hub.Run under its own context, cancelled via t.Cleanup:
 // a slow or wedged Watch hub must never hold the harness's writes hostage.
-// Everything else as the tracer built it: a hand-written in-memory fake
-// DumpStore, a real persist engine (test node id, wall-clock now, shrunken
+// The api server is constructed with the config's gate wiring, its health
+// server registered alongside SupKV on the same grpc.Server (API-06's
+// registration contract, the one main must copy in 05-06), and the gate
+// resolver launched under its own context. Everything else as the tracer
+// built it: a real persist engine (test node id, wall-clock now, shrunken
 // value limit, dump timings tuned down to 1ms/50ms of real time — bufconn
 // and synctest bubbles do not mix), the grpcapi Server with a nil notify
 // (the legal single-node configuration, D-11), and a gRPC client dialed
 // over bufconn with insecure credentials — mandatory on modern gRPC
-// clients even for an in-memory transport. Everything stops via t.Cleanup,
-// so every test using the harness can run t.Parallel().
-func newTestServerWithWatchBuffer(t *testing.T, subscriberBuffer int) *testHarness {
+// clients even for an in-memory transport. Everything stops via
+// t.Cleanup, so every test using the harness can run t.Parallel().
+func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	t.Helper()
 
 	var hub *grpcapi.WatchHub
-	if subscriberBuffer > 0 {
-		hub = grpcapi.NewWatchHubWithBuffer(subscriberBuffer)
+	if cfg.watchBuffer > 0 {
+		hub = grpcapi.NewWatchHubWithBuffer(cfg.watchBuffer)
 	} else {
 		hub = grpcapi.NewWatchHub()
 	}
 
-	dumps := &fakeDumpStore{}
+	var fake *fakeDumpStore
+	dumps := cfg.dumps
+	if dumps == nil {
+		fake = &fakeDumpStore{}
+		dumps = fake
+	}
 	eng, _ := persist.Open(
 		42,
 		time.Now,
@@ -150,8 +199,14 @@ func newTestServerWithWatchBuffer(t *testing.T, subscriberBuffer int) *testHarne
 	go func() { _ = hub.Run(hubCtx) }()
 	t.Cleanup(cancelHub)
 
+	api := grpcapi.NewServer(eng, nil, hub, cfg.gate)
+	gateCtx, cancelGate := context.WithCancel(t.Context())
+	t.Cleanup(cancelGate)
+	go api.RunGate(gateCtx)
+
 	srv := grpc.NewServer()
-	apiproto.RegisterSupKVServer(srv, grpcapi.NewServer(eng, nil, hub))
+	apiproto.RegisterSupKVServer(srv, api)
+	healthpb.RegisterHealthServer(srv, api.Health())
 
 	lis := bufconn.Listen(1 << 20)
 	go func() { _ = srv.Serve(lis) }()
@@ -170,11 +225,48 @@ func newTestServerWithWatchBuffer(t *testing.T, subscriberBuffer int) *testHarne
 
 	return &testHarness{
 		client:       apiproto.NewSupKVClient(conn),
+		health:       healthpb.NewHealthClient(conn),
 		engine:       eng,
 		hub:          hub,
-		dumps:        dumps,
+		dumps:        fake,
 		cancelEngine: cancelEng,
 	}
+}
+
+// gateWait bounds every wait for a state the gate resolver owes the test,
+// and gatePoll is the poll period — the resolver itself polls every
+// gatePollInterval, so the observation lag is one resolver interval at
+// most.
+const (
+	gateWait = 2 * time.Second
+	gatePoll = 10 * time.Millisecond
+)
+
+// waitFor polls cond every gatePoll until it holds or the deadline — the
+// smoke waitFor pattern (udprepl/smoke_test.go) — and fails with what on
+// expiry.
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(gatePoll)
+	}
+	t.Fatalf("timed out after %v waiting for %s", timeout, what)
+}
+
+// awaitGateOpen blocks until the health endpoint reports SERVING for the
+// empty service name — the deterministic wait for the resolver's opening
+// poll, since the gate flag itself is unexported and the health endpoint
+// is its pinned 1:1 mirror (API-06).
+func awaitGateOpen(t *testing.T, h *testHarness) {
+	t.Helper()
+	waitFor(t, gateWait, "the health endpoint to flip SERVING (gate open)", func() bool {
+		resp, err := h.health.Check(t.Context(), &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
 }
 
 // TestServer_setGetRoundTrip proves the tracer slice end-to-end: a Set over
