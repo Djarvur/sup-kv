@@ -4,17 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: gRPC API and Binary
 status: executing
-stopped_at: Phase 04 complete, ready to execute Phase 05
-last_updated: "2026-11-08T21:25:42.311Z"
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-11-09T10:49:44.886Z"
 last_activity: 2026-11-09
-last_activity_desc: Phase 04 complete, transitioned to Phase 05
-state_head: 9727c80a66c7228a605406a334b472ef391c9e1f
+last_activity_desc: Phase 05 execution started
+state_head: bd8cf99b7183a590fd22464d6d536a86ec117dec
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 24
-  completed_plans: 18
-  percent: 57
+  completed_plans: 19
 ---
 
 # Project State
@@ -28,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-11-09)
 
 ## Current Position
 
-Phase: 05 — gRPC API and Binary
-Plan: Not started
+Phase: 05 (gRPC API and Binary) — EXECUTING
+Plan: 2 of 6
 Status: Ready to execute
-Last activity: 2026-11-09 — Completed quick task 261108-vxx: migrate proto codegen to buf
+Last activity: 2026-11-09 — Phase 05 execution started
 
 Progress: [██████░░░░] 57%
 
@@ -78,6 +77,7 @@ Progress: [██████░░░░] 57%
 | Phase 04 P04 | 9 min | 2 tasks | 2 files |
 | Phase 04 P05 | 24 min | 3 tasks | 4 files |
 | Phase 4 P06 | 15 min | 2 tasks | 6 files |
+| Phase 05 P01 | 19 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -156,6 +156,10 @@ Recent decisions affecting current work:
 - [Phase 4]: [Phase 04]: The duplicate-node_id second variant keys on remembered-run_id equality plus a differing source handle, so run_id inequality is always the restart path — the classifier never pre-empts the plan-04-04 restart branch; both variants log a configuration error naming node_id and both handles (plan 04-06) — Two sources claiming one identity is a misconfiguration (REPL-08); a changed run_id is a restart (REPL-07) — the equality test keeps the branches disjoint by construction
 - [Phase 4]: [Phase 04]: Engine.ApplyRemote = Merge + markDirty + the non-blocking changed nudge (an idle dumper parked in its select would never arm timers without the wake); no waiter, no flush, errors unchanged, REPL-03's memory-apply contract (plan 04-06) — markDirty alone mutates state nobody polls — remote merges on a clean engine would never reach disk, the Phase-3 reserved seam's exact gap
 - [Phase 4]: [Phase 04]: No-waiter dump paths in synctest advance the bubble clock with synctest.Sleep — synctest.Wait returns without firing timers; waiter-based tests never hit this because their blocked calls hold the test goroutine until the dump resolves (plan 04-06) — The first persist GREEN run failed only on harness timing; pinned so future no-waiter timing tests use Sleep from the start
+- [Phase 05]: Codegen rides buf (post-plan buf migration): buf.gen.yaml gained the go-tool protoc-gen-go-grpc plugin; Makefile proto target unchanged — one buf generate pass covers both proto dirs; per-file buf-lint waivers keep the plan-pinned wire names SupKV/WatchEvent (D-06 exception pattern)
+- [Phase 05]: protobuf stays at the buf-migration pseudo-version v1.36.13-0.20261016172727-e9ee2a76ab8e (plan's v1.36.12 pin superseded by the buf baseline); grpc v1.85.0 MVS sits below it — zero version churn (plan 05-01)
+- [Phase 05]: Delete notifies the tombstone through LocalNotify (API-05: a delete is a write; D-05 author contract) — Rule 2 addition beyond the task text, else deletes never replicate (plan 05-01)
+- [Phase 05]: LocalNotify record rebuilt from the write's own inputs + RecordChecksum so the notified record equals the stored one; receivers recompute checksums on merge regardless (plan 05-01)
 
 ### Pending Todos
 
@@ -183,6 +187,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-08T21:12:58.000Z
-Stopped at: Phase 04 re-verified complete (stale refresh), ready to execute Phase 05
-Resume file: .planning/phases/05-grpc-api-and-binary/05-CONTEXT.md
+Last session: 2026-11-09T10:49:44.718Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: None
