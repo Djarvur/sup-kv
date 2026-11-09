@@ -1,0 +1,141 @@
+// sup-kv gRPC API wire schema: the client-facing surface over the engine
+// (docs/IDEA.md §API). All seven RPCs of the phase are declared here in one
+// codegen pass — the later phase-5 plans (Watch, snapshots,
+// wait_for_replication) consume the already-generated messages; the
+// unimplemented RPCs inherit Unimplemented from the server embed. The full
+// record travels in every state-carrying message (D-01): a subscriber or
+// writer never needs a second round trip to act on a change. This file is
+// the client-facing wire contract (CONTEXT.md D-01/D-03 rate changing it
+// costly) — field names and numbers are pinned once clients exist.
+syntax = "proto3";
+
+package supkvapi.v1;
+
+option go_package = "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto;apiproto";
+
+// Record carries one key's full state (D-01): key, the 16-byte RFC 9562
+// RecordVersion, the value bytes and the deleted tombstone flag. Deletes
+// arrive in the same shape with deleted=true (D-02) — the record carries no
+// checksum field: the engine recomputes it on install, and the wire never
+// trusted a transported checksum (the phase-2 Merge discipline).
+message Record {
+  string key = 1;
+  bytes version = 2;
+  bytes value = 3;
+  bool deleted = 4;
+}
+
+// SupKV is the whole phase-5 RPC surface. Watch is server-streaming; every
+// other RPC is unary.
+service SupKV {
+  // Get returns the live record for one key.
+  rpc Get(GetRequest) returns (GetResponse);
+  // Set writes a value (or a create-if-absent variant of it).
+  rpc Set(SetRequest) returns (SetResponse);
+  // Delete writes a fresh-version tombstone for one key.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  // List returns the sorted live keys under a prefix.
+  rpc List(ListRequest) returns (ListResponse);
+  // Watch streams snapshot-then-live change events (phase-5 plan 05-04).
+  rpc Watch(WatchRequest) returns (stream WatchEvent);
+  // SnapshotCreate copies the confirmed dump under a name (plan 05-05).
+  rpc SnapshotCreate(SnapshotCreateRequest) returns (SnapshotCreateResponse);
+  // SnapshotLoad replays a named snapshot as ordinary writes (plan 05-05).
+  rpc SnapshotLoad(SnapshotLoadRequest) returns (SnapshotLoadResponse);
+}
+
+// GetRequest names one key to read.
+message GetRequest {
+  string key = 1;
+}
+
+// GetResponse carries the live record; an absent or tombstoned key is the
+// NotFound error, never an empty response.
+message GetResponse {
+  Record record = 1;
+}
+
+// SetRequest writes value under key. create_if_absent turns the write into
+// the create-if-absent variant (AlreadyExists for any existing record,
+// including a tombstone). wait_for_replication / wait_timeout_ms (D-09) ask
+// for the optional replication-ack report; until plan 05-05 they are
+// accepted but not acted on (D-08's report fields stay zero values).
+message SetRequest {
+  string key = 1;
+  bytes value = 2;
+  bool create_if_absent = 3;
+  bool wait_for_replication = 4;
+  int64 wait_timeout_ms = 5;
+}
+
+// SetResponse carries the stored record's 16-byte version and the D-08
+// aggregate replication report: acked plus acked_count/total_peers counts —
+// no per-peer breakdown. The report fields carry zero values when the write
+// did not request a wait (wait_for_replication=false) or while the wait is
+// not yet implemented (plan 05-05).
+message SetResponse {
+  bytes version = 1;
+  bool acked = 2;
+  uint32 acked_count = 3;
+  uint32 total_peers = 4;
+}
+
+// DeleteRequest tombstones one key; the optional wait fields carry the same
+// meaning as on SetRequest (a delete is a write — API-05).
+message DeleteRequest {
+  string key = 1;
+  bool wait_for_replication = 2;
+  int64 wait_timeout_ms = 3;
+}
+
+// DeleteResponse carries the tombstone's version plus the D-08 aggregate
+// report fields, zero-valued under the same conditions as SetResponse.
+message DeleteResponse {
+  bytes version = 1;
+  bool acked = 2;
+  uint32 acked_count = 3;
+  uint32 total_peers = 4;
+}
+
+// ListRequest filters by prefix; the empty prefix means all keys (D-15).
+message ListRequest {
+  string prefix = 1;
+}
+
+// ListResponse carries the sorted live (non-tombstoned) keys only (D-13,
+// D-14) in one response — no pagination fields exist (D-12).
+message ListResponse {
+  repeated string keys = 1;
+}
+
+// WatchRequest subscribes to changes under a prefix; the empty prefix means
+// all keys (D-04).
+message WatchRequest {
+  string prefix = 1;
+}
+
+// WatchEvent is one change notification carrying the full record (D-01) —
+// snapshot and live events share this one shape (D-03), tombstones arrive
+// with deleted=true (D-02).
+message WatchEvent {
+  Record record = 1;
+}
+
+// SnapshotCreateRequest names the recovery point to copy the confirmed dump
+// under (D-10; names validated at the persistfile adapter).
+message SnapshotCreateRequest {
+  string name = 1;
+}
+
+// SnapshotCreateResponse confirms the copy; the snapshot is read back by
+// name.
+message SnapshotCreateResponse {}
+
+// SnapshotLoadRequest names the snapshot to replay as ordinary writes with
+// fresh versions (D-09 semantics of persist.Restore).
+message SnapshotLoadRequest {
+  string name = 1;
+}
+
+// SnapshotLoadResponse confirms the replay completed and is dump-confirmed.
+message SnapshotLoadResponse {}

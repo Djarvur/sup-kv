@@ -1,9 +1,14 @@
-# Buf codegen for the committed wire structs. The local plugin resolves
-# protoc-gen-go through the go.mod tool directive — no global PATH install,
-# no BSR remote plugins (D-05; .claude/CLAUDE.md tool policy).
+# Buf codegen for the committed wire structs. The local plugins resolve
+# protoc-gen-go and protoc-gen-go-grpc through the go.mod tool directives —
+# no global PATH install, no BSR remote plugins (D-05; .claude/CLAUDE.md
+# tool policy). protoc-gen-go-grpc skips service-less files (the phase-4
+# replication schema), so one pass generates both proto dirs.
 version: v2
 
 plugins:
   - local: ["go", "tool", "protoc-gen-go"]
+    out: .
+    opt: paths=source_relative
+  - local: ["go", "tool", "protoc-gen-go-grpc"]
     out: .
     opt: paths=source_relative

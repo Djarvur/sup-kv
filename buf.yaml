@@ -21,13 +21,26 @@ lint:
   # prints a deprecation WARN on every invocation (D-02: DEFAULT rule set).
   use:
     - STANDARD
-  # The single DEFAULT/STANDARD finding on this repo: package supkv.v1 lives in
-  # internal/udprepl/replproto, not supkv/v1/. Moving the proto would churn
-  # phase-4 import paths for no gain, so the rule is waived for this one file
-  # only (D-06: documented exception over file moves).
+  # The DEFAULT/STANDARD findings on this repo: package supkv.v1 lives in
+  # internal/udprepl/replproto and package supkvapi.v1 lives in
+  # internal/grpcapi/apiproto — neither matches the package-derived
+  # directory the rule expects. Moving the protos would churn import paths
+  # for no gain, so the rule is waived for these two files only (D-06:
+  # documented exception over file moves).
+  #
+  # The gRPC schema keeps the plan-pinned client-facing names — service
+  # SupKV (not SupKVService) and response message WatchEvent (not
+  # WatchResponse) — the wire contract (/supkvapi.v1.SupKV/Watch and the
+  # event message clients decode) pinned by the phase-5 plan; the generic
+  # naming rules are waived for that one file.
   ignore_only:
     PACKAGE_DIRECTORY_MATCH:
       - internal/udprepl/replproto/supkv.proto
+      - internal/grpcapi/apiproto/supkvapi.proto
+    SERVICE_SUFFIX:
+      - internal/grpcapi/apiproto/supkvapi.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - internal/grpcapi/apiproto/supkvapi.proto
 
 breaking:
   # FILE policy: a deleted, renumbered or retyped field vs origin/master fails
