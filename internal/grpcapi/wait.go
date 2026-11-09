@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
@@ -18,7 +19,11 @@ const (
 	// pattern, production-side): the udprepl adapter refreshes its
 	// copy-on-write mirror after every event-loop iteration, so a 5ms poll
 	// observes drain progress well inside the ack ladder's first 200ms
-	// step while costing one map read per tick.
+	// step while costing one map read per tick. The mirror also retains a
+	// drained entry's resolved row for a bounded window (udprepl
+	// drainedRetention), so this poll observes full Ack coverage even when
+	// the whole notify→broadcast→ack cycle completes between two refreshes
+	// — the healthy-LAN case (05-REVIEW CR-01).
 	waitPoll = 5 * time.Millisecond
 
 	// waitAppear bounds the appearance phase (RESEARCH Pitfall 4 — the
@@ -53,14 +58,20 @@ const (
 //  3. Appearance phase: the (key, ver) entry may lag the confirmed write
 //     through the notify queue, so absence does not mean drained until the
 //     entry had its bounded chance to appear (earlier of timeout and
-//     waitAppear). Never appearing returns (false, 0, total).
-//  4. Drain phase: lastAcked is the maximum len(Acked) observed. Entry
-//     absent — drained via full Ack coverage. Entry with a different
-//     version — a greater remote version superseded the tracked one and
-//     the report freezes at the last observation (the Q2 pin: honest — the
-//     tracked version's Acks did not all arrive). WaitingOn empty — the
-//     wait set fully resolved; success only at full Acked coverage
-//     (Pitfall 3: eviction is not an Ack).
+//     waitAppear). Never appearing returns (false, 0, total). The
+//     observation that ends the phase hands straight to the drain phase —
+//     no re-poll gap in which a fast resolution could vanish unobserved.
+//  4. Drain phase: lastAcked is the maximum clamped len(Acked) observed.
+//     WaitingOn empty or the entry gone with the adapter's resolved row in
+//     its place (the core deletes a drained entry immediately; the
+//     adapter's mirror retains such entries as resolved rows for a bounded
+//     window) — the wait set fully resolved; success only at full Acked
+//     coverage (Pitfall 3: eviction is not an Ack). Entry absent with no
+//     resolved row — a supersession removed the tracked entry between two
+//     polls (the Q2 pin: honest — the tracked version's Acks did not all
+//     arrive). Entry with a different version — a greater remote version
+//     superseded the tracked one and the report freezes at the last
+//     observation.
 //  5. Deadline — or ctx cancellation — returns the last observed state,
 //     always with acked=false: the wait never reports a success it did not
 //     observe.
@@ -85,7 +96,7 @@ func (s *Server) waitForReplication(ctx context.Context, key string, ver version
 	defer poll.Stop()
 	for {
 		if info, ok := s.opts.PendingCopy()[key]; ok && info.Version == ver {
-			return s.waitForDrain(ctx, key, ver, peerCount, deadline)
+			return s.waitForDrain(ctx, key, ver, peerCount, deadline, info)
 		}
 		if !time.Now().Before(appear) {
 			// The entry never appeared within the appearance bound:
@@ -103,27 +114,33 @@ func (s *Server) waitForReplication(ctx context.Context, key string, ver version
 	}
 }
 
-// waitForDrain is the drain phase of waitForReplication (step 4): poll the
-// mirrored pending set until the tracked entry drains (absent — the core
-// deletes it exactly when every write-time peer Acked), resolves
-// (WaitingOn empty — every known peer Acked or was evicted, and eviction is
-// never counted: T-05-04), is superseded (version mismatch — counts frozen
-// at the last observation, the Q2 pin), or the deadline fires. lastAcked
-// never decreases: it is the maximum len(Acked) observed across polls.
-func (s *Server) waitForDrain(ctx context.Context, key string, ver version.RecordVersion, total uint32, deadline time.Time) (acked bool, ackedCount, totalPeers uint32) {
+// waitForDrain is the drain phase of waitForReplication (step 4): starting
+// from first — the appearance phase's own observation, consumed without a
+// re-poll so a resolution landing between the two polls cannot be missed —
+// poll the mirrored pending set until the tracked entry resolves (the
+// adapter's resolved drained row, or a live entry with WaitingOn empty —
+// the core deletes a drained entry exactly when every write-time peer
+// Acked, and the mirror retains such entries for a bounded window), is
+// superseded (absent with no resolved row, or a version mismatch — counts
+// frozen at the last observation, the Q2 pin), or the deadline fires.
+// lastAcked never decreases: it is the maximum len(Acked) observed across
+// polls.
+func (s *Server) waitForDrain(ctx context.Context, key string, ver version.RecordVersion, total uint32, deadline time.Time, first repl.PendingInfo) (acked bool, ackedCount, totalPeers uint32) {
 	lastAcked := uint32(0)
+	info, ok := first, true
 	poll := time.NewTimer(waitPoll)
 	defer poll.Stop()
 	for {
-		info, ok := s.opts.PendingCopy()[key]
 		// The Acked count narrows once per poll; the set is bounded by
 		// the uint16-keyed peer table, so the conversion cannot truncate.
 		ackedLen := uint32(len(info.Acked)) //nolint:gosec // G115: bounded by the uint16-keyed peer table (<= 65535), cannot truncate.
 		switch {
 		case !ok:
-			// Drained: full Ack coverage deleted the entry — success
-			// only if the observed Acked count reached the write-time
-			// total.
+			// Absent with no resolved row: a supersession removed the
+			// tracked entry between two polls (a drain would have left
+			// the adapter's resolved row in the mirror). Success only
+			// if the last observed Acked count already reached the
+			// write-time total — otherwise an honest false.
 			return lastAcked == total, lastAcked, total
 		case info.Version != ver:
 			// Superseded by a greater remote version: the core's
@@ -146,6 +163,7 @@ func (s *Server) waitForDrain(ctx context.Context, key string, ver version.Recor
 		if !time.Now().Before(deadline) {
 			return false, lastAcked, total
 		}
+		info, ok = s.opts.PendingCopy()[key]
 		select {
 		case <-ctx.Done():
 			return false, lastAcked, total

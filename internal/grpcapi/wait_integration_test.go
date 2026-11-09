@@ -1,0 +1,287 @@
+package grpcapi_test
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"net"
+	"syscall"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/Djarvur/sup-kv/internal/app/clock"
+	"github.com/Djarvur/sup-kv/internal/app/persist"
+	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
+	"github.com/Djarvur/sup-kv/internal/grpcapi"
+	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	"github.com/Djarvur/sup-kv/internal/udprepl"
+)
+
+// The wait_for_replication integration harness (05-REVIEW CR-01). Unlike
+// wait_test.go's fakeMirror — whose fixtures can publish mirror states the
+// real repl core never produces — this file drives the wait through a REAL
+// udprepl.Adapter pair exchanging real datagrams over real UDP sockets: the
+// production mirror timing, where the core deletes a pending entry inside
+// the very handleAck call that completes Ack coverage and the adapter
+// refreshes its mirror only after whole event-loop iterations, one datagram
+// per iteration.
+//
+// The two nodes bind DIFFERENT loopback ports and target each other's port
+// as their broadcast address: broadcast Hello discovery crosses over, while
+// every unicast — the peer's Ack above all — is delivered to a port exactly
+// one socket holds. The adapter's same-host caveat (unicast to a port
+// shared by SO_REUSEADDR sockets is the kernel's choice) therefore never
+// applies, and the Ack path this test asserts is deterministic.
+const (
+	// replNodeA and replNodeB are the two adapters' wire node ids; the
+	// engine's node id is version-stamping only and carries no wire role.
+	replNodeA = uint16(7)
+	replNodeB = uint16(9)
+
+	// integrationProbeWait bounds the broadcast capability probe, and
+	// integrationDeadline bounds every state the real datagram paths owe
+	// the test (discovery, gate open, replication visibility) — generous
+	// real-time waits, since the assertions under test carry their own
+	// tight bound (waitAssertBound).
+	integrationProbeWait = 300 * time.Millisecond
+	integrationDeadline  = 5 * time.Second
+)
+
+// integrationUDPPort picks one free UDP port: bind a throwaway wildcard
+// socket to :0, read its port, close it (the udprepl smoke-test recipe —
+// the adapter keeps no local-address accessor, so the test must know the
+// ports before constructing the nodes).
+func integrationUDPPort(t *testing.T) int {
+	t.Helper()
+	var lc net.ListenConfig
+	conn, err := lc.ListenPacket(t.Context(), "udp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("bind throwaway port-picking socket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	return conn.LocalAddr().(*net.UDPAddr).Port
+}
+
+// integrationSocket binds a wildcard udp4 socket with SO_REUSEADDR and
+// SO_BROADCAST set before bind — the adapter's exact socket recipe
+// (research Pattern 3), replicated here because the adapter keeps it
+// unexported and this test's capability probe needs the same topology.
+func integrationSocket(bindAddr string) (*net.UDPConn, error) {
+	var opErr error
+	lc := net.ListenConfig{
+		Control: func(_, _ string, c syscall.RawConn) error {
+			err := c.Control(func(fd uintptr) {
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				if opErr != nil {
+					return
+				}
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+			})
+			if err != nil {
+				return fmt.Errorf("socket control: %w", err)
+			}
+			if opErr != nil {
+				return fmt.Errorf("socket options: %w", opErr)
+			}
+			return nil
+		},
+	}
+	packetConn, err := lc.ListenPacket(context.Background(), "udp4", bindAddr)
+	if err != nil {
+		return nil, fmt.Errorf("bind udp4 %s: %w", bindAddr, err)
+	}
+	return packetConn.(*net.UDPConn), nil
+}
+
+// probeLoopbackBroadcast pre-flights the one platform capability this test
+// needs — a datagram sent to the loopback broadcast address reaches the
+// socket bound to the destination port (loopback broadcast fan-out is a
+// Linux-only kernel behavior; macOS lo0 carries no BROADCAST flag — the
+// udprepl smoke test's D-08 probe matrix) — and skips loudly when it is
+// missing, naming the probed address. Protocol correctness under absence of
+// the capability stays proven by wait_test.go's mirror fixtures.
+func probeLoopbackBroadcast(t *testing.T, port int) {
+	t.Helper()
+	rx, err := integrationSocket(fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		t.Fatalf("probe rx bind: %v", err)
+	}
+	defer func() { _ = rx.Close() }()
+	tx, err := integrationSocket("0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("probe tx bind: %v", err)
+	}
+	defer func() { _ = tx.Close() }()
+	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
+	if _, err := tx.WriteToUDP([]byte("sup-kv wait integration probe"), dst); err != nil {
+		t.Fatalf("probe send to %s: %v", dst, err)
+	}
+	if err := rx.SetReadDeadline(time.Now().Add(integrationProbeWait)); err != nil {
+		t.Fatalf("probe read deadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	for {
+		n, _, err := rx.ReadFromUDP(buf)
+		if err != nil {
+			t.Skipf("loopback broadcast to %s did not reach the bound socket within %v: this platform lacks the capability the test drives (protocol correctness stays proven by the mirror fixtures)",
+				dst, integrationProbeWait)
+		}
+		if n > 0 {
+			return
+		}
+	}
+}
+
+// peerStore adapts *storage.Store to repl.StateStore for the peer node (the
+// udprepl smokeStore precedent): remote merges join through Merge, and the
+// store keeps the corroborating copy this test reads back.
+type peerStore struct{ store *storage.Store }
+
+// ApplyRemote joins one replicated record through the store's LWW merge.
+func (s peerStore) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
+	return s.store.Merge(key, rec)
+}
+
+// Records returns the full snapshot, tombstones included.
+func (s peerStore) Records() map[string]storage.Record { return s.store.Records() }
+
+// TestWaitIntegration_ackedThroughRealAdapterMirror drives 05-REVIEW CR-01's
+// exact production scenario end to end: one known peer, a Set with
+// wait_for_replication, the notify→broadcast→apply→ack cycle over real UDP
+// datagrams — a cycle that routinely finishes inside one 5ms poll window on
+// a healthy link — and the D-08 report coming back acked=true 1/1 from what
+// the real adapter mirror published. The response must also arrive well
+// under the appearance bound: the wait must observe the replication on the
+// mirror, not burn waitAppear before reporting an honest-looking false.
+// Finally the Ack chain is corroborated as real: the peer holds the record
+// byte-equal.
+func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
+	t.Parallel()
+
+	portA := integrationUDPPort(t)
+	portB := integrationUDPPort(t)
+	probeLoopbackBroadcast(t, portB)
+
+	// Writer node A, production stack shape (cmd/sup-kv wiring): one real
+	// persist engine serves as both the gRPC server's store and the
+	// adapter's StateStore; the adapter owns the post-write notification
+	// (D-05) and both wait seams (API-05).
+	hub := grpcapi.NewWatchHub()
+	eng, _ := persist.Open(
+		42,
+		time.Now,
+		time.Minute,
+		&fakeDumpStore{},
+		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
+		persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond},
+	)
+	engCtx, cancelEng := context.WithCancel(t.Context())
+	go func() { _ = eng.Run(engCtx) }()
+	t.Cleanup(cancelEng)
+	hubCtx, cancelHub := context.WithCancel(t.Context())
+	go func() { _ = hub.Run(hubCtx) }()
+	t.Cleanup(cancelHub)
+
+	adapterA, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", portA),
+		fmt.Sprintf("127.255.255.255:%d", portB),
+		replNodeA, eng, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("node A adapter: %v", err)
+	}
+
+	// Peer node B: a plain storage store behind the repl.StateStore wrapper
+	// — it applies A's DataReplication and answers with the unicast Ack.
+	storeB := storage.NewStore(replNodeB, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
+	adapterB, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", portB),
+		fmt.Sprintf("127.255.255.255:%d", portA),
+		replNodeB, peerStore{store: storeB}, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("node B adapter: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() { _ = adapterA.Run(ctx) }()
+	go func() { _ = adapterB.Run(ctx) }()
+
+	// Discovery over real broadcast Hellos: A must know B before the write,
+	// or the wait-set seeds empty, total is zero and the wait short-circuits
+	// at acked=true 0/0 (D-11) — the degenerate path this test must not
+	// confuse with success.
+	waitFor(t, integrationDeadline, "adapter A to discover adapter B", func() bool {
+		return adapterA.KnownPeers() == 1
+	})
+
+	opts := openGateOptions()
+	opts.KnownPeers = adapterA.KnownPeers
+	opts.PendingCopy = adapterA.PendingCopy
+	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
+	gateCtx, cancelGate := context.WithCancel(t.Context())
+	t.Cleanup(cancelGate)
+	go api.RunGate(gateCtx)
+
+	srv := grpc.NewServer()
+	apiproto.RegisterSupKVServer(srv, api)
+	healthpb.RegisterHealthServer(srv, api.Health())
+
+	lis := bufconn.Listen(1 << 20)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient(
+		"passthrough:bufnet",
+		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStaticStreamWindowSize(testFlowWindowSize),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: want nil, got error: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := apiproto.NewSupKVClient(conn)
+	health := healthpb.NewHealthClient(conn)
+	waitFor(t, gateWait, "the health endpoint to flip SERVING (gate open)", func() bool {
+		resp, err := health.Check(t.Context(), &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
+
+	start := time.Now()
+	resp, err := client.Set(t.Context(), &apiproto.SetRequest{
+		Key:                "wait/integ",
+		Value:              []byte("integration"),
+		WaitForReplication: true,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Set wait/integ: want OK, got error: %v", err)
+	}
+	if !resp.GetAcked() || resp.GetAckedCount() != 1 || resp.GetTotalPeers() != 1 {
+		t.Fatalf("real-adapter report: want acked=true 1/1, got acked=%v %d/%d",
+			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+	if elapsed >= waitAssertBound {
+		t.Fatalf("Set took %v: want well under %v — a healthy cycle must resolve on the observed mirror, not burn the 500ms appearance bound",
+			elapsed, waitAssertBound)
+	}
+
+	// Corroboration: the Ack chain was real replication, not a phantom
+	// success — node B holds the record byte-equal under the written
+	// version.
+	var ver version.RecordVersion
+	copy(ver[:], resp.GetVersion())
+	waitFor(t, integrationDeadline, "node B serving the record byte-equal", func() bool {
+		got, err := storeB.Get("wait/integ")
+		return err == nil && got.Version == ver && bytes.Equal(got.Data, []byte("integration"))
+	})
+}

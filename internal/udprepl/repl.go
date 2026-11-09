@@ -59,6 +59,21 @@ const (
 	// wedged loop eventually fills the queue and blocks authors, a
 	// bounded backpressure that never silently drops a write.
 	notifyQueue = 1024
+
+	// drainedRetention is how long the pending mirror keeps a drained
+	// entry's resolved row published (the wait_for_replication
+	// observability fix, 05-REVIEW CR-01). The core deletes a pending
+	// entry inside the very handleAck call that completes Ack coverage
+	// (REPL-02), so a healthy cycle that finishes between two mirror
+	// refreshes would otherwise move the published mirror straight from
+	// "partial Acked" to "absent", and no reader could ever observe the
+	// full-coverage state the D-08 report needs. The retained row is the
+	// resolution itself — WaitingOn nil, Acked exactly the peers the core
+	// had recorded as Acked at deletion — kept for one bounded window:
+	// comfortably longer than the API's 5ms poll period and scheduler
+	// jitter, with memory bounded by one row per key drained inside the
+	// window.
+	drainedRetention = 250 * time.Millisecond
 )
 
 // errNoStandaloneBody rejects a port message that has no datagram body of
@@ -87,6 +102,27 @@ type inboundEvent struct {
 type localWrite struct {
 	key string
 	rec storage.Record
+}
+
+// drainedRow is one drained pending entry as the mirror retains it for
+// drainedRetention: the resolved PendingInfo row (version tracked, WaitingOn
+// nil, Acked everyone the core had recorded as Acked at the deletion) and
+// the retention deadline the row is dropped after.
+type drainedRow struct {
+	info  repl.PendingInfo
+	until time.Time
+}
+
+// published returns the row's PendingInfo with a fresh Acked clone, so no
+// two published snapshots ever share a backing array (the copy-on-write
+// pin — callers must not mutate a returned map or its slices).
+func (r drainedRow) published() repl.PendingInfo {
+	return repl.PendingInfo{
+		Version:   r.info.Version,
+		WaitingOn: nil,
+		Acked:     slices.Clone(r.info.Acked),
+		NextRetry: r.info.NextRetry,
+	}
 }
 
 // Adapter is the UDP replication adapter for one node: it owns the bound
@@ -119,9 +155,37 @@ type Adapter struct {
 	// startup gate's sync half, API-04); pendingCopy mirrors the core's
 	// pending snapshot as a fresh copy-on-write map — the pointer is
 	// replaced wholesale after every loop iteration, never mutated in
-	// place, so readers may hold a snapshot across events.
+	// place, so readers may hold a snapshot across events. The published
+	// map additionally carries recently drained entries' resolved rows for
+	// drainedRetention (the CR-01 observability fix).
 	syncArrived atomic.Bool
 	pendingCopy atomic.Pointer[map[string]repl.PendingInfo]
+
+	// lastAck holds the (key, version) of an Ack message the event loop
+	// JUST fed the core (recorded in Run's inbound case, consumed and
+	// cleared by the iteration's mirrorState): an entry that vanishes from
+	// the core's pending snapshot in the same iteration its Ack was
+	// processed drained by full Ack coverage, while an entry that vanishes
+	// on any other event — a strictly greater remote version's supersession
+	// above all — must not be published as Acked-resolved (the Q2 pin: a
+	// superseded version's Acks did not all arrive). Exactly one event per
+	// iteration (D-04) makes the correlation exact; clearing it per mirror
+	// keeps an old Ack from mislabeling a later supersession.
+	lastAck struct {
+		ok      bool
+		key     string
+		version version.RecordVersion
+	}
+
+	// prevPending is the previous iteration's raw core pending snapshot —
+	// the present→absent transition detector behind the drained-row
+	// retention. Event-loop goroutine only, like all core reads.
+	prevPending map[string]repl.PendingInfo
+
+	// drained holds the recently drained entries' resolved rows until
+	// their drainedRetention deadline. Event-loop goroutine only; at most
+	// one row per key, bounded by the keys drained inside the window.
+	drained map[string]drainedRow
 }
 
 // New binds the node's udp4 socket and constructs the replication core over
@@ -157,6 +221,7 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 		inbound:       make(chan inboundEvent, inboundQueue),
 		notify:        make(chan localWrite, notifyQueue),
 		done:          make(chan struct{}),
+		drained:       make(map[string]drainedRow),
 	}, nil
 }
 
@@ -215,6 +280,16 @@ func (a *Adapter) Run(ctx context.Context) error {
 			in := decode(ev.datagram)
 			in.Source = ev.source
 			a.core.HandleDatagram(time.Now(), in, &out)
+			if ack, ok := in.Msg.(port.Ack); ok {
+				// The mirror's drained-row retention correlates this Ack
+				// with the entry it drained at the iteration's mirror
+				// (retainDrained); a non-Ack event leaves any stale
+				// record from an earlier iteration irrelevant — the flag
+				// clears after every mirror.
+				a.lastAck.ok = true
+				a.lastAck.key = ack.Key
+				a.lastAck.version = ack.Version
+			}
 		case lw := <-a.notify:
 			a.core.NotifyLocalWrite(time.Now(), lw.key, lw.rec, &out)
 		case <-timerChan(timer):
@@ -292,13 +367,19 @@ func (a *Adapter) SyncArrived() bool {
 
 // PendingCopy returns an immutable snapshot of the core's pending set (the
 // wait_for_replication read seam, API-05), mirrored after the latest
-// event-loop iteration — safe from any goroutine. The caller must not
-// mutate the returned map or its slices: the mirror replaces the published
-// pointer wholesale (copy-on-write — the map and every WaitingOn/Acked
-// slice are fresh copies built from the core's snapshot, sharing no backing
-// array with core state) and never mutates an already-published map, so a
-// snapshot held across events stays stable. Before the first loop iteration
-// has mirrored, the snapshot is empty — nothing is pending. gRPC handler
+// event-loop iteration — safe from any goroutine. The snapshot also carries
+// recently drained entries' resolved rows (WaitingOn nil, Acked complete at
+// the deletion) for drainedRetention: the core deletes a drained entry
+// immediately, so without the retention a full-coverage cycle that finishes
+// between two refreshes would never be observable (05-REVIEW CR-01). A
+// retained row is dropped as soon as the core tracks the key again, and
+// rows expire by wall clock. The caller must not mutate the returned map
+// or its slices: the mirror replaces the published pointer wholesale
+// (copy-on-write — the map and every WaitingOn/Acked slice are fresh
+// copies, sharing no backing array with core state or other published
+// maps) and never mutates an already-published map, so a snapshot held
+// across events stays stable. Before the first loop iteration has
+// mirrored, the snapshot is empty — nothing is pending. gRPC handler
 // goroutines read pending state only here, never by calling the
 // single-driver core.
 func (a *Adapter) PendingCopy() map[string]repl.PendingInfo {
@@ -380,13 +461,16 @@ func (a *Adapter) mirrorStats() {
 // runs at, so a reader never sees the pair torn across an event: the
 // first-sync flag (API-04) stored as-is, and the pending snapshot (API-05)
 // rebuilt as a fresh copy-on-write map whose entries clone every
-// WaitingOn/Acked slice, sharing no backing array with core state. Pending
-// sets are small at this scale (entries drain within about one RTT
-// normally), so the per-event copy is cheap.
+// WaitingOn/Acked slice, sharing no backing array with core state. The
+// published map also carries the recently drained entries' resolved rows
+// (retainDrained) for keys the core no longer tracks — a live entry always
+// shadows its retained row. Pending sets are small at this scale (entries
+// drain within about one RTT normally), so the per-event copy is cheap.
 func (a *Adapter) mirrorState() {
 	a.syncArrived.Store(a.core.SyncArrived())
 	snap := a.core.PendingSnapshot()
-	copied := make(map[string]repl.PendingInfo, len(snap))
+	a.retainDrained(snap, time.Now())
+	copied := make(map[string]repl.PendingInfo, len(snap)+len(a.drained))
 	for key, info := range snap {
 		copied[key] = repl.PendingInfo{
 			Version:   info.Version,
@@ -395,7 +479,59 @@ func (a *Adapter) mirrorState() {
 			NextRetry: info.NextRetry,
 		}
 	}
+	for key, row := range a.drained {
+		if _, live := snap[key]; !live {
+			copied[key] = row.published()
+		}
+	}
 	a.pendingCopy.Store(&copied)
+}
+
+// retainDrained detects the entries that left the core's pending set since
+// the previous iteration and, when the leaving was the drain — the
+// just-processed event was the entry's own Ack, key and version matching
+// the last observed snapshot row — keeps a resolved row in the published
+// mirror for drainedRetention. The row's Acked set is the union of the
+// last observed WaitingOn and Acked: the core's deletion fires inside the
+// handleAck that empties the wait-set, so every peer neither Acked nor
+// evicted at the last observation Acked in this very iteration, and
+// eviction never adds to Acked (T-05-04) — the union is exactly the core's
+// acked set at deletion, evicted-never-acked peers honestly excluded. A
+// vanishing on any other event (remote supersession, local replacement —
+// the latter keeps the key present anyway) retains nothing, so the mirror
+// never claims Acked coverage for a version the peers moved past (the Q2
+// pin). Rows expire by wall clock; a key re-draining overwrites its row.
+// Event-loop goroutine only (all core reads are).
+func (a *Adapter) retainDrained(snap map[string]repl.PendingInfo, now time.Time) {
+	for key, prev := range a.prevPending {
+		if _, live := snap[key]; live {
+			continue
+		}
+		if !a.lastAck.ok || a.lastAck.key != key || a.lastAck.version != prev.Version {
+			continue
+		}
+		acked := append(slices.Clone(prev.Acked), prev.WaitingOn...)
+		slices.Sort(acked)
+		a.drained[key] = drainedRow{
+			info: repl.PendingInfo{
+				Version:   prev.Version,
+				WaitingOn: nil,
+				Acked:     acked,
+				NextRetry: prev.NextRetry,
+			},
+			until: now.Add(drainedRetention),
+		}
+	}
+	for key, row := range a.drained {
+		if now.After(row.until) {
+			delete(a.drained, key)
+		}
+	}
+	// One event per iteration (D-04): the correlation describes exactly
+	// the event this mirror consumed — clear it so a stale Ack can never
+	// mislabel a later supersession's disappearance.
+	a.lastAck.ok = false
+	a.prevPending = snap
 }
 
 // armTimer re-arms (or first creates) t for the next deadline and returns
