@@ -22,6 +22,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	"github.com/Djarvur/sup-kv/internal/persistfile"
 )
 
 // LocalNotify is the post-write replication notification seam: the gRPC
@@ -53,8 +54,12 @@ func NewServer(engine *persist.Engine, notify LocalNotify) *Server {
 
 // Get returns the live record for one key. Reads are never gated on dumps
 // or replication state — an absent or tombstoned key is the NotFound code,
-// never an empty success.
+// never an empty success. An empty key is rejected with InvalidArgument
+// before any engine call (A7), like the write handlers.
 func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.GetResponse, error) {
+	if req.GetKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
+	}
 	rec, err := s.engine.Get(req.GetKey())
 	if err != nil {
 		return nil, mapError(err)
@@ -88,26 +93,48 @@ func (s *Server) Set(_ context.Context, req *apiproto.SetRequest) (*apiproto.Set
 	if err != nil {
 		return nil, mapError(err)
 	}
-	s.notifyLocalWrite(req.GetKey(), ver, req.GetValue())
+	s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false)
 	return &apiproto.SetResponse{Version: ver[:]}, nil
+}
+
+// Delete writes a fresh-version tombstone for one key and returns only
+// after the engine confirmed the tombstone on disk (PERS-04 inside the
+// RPC). A missing or already-tombstoned key surfaces the engine's NotFound
+// through the shared mapper — a delete of nothing happened. An empty key
+// is rejected with InvalidArgument before any engine call, like Set. The
+// wait fields carry the same accepted-but-deferred meaning as on Set
+// (API-05: a delete is a write), and the response's D-08 report fields
+// carry zero values until plan 05-05.
+func (s *Server) Delete(_ context.Context, req *apiproto.DeleteRequest) (*apiproto.DeleteResponse, error) {
+	if req.GetKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
+	}
+	ver, _, err := s.engine.Delete(req.GetKey())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	s.notifyLocalWrite(req.GetKey(), ver, nil, true)
+	return &apiproto.DeleteResponse{Version: ver[:]}, nil
 }
 
 // notifyLocalWrite hands the just-confirmed write to the replication
 // adapter through the LocalNotify seam (D-05). The record is rebuilt from
 // the write's own inputs — the engine-stamped version, the request value
-// and the checksum the store computed for exactly those inputs — so the
-// notified record is the stored one; the defensive copy keeps the record's
-// bytes owned by the notification. The notify error is deliberately
-// ignored: a failed notify (ErrRunLoopExited during shutdown) never lies
-// about the durable write, which the engine already confirmed.
-func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []byte) {
+// (nil for a tombstone) and the checksum the store computed for exactly
+// those inputs — so the notified record is the stored one; the defensive
+// copy keeps the record's bytes owned by the notification. The notify
+// error is deliberately ignored: a failed notify (ErrRunLoopExited during
+// shutdown) never lies about the durable write, which the engine already
+// confirmed.
+func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []byte, deleted bool) {
 	if s.notify == nil {
 		return
 	}
 	rec := storage.Record{
 		Version:  ver,
 		Data:     bytes.Clone(data),
-		Checksum: storage.RecordChecksum(key, ver, data, false),
+		Deleted:  deleted,
+		Checksum: storage.RecordChecksum(key, ver, data, deleted),
 	}
 	_ = s.notify(key, rec)
 }
@@ -122,6 +149,7 @@ func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []
 //	storage.ErrValueTooLarge -> codes.InvalidArgument ("value exceeds the maximum allowed size")
 //	persist.ErrDumpFailed    -> codes.Unavailable     ("dump failed; write not confirmed")
 //	persist.ErrClosed        -> codes.Unavailable     ("persist engine closed")
+//	persistfile.ErrInvalidSnapshotName -> codes.InvalidArgument ("invalid snapshot name")
 //
 // A status error passes through unchanged; any other unmapped error becomes
 // codes.Internal. Handlers stay total over any input — no panic path, the
@@ -138,6 +166,8 @@ func mapError(err error) error {
 		return status.Error(codes.Unavailable, persist.ErrDumpFailed.Error())
 	case errors.Is(err, persist.ErrClosed):
 		return status.Error(codes.Unavailable, persist.ErrClosed.Error())
+	case errors.Is(err, persistfile.ErrInvalidSnapshotName):
+		return status.Error(codes.InvalidArgument, persistfile.ErrInvalidSnapshotName.Error())
 	}
 	if _, ok := status.FromError(err); ok {
 		return err

@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/Djarvur/sup-kv/internal/app/persist"
@@ -78,8 +80,9 @@ func (*fakeDumpStore) ReadSnapshot(_ string) ([]byte, error) {
 
 // testHarness bundles one running engine and its bufconn-dialed client.
 type testHarness struct {
-	client apiproto.SupKVClient
-	dumps  *fakeDumpStore
+	client       apiproto.SupKVClient
+	dumps        *fakeDumpStore
+	cancelEngine context.CancelFunc
 }
 
 // newTestServer builds the reusable bufconn harness: a hand-written
@@ -123,7 +126,7 @@ func newTestServer(t *testing.T) *testHarness {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	return &testHarness{client: apiproto.NewSupKVClient(conn), dumps: dumps}
+	return &testHarness{client: apiproto.NewSupKVClient(conn), dumps: dumps, cancelEngine: cancelEng}
 }
 
 // TestServer_setGetRoundTrip proves the tracer slice end-to-end: a Set over
@@ -164,4 +167,96 @@ func TestServer_setGetRoundTrip(t *testing.T) {
 	if get.GetRecord().GetKey() != "svc/a" {
 		t.Fatalf("Get key: want %q, got %q", "svc/a", get.GetRecord().GetKey())
 	}
+}
+
+// assertCode checks one RPC error's status code against the wanted code.
+func assertCode(t *testing.T, what string, err error, want codes.Code) {
+	t.Helper()
+	if got := status.Code(err); got != want {
+		t.Fatalf("%s: want code %v, got %v (err=%v)", what, want, got, err)
+	}
+}
+
+// TestServer_errorMapping walks the full pinned error set through the RPC
+// surface, asserting the code on status.Code(err) for every row of the
+// mapError table. The dump-failure row additionally checks the message
+// wording, distinguishing the mapped persist.ErrDumpFailed from a
+// transport-level Unavailable, and proves the PERS-04 memory-retention
+// semantics survive the API: the value is still readable via Get after the
+// write was reported Unavailable.
+func TestServer_errorMapping(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	// Empty key is InvalidArgument on every unary handler (A7 pin), before
+	// any engine call.
+	_, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: ""})
+	assertCode(t, "Get empty key", err, codes.InvalidArgument)
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "", Value: []byte("x")})
+	assertCode(t, "Set empty key", err, codes.InvalidArgument)
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: ""})
+	assertCode(t, "Delete empty key", err, codes.InvalidArgument)
+
+	// NotFound for a missing key.
+	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: "err/missing"})
+	assertCode(t, "Get missing key", err, codes.NotFound)
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "err/missing"})
+	assertCode(t, "Delete missing key", err, codes.NotFound)
+
+	// InvalidArgument for a value over the harness's shrunken value limit —
+	// the store's ErrValueTooLarge mapped through the engine.
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{
+		Key:   "err/big",
+		Value: bytes.Repeat([]byte("x"), testValueLimit+1),
+	})
+	assertCode(t, "Set oversized value", err, codes.InvalidArgument)
+
+	// AlreadyExists for create_if_absent over a live key.
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "err/live", Value: []byte("v1")})
+	if err != nil {
+		t.Fatalf("Set err/live: want OK, got error: %v", err)
+	}
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "err/live", Value: []byte("v2"), CreateIfAbsent: true})
+	assertCode(t, "SetIfAbsent over live key", err, codes.AlreadyExists)
+
+	// NotFound for a deleted key — the tombstone hides the record.
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "err/live"})
+	if err != nil {
+		t.Fatalf("Delete err/live: want OK, got error: %v", err)
+	}
+	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: "err/live"})
+	assertCode(t, "Get deleted key", err, codes.NotFound)
+
+	// AlreadyExists for create_if_absent over a tombstoned key — a
+	// Delete-then-SetIfAbsent cannot resurrect the key.
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "err/live", Value: []byte("v3"), CreateIfAbsent: true})
+	assertCode(t, "SetIfAbsent over tombstoned key", err, codes.AlreadyExists)
+
+	// Unavailable when the dump fails: the fake's Save fails for one write,
+	// the engine reports ErrDumpFailed, and the value stays readable in
+	// memory (PERS-04 memory retention survives the API).
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = true
+	ts.dumps.mu.Unlock()
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "err/dumpfail", Value: []byte("v")})
+	assertCode(t, "Set with failing dump", err, codes.Unavailable)
+	if got := status.Convert(err).Message(); got != persist.ErrDumpFailed.Error() {
+		t.Fatalf("Set with failing dump message: want %q, got %q", persist.ErrDumpFailed.Error(), got)
+	}
+	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: "err/dumpfail"})
+	if err != nil {
+		t.Fatalf("Get after dump failure: want OK (PERS-04 memory retention), got error: %v", err)
+	}
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = false
+	ts.dumps.mu.Unlock()
+
+	// Unavailable via ErrClosed after the engine context is cancelled —
+	// every write stranded by Run's exit resolves ErrClosed through the
+	// same mapper.
+	ts.cancelEngine()
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "err/closed", Value: []byte("v")})
+	assertCode(t, "Set after engine close", err, codes.Unavailable)
 }
