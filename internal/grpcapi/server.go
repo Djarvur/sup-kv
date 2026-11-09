@@ -39,10 +39,9 @@ type LocalNotify func(key string, rec storage.Record) error
 
 // Server implements the apiproto.SupKVServer surface over one persist
 // Engine. The UnimplementedSupKVServer embed is mandatory with
-// protoc-gen-go-grpc v1.6.2 (forward-compat) and serves the phase's later
-// plans: RPCs not yet implemented — SnapshotCreate, SnapshotLoad — inherit
-// its Unimplemented responses until their plans land, so the whole phase's
-// wire surface could be generated in one codegen pass.
+// protoc-gen-go-grpc v1.6.2 (forward compatibility): every phase-5 RPC is
+// implemented on it today, and the embed is what future wire additions
+// would answer Unimplemented with until their plans land.
 type Server struct {
 	apiproto.UnimplementedSupKVServer
 
@@ -187,6 +186,46 @@ func (s *Server) List(_ context.Context, req *apiproto.ListRequest) (*apiproto.L
 	}
 	slices.Sort(keys)
 	return &apiproto.ListResponse{Keys: keys}, nil
+}
+
+// SnapshotCreate forces the current dump to complete — every confirmed
+// write is on disk — then byte-copies that finished dump under name
+// through the persistfile adapter (API-07, D-10). A snapshot is a write
+// (A5): a create forces a confirmed dump, so the handler is gated exactly
+// like Set and Delete — Unavailable while the startup gate is closed. The
+// name crosses to persistfile untouched: its validateName is the single
+// closed path-traversal control (T-05-07) and runs before any filesystem
+// touch, so the adapter's whole job is mapping the sentinel through
+// mapError (InvalidArgument) — never re-validating, never sanitizing.
+func (s *Server) SnapshotCreate(_ context.Context, req *apiproto.SnapshotCreateRequest) (*apiproto.SnapshotCreateResponse, error) {
+	if s.gated() {
+		return nil, gateUnavailable()
+	}
+	err := s.engine.Snapshot(req.GetName())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &apiproto.SnapshotCreateResponse{}, nil
+}
+
+// SnapshotLoad replays the named snapshot as ordinary fresh-version writes
+// and deletes (API-07, D-09 — persist.Restore semantics): the replay
+// replicates and wins by normal LWW, and the 05-03 change tap fires watch
+// events for every replayed record with no extra wiring — a load is
+// visible to Watch subscribers like any write burst. Gated exactly like
+// SnapshotCreate (A5: a load replays writes through the store). The name
+// crosses to persistfile untouched, for the same T-05-07 reason as the
+// create path, and the call returns only after one final dump covering the
+// whole replay — the PERS-04 confirmation contract, batched.
+func (s *Server) SnapshotLoad(_ context.Context, req *apiproto.SnapshotLoadRequest) (*apiproto.SnapshotLoadResponse, error) {
+	if s.gated() {
+		return nil, gateUnavailable()
+	}
+	err := s.engine.Restore(req.GetName())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &apiproto.SnapshotLoadResponse{}, nil
 }
 
 // notifyLocalWrite hands the just-confirmed write to the replication
