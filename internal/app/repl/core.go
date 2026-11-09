@@ -479,12 +479,18 @@ func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Ou
 // WaitingOn alone cannot distinguish "peer Acked" from "peer evicted by
 // peer_timeout" — both shrink the wait-set — while a peer recorded in
 // acked is an Ack by construction, because evictPeers never touches acked.
-// A stale Ack (version mismatch), an Ack for an unknown key and an Ack
-// from a peer outside the wait-set are silent no-ops — no counter, no log
-// (probe #2). The empty-table guard is load-bearing: an entry whose every
-// waiter was evicted stays retained in suspension, and an Ack can only
-// drain when peers actually exist. The peer is identified by the
-// datagram's NodeID alone; nothing here writes the peer table.
+// A stale Ack (version mismatch) and an Ack for an unknown key are silent
+// no-ops — no counter, no log (probe #2). Any OTHER node_id's matching Ack
+// joins the acked set whether or not the sender was in the wait-set (the
+// counting behavior — WR-01): the wait-set gate does not exist, so a peer
+// may appear in acked without ever having been waited on, and the acked
+// length can exceed the write-time peer snapshot; the D-08 report keeps
+// its peer set fixed at write time (D-10) by reading the count clamped to
+// the write-time total (grpcapi's waitForDrain). The empty-table guard is
+// load-bearing: an entry whose every waiter was evicted stays retained in
+// suspension, and an Ack can only drain when peers actually exist. The
+// peer is identified by the datagram's NodeID alone; nothing here writes
+// the peer table.
 func (c *Core) handleAck(peerID uint16, ack port.Ack) {
 	entry, ok := c.pending[ack.Key]
 	if !ok || entry.version != ack.Version {

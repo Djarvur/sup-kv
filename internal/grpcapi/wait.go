@@ -124,7 +124,7 @@ func (s *Server) waitForReplication(ctx context.Context, key string, ver version
 // superseded (absent with no resolved row, or a version mismatch — counts
 // frozen at the last observation, the Q2 pin), or the deadline fires.
 // lastAcked never decreases: it is the maximum len(Acked) observed across
-// polls.
+// polls, clamped to the write-time total (D-10).
 func (s *Server) waitForDrain(ctx context.Context, key string, ver version.RecordVersion, total uint32, deadline time.Time, first repl.PendingInfo) (acked bool, ackedCount, totalPeers uint32) {
 	lastAcked := uint32(0)
 	info, ok := first, true
@@ -133,7 +133,13 @@ func (s *Server) waitForDrain(ctx context.Context, key string, ver version.Recor
 	for {
 		// The Acked count narrows once per poll; the set is bounded by
 		// the uint16-keyed peer table, so the conversion cannot truncate.
-		ackedLen := uint32(len(info.Acked)) //nolint:gosec // G115: bounded by the uint16-keyed peer table (<= 65535), cannot truncate.
+		// The count reads clamped to the write-time total (WR-01, D-10):
+		// any node_id whose Ack matches the (key, version) joins the
+		// core's acked set — wait-set membership or not — so the raw
+		// length can exceed the write-time peer snapshot, and both the
+		// report and its success criterion must stay inside the peer set
+		// fixed at write time.
+		ackedLen := min(uint32(len(info.Acked)), total) //nolint:gosec // G115: bounded by the uint16-keyed peer table (<= 65535), cannot truncate.
 		switch {
 		case !ok:
 			// Absent with no resolved row: a supersession removed the

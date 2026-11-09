@@ -350,6 +350,50 @@ func TestWait_superseded(t *testing.T) {
 	}
 }
 
+// TestWait_strangerAcksClampedToTotal locks the WR-01 report semantics:
+// Acks from node ids outside the write-time peer snapshot join the core's
+// acked set (the counting behavior — no wait-set gate), so the raw count
+// can exceed the write-time total. The D-08 report reads that count
+// clamped to total (D-10 — the report's peer set is the write-time
+// snapshot): the timeout report stays honest acked=false with the clamped
+// count, and once the one real peer's Ack resolves the wait set the report
+// is acked=true 1/1 — not the raw 3/1, and not the inflated-count failure
+// the unclamped criterion would produce.
+func TestWait_strangerAcksClampedToTotal(t *testing.T) {
+	t.Parallel()
+
+	const key = "wait/strangers"
+	mirror := newFakeMirror(1)
+	ts := newWaitServer(t, mirror, 0)
+	ctx := t.Context()
+
+	go func() {
+		ver, ok := awaitWrittenVersion(ts, key)
+		if !ok {
+			return
+		}
+		// Two strangers (node ids never in the write-time snapshot) Ack
+		// the tracked version while the one real waiter has not.
+		mirror.setPending(key, repl.PendingInfo{Version: ver, Acked: []uint16{7, 9}, WaitingOn: []uint16{1}})
+		time.Sleep(30 * time.Millisecond)
+		// The real peer's Ack arrives and empties the wait set: resolved.
+		mirror.setPending(key, repl.PendingInfo{Version: ver, Acked: []uint16{1, 7, 9}})
+	}()
+
+	resp, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key:                key,
+		Value:              []byte("v"),
+		WaitForReplication: true,
+	})
+	if err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", key, err)
+	}
+	if !resp.GetAcked() || resp.GetAckedCount() != 1 || resp.GetTotalPeers() != 1 {
+		t.Fatalf("stranger-ack report: want acked=true 1/1 with the count clamped to the write-time total, got acked=%v %d/%d",
+			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+}
+
 // TestWait_perRequestTimeout pins D-09: the per-request wait_timeout_ms
 // (120ms) wins over the 1s operator default in the options — the call
 // returns in roughly 120ms, and an elapsed at or beyond the bound would
