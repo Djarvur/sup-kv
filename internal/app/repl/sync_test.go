@@ -472,6 +472,55 @@ func TestSync_triggers(t *testing.T) {
 	}
 }
 
+// TestSync_syncArrived proves the startup gate's sync half (API-04, the A1
+// reading): SyncArrived() is false until the first received DataSync
+// datagram — our own startup listing emission does not count, only a
+// receipt, and an unrelated Hello receipt does not either — flips true on
+// the first received DataSync chunk (an empty listing is a valid chunk:
+// chunks are self-sufficient, the protocol carries no completeness state,
+// and the startup_gate timeout is the backstop), and stays true through
+// further unrelated events, never resetting.
+func TestSync_syncArrived(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, _ := newTestCore()
+	var out port.Outbox
+
+	// The startup Advance emits our own Hello + listing — emissions, not
+	// receipts: the flag must stay false.
+	core.Advance(now, &out)
+	out.Drain()
+	if core.SyncArrived() {
+		t.Fatal("SyncArrived() = true after our own startup listing emission, want false — only a received DataSync counts")
+	}
+
+	// An unrelated received datagram (a Hello) does not flip it either.
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	out.Drain()
+	if core.SyncArrived() {
+		t.Fatal("SyncArrived() = true after a Hello receipt, want false")
+	}
+
+	// One received DataSync datagram — the empty listing chunk — flips it:
+	// any received chunk counts (A1), from any sender (the compare path
+	// never consults the peer table).
+	core.HandleDatagram(now, syncFrom(peerID2), &out)
+	out.Drain()
+	if !core.SyncArrived() {
+		t.Fatal("SyncArrived() = false after a received DataSync datagram, want true")
+	}
+
+	// Further unrelated events never reset it: a sync-timer Advance and
+	// another Hello both traverse the core first.
+	core.Advance(now.Add(time.Second), &out)
+	out.Drain()
+	core.HandleDatagram(now.Add(2*time.Second), helloFrom(peerID1), &out)
+	out.Drain()
+	if !core.SyncArrived() {
+		t.Fatal("SyncArrived() = false after further events, want it sticky true — the flag never resets")
+	}
+}
+
 // keyDelta and keyTombstone extend the shared write keys for the compare
 // cases (equal version; local tombstone newer than the listing's live
 // entry).

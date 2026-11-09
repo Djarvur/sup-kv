@@ -205,13 +205,17 @@ type queuedUnicast struct {
 // defensive copy of the written record (the storage.install precedent — the
 // author may reuse its buffer after NotifyLocalWrite returns), the exact
 // tracked version, the wait-set of known peers that have not yet Acked that
-// version, the retransmission ladder state (next retry time and current
+// version, the set of peers that have (sorted ascending, idempotent —
+// handleAck inserts; eviction never touches it, which is what keeps an
+// Ack distinguishable from a peer_timeout eviction in PendingSnapshot,
+// T-05-04), the retransmission ladder state (next retry time and current
 // backoff — the ladder itself fires from Advance, plan 04-02 Task 2), and
 // the creation time behind UnackedStats' oldest age.
 type pendingEntry struct {
 	rec       storage.Record
 	version   version.RecordVersion
 	waitSet   map[uint16]struct{}
+	acked     []uint16
 	nextRetry time.Time
 	backoff   time.Duration
 	createdAt time.Time
@@ -220,9 +224,10 @@ type pendingEntry struct {
 // Core is the replication decision state machine for one node. Not safe for
 // concurrent use: exactly one driver goroutine — the adapter's event loop
 // in production, the simulator's scheduler in tests — calls the handlers
-// (D-04); the discard counters and the peer-table snapshot are the
-// sanctioned cross-goroutine reads, through their copying accessors after
-// each event.
+// (D-04); the copying accessors (Discards, SyncArrived, PeerSnapshot,
+// PendingSnapshot) are the sanctioned cross-goroutine read seams, consumed
+// through the production adapter's post-event atomics. Results, never
+// callbacks: no handler takes a callback, a channel or a goroutine.
 type Core struct {
 	nodeID    uint16
 	runID     [16]byte
@@ -253,6 +258,14 @@ type Core struct {
 	syncResponseInterval time.Duration
 
 	discards DiscardStats
+
+	// syncArrived flips true on the first received DataSync datagram and
+	// never resets — the startup gate's sync half (API-04). Set by
+	// handleDataSync on the driver goroutine; read through the copying
+	// SyncArrived accessor, which the production adapter mirrors into an
+	// atomic after every loop iteration so cross-goroutine readers never
+	// touch core state.
+	syncArrived bool
 }
 
 // New returns a core for nodeID with the per-process runID. ownHandle is
@@ -457,14 +470,20 @@ func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Ou
 }
 
 // handleAck drains one waiter of the pending entry matching the Ack's
-// (key, version) exactly: the sender leaves the entry's wait-set, and the
-// entry leaves tracking only when its wait-set empties while at least one
-// peer is known — the promise is until-Ack-or-supersession, never a timeout
-// (REPL-02). A stale Ack (version mismatch), an Ack for an unknown key and
-// an Ack from a peer outside the wait-set are silent no-ops — no counter,
-// no log (probe #2). The empty-table guard is load-bearing: an entry whose
-// every waiter was evicted stays retained in suspension, and an Ack can
-// only drain when peers actually exist. The peer is identified by the
+// (key, version) exactly: the sender leaves the entry's wait-set, the
+// sender joins the entry's acked set (sorted, idempotent — a re-Ack adds no
+// second entry), and the entry leaves tracking only when its wait-set
+// empties while at least one peer is known — the promise is
+// until-Ack-or-supersession, never a timeout (REPL-02). The acked set is
+// the honesty half of the Phase 5 wait_for_replication report (T-05-04):
+// WaitingOn alone cannot distinguish "peer Acked" from "peer evicted by
+// peer_timeout" — both shrink the wait-set — while a peer recorded in
+// acked is an Ack by construction, because evictPeers never touches acked.
+// A stale Ack (version mismatch), an Ack for an unknown key and an Ack
+// from a peer outside the wait-set are silent no-ops — no counter, no log
+// (probe #2). The empty-table guard is load-bearing: an entry whose every
+// waiter was evicted stays retained in suspension, and an Ack can only
+// drain when peers actually exist. The peer is identified by the
 // datagram's NodeID alone; nothing here writes the peer table.
 func (c *Core) handleAck(peerID uint16, ack port.Ack) {
 	entry, ok := c.pending[ack.Key]
@@ -472,9 +491,24 @@ func (c *Core) handleAck(peerID uint16, ack port.Ack) {
 		return
 	}
 	delete(entry.waitSet, peerID)
+	entry.acked = ackedInsert(entry.acked, peerID)
 	if len(entry.waitSet) == 0 && len(c.peers) > 0 {
 		delete(c.pending, ack.Key)
+		return
 	}
+	c.pending[ack.Key] = entry
+}
+
+// ackedInsert returns acked with id inserted at its sorted position — the
+// WaitingOn sorted discipline (probe #9: no map-iteration order reaches a
+// read path) — or unchanged when already present, so a re-Ack stays
+// idempotent.
+func ackedInsert(acked []uint16, id uint16) []uint16 {
+	pos, found := slices.BinarySearch(acked, id)
+	if found {
+		return acked
+	}
+	return slices.Insert(acked, pos, id)
 }
 
 // handleDataRequest answers one DataRequest (REPL-04): a single Records()
@@ -500,17 +534,23 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 // handleDataSync compares one received DataSync listing against the local
 // store (REPL-05): a single Records() snapshot serves the whole handler
 // call, and each listing entry compares per key by the full record-version
-// order — version.Compare, the same order storage.Merge joins by. A
-// locally absent key or a strictly newer listing version enqueues a
-// unicast DataRequest to the sender's handle; a strictly newer local
-// record — tombstones included, so a local delete heals the sender's live
-// copy through the reply — enqueues a unicast exact-record
+// order — version.Compare, the same order storage.Merge joins by. The
+// first received DataSync datagram — any chunk, an empty listing included —
+// sets the core's syncArrived flag (the startup gate's sync half, API-04,
+// the A1 reading: the protocol deliberately carries no chunk-completeness
+// state because chunks are self-sufficient, so the first received chunk is
+// the honest first-sync-round signal and the startup_gate timeout is the
+// backstop). A locally absent key or a strictly newer listing version
+// enqueues a unicast DataRequest to the sender's handle; a strictly newer
+// local record — tombstones included, so a local delete heals the sender's
+// live copy through the reply — enqueues a unicast exact-record
 // DataReplication; equal versions produce silence. Entries are processed
 // in received order (senders emit sorted, but the compare is per key and
 // order-independent by construction) and every response flows through the
 // single rate-limited egress queue — the scope pin; no reactive unicast
 // has a bypass path, which is what survives empty-node recovery (T-04-07).
 func (c *Core) handleDataSync(now time.Time, source string, entries []port.SyncEntry) {
+	c.syncArrived = true
 	snapshot := c.store.Records()
 	for _, entry := range entries {
 		local, present := snapshot[entry.Key]
@@ -701,7 +741,10 @@ func chunkSyncEntries(entries []port.SyncEntry, budget int) [][]port.SyncEntry {
 // table AND from every pending entry's wait-set in the same event. It never
 // drains an entry by itself: with the drain rule, an entry whose every
 // waiter was evicted is retained in suspension until a future Hello
-// re-adds waiters via the flush rule. Only a Hello ever refreshed lastHello
+// re-adds waiters via the flush rule. Eviction deliberately never touches a
+// pending entry's acked set: an Ack that never arrived stays un-Acked, so
+// PendingSnapshot keeps eviction distinguishable from an Ack (T-05-04,
+// RESEARCH Pitfall 3). Only a Hello ever refreshed lastHello
 // (handleHello), so this scan is exactly the gone-after-peer_timeout
 // reading. An evicted peer is re-learned by its next Hello exactly like a
 // first Hello — there is no blacklist state of any kind, and the table
@@ -716,6 +759,7 @@ func (c *Core) evictPeers(now time.Time) {
 	for _, id := range expired {
 		delete(c.peers, id)
 		for key := range c.pending {
+			// wait-set only — acked stays (an eviction is never an Ack).
 			delete(c.pending[key].waitSet, id)
 		}
 	}
@@ -837,6 +881,21 @@ func (c *Core) Discards() DiscardStats {
 	return c.discards
 }
 
+// SyncArrived reports whether at least one DataSync datagram has been
+// received — the startup gate's sync half (API-04), false until the first
+// handleDataSync and true forever after. The reading is pinned by A1: the
+// first received DataSync datagram counts as the first sync round, because
+// the protocol deliberately carries no chunk-completeness state — chunks
+// are self-sufficient (chunkSyncEntries) — and the startup_gate timeout is
+// the backstop for a node whose peers never announce. Set on the driver
+// goroutine only; like Discards this is a value read sanctioned for the
+// adapter's post-event mirroring, so cross-goroutine readers (Phase 5's
+// gate resolver) see the state through the adapter's atomic, never by
+// calling into a core the driver owns.
+func (c *Core) SyncArrived() bool {
+	return c.syncArrived
+}
+
 // PeerSnapshot returns a defensive copy of the peer table keyed by NodeID
 // (the storage.Records copying precedent) — the peer-table read seam
 // consumed by the later Phase 4 plans (retransmission fan-out, peer
@@ -851,10 +910,14 @@ func (c *Core) PeerSnapshot() map[uint16]PeerInfo {
 
 // PendingInfo is one pending entry as exposed by PendingSnapshot: the exact
 // tracked version, the known peers that have not yet Acked it (sorted
-// ascending) and the retransmission ladder's next retry time.
+// ascending), the peers that have Acked it (sorted ascending, idempotent —
+// eviction never adds here, so a peer absent from both sets was evicted by
+// peer_timeout, never silently Acked: T-05-04) and the retransmission
+// ladder's next retry time.
 type PendingInfo struct {
 	Version   version.RecordVersion
 	WaitingOn []uint16
+	Acked     []uint16
 	NextRetry time.Time
 }
 
@@ -862,6 +925,8 @@ type PendingInfo struct {
 // observability seam Phase 5's wait_for_replication and Phase 6's OBS-01
 // consume. Keys are iterated sorted and every WaitingOn is sorted ascending:
 // no map-iteration order reaches a read path either (probe #9 discipline).
+// Acked is cloned, not aliased — the snapshot shares no backing array with
+// core state (the storage.Records defensive-copy precedent).
 func (c *Core) PendingSnapshot() map[string]PendingInfo {
 	out := make(map[string]PendingInfo, len(c.pending))
 	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
@@ -869,6 +934,7 @@ func (c *Core) PendingSnapshot() map[string]PendingInfo {
 		out[key] = PendingInfo{
 			Version:   entry.version,
 			WaitingOn: slices.Sorted(maps.Keys(entry.waitSet)),
+			Acked:     slices.Clone(entry.acked),
 			NextRetry: entry.nextRetry,
 		}
 	}

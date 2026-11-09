@@ -382,7 +382,10 @@ func TestRetransmit_suspendAndFlush(t *testing.T) {
 // (REPL-02, probes #2 and #10): an Ack drains exactly its own waiter on an
 // exact (key, version) match, the entry survives until its last waiter Acks
 // or a strictly greater version supersedes it, and every other Ack — stale,
-// stranger, out-of-order for another key — is a silent no-op.
+// stranger, out-of-order for another key — is a silent no-op. The Acked
+// rows pin the Phase 5 honesty seam (T-05-04): an Acked peer reads from
+// Acked and vanishes from WaitingOn, a peer_timeout eviction shrinks
+// WaitingOn while Acked stays empty, and a re-Ack is idempotent.
 func TestRetransmit_ackDrainSemantics(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -605,6 +608,102 @@ func TestRetransmit_ackDrainSemantics(t *testing.T) {
 			core.HandleDatagram(now, replFrom(peerID1, keyAlpha, served), &out)
 			assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, ver)
 			assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1, peerID2})
+		}},
+		{"an Ack moves the peer from WaitingOn to Acked, sorted by node id", func(t *testing.T) {
+			t.Helper()
+			now := at(0)
+			core, st := newTestCore()
+			var out port.Outbox
+			core.HandleDatagram(now, helloFrom(peerID1), &out)
+			core.HandleDatagram(now, helloFrom(peerID2), &out)
+			core.HandleDatagram(now, helloFrom(peerID3), &out)
+			out.Drain()
+
+			ver := localWrite(t, core, st, now, keyAlpha, "one")
+			assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1, peerID2, peerID3})
+
+			// Acks arrive scrambled — the highest node id first — but the
+			// reported Acked set stays sorted ascending (the WaitingOn
+			// discipline): with the entry surviving on its last waiter, the
+			// Acking peers read from Acked and nobody reads from WaitingOn.
+			core.HandleDatagram(now, ackFrom(peerID3, keyAlpha, ver), &out)
+			out.Drain()
+			core.HandleDatagram(now, ackFrom(peerID1, keyAlpha, ver), &out)
+			out.Drain()
+
+			info, ok := core.PendingSnapshot()[keyAlpha]
+			if !ok {
+				t.Fatalf("pending entry for key %q drained before its last waiter Acked", keyAlpha)
+			}
+			if !slices.Equal(info.Acked, []uint16{peerID1, peerID3}) {
+				t.Fatalf("PendingSnapshot[%q].Acked = %v, want sorted [%d %d] despite the scrambled arrival order",
+					keyAlpha, info.Acked, peerID1, peerID3)
+			}
+			if !slices.Equal(info.WaitingOn, []uint16{peerID2}) {
+				t.Fatalf("PendingSnapshot[%q].WaitingOn = %v, want [%d]", keyAlpha, info.WaitingOn, peerID2)
+			}
+		}},
+		{"peer_timeout eviction shrinks WaitingOn while Acked stays empty", func(t *testing.T) {
+			t.Helper()
+			now0 := at(0)
+			core, st := newTestCore()
+			var out port.Outbox
+			core.Advance(now0, &out) // startup Hello + listing; arms the timers.
+			out.Drain()
+			core.HandleDatagram(now0, helloFrom(peerID1), &out)
+			out.Drain()
+			ver := localWrite(t, core, st, now0, keyAlpha, "one")
+			assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1})
+
+			// The peer goes silent; the first Advance at or after
+			// lastHello+peer_timeout evicts it from the table and the
+			// entry's wait-set in that same event (REPL-06, the at-or-after
+			// boundary). The entry survives in suspension — no Ack ever
+			// arrived, so Acked must stay empty: eviction is never an Ack
+			// (T-05-04, the wait_for_replication honesty regression lock).
+			core.Advance(at(peerTimeout), &out)
+			out.Drain()
+
+			info, ok := core.PendingSnapshot()[keyAlpha]
+			if !ok {
+				t.Fatal("eviction drained the pending entry, want it retained in suspension (an empty table retains, never drains)")
+			}
+			if len(info.WaitingOn) != 0 {
+				t.Fatalf("post-eviction WaitingOn = %v, want empty (the peer left by expiry)", info.WaitingOn)
+			}
+			if len(info.Acked) != 0 {
+				t.Fatalf("post-eviction Acked = %v, want empty — an eviction must never read as an Ack", info.Acked)
+			}
+		}},
+		{"a duplicate Ack adds no second Acked entry", func(t *testing.T) {
+			t.Helper()
+			now := at(0)
+			core, st := newTestCore()
+			var out port.Outbox
+			core.HandleDatagram(now, helloFrom(peerID1), &out)
+			core.HandleDatagram(now, helloFrom(peerID2), &out)
+			out.Drain()
+
+			ver := localWrite(t, core, st, now, keyAlpha, "one")
+			core.HandleDatagram(now, ackFrom(peerID1, keyAlpha, ver), &out)
+			out.Drain()
+			// The retransmitted record reaches the peer again and it
+			// re-Acks (the always-Ack-on-duplicate truth of plan 04-01):
+			// the second Ack is idempotent — the wait-set stays drained of
+			// the peer and Acked gains no second entry.
+			core.HandleDatagram(now, ackFrom(peerID1, keyAlpha, ver), &out)
+			out.Drain()
+
+			info, ok := core.PendingSnapshot()[keyAlpha]
+			if !ok {
+				t.Fatalf("pending entry for key %q drained before its last waiter Acked", keyAlpha)
+			}
+			if !slices.Equal(info.Acked, []uint16{peerID1}) {
+				t.Fatalf("PendingSnapshot[%q].Acked = %v after a duplicate Ack, want exactly [%d]", keyAlpha, info.Acked, peerID1)
+			}
+			if !slices.Equal(info.WaitingOn, []uint16{peerID2}) {
+				t.Fatalf("PendingSnapshot[%q].WaitingOn = %v, want [%d]", keyAlpha, info.WaitingOn, peerID2)
+			}
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
