@@ -72,7 +72,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Tooling
 
-- [ ] **TOOL-01**: sup-kv ships as a single static binary with flags/env config, `--version`, and systemd-friendly behavior
+- [x] **TOOL-01**: sup-kv ships as a single static binary with flags/env config, `--version`, and systemd-friendly behavior
 
 ### Quality
 
@@ -177,7 +177,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | API-05 | Phase 5 | Complete |
 | API-06 | Phase 5 | Complete |
 | API-07 | Phase 5 | Complete |
-| TOOL-01 | Phase 5 | Pending |
+| TOOL-01 | Phase 5 | Complete |
 | OBS-01 | Phase 6 | Pending |
 | OBS-02 | Phase 6 | Pending |
 | OBS-03 | Phase 6 | Pending |

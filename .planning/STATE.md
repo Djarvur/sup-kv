@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 05
 current_phase_name: gRPC API and Binary
-status: executing
-stopped_at: Completed 05-05-PLAN.md
-last_updated: "2026-11-09T13:06:25.218Z"
+status: verifying
+stopped_at: Completed 05-06-PLAN.md
+last_updated: "2026-11-09T13:48:51.372Z"
 last_activity: 2026-11-09
 last_activity_desc: Phase 05 execution started
-state_head: 9a59ba65da13ede626ce21bb34e622c85d115b9a
+state_head: 5d645e41604c8e70e3819c450666bb5f223ad309
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 24
-  completed_plans: 22
+  completed_plans: 24
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-09)
 
 Phase: 05 (gRPC API and Binary) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-09 — Phase 05 execution started
 
 Progress: [██████░░░░] 57%
@@ -82,6 +82,7 @@ Progress: [██████░░░░] 57%
 | Phase 05 P03 | 60min | 2 tasks | 6 files |
 | Phase 05 P04 | 12min | 2 tasks | 4 files |
 | Phase 05 P05 | 12min | 2 tasks | 7 files |
+| Phase 05 P06 | 24min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -180,6 +181,10 @@ Recent decisions affecting current work:
 - [Phase 05]: The appearance phase (waitAppear 500ms cap, 5ms poll) closes the notify-queue race: absence is not drained until the (key,version) entry had its bounded chance to appear — Pitfall 4 locked by TestWait_appearanceRace (plan 05-05)
 - [Phase 05]: Drain honesty reads counts only from the Acked seam: eviction (WaitingOn empty, Acked empty) reports false, supersession freezes counts at the last observation (Q2), deadline and ctx cancellation always report acked=false — the wait never changes the write outcome (plan 05-05)
 - [Phase 05]: Proto wait-field comments made live and regenerated via buf: the stale accepted-but-deferred wording would misstate the now-live wire contract (plan 05-05)
+- [Phase 05]: hub.Run(apiCtx) launched in wire(): the D-19 'ends Watch streams and the hub' step requires the hub goroutine running on apiCtx — without it Watch subscribe blocks forever (plan 05-06, Rule 3)
+- [Phase 05]: Exit-code contract: exit 0 only after a confirmed final dump (D-19); failed Engine.Flush exits 1 (exitDumpFailed, Restart=on-failure reacts); missing/malformed config exits 2 (exitUsage) — malformed SUPKV_ env values are fatal, --version still works on a broken environment
+- [Phase 05]: revive deep-exit reshaped main.go: every exit in main, registerConfig/serve/shutdown return errors (errors.Join for env mistakes); funlen split wire() into startEngine/wire/listenGRPC wiring helpers — semantics identical to the plan sketch
+- [Phase 05]: Flush is export-by-delegation (unexported flush unchanged); gosec G115 nolints unnecessary on guarded uint64-to-uint16 conversions (directives removed as unused); sole remaining nolint is gochecknoglobals on commit (the -X ldflags mechanism, D-18)
 
 ### Pending Todos
 
@@ -207,6 +212,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-09T13:06:24.978Z
-Stopped at: Completed 05-05-PLAN.md
+Last session: 2026-11-09T13:48:32.155Z
+Stopped at: Completed 05-06-PLAN.md
 Resume file: None
