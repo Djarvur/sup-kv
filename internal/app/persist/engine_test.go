@@ -696,6 +696,103 @@ func TestEngine_flushRacesExitMidDump(t *testing.T) {
 	})
 }
 
+// TestFlush_remoteDirtiness pins Flush's shutdown contract (D-19): a remote
+// merge applied via ApplyRemote dirties the engine with NO waiter — only
+// the debounced Run schedule would persist it — so shutdown must call Flush
+// before cancelling the engine context. Run's exit sweep resolves stranded
+// waiters with ErrClosed without performing a final dump, making Flush the
+// only path that turns residual dirtiness into a confirmed dump: the saved
+// bytes must carry the merged record — the write-confirmed-after-dump
+// contract extended to the shutdown path.
+func TestFlush_remoteDirtiness(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		remote := storage.Record{
+			Version: version.PackVersion(1, 1, synctestNodeID+1),
+			Data:    []byte("remote-value"),
+		}
+		conflicts, _, err := eng.ApplyRemote("remote", remote)
+		if err != nil {
+			t.Fatalf("ApplyRemote() error = %v, want nil", err)
+		}
+		if len(conflicts) != 0 {
+			t.Fatalf("ApplyRemote() conflicts = %v, want none on a fresh key", conflicts)
+		}
+		// No synctest.Sleep: the debounce timer has not fired, so the flush
+		// request is the first event Run services — the dump Flush forces is
+		// the one covering the merge, exactly the shutdown-time dump D-19
+		// orders.
+		err = eng.Flush()
+		if err != nil {
+			t.Fatalf("Flush() error = %v, want nil", err)
+		}
+		if saves := dumps.saveCount(); saves != 1 {
+			t.Fatalf("completed saves = %d, want exactly the one covering dump", saves)
+		}
+		records, discarded, err := persist.Decode(dumps.save(0).dump)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		merged, ok := records["remote"]
+		if !ok || merged.Version != remote.Version || string(merged.Data) != "remote-value" {
+			t.Errorf("the Flush dump carries remote = (%t, %x, %q), want the merged record",
+				ok, merged.Version[:], merged.Data)
+		}
+	})
+}
+
+// TestFlush_closed pins the closed half of the shutdown contract: once Run
+// has returned — its exit sweep set the closed flag and closed runDone —
+// Flush returns ErrClosed instead of hanging or re-dumping, the same
+// post-close contract flush reports to its callers (Snapshot, Restore, and
+// now the binary's signal path).
+func TestFlush_closed(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, _ := newFakeEngine()
+		stop := startDumper(t, eng)
+		stop() // the exit sweep ran: closed is set, runDone is closed
+
+		err := eng.Flush()
+		if !errors.Is(err, persist.ErrClosed) {
+			t.Errorf("Flush() error = %v, want ErrClosed after Run exited", err)
+		}
+	})
+}
+
+// TestFlush_clean pins the Phase-3 clean-engine decision on the shutdown
+// path: every confirmed write is already on disk, so Flush on a clean
+// engine returns nil WITHOUT issuing a new save — the redundant-dump
+// prohibition the flushCh seam carries (D-10), extended to shutdown, so a
+// clean node's final dump costs nothing.
+func TestFlush_clean(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		// One confirmed write: its covering dump completed, the engine is
+		// clean — the realistic shutdown state with data on disk.
+		_, _, err := eng.Set("k", []byte("v"))
+		if err != nil {
+			t.Fatalf("Set(k) error = %v, want nil", err)
+		}
+		if saves := dumps.saveCount(); saves != 1 {
+			t.Fatalf("completed saves after the confirmed Set = %d, want exactly one", saves)
+		}
+		err = eng.Flush()
+		if err != nil {
+			t.Fatalf("Flush() error = %v, want nil on a clean engine", err)
+		}
+		if saves := dumps.saveCount(); saves != 1 {
+			t.Errorf("completed saves after Flush = %d, want the same one — a clean engine never re-dumps", saves)
+		}
+	})
+}
+
 // TestEngine_writeSurface proves the full write surface through the engine:
 // SetIfAbsent on a tombstoned key returns the store's ErrAlreadyExists and
 // Delete on a missing key the store's ErrNotFound — both unchanged, with no

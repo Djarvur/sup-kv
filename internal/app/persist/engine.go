@@ -519,6 +519,21 @@ func replayRecord(store *storage.Store, key string, rec storage.Record) error {
 	return err
 }
 
+// Flush is the shutdown seam (D-19): the binary's signal path calls it
+// BEFORE cancelling the engine context, turning residual dirtiness — remote
+// merges applied via ApplyRemote that have no waiter — into one final
+// write-confirmed dump. It is the only such path: Run's exit sweep resolves
+// stranded waiters with ErrClosed without performing a final dump, so state
+// merged after the last scheduled dump would otherwise die with the
+// process. Delegates to flush with its exact contract: a dirty engine
+// completes one covering dump and returns its error, a clean engine replies
+// nil without a redundant save (the D-10 clean decision), and ErrClosed
+// once Run has exited. Requires a running Run goroutine like every blocking
+// engine call.
+func (e *Engine) Flush() error {
+	return e.flush()
+}
+
 // flush forces the dumper to complete one dump covering every unconfirmed
 // write and returns that dump's error: it hands a reply channel to Run
 // through flushCh, which Run services immediately — bypassing the debounce
