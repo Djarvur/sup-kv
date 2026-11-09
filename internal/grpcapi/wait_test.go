@@ -224,3 +224,159 @@ func TestWait_deleteSymmetry(t *testing.T) {
 			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
 	}
 }
+
+// supersededVersion returns a RecordVersion guaranteed different from any
+// engine-stamped one: RFC 9562 versions carry the 0x7 version nibble in
+// byte 6 and a variant encoding in byte 8, so the 0xAA fill cannot collide.
+func supersededVersion() version.RecordVersion {
+	var sup version.RecordVersion
+	for i := range sup {
+		sup[i] = 0xAA
+	}
+	return sup
+}
+
+// TestWait_appearanceRace locks RESEARCH Pitfall 4: the mirror stays empty
+// for the first ~60ms, and only then carries the entry with Acked=[1],
+// WaitingOn empty — pre-appearance absence must not be misread as drained.
+// The response reports acked=true 1/1 only after the poll waited through
+// the empty phase, which the elapsed floor also pins.
+func TestWait_appearanceRace(t *testing.T) {
+	t.Parallel()
+
+	const key = "wait/race"
+	mirror := newFakeMirror(1)
+	ts := newWaitServer(t, mirror, 0)
+	ctx := t.Context()
+
+	go func() {
+		ver, ok := awaitWrittenVersion(ts, key)
+		if !ok {
+			return
+		}
+		time.Sleep(60 * time.Millisecond)
+		mirror.setPending(key, repl.PendingInfo{Version: ver, Acked: []uint16{1}})
+	}()
+
+	start := time.Now()
+	resp, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key:                key,
+		Value:              []byte("v"),
+		WaitForReplication: true,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", key, err)
+	}
+	if !resp.GetAcked() || resp.GetAckedCount() != 1 || resp.GetTotalPeers() != 1 {
+		t.Fatalf("appearance-race report: want acked=true 1/1, got acked=%v %d/%d",
+			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+	if elapsed < 60*time.Millisecond {
+		t.Fatalf("appearance-race Set returned in %v — before the entry could appear: the poll did not wait through the empty phase", elapsed)
+	}
+}
+
+// TestWait_evictionNotAck locks RESEARCH Pitfall 3 (T-05-04): the mirror
+// shows the entry resolved with WaitingOn empty but Acked empty — every
+// waiter was evicted by peer_timeout, none Acked. The report is honest
+// acked=false 0/1; the plain total-minus-WaitingOn reading would have
+// reported a success no peer granted.
+func TestWait_evictionNotAck(t *testing.T) {
+	t.Parallel()
+
+	const key = "wait/evict"
+	mirror := newFakeMirror(1)
+	ts := newWaitServer(t, mirror, 0)
+	ctx := t.Context()
+
+	go func() {
+		ver, ok := awaitWrittenVersion(ts, key)
+		if !ok {
+			return
+		}
+		mirror.setPending(key, repl.PendingInfo{Version: ver})
+	}()
+
+	resp, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key:                key,
+		Value:              []byte("v"),
+		WaitForReplication: true,
+	})
+	if err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", key, err)
+	}
+	if resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 1 {
+		t.Fatalf("eviction report: want acked=false 0/1, got acked=%v %d/%d",
+			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+}
+
+// TestWait_superseded pins the Q2 interpretation: the drain phase watches
+// the tracked version's entry — whose prior snapshot showed Acked=[1]
+// against 2 known peers — until a greater remote version replaces it. The
+// report is acked=false with the counts frozen at the last observation
+// (1/2): the tracked version's Acks did not arrive, and the superseding
+// entry's Acked set must not leak into the report.
+func TestWait_superseded(t *testing.T) {
+	t.Parallel()
+
+	const key = "wait/superseded"
+	mirror := newFakeMirror(2)
+	ts := newWaitServer(t, mirror, 0)
+	ctx := t.Context()
+
+	go func() {
+		ver, ok := awaitWrittenVersion(ts, key)
+		if !ok {
+			return
+		}
+		mirror.setPending(key, repl.PendingInfo{Version: ver, Acked: []uint16{1}, WaitingOn: []uint16{2}})
+		time.Sleep(30 * time.Millisecond)
+		mirror.setPending(key, repl.PendingInfo{Version: supersededVersion(), WaitingOn: []uint16{2}})
+	}()
+
+	resp, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key:                key,
+		Value:              []byte("v"),
+		WaitForReplication: true,
+	})
+	if err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", key, err)
+	}
+	if resp.GetAcked() || resp.GetAckedCount() != 1 || resp.GetTotalPeers() != 2 {
+		t.Fatalf("superseded report: want acked=false 1/2 frozen at the last observation, got acked=%v %d/%d",
+			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+}
+
+// TestWait_perRequestTimeout pins D-09: the per-request wait_timeout_ms
+// (120ms) wins over the 1s operator default in the options — the call
+// returns in roughly 120ms, and an elapsed at or beyond the bound would
+// expose the appearance phase running on the default.
+func TestWait_perRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	mirror := newFakeMirror(1)
+	ts := newWaitServer(t, mirror, 0) // 0 -> NewServer's 1s default in opts
+	ctx := t.Context()
+
+	start := time.Now()
+	resp, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key:                "wait/perreq",
+		Value:              []byte("v"),
+		WaitForReplication: true,
+		WaitTimeoutMs:      120,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Set wait/perreq: want OK, got error: %v", err)
+	}
+	if resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 1 {
+		t.Fatalf("per-request timeout report: want acked=false 0/1, got acked=%v %d/%d",
+			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+	if elapsed >= waitAssertBound {
+		t.Fatalf("per-request-timeout Set took %v: want under %v — the 120ms request field must win over the 1s default", elapsed, waitAssertBound)
+	}
+}
