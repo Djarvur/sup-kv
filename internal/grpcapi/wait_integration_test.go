@@ -120,17 +120,19 @@ func probeLoopbackBroadcast(t *testing.T, port int) {
 	}
 	defer func() { _ = tx.Close() }()
 	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
-	if _, err := tx.WriteToUDP([]byte("sup-kv wait integration probe"), dst); err != nil {
-		t.Fatalf("probe send to %s: %v", dst, err)
+	_, sendErr := tx.WriteToUDP([]byte("sup-kv wait integration probe"), dst)
+	if sendErr != nil {
+		t.Fatalf("probe send to %s: %v", dst, sendErr)
 	}
-	if err := rx.SetReadDeadline(time.Now().Add(integrationProbeWait)); err != nil {
-		t.Fatalf("probe read deadline: %v", err)
+	deadlineErr := rx.SetReadDeadline(time.Now().Add(integrationProbeWait))
+	if deadlineErr != nil {
+		t.Fatalf("probe read deadline: %v", deadlineErr)
 	}
 	buf := make([]byte, 64)
 	for {
-		n, _, err := rx.ReadFromUDP(buf)
-		if err != nil {
-			t.Skipf("loopback broadcast to %s did not reach the bound socket within %v: this platform lacks the capability the test drives (protocol correctness stays proven by the mirror fixtures)",
+		n, _, readErr := rx.ReadFromUDP(buf)
+		if readErr != nil {
+			t.Skipf("loopback broadcast to %s did not reach the bound socket within %v — platform lacks the capability (protocol correctness stays proven by the mirror fixtures)",
 				dst, integrationProbeWait)
 		}
 		if n > 0 {

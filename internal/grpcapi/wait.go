@@ -25,6 +25,12 @@ const (
 	// handler goroutine).
 	maxWaitTimeoutMs = math.MaxInt64 / int64(time.Millisecond)
 
+	// waitTimeoutCeilingFactor is the per-request ceiling's multiple over
+	// the operator default (WR-02): an unvalidated wait_timeout_ms may
+	// hold a write handler at most an order of magnitude beyond the
+	// operator's own configuration.
+	waitTimeoutCeilingFactor = 10
+
 	// waitPoll is the pending-mirror poll period (the smoke waitFor
 	// pattern, production-side): the udprepl adapter refreshes its
 	// copy-on-write mirror after every event-loop iteration, so a 5ms poll
@@ -209,7 +215,7 @@ func (s *Server) waitTimeout(requestMs int64) time.Duration {
 		requestMs = maxWaitTimeoutMs
 	}
 	timeout := time.Duration(requestMs) * time.Millisecond
-	if ceiling := 10 * s.opts.WaitTimeout; ceiling > 0 && timeout > ceiling {
+	if ceiling := waitTimeoutCeilingFactor * s.opts.WaitTimeout; ceiling > 0 && timeout > ceiling {
 		// The > 0 guard keeps an absurd operator default whose ×10
 		// overflows from inverting the comparison; such a default then
 		// stays bounded only by the conversion-safe ceiling.
