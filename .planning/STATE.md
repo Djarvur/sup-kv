@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: gRPC API and Binary
 status: executing
-stopped_at: Completed 05-04-PLAN.md
-last_updated: "2026-11-09T12:45:08.821Z"
+stopped_at: Completed 05-05-PLAN.md
+last_updated: "2026-11-09T13:06:25.218Z"
 last_activity: 2026-11-09
 last_activity_desc: Phase 05 execution started
-state_head: 3231c00bfc4bd66a6cd0d41a02e6567605f27606
+state_head: 9a59ba65da13ede626ce21bb34e622c85d115b9a
 progress:
   total_phases: 7
   completed_phases: 4
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-09)
 ## Current Position
 
 Phase: 05 (gRPC API and Binary) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
 Last activity: 2026-11-09 — Phase 05 execution started
 
@@ -81,6 +81,7 @@ Progress: [██████░░░░] 57%
 | Phase 05 P02 | 16 min | 2 tasks | 5 files |
 | Phase 05 P03 | 60min | 2 tasks | 6 files |
 | Phase 05 P04 | 12min | 2 tasks | 4 files |
+| Phase 05 P05 | 12min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -175,6 +176,10 @@ Recent decisions affecting current work:
 - [Phase 05]: Snapshot RPCs gated exactly like writes (A5); names cross to persistfile untouched — its validateName is the single closed path-traversal control (T-05-07), the adapter only maps ErrInvalidSnapshotName to InvalidArgument (plan 05-04)
 - [Phase 05]: Snapshot tests run against a real persistfile.FileStore (newFileServer) — the in-memory fake deliberately does not reproduce name validation, so a fake-backed test would prove nothing about T-05-07 (plan 05-04)
 - [Phase 05]: Deterministic closed-gate observation: block the resolver's injected SyncArrived closure until the test observed the state — naive 'assert before the deadline' races the deadline under test under full-suite parallel load (plan 05-04)
+- [Phase 05]: waitForReplication reads only the injected ServerOptions seams (KnownPeers/PendingCopy) — handler goroutines never touch the single-driver core; total captured once pre-poll (D-10) and zero peers short-circuit acked immediately (D-11), including the nil-seam single-node default (plan 05-05)
+- [Phase 05]: The appearance phase (waitAppear 500ms cap, 5ms poll) closes the notify-queue race: absence is not drained until the (key,version) entry had its bounded chance to appear — Pitfall 4 locked by TestWait_appearanceRace (plan 05-05)
+- [Phase 05]: Drain honesty reads counts only from the Acked seam: eviction (WaitingOn empty, Acked empty) reports false, supersession freezes counts at the last observation (Q2), deadline and ctx cancellation always report acked=false — the wait never changes the write outcome (plan 05-05)
+- [Phase 05]: Proto wait-field comments made live and regenerated via buf: the stale accepted-but-deferred wording would misstate the now-live wire contract (plan 05-05)
 
 ### Pending Todos
 
@@ -202,6 +207,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-09T12:45:08.573Z
-Stopped at: Completed 05-04-PLAN.md
+Last session: 2026-11-09T13:06:24.978Z
+Stopped at: Completed 05-05-PLAN.md
 Resume file: None

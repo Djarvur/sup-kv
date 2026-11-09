@@ -52,7 +52,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **API-02**: User can List keys under a prefix, returned in sorted order (prefix-range RPC)
 - [x] **API-03**: User can Watch a stream of change notifications covering local and replicated changes alike (engine event taps designed in from the start)
 - [x] **API-04**: Writes are rejected with Unavailable during the startup gate (until the first full sync round arrives or `startup_gate` elapses); reads are served immediately
-- [ ] **API-05**: User can request `wait_for_replication` on a write: the server waits for Acks from known peers within a timeout and reports whether they were received; it never changes the write outcome
+- [x] **API-05**: User can request `wait_for_replication` on a write: the server waits for Acks from known peers within a timeout and reports whether they were received; it never changes the write outcome
 - [x] **API-06**: The gRPC standard health checking endpoint is served and reflects startup-gate state (NOT_SERVING until gated open)
 - [x] **API-07**: Snapshot create/load is exposed through the API
 
@@ -174,7 +174,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | API-02 | Phase 5 | Complete |
 | API-03 | Phase 5 | Complete |
 | API-04 | Phase 5 | Complete |
-| API-05 | Phase 5 | Pending |
+| API-05 | Phase 5 | Complete |
 | API-06 | Phase 5 | Complete |
 | API-07 | Phase 5 | Complete |
 | TOOL-01 | Phase 5 | Pending |
