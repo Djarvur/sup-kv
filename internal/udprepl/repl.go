@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"net"
+	"slices"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -92,8 +93,10 @@ type localWrite struct {
 // socket and drives one repl.Core. Exactly one goroutine — the caller's
 // Run — mutates core state (D-04); the read goroutine only queues inbound
 // datagrams, write authors only queue notifications, and the discard
-// counters and known-peer count are mirrored into atomics after every loop
-// iteration so cross-goroutine readers never touch core state.
+// counters, known-peer count and the replication read states (the
+// first-sync signal and the pending snapshot) are mirrored into atomics
+// after every loop iteration so cross-goroutine readers never touch core
+// state.
 type Adapter struct {
 	conn          *net.UDPConn
 	broadcastAddr *net.UDPAddr
@@ -111,6 +114,14 @@ type Adapter struct {
 	ownEcho         atomic.Uint64
 	duplicateNodeID atomic.Uint64
 	peerCount       atomic.Uint64
+
+	// syncArrived mirrors the core's first-DataSync-received flag (the
+	// startup gate's sync half, API-04); pendingCopy mirrors the core's
+	// pending snapshot as a fresh copy-on-write map — the pointer is
+	// replaced wholesale after every loop iteration, never mutated in
+	// place, so readers may hold a snapshot across events.
+	syncArrived atomic.Bool
+	pendingCopy atomic.Pointer[map[string]repl.PendingInfo]
 }
 
 // New binds the node's udp4 socket and constructs the replication core over
@@ -183,8 +194,9 @@ func reuseAddrBroadcastListenPacket(bindAddr string) (net.PacketConn, error) {
 // the timer channel re-armed from Advance's returned deadline. After every
 // event it calls the core handler with [time.Now] (the production now
 // seam), drains the shared Outbox through encode+send, and mirrors the
-// core's counters into atomics. Run returns ctx's error; closing the
-// context unblocks both the loop and the read goroutine.
+// core's counters and replication read states into atomics. Run returns
+// ctx's error; closing the context unblocks both the loop and the read
+// goroutine.
 func (a *Adapter) Run(ctx context.Context) error {
 	go a.readLoop()
 	defer func() { _ = a.conn.Close() }() // unblocks the read goroutine's ReadFromUDP.
@@ -211,6 +223,7 @@ func (a *Adapter) Run(ctx context.Context) error {
 		next = a.core.Advance(time.Now(), &out)
 		a.flush(&out)
 		a.mirrorStats()
+		a.mirrorState()
 	}
 }
 
@@ -266,6 +279,33 @@ func (a *Adapter) Discards() repl.DiscardStats {
 // table after the latest event-loop iteration — safe from any goroutine.
 func (a *Adapter) KnownPeers() uint64 {
 	return a.peerCount.Load()
+}
+
+// SyncArrived reports whether the core has received its first DataSync
+// datagram (the startup gate's sync half, API-04), mirrored after the
+// latest event-loop iteration — safe from any goroutine. gRPC handler
+// goroutines read the gate's sync half only here, never by calling the
+// single-driver core.
+func (a *Adapter) SyncArrived() bool {
+	return a.syncArrived.Load()
+}
+
+// PendingCopy returns an immutable snapshot of the core's pending set (the
+// wait_for_replication read seam, API-05), mirrored after the latest
+// event-loop iteration — safe from any goroutine. The caller must not
+// mutate the returned map or its slices: the mirror replaces the published
+// pointer wholesale (copy-on-write — the map and every WaitingOn/Acked
+// slice are fresh copies built from the core's snapshot, sharing no backing
+// array with core state) and never mutates an already-published map, so a
+// snapshot held across events stays stable. Before the first loop iteration
+// has mirrored, the snapshot is empty — nothing is pending. gRPC handler
+// goroutines read pending state only here, never by calling the
+// single-driver core.
+func (a *Adapter) PendingCopy() map[string]repl.PendingInfo {
+	if p := a.pendingCopy.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // readLoop is the one read goroutine feeding the event loop's inbound queue
@@ -333,6 +373,29 @@ func (a *Adapter) mirrorStats() {
 	a.ownEcho.Store(d.OwnEcho)
 	a.duplicateNodeID.Store(d.DuplicateNodeID)
 	a.peerCount.Store(uint64(len(a.core.PeerSnapshot())))
+}
+
+// mirrorState copies the core's replication read states into the atomics
+// after each loop iteration (D-04) — the same post-event site mirrorStats
+// runs at, so a reader never sees the pair torn across an event: the
+// first-sync flag (API-04) stored as-is, and the pending snapshot (API-05)
+// rebuilt as a fresh copy-on-write map whose entries clone every
+// WaitingOn/Acked slice, sharing no backing array with core state. Pending
+// sets are small at this scale (entries drain within about one RTT
+// normally), so the per-event copy is cheap.
+func (a *Adapter) mirrorState() {
+	a.syncArrived.Store(a.core.SyncArrived())
+	snap := a.core.PendingSnapshot()
+	copied := make(map[string]repl.PendingInfo, len(snap))
+	for key, info := range snap {
+		copied[key] = repl.PendingInfo{
+			Version:   info.Version,
+			WaitingOn: slices.Clone(info.WaitingOn),
+			Acked:     slices.Clone(info.Acked),
+			NextRetry: info.NextRetry,
+		}
+	}
+	a.pendingCopy.Store(&copied)
 }
 
 // armTimer re-arms (or first creates) t for the next deadline and returns

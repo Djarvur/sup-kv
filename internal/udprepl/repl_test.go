@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
@@ -246,5 +249,183 @@ func TestNotifyLocalWrite_afterRunReturns(t *testing.T) {
 		case <-time.After(postRunDeadline):
 			t.Fatalf("post-Run NotifyLocalWrite call %d blocked past %v — the write path wedged after Run exited", call+1, postRunDeadline)
 		}
+	}
+}
+
+// mirrorWait is the mirror tests' poll deadline (real time — a real event
+// loop over a real socket; loopback unicast delivery is sub-millisecond, so
+// two seconds is generous).
+const mirrorWait = 2 * time.Second
+
+// mirrorKey is the one key the mirror tests write and sync about.
+const mirrorKey = "mirror/key"
+
+// peerSocket returns the one loopback socket the fake peer (node B) sends
+// from, held for the test's lifetime: one node owns one socket, so every
+// datagram it sends carries the same source handle — a per-datagram
+// throwaway socket would make the second-variant duplicate-node_id
+// classifier (REPL-08: one identity claimed from two handles) discard the
+// peer's later datagrams.
+func peerSocket(t *testing.T) net.PacketConn {
+	t.Helper()
+	var lc net.ListenConfig
+	tx, err := lc.ListenPacket(t.Context(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind loopback peer socket: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Close() })
+	return tx
+}
+
+// sendDatagram delivers one encoded datagram from the peer's socket to the
+// adapter's wildcard socket over loopback unicast: the adapter exclusively
+// holds its port (no SO_REUSEPORT sibling receiver), so kernel delivery is
+// deterministic — the same-host ambiguity documented on the package affects
+// only ports shared between SO_REUSEADDR receivers.
+func sendDatagram(t *testing.T, tx net.PacketConn, udpPort int, datagram []byte) {
+	t.Helper()
+	dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: udpPort}
+	_, err := tx.WriteTo(datagram, dst)
+	if err != nil {
+		t.Fatalf("send datagram to %s: %v", dst, err)
+	}
+}
+
+// newMirrorAdapter returns the adapter under test running its real event
+// loop on a free port, with the loopback broadcast address (the
+// postRunNotify test's shape). The loop is stopped by the test's cleanup.
+func newMirrorAdapter(t *testing.T) (*udprepl.Adapter, int) {
+	t.Helper()
+	udpPort := freeUDPPort(t)
+	adapter, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", udpPort),
+		fmt.Sprintf("127.255.255.255:%d", udpPort),
+		nodeIDA, newTestStore(nodeIDA), repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("adapter New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() { _ = adapter.Run(ctx) }()
+	return adapter, udpPort
+}
+
+// TestMirror_pendingAckVisible proves the pending mirror (API-05): a
+// notified local write surfaces in PendingCopy once its event traverses the
+// loop, an Ack datagram surfaces as the peer joining the entry's Acked
+// while the entry survives on its empty wait-set (zero known peers — the
+// suspension rule), and a snapshot held across a later event stays stable
+// while the mirror replaces the published map wholesale. Everything reads
+// through the adapter atomics from this goroutine — never the
+// single-driver core.
+func TestMirror_pendingAckVisible(t *testing.T) {
+	t.Parallel()
+	adapter, udpPort := newMirrorAdapter(t)
+	tx := peerSocket(t)
+
+	if got := adapter.PendingCopy(); len(got) != 0 {
+		t.Fatalf("PendingCopy() before the write holds %d entries, want none", len(got))
+	}
+
+	// The author's notification traverses the loop: the entry appears
+	// waiting on nobody (nothing known to wait on) with Acked empty.
+	ver := version.PackVersion(testNowMs, 0, nodeIDA)
+	rec := storage.Record{Version: ver, Data: []byte("mirror me")}
+	err := adapter.NotifyLocalWrite(mirrorKey, rec)
+	if err != nil {
+		t.Fatalf("NotifyLocalWrite(%q): %v", mirrorKey, err)
+	}
+	waitFor(t, mirrorWait, "the pending entry to appear in PendingCopy", func() bool {
+		info, ok := adapter.PendingCopy()[mirrorKey]
+		return ok && info.Version == ver && len(info.WaitingOn) == 0 && len(info.Acked) == 0
+	})
+
+	// An Ack traverses the loop: the peer joins Acked, read back through
+	// the atomic snapshot.
+	datagram, err := udprepl.EncodeDatagramForTest(port.Ack{Key: mirrorKey, Version: ver}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Ack: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "the Ack to surface in PendingCopy Acked", func() bool {
+		info, ok := adapter.PendingCopy()[mirrorKey]
+		return ok && slices.Equal(info.Acked, []uint16{nodeIDB}) && len(info.WaitingOn) == 0
+	})
+
+	// A snapshot held across a later event stays stable: the mirror
+	// replaces the published pointer wholesale and never mutates a
+	// published map. The Hello ends the empty peer table (discovery), so
+	// the fresh snapshot additionally shows the flushed peer as a waiter —
+	// with the earlier Ack still recorded in Acked (eviction and discovery
+	// never erase it).
+	held := adapter.PendingCopy()
+	datagram, err = udprepl.EncodeDatagramForTest(port.Hello{}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Hello: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "discovery to surface as KnownPeers == 1", func() bool {
+		return adapter.KnownPeers() == 1
+	})
+	if !slices.Equal(held[mirrorKey].Acked, []uint16{nodeIDB}) || len(held[mirrorKey].WaitingOn) != 0 {
+		t.Fatalf("the snapshot held across the discovery event changed: %+v", held[mirrorKey])
+	}
+	info := adapter.PendingCopy()[mirrorKey]
+	if !slices.Equal(info.Acked, []uint16{nodeIDB}) || !slices.Equal(info.WaitingOn, []uint16{nodeIDB}) {
+		t.Fatalf("after discovery the mirrored entry = (WaitingOn %v, Acked %v), want the flushed waiter plus the kept Ack",
+			info.WaitingOn, info.Acked)
+	}
+}
+
+// TestMirror_syncArrivedFlip proves the sync mirror (API-04): after the
+// mirror has demonstrably run (a Hello traversed the loop) SyncArrived() is
+// still false, one DataSync datagram traversing the loop flips it true
+// through the atomic, and it stays true across further unrelated events —
+// the flag never resets.
+func TestMirror_syncArrivedFlip(t *testing.T) {
+	t.Parallel()
+	adapter, udpPort := newMirrorAdapter(t)
+	tx := peerSocket(t)
+
+	// A first event (the peer's Hello) proves the mirror has run at least
+	// once while the flag is still false — not merely unset.
+	datagram, err := udprepl.EncodeDatagramForTest(port.Hello{}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Hello: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "the Hello to surface as KnownPeers == 1", func() bool {
+		return adapter.KnownPeers() == 1
+	})
+	if adapter.SyncArrived() {
+		t.Fatal("SyncArrived() = true after a Hello event, want false — only a DataSync receipt counts")
+	}
+
+	// One DataSync datagram from the same peer handle flips the mirrored
+	// flag.
+	datagram, err = udprepl.EncodeDatagramForTest(port.DataSync{
+		Entries: []port.SyncEntry{{Key: mirrorKey, Version: version.PackVersion(testNowMs, 1, nodeIDB)}},
+	}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode DataSync: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "SyncArrived() to flip true", func() bool {
+		return adapter.SyncArrived()
+	})
+
+	// Further unrelated events never reset it: a notified write traverses
+	// the loop (its entry appears in the pending mirror) first.
+	err = adapter.NotifyLocalWrite(mirrorKey, storage.Record{Version: version.PackVersion(testNowMs, 0, nodeIDA), Data: []byte("v")})
+	if err != nil {
+		t.Fatalf("NotifyLocalWrite(%q): %v", mirrorKey, err)
+	}
+	waitFor(t, mirrorWait, "the notified entry to appear in PendingCopy", func() bool {
+		_, ok := adapter.PendingCopy()[mirrorKey]
+		return ok
+	})
+	if !adapter.SyncArrived() {
+		t.Fatal("SyncArrived() = false after further events, want it sticky true — the flag never resets")
 	}
 }
