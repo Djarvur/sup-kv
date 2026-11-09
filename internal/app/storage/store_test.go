@@ -899,3 +899,265 @@ func TestStore_concurrentDeleteVsSet(t *testing.T) {
 		}
 	}
 }
+
+// changeTapEvent is one OnChange tap firing as the tests observe it: the key
+// and the handed record — the store's stored copy, which is replaced
+// wholesale on the next install and never mutated in place, so retaining it
+// is safe per the field's documented contract.
+type changeTapEvent struct {
+	key    string
+	record storage.Record
+}
+
+// changeTapRecorder collects the events a storage.Config.OnChange tap
+// fires. Every firing happens under the store write lock, so calls are
+// serialized by the store itself; the mutex keeps the recorder race-clean
+// for tests collecting after concurrent writers have joined.
+type changeTapRecorder struct {
+	mu     sync.Mutex
+	events []changeTapEvent
+}
+
+// tap is the Config.OnChange callback.
+func (r *changeTapRecorder) tap(key string, rec storage.Record) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, changeTapEvent{key: key, record: rec})
+}
+
+// count returns how many events have fired so far.
+func (r *changeTapRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.events)
+}
+
+// event returns the i-th fired event.
+func (r *changeTapRecorder) event(i int) changeTapEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.events[i]
+}
+
+// newTapStore returns a store at the fixed wall clock wired with a fresh
+// recorder as its OnChange tap.
+func newTapStore() (*storage.Store, *changeTapRecorder) {
+	rec := &changeTapRecorder{}
+	store := storage.NewStore(testNodeID, clock.NewClock(fixedNow(), 0, 0, testDriftWarn),
+		storage.Config{OnChange: rec.tap})
+	return store, rec
+}
+
+// TestStore_onChange covers the Config.OnChange tap (the phase-5 API-03
+// seam): it fires exactly once per actual install for every change source —
+// fresh and overwriting local Sets, a tombstone Delete, a winning remote
+// Merge install and a Merge-delivered winning tombstone — and stays silent
+// for a strictly-older losing merge and an equal-version redelivery (D-06:
+// events fire only on actual state changes). The handed record is asserted
+// field-by-field against the record a following Get or Records returns.
+func TestStore_onChange(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a fresh Set fires once with the stored record", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		ver, _, err := store.Set("k", []byte("v1"))
+		if err != nil {
+			t.Fatalf("Set() error = %v, want nil", err)
+		}
+		if got := tap.count(); got != 1 {
+			t.Fatalf("tap fired %d times after one Set, want 1", got)
+		}
+		ev := tap.event(0)
+		if ev.key != "k" || ev.record.Deleted {
+			t.Fatalf("tap event = (%q, deleted=%t), want (k, deleted=false)", ev.key, ev.record.Deleted)
+		}
+		if ev.record.Version != ver {
+			t.Fatalf("tap version = %x, want the Set's version %x", ev.record.Version[:], ver[:])
+		}
+		got, err := store.Get("k")
+		if err != nil {
+			t.Fatalf("Get() error = %v, want nil", err)
+		}
+		if ev.record.Version != got.Version || ev.record.Checksum != got.Checksum ||
+			!bytes.Equal(ev.record.Data, got.Data) {
+			t.Fatalf("tap record = (%x, %q, sum %x), want the Get record (%x, %q, sum %x)",
+				ev.record.Version[:], ev.record.Data, ev.record.Checksum,
+				got.Version[:], got.Data, got.Checksum)
+		}
+	})
+
+	t.Run("an overwrite Set fires for the second install", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		_, _, err := store.Set("k", []byte("v1"))
+		if err != nil {
+			t.Fatalf("first Set() error = %v, want nil", err)
+		}
+		ver2, _, err := store.Set("k", []byte("v2"))
+		if err != nil {
+			t.Fatalf("second Set() error = %v, want nil", err)
+		}
+		if got := tap.count(); got != 2 {
+			t.Fatalf("tap fired %d times after two Sets, want 2", got)
+		}
+		ev := tap.event(1)
+		if ev.key != "k" || ev.record.Deleted || ev.record.Version != ver2 ||
+			!bytes.Equal(ev.record.Data, []byte("v2")) {
+			t.Fatalf("second tap event = (%q, deleted=%t, %x, %q), want (k, false, the second version, v2)",
+				ev.key, ev.record.Deleted, ev.record.Version[:], ev.record.Data)
+		}
+	})
+
+	t.Run("a Delete fires with the tombstone install", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		_, _, err := store.Set("k", []byte("v1"))
+		if err != nil {
+			t.Fatalf("Set() error = %v, want nil", err)
+		}
+		ver, _, err := store.Delete("k")
+		if err != nil {
+			t.Fatalf("Delete() error = %v, want nil", err)
+		}
+		if got := tap.count(); got != 2 {
+			t.Fatalf("tap fired %d times after Set+Delete, want 2", got)
+		}
+		ev := tap.event(1)
+		if ev.key != "k" || !ev.record.Deleted || ev.record.Version != ver {
+			t.Fatalf("second tap event = (%q, deleted=%t, %x), want (k, deleted=true, the Delete version %x)",
+				ev.key, ev.record.Deleted, ev.record.Version[:], ver[:])
+		}
+		stored, ok := store.Records()["k"]
+		if !ok {
+			t.Fatal("Records()[k] missing after Delete, want the stored tombstone")
+		}
+		if ev.record.Version != stored.Version || ev.record.Deleted != stored.Deleted ||
+			ev.record.Checksum != stored.Checksum || !bytes.Equal(ev.record.Data, stored.Data) {
+			t.Fatalf("tap record = (%x, deleted=%t, sum %x, %q), want the stored tombstone (%x, deleted=%t, sum %x, %q)",
+				ev.record.Version[:], ev.record.Deleted, ev.record.Checksum, ev.record.Data,
+				stored.Version[:], stored.Deleted, stored.Checksum, stored.Data)
+		}
+	})
+
+	t.Run("a winning remote Merge install fires", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		_, _, err := store.Merge("k", stored)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		winner := storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeB), Data: []byte("b")}
+		conflicts, _, err := store.Merge("k", winner)
+		if err != nil {
+			t.Fatalf("Merge() error = %v, want nil", err)
+		}
+		want := []storage.Conflict{{Key: "k", Winner: winner.Version, Loser: stored.Version}}
+		if !conflictsEqual(conflicts, want) {
+			t.Fatalf("Merge() conflicts = %v, want %v", conflicts, want)
+		}
+		if got := tap.count(); got != 2 {
+			t.Fatalf("tap fired %d times, want 2 (the seed install plus the winning install)", got)
+		}
+		ev := tap.event(1)
+		got, err := store.Get("k")
+		if err != nil {
+			t.Fatalf("Get() error = %v, want nil", err)
+		}
+		if ev.key != "k" || ev.record.Deleted || ev.record.Version != winner.Version ||
+			ev.record.Checksum != got.Checksum || !bytes.Equal(ev.record.Data, got.Data) {
+			t.Fatalf("second tap event = (%q, deleted=%t, %x, sum %x, %q), want the winning install matching Get (k, false, %x, sum %x, %q)",
+				ev.key, ev.record.Deleted, ev.record.Version[:], ev.record.Checksum, ev.record.Data,
+				got.Version[:], got.Checksum, got.Data)
+		}
+	})
+
+	t.Run("a Merge-delivered winning tombstone fires with deleted=true", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		live := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		_, _, err := store.Merge("k", live)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		tomb := storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeB), Deleted: true}
+		conflicts, _, err := store.Merge("k", tomb)
+		if err != nil {
+			t.Fatalf("Merge(tombstone) error = %v, want nil", err)
+		}
+		want := []storage.Conflict{{Key: "k", Winner: tomb.Version, Loser: live.Version}}
+		if !conflictsEqual(conflicts, want) {
+			t.Fatalf("Merge(tombstone) conflicts = %v, want %v", conflicts, want)
+		}
+		if got := tap.count(); got != 2 {
+			t.Fatalf("tap fired %d times, want 2 (the seed install plus the tombstone install)", got)
+		}
+		ev := tap.event(1)
+		if ev.key != "k" || !ev.record.Deleted || ev.record.Version != tomb.Version {
+			t.Fatalf("second tap event = (%q, deleted=%t, %x), want (k, deleted=true, %x)",
+				ev.key, ev.record.Deleted, ev.record.Version[:], tomb.Version[:])
+		}
+	})
+
+	t.Run("a strictly older losing Merge fires nothing", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		stored := storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeA), Data: []byte("a")}
+		_, _, err := store.Merge("k", stored)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		loser := storage.Record{Version: version.PackVersion(mergeL, 0, nodeB), Data: []byte("b")}
+		conflicts, _, err := store.Merge("k", loser)
+		if err != nil {
+			t.Fatalf("Merge() error = %v, want nil", err)
+		}
+		if len(conflicts) != 1 || conflicts[0].Winner != stored.Version {
+			t.Fatalf("Merge() conflicts = %v, want the incoming version rejected as the loser", conflicts)
+		}
+		if got := tap.count(); got != 1 {
+			t.Fatalf("tap fired %d times, want 1 (the seed install only — a loser never installs, D-06)", got)
+		}
+	})
+
+	t.Run("an equal-version redelivery fires nothing", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		rec := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		_, _, err := store.Merge("k", rec)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		dup := storage.Record{Version: rec.Version, Data: []byte("x")}
+		conflicts, _, err := store.Merge("k", dup)
+		if err != nil {
+			t.Fatalf("Merge() error = %v, want nil", err)
+		}
+		if conflicts != nil {
+			t.Fatalf("Merge() conflicts = %v, want nil (equal version is a full no-op)", conflicts)
+		}
+		if got := tap.count(); got != 1 {
+			t.Fatalf("tap fired %d times, want 1 (the seed install only — an equal-version redelivery never installs, D-06)", got)
+		}
+	})
+
+	t.Run("a nil OnChange is a no-op", func(t *testing.T) {
+		t.Parallel()
+		store := newStore() // zero-value Config: OnChange normalizes to a no-op.
+		_, _, err := store.Set("k", []byte("v"))
+		if err != nil {
+			t.Fatalf("Set() error = %v, want nil", err)
+		}
+		_, _, err = store.Merge("k", storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeA), Data: []byte("b")})
+		if err != nil {
+			t.Fatalf("Merge() error = %v, want nil", err)
+		}
+		_, _, err = store.Delete("k")
+		if err != nil {
+			t.Fatalf("Delete() error = %v, want nil", err)
+		}
+		// Reaching here without a nil-callback panic is the assertion: the
+		// zero-value Config behaves exactly like the pre-tap store.
+	})
+}
