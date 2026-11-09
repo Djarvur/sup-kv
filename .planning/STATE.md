@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: gRPC API and Binary
 status: executing
-stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-11-09T11:16:15.921Z"
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-11-09T12:22:12.948Z"
 last_activity: 2026-11-09
 last_activity_desc: Phase 05 execution started
-state_head: d1026dcff8a90bac08160e37ccf0c60ec6cfc8d2
+state_head: fc8581bc327429d99148708b312b4401bc95943a
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 24
-  completed_plans: 20
+  completed_plans: 21
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-09)
 ## Current Position
 
 Phase: 05 (gRPC API and Binary) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
 Last activity: 2026-11-09 — Phase 05 execution started
 
@@ -79,6 +79,7 @@ Progress: [██████░░░░] 57%
 | Phase 4 P06 | 15 min | 2 tasks | 6 files |
 | Phase 05 P01 | 19 min | 3 tasks | 9 files |
 | Phase 05 P02 | 16 min | 2 tasks | 5 files |
+| Phase 05 P03 | 60min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -164,6 +165,10 @@ Recent decisions affecting current work:
 - [Phase 05]: mirrorState is one sibling call at the existing post-iteration stats site — sync flag and pending copy refresh together after every loop event, never torn (plan 05-02)
 - [Phase 05]: handleAck writes the pending entry back to the map (value copy) after appending to acked; evictPeers deliberately never touches acked — eviction stays distinguishable from an Ack by construction (T-05-04, plan 05-02)
 - [Phase 05]: udprepl pending mirror is copy-on-write: fresh map, every WaitingOn/Acked slice cloned, pointer replaced wholesale — published snapshots are immutable and stable across events (plan 05-02)
+- [Phase 05]: write() routes through install so the storage OnChange tap truly has a single convergence point for every change source; the join law keeps D-06 decidable at one point (plan 05-03)
+- [Phase 05]: WatchHub snapshot is built by the hub goroutine at subscribe and streamed by the handler from the subscribe reply — a snapshot larger than the subscriber buffer can never block the hub (plan 05-03)
+- [Phase 05]: The disconnect status is written before the events channel close — the close happens-before the handler's zero-value receive carries the termination status with no locks (plan 05-03)
+- [Phase 05]: TestWatch_slowConsumer floods hub.Ingest (the production OnChange entry) because gRPC flow control grants a stalled reader ~0.5-1 MiB of buffering — no test-scale write round can force the shed; the harness pins a static 64 KiB stream window (plan 05-03)
 
 ### Pending Todos
 
@@ -191,6 +196,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-09T11:16:15.770Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-11-09T12:22:12.707Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None

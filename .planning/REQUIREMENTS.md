@@ -50,7 +50,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **API-01**: gRPC service with protobuf definitions exposes Get/Set (incl. create-if-absent)/Delete with errors OK / NotFound / AlreadyExists / InvalidArgument / Unavailable
 - [x] **API-02**: User can List keys under a prefix, returned in sorted order (prefix-range RPC)
-- [ ] **API-03**: User can Watch a stream of change notifications covering local and replicated changes alike (engine event taps designed in from the start)
+- [x] **API-03**: User can Watch a stream of change notifications covering local and replicated changes alike (engine event taps designed in from the start)
 - [ ] **API-04**: Writes are rejected with Unavailable during the startup gate (until the first full sync round arrives or `startup_gate` elapses); reads are served immediately
 - [ ] **API-05**: User can request `wait_for_replication` on a write: the server waits for Acks from known peers within a timeout and reports whether they were received; it never changes the write outcome
 - [ ] **API-06**: The gRPC standard health checking endpoint is served and reflects startup-gate state (NOT_SERVING until gated open)
@@ -172,7 +172,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-03 | Phase 4 | Complete |
 | API-01 | Phase 5 | Complete |
 | API-02 | Phase 5 | Complete |
-| API-03 | Phase 5 | Pending |
+| API-03 | Phase 5 | Complete |
 | API-04 | Phase 5 | Pending |
 | API-05 | Phase 5 | Pending |
 | API-06 | Phase 5 | Pending |
