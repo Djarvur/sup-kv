@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 05
 current_phase_name: gRPC API and Binary
 status: executing
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-11-09T12:22:12.948Z"
+stopped_at: Completed 05-04-PLAN.md
+last_updated: "2026-11-09T12:45:08.821Z"
 last_activity: 2026-11-09
 last_activity_desc: Phase 05 execution started
-state_head: fc8581bc327429d99148708b312b4401bc95943a
+state_head: 3231c00bfc4bd66a6cd0d41a02e6567605f27606
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 24
-  completed_plans: 21
+  completed_plans: 22
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-09)
 ## Current Position
 
 Phase: 05 (gRPC API and Binary) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-11-09 — Phase 05 execution started
 
@@ -80,6 +80,7 @@ Progress: [██████░░░░] 57%
 | Phase 05 P01 | 19 min | 3 tasks | 9 files |
 | Phase 05 P02 | 16 min | 2 tasks | 5 files |
 | Phase 05 P03 | 60min | 2 tasks | 6 files |
+| Phase 05 P04 | 12min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -169,6 +170,11 @@ Recent decisions affecting current work:
 - [Phase 05]: WatchHub snapshot is built by the hub goroutine at subscribe and streamed by the handler from the subscribe reply — a snapshot larger than the subscriber buffer can never block the hub (plan 05-03)
 - [Phase 05]: The disconnect status is written before the events channel close — the close happens-before the handler's zero-value receive carries the termination status with no locks (plan 05-03)
 - [Phase 05]: TestWatch_slowConsumer floods hub.Ingest (the production OnChange entry) because gRPC flow control grants a stalled reader ~0.5-1 MiB of buffering — no test-scale write round can force the shed; the harness pins a static 64 KiB stream window (plan 05-03)
+- [Phase 05]: Gate check is the first statement of Set/Delete — before empty-key validation (API-04 rejects writes during the gate, full stop); empty key surfaces Unavailable during the gate (plan 05-04)
+- [Phase 05]: openGate is one CAS'd transition storing the gate flag and flipping health under the same branch — the resolver is the only opener, health bound 1:1 to the gate for the empty service name (T-05-08, plan 05-04)
+- [Phase 05]: Snapshot RPCs gated exactly like writes (A5); names cross to persistfile untouched — its validateName is the single closed path-traversal control (T-05-07), the adapter only maps ErrInvalidSnapshotName to InvalidArgument (plan 05-04)
+- [Phase 05]: Snapshot tests run against a real persistfile.FileStore (newFileServer) — the in-memory fake deliberately does not reproduce name validation, so a fake-backed test would prove nothing about T-05-07 (plan 05-04)
+- [Phase 05]: Deterministic closed-gate observation: block the resolver's injected SyncArrived closure until the test observed the state — naive 'assert before the deadline' races the deadline under test under full-suite parallel load (plan 05-04)
 
 ### Pending Todos
 
@@ -196,6 +202,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-09T12:22:12.707Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-11-09T12:45:08.573Z
+Stopped at: Completed 05-04-PLAN.md
 Resume file: None
