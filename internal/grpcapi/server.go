@@ -37,21 +37,29 @@ type LocalNotify func(key string, rec storage.Record) error
 // Server implements the apiproto.SupKVServer surface over one persist
 // Engine. The UnimplementedSupKVServer embed is mandatory with
 // protoc-gen-go-grpc v1.6.2 (forward-compat) and serves the phase's later
-// plans: RPCs not yet implemented — Watch, SnapshotCreate, SnapshotLoad —
-// inherit its Unimplemented responses until their plans land, so the whole
-// phase's wire surface could be generated in one codegen pass.
+// plans: RPCs not yet implemented — SnapshotCreate, SnapshotLoad — inherit
+// its Unimplemented responses until their plans land, so the whole phase's
+// wire surface could be generated in one codegen pass.
 type Server struct {
 	apiproto.UnimplementedSupKVServer
 
 	engine *persist.Engine
 	notify LocalNotify
+	hub    *WatchHub
 }
 
 // NewServer returns the SupKV service over engine. notify may be nil: that
 // is the single-node configuration with no replication (D-11), and the
-// handlers then skip the post-write notification entirely.
-func NewServer(engine *persist.Engine, notify LocalNotify) *Server {
-	return &Server{engine: engine, notify: notify}
+// handlers then skip the post-write notification entirely. hub is the
+// WatchHub backing the Watch stream; NewServer attaches the engine to it —
+// the hub is constructed first because persist.Open threads the change tap
+// through storage.Config — and a nil hub keeps Watch answering
+// Unimplemented (the pre-Watch embed behavior).
+func NewServer(engine *persist.Engine, notify LocalNotify, hub *WatchHub) *Server {
+	if hub != nil {
+		hub.attach(engine)
+	}
+	return &Server{engine: engine, notify: notify, hub: hub}
 }
 
 // Get returns the live record for one key. Reads are never gated on dumps

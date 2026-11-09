@@ -28,6 +28,18 @@ import (
 // oversized write instead of a 60 KiB payload.
 const testValueLimit = 1024
 
+// testFlowWindowSize is the static gRPC stream flow-control window the
+// harness client advertises: the transport floor (64 KiB — smaller values
+// are ignored, http2_client.go) pinned as STATIC, which disables the BDP
+// estimator that would otherwise grow the window on frame arrivals alone
+// and let a stalled reader buffer an unbounded burst through bufconn's
+// 1 MiB pipe. With the static window, a Watch subscriber that stops
+// reading stalls the server handler's Send after at most 64 KiB of
+// undelivered events — the deterministic precondition the slow-consumer
+// shed test needs; every other test's client reads continuously, so the
+// window refills and no unary or streaming test ever notices it.
+const testFlowWindowSize = 64 * 1024
+
 // errSaveFailed is the injected Save failure: the fake reports it for every
 // Save while failSave is set, driving the engine's ErrDumpFailed path
 // without touching a filesystem.
@@ -79,23 +91,47 @@ func (*fakeDumpStore) ReadSnapshot(_ string) ([]byte, error) {
 	return nil, errFakeSnapshot
 }
 
-// testHarness bundles one running engine and its bufconn-dialed client.
+// testHarness bundles one running engine, its watch hub and the
+// bufconn-dialed client.
 type testHarness struct {
 	client       apiproto.SupKVClient
+	engine       *persist.Engine
+	hub          *grpcapi.WatchHub
 	dumps        *fakeDumpStore
 	cancelEngine context.CancelFunc
 }
 
-// newTestServer builds the reusable bufconn harness: a hand-written
-// in-memory fake DumpStore, a real persist engine (test node id, wall-clock
-// now, shrunken value limit, dump timings tuned down to 1ms/50ms of real
-// time — bufconn and synctest bubbles do not mix), the grpcapi Server with
-// a nil notify (the legal single-node configuration, D-11), and a gRPC
-// client dialed over bufconn with insecure credentials — mandatory on
-// modern gRPC clients even for an in-memory transport. Everything stops via
-// t.Cleanup, so every test using the harness can run t.Parallel().
+// newTestServer builds the harness with the default watch hub.
 func newTestServer(t *testing.T) *testHarness {
 	t.Helper()
+	return newTestServerWithWatchBuffer(t, 0)
+}
+
+// newTestServerWithWatchBuffer builds the reusable bufconn harness with the
+// watch hub's per-subscriber buffer set to subscriberBuffer (0 = the
+// package default through NewWatchHub) — the shrink-to-2 knob the overflow
+// tests need to force the disconnect path deterministically. The hub is
+// constructed FIRST — persist.Open threads the change tap through
+// storage.Config (OnChange: hub.Ingest, no persist change) — then the
+// engine, then go hub.Run under its own context, cancelled via t.Cleanup:
+// a slow or wedged Watch hub must never hold the harness's writes hostage.
+// Everything else as the tracer built it: a hand-written in-memory fake
+// DumpStore, a real persist engine (test node id, wall-clock now, shrunken
+// value limit, dump timings tuned down to 1ms/50ms of real time — bufconn
+// and synctest bubbles do not mix), the grpcapi Server with a nil notify
+// (the legal single-node configuration, D-11), and a gRPC client dialed
+// over bufconn with insecure credentials — mandatory on modern gRPC
+// clients even for an in-memory transport. Everything stops via t.Cleanup,
+// so every test using the harness can run t.Parallel().
+func newTestServerWithWatchBuffer(t *testing.T, subscriberBuffer int) *testHarness {
+	t.Helper()
+
+	var hub *grpcapi.WatchHub
+	if subscriberBuffer > 0 {
+		hub = grpcapi.NewWatchHubWithBuffer(subscriberBuffer)
+	} else {
+		hub = grpcapi.NewWatchHub()
+	}
 
 	dumps := &fakeDumpStore{}
 	eng, _ := persist.Open(
@@ -103,15 +139,19 @@ func newTestServer(t *testing.T) *testHarness {
 		time.Now,
 		time.Minute,
 		dumps,
-		storage.Config{ValueMaxBytes: testValueLimit},
+		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
 		persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond},
 	)
 	engCtx, cancelEng := context.WithCancel(t.Context())
 	go func() { _ = eng.Run(engCtx) }()
 	t.Cleanup(cancelEng)
 
+	hubCtx, cancelHub := context.WithCancel(t.Context())
+	go func() { _ = hub.Run(hubCtx) }()
+	t.Cleanup(cancelHub)
+
 	srv := grpc.NewServer()
-	apiproto.RegisterSupKVServer(srv, grpcapi.NewServer(eng, nil))
+	apiproto.RegisterSupKVServer(srv, grpcapi.NewServer(eng, nil, hub))
 
 	lis := bufconn.Listen(1 << 20)
 	go func() { _ = srv.Serve(lis) }()
@@ -121,13 +161,20 @@ func newTestServer(t *testing.T) *testHarness {
 		"passthrough:bufnet",
 		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) { return lis.Dial() }),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStaticStreamWindowSize(testFlowWindowSize),
 	)
 	if err != nil {
 		t.Fatalf("grpc.NewClient: want nil, got error: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	return &testHarness{client: apiproto.NewSupKVClient(conn), dumps: dumps, cancelEngine: cancelEng}
+	return &testHarness{
+		client:       apiproto.NewSupKVClient(conn),
+		engine:       eng,
+		hub:          hub,
+		dumps:        dumps,
+		cancelEngine: cancelEng,
+	}
 }
 
 // TestServer_setGetRoundTrip proves the tracer slice end-to-end: a Set over
