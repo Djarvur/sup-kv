@@ -1,19 +1,11 @@
 ---
 phase: 01-ci-bootstrap-and-repo-skeleton
-verified: 2026-11-08T18:01:26Z
+verified: 2026-11-11T11:13:23Z
 status: passed
 score: 25/25 must-haves verified
 covered_files:
   - .claude/CLAUDE.md
-  - .github/dependabot.yml
   - .github/workflows/ci.yml
-  - .github/workflows/vulncheck.yml
-  - .gitignore
-  - .golangci.yml
-  - .planning/PROJECT.md
-  - .planning/REQUIREMENTS.md
-  - .planning/STATE.md
-  - .planning/WINDOWS.md
   - .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-01-PLAN.md
   - .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-01-SUMMARY.md
   - .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-02-PLAN.md
@@ -26,36 +18,20 @@ covered_files:
   - .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-05-SUMMARY.md
   - .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-06-PLAN.md
   - .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-06-SUMMARY.md
-  - .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-UAT.md
-  - AGENTS.md
   - Makefile
   - cmd/sup-kv/main.go
-  - docs/setup/branch-protection.md
-  - docs/setup/ruleset.json
   - go.mod
   - go.sum
-  - internal/app/clock/clock.go
-  - internal/app/clock/clock_test.go
-  - internal/app/clock/hlc_prop_test.go
-  - internal/app/internal/testutil/gen.go
-  - internal/app/internal/testutil/rng.go
-  - internal/app/storage/doc.go
-  - internal/app/storage/errors.go
-  - internal/app/storage/merge_test.go
   - internal/app/storage/store.go
   - internal/app/storage/store_test.go
-  - internal/app/version/version.go
-  - internal/app/version/version_test.go
-  - internal/port/doc.go
-covered_digest: "v4:sha256:2b48b744ada38cae7c92d20374f716aafd94aa5a0fc89b682792a78a5400c939"
+covered_digest: "v4:sha256:ecd441ea46bf652739861cc7e581020ebac64da22eeb8074c32210d47f00a2a8"
 behavior_unverified: 0
 overrides_applied: 4
 re_verification:
   previous_status: passed
   previous_score: 25/25
   gaps_closed:
-    - "Stale-report regeneration trigger: phase-4 work (branch gsd/phase-4-replication-and-deterministic-simulator) changed covered inputs — go.mod (protobuf direct require + protoc-gen-go tool directive), Makefile (proto target), .gitignore (.tmp/), internal/port/doc.go (Repl seam doc), PROJECT.md/REQUIREMENTS.md/STATE.md (phase-4 planning rows). This pass re-derived every predicate against the current tree and recomputed the covered-input fingerprint (new digest over the same 43-file set)."
-    - "Dependency-graph truth (truth 9) re-scoped by sanctioned phase-4 policy: AGENTS.md dependency policy explicitly provides 'gRPC and protobuf enter go.mod in the phases that first use them' — the single direct require google.golang.org/protobuf v1.36.12 is exactly that addition, reviewed in phase 4's code review; go mod tidy idempotent, boundary red probes still fire, lint/test green."
+    - "Триггер регенерации: покрытые входы изменились после прогона 2026-11-08T18:01:26Z — buf-миграция (ed880c7/9727c80: .claude/CLAUDE.md, ci.yml, Makefile) и работа фазы 5 (46633f6: cmd/sup-kv/main.go; a09b8b0: go.mod/grpc + go.sum; c2746cb: internal/app/storage/{store,store_test}.go; правки planning-доков). Этот прогон заново вывел каждый предикат по текущему дереву и пересчитал covered-input fingerprint: новый digest по 20 входам (8 изменившихся файлов реализации + автоматически добавленные PLAN/SUMMARY; planning-root доки инертны per #4623; все прочие покрытые файлы git-подтверждённо байт-неизменны с прошлых прогонов и наследуют их вердикты)."
   gaps_remaining: []
   regressions: []
 overrides:
@@ -71,303 +47,302 @@ overrides:
     reason: "Window elapsed (Mon 2026-11-02 06:00 UTC cron) and no version-update PR exists because nothing is updatable: golangci-lint v2.15.0 is the latest upstream release (verifier-confirmed live via the GitHub releases API this pass) and is deliberately ignored in dependabot.yml (WR-01 — must move in lockstep with the vendored 2.15.0-exact strict config); the weekly machinery demonstrably fires — the vulncheck cron ran on schedule 2026-11-02 with conclusion success (verifier-observed run 41466437895). Maintainer decision 2026-11-02 (UAT Test 1, option A): the backstop's substance — Dependabot wired and healthy — is satisfied; a version-update PR will appear when an upstream release actually exists."
     accepted_by: "onokonem"
     accepted_at: "2026-11-02T15:55:45Z"
+advisory:
+  - finding: "WR-01 (ревью 2026-11-11): CI-задачи lint/gate в ci.yml не задают timeout-minutes — зависшая задача держит раннер до 6-часового дефолта GitHub (до пяти раннеров на коммит при fail-fast:false)"
+    category: other
+    reason: "Новая находка инкрементального ревью на файле, изменённом с прошлой верификации; ни один must_have фазы 1 не нарушает (таймауты задач в контракт фазы не входят); disposition: open в 01-REVIEW-DISPOSITION.md. Разрешается фикс timeout-minutes: 15/20 в ci.yml"
+    evidence_status: "none provided — это совет по устойчивости/стоимости, детерминированного red-теста не существует (текущее поведение — задокументированный дефолт GitHub 360 мин)"
+  - finding: "IN-01 (ревью 2026-11-11): serve() в cmd/sup-kv/main.go отпускает обработку сигналов (defer stop()) до завершения shutdown — второй SIGTERM/SIGINT в окне graceful-shutdown убивает процесс без финального write-confirmed дампа"
+    category: other
+    reason: "Находка инкрементального ревью на коде фазы 5 (main.go — покрытый файл, изменённый с прошлой верификации); контракт фазы 1 не нарушает; disposition: open в 01-REVIEW-DISPOSITION.md; экспозиция ограничена (write-confirmed записи уже на диске, remote-merged dirt восстанавливается с пиров)"
+    evidence_status: "none provided — поведенческое окно гонки сигнал/ширкдаун, воспроизводимого red-теста в этом прогоне не запускалось"
 ---
 
-# Phase 1: CI Bootstrap and Repo Skeleton Verification Report
+# Phase 1: CI Bootstrap and Repo Skeleton — отчёт верификации
 
 **Phase Goal:** Quality gates and the enforced repo skeleton exist before any feature code, so every subsequent change lands inside the architecture and behind a red-light-blocking gate
-**Verified:** 2026-11-08T18:01:26Z
+**Verified:** 2026-11-11T11:13:23Z
 **Status:** passed
-**Re-verification:** Yes — sanctioned regeneration of a stale report (prior pass passed 25/25, verified 2026-11-03T14:08:31Z; invalidated by covered-input changes from phase-4 work: go.mod, Makefile, .gitignore, internal/port/doc.go, .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/STATE.md)
+**Re-verification:** Да — санкционированная регенерация устаревшего отчёта (прошлый прогон passed 25/25, verified 2026-11-08T18:01:26Z; инвалидирован изменениями покрытых входов от работы фаз 4-5: buf-миграция — .claude/CLAUDE.md, ci.yml, Makefile; фаза 5 — cmd/sup-kv/main.go, go.mod (grpc v1.85.0), go.sum, internal/app/storage/{store,store_test}.go; правки planning-доков)
 
 ## Regeneration Scope
 
-Covered-input diff since the prior verified tree (verifier-run `git diff 617951e` over the covered
-set — origin/master HEAD is UNCHANGED at 617951e; the phase-4 changes live on the unpushed branch
-`gsd/phase-4-replication-and-deterministic-simulator`, which is the working tree verified here):
+Дифф покрытого множества с момента прошлого верифицированного состояния (рабочее дерево — ветка
+`gsd/phase-4-replication-and-deterministic-simulator`, впереди origin-ветки на 38 коммитов; origin/master
+неизменен на 617951e):
 
-- **go.mod**: tool block gained `google.golang.org/protobuf/cmd/protoc-gen-go`;
-  `google.golang.org/protobuf v1.36.12` promoted from `// indirect` to the single direct require —
-  exactly the AGENTS.md dependency-policy reading ("Phase 1 carries zero direct runtime requires;
-  gRPC and protobuf enter go.mod in the phases that first use them"); reviewed in phase 4's code
-  review. Verified this pass: `go mod tidy` idempotent (`git diff --exit-code go.mod go.sum` clean),
-  golangci-lint still pinned v2.15.0 (line 97) and govulncheck v1.9.0 (line 219), and the
-  `google.golang.org/` deny for internal/app still fires (truth 7) — protobuf stays in the adapter
-  (internal/udprepl), not the pure core.
-- **Makefile**: gained the `proto` dev target (+ .PHONY) building the go.mod-pinned plugin;
-  lint/test/generate/build targets untouched; `make lint` verifier-run exit 0.
-- **.gitignore**: gained `.tmp/` (the proto plugin build dir).
-- **internal/port/doc.go**: doc comment extended to name the Phase 4 Repl message seam; package
-  comment present; port red probe re-fired red this pass.
-- **.planning/PROJECT.md, REQUIREMENTS.md, STATE.md**: phase-4 row updates only — every phase-1
-  marker re-verified intact post-edit (truths G3/G4/G6/G8).
+- **buf-миграция (ed880c7, 9727c80, 2026-11-09)**: Makefile +43 строки (цели proto/buf-lint/buf-format/buf-breaking; гейт-цели lint/test/generate/build не тронуты), ci.yml +20 строк (шаг Buf proto schema gates в lint-задаче + fetch-depth: 0; матрица, permissions, concurrency, standing config-verify не тронуты), .claude/CLAUDE.md (10 строк, правка тулинга; deferral-parenthetical цела — см. G6).
+- **Фаза 5 (a09b8b0, 46633f6, c2746cb)**: go.mod — второй санкционированный прямой require `google.golang.org/grpc v1.85.0` + рост tool-блока до 5 директив (buf, protoc-gen-go, protoc-gen-go-grpc); go.sum соответственно; cmd/sup-kv/main.go — 507 строк полного wiring (doc-комментарий цел, main() держит только flags/env/signals/wiring по layout-контракту AGENTS.md); internal/app/storage/store.go/store_test.go — OnChange-tap (пакет остаётся чистым — красная проба net подтверждает).
+- **Planning-доки**: PROJECT.md/REQUIREMENTS.md/STATE.md/WINDOWS.md — обновления строк фаз 4-5; каждый маркер фазы 1 перепроверен почиткой (истины G3-G8).
 
-Every other covered file is byte-unchanged since the prior verified pass (verifier-run diff over
-the full covered set; .golangci.yml, ci.yml, vulncheck.yml, dependabot.yml, branch-protection.md,
-ruleset.json, AGENTS.md, .claude/CLAUDE.md, main.go and the internal/app/{clock,storage,version,
-testutil} files all show no diff). Changed inputs got full re-verification: local gates re-run
-live, both depguard red probes re-fired, a local govulncheck scan run against the new dependency
-graph, live GitHub state re-queried, the vendored config re-diffed against a fresh upstream fetch,
-and the fingerprint recomputed. Nothing was trusted from SUMMARYs or from the prior report's
-claims.
+Все прочие покрытые файлы git-подтверждённо байт-неизменны с прошлых прогонов (dependabot.yml, vulncheck.yml,
+.gitignore, .golangci.yml, AGENTS.md, branch-protection.md, ruleset.json, clock/version/testutil-файлы,
+storage/doc.go+errors.go+merge_test.go, internal/port/doc.go). Изменившиеся входы получили полную
+реверификацию: локальные гейты перезапущены живьём, обе depguard-красные пробы перезапущены, локальный
+govulncheck по новому графу, live-запросы GitHub, свежий upstream-дифф вендоренного конфига, fingerprint
+пересчитан. Ничего из SUMMARY и из claims прошлого отчёта не принято на веру.
 
-Working-tree observation: two untracked files — `.planning/state.json` (planning tooling state)
-and `.planning/phases/04-.../04-REVIEW-FIX.md` (phase-4 working file); neither is a covered
-input; no covered file is modified (git status over the covered set is clean).
+Рабочее дерево: два untracked-файла (`.planning/state.json`, `04-REVIEW-FIX.md` фазы 4) и незакоммиченная
+правка `.planning/STATE.md` (phase-pointer верификационного workflow) — planning-книжчество, не покрытые
+входы; `git status internal/` чист, go.mod/go.sum без churn.
 
 ## Goal Achievement
 
 ### Observable Truths
 
-Same 25-truth contract as the prior report (4 ROADMAP success criteria split into
-independently-verifiable halves + deduplicated PLAN truths + the 8 gap-closure recording truths
-G1-G8). All evidence below was collected by this verifier on this pass against the current tree
-(phase-4 branch working tree; origin/master HEAD 617951e).
+Тот же контракт из 25 истин, что в прошлом отчёте (4 критерия успеха ROADMAP, разбитые на независимо
+проверяемые половины + дедуплицированные истины PLAN + 8 record-keeping истин G1-G8). Вся доказательная
+база собрана этим верификатором в этом прогоне против текущего дерева.
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | SC-1a: A PR runs the full gate matrix (strict lint, go vet, race tests) across Linux/macOS × amd64/arm64 | ✓ VERIFIED | ci.yml key fields re-read this pass (push(master)+pull_request, permissions, go-version-file, v2.15.0 full-patch pin, fail-fast:false, 4 cells). Verifier-run `gh api commits/617951e/check-runs`: lint + 4 gate cells all **success** on the latest merged head. No new PRs since the prior pass (phase-4 branch not yet pushed); the phase-4 PR will run the same matrix — `go-version-file: go.mod` absorbs the go.mod change automatically |
-| 2 | SC-1b: A red gate blocks the merge | ✓ PASSED (override) | Red path re-proven live this pass: both depguard red probes fired (truth 7) — a violating import turns the lint gate red with exit 1; historical probe PR #4 (lint failed, CLOSED unmerged) stands. Server-side merge-blocking absent by ratified override entry 1 (accepted_by onokonem, 2026-10-31T18:41:25Z) |
-| 3 | SC-2a: Direct pushes to master are rejected by branch protection | ✓ PASSED (override) | Verifier re-ran `gh api repos/Djarvur/sup-kv/rulesets` this pass → 403 "Upgrade to GitHub Pro or make this repository public" — the override's factual predicate still holds (repo private=true, default=master re-confirmed). All markers re-verified (REQUIREMENTS CI-03 suffix, branch-protection.md DEFERRED heading, WINDOWS item 2 waived, STATE decision log) |
-| 4 | SC-2b: Every change (code and docs) lands through a pull request | ✓ VERIFIED | Verifier-run first-parent scan over origin/master: ZERO non-PR commits (subjects without `(#N)`) touch any implementation file (.go/.yml/.mod/.sum/Makefile/AGENTS.md/.golangci*/.gitignore) across the entire history. The phase-4 implementation sits on an unpushed feature branch awaiting its PR — PR-only practiced, not violated; the 8 unpushed local-master commits were scanned and touch .planning docs only |
-| 5 | SC-3a: Dependabot is active (updates and alerts) | ✓ PASSED (override) | Updates: dependabot.yml byte-unchanged since prior pass (git-verified); WR-01 ignore for golangci-lint/v2 with lockstep justification intact. Alerts: GHAS-gated off — ratified override entry 2; REQUIREMENTS CI-02 honestly Partial/unchecked (re-read post-phase-4-edits) |
-| 6 | SC-3b: The scheduled govulncheck job runs green against the Go vulnerability database | ✓ VERIFIED | Verifier-run `gh run list --workflow=vulncheck.yml`: run 41466437895, event **schedule**, conclusion **success**, 2026-11-02T14:54:44Z — still the latest run, which is correct: no push/PR touched go.mod/go.sum since (phase-4 changes unpushed), next cron is Mon 2026-11-09. vulncheck.yml re-read: weekly Monday 06:00 UTC cron, go.mod/go.sum paths trigger, workflow_dispatch, `go tool govulncheck ./...`. PLUS verifier-run local `go tool govulncheck ./...` against the CURRENT graph (incl. the phase-4 protobuf direct require): **"No vulnerabilities found." exit 0** |
-| 7 | SC-4: Dependency boundary machine-enforced (internal/app importing net/os/grpc, internal/port beyond stdlib, fails the gate) | ✓ VERIFIED | Verifier re-fired BOTH red probes on the current tree (now including phase-4 code and the protobuf dependency): `net` import in internal/app/clock → `import 'net' is not allowed from list 'sup-kv-app-no-io'`; `golang.org/x/mod/semver` in internal/port → `not allowed from list 'sup-kv-port-stdlib-only'`. Probes removed; scoped re-run green; `git status internal/` clean; `git diff --exit-code go.mod go.sum` clean. The `google.golang.org/` deny in internal/app demonstrably still holds with protobuf in the module graph |
-| 8 | .golangci.yml is the vendored powerman 2.15.0 config byte-unmodified with exactly two additive sup-kv rules | ✓ VERIFIED | Verifier fetched the pristine upstream config live this pass and diffed: single hunk 64a65,88 (the two sup-kv rules + banner — pure insertion, zero upstream lines deleted or changed); Origin header line 1 intact; exactly one occurrence each of both rule names; file git-unchanged since e456764 (2026-10-31) |
-| 9 | go.mod pins the toolchain (golangci-lint v2.15.0, govulncheck v1.9.0) with a minimal, policy-sanctioned runtime graph | ✓ VERIFIED | Tool block re-read: 3 directives (golangci-lint v2.15.0, govulncheck v1.9.0, + phase-4's protoc-gen-go). Direct requires = EXACTLY ONE: google.golang.org/protobuf v1.36.12 — the AGENTS.md-sanctioned phase-4 addition ("gRPC and protobuf enter go.mod in the phases that first use them"; the zero-direct-requires clause was Phase-1-scoped and held at phase-1 time); 212 indirect markers; `go mod tidy` idempotent this pass (git diff clean) |
-| 10 | The strict lint gate is live and green; `config verify` exits 0 (QUAL-01) — a STANDING gate in Makefile and CI | ✓ VERIFIED | Verifier-run this pass: `make lint` → exit 0 (runs `go tool golangci-lint config verify` THEN `run ./...`; both green on the full current tree including the phase-4 repl/simnet/udprepl packages). The standing verify step re-read in both Makefile and ci.yml (line 28) |
-| 11 | The race gate is not vacuous (CI reports ok for internal/app) | ✓ VERIFIED | Verifier-run with cache bypass: `go test -race -count=1 ./...` → exit 0; ok internal/app/clock 1.041s, internal/app/internal/simnet 1.029s, internal/app/persist 2.866s, internal/app/repl 1.202s, internal/app/storage 1.583s, internal/app/version 1.024s, internal/persistfile 5.667s, internal/udprepl 1.035s; build + vet green; matrix race step green live on 617951e |
-| 12 | Matrix cells are independent (fail-fast disabled) | ✓ VERIFIED | ci.yml re-read: `fail-fast: false` with the rationale comment (line 37); file git-unchanged since prior pass |
-| 13 | Push and PR events for the same ref do not cancel each other; superseded runs cancel | ✓ VERIFIED | ci.yml re-read: concurrency group `ci-${{ github.event_name }}-${{ github.ref }}` (event name in the key), `cancel-in-progress: true`; file git-unchanged since prior pass |
-| 14 | docs/setup/ruleset.json encodes the full master protection payload with contexts matching the check-run names verbatim | ✓ VERIFIED | Verifier-run python compare against live check-runs on 617951e: 5 contexts == 5 live gate/lint check-run names, match True; rule types [pull_request, required_status_checks, non_fast_forward, deletion]; strict_required_status_checks_policy true; conditions ref_name exactly refs/heads/master |
-| 15 | delete_branch_on_merge enabled on the repository | ✓ VERIFIED | Verifier-run `gh api repos/Djarvur/sup-kv` → delete_branch_on_merge=true, default_branch=master, private=true |
-| 16 | docs/setup/branch-protection.md records apply/verify/re-apply commands, zero-approval rationale, context-coupling rule, and the current ratified state | ✓ VERIFIED | Re-greped this pass: `Status: DEFERRED (accepted override)` (line 14), `Deferral decision 2026-10-31` (line 24), zero PENDING headings; file git-unchanged since prior pass |
-| 17 | Backstop: Dependabot opens its first version-update PR within the weekly window | ✓ PASSED (override) | Verifier-run live this pass: `gh pr list --author app/dependabot --state all` → 0; `gh api repos/golangci/golangci-lint/releases/latest` → **v2.15.0** == the pin (still nothing updatable — re-confirmed 2026-11-08; the deliberately-ignored WR-01 lockstep rule unchanged); weekly machinery proven firing by scheduled vulncheck run 41466437895 (schedule, success). Override entry 3's every factual predicate re-verified; WINDOWS ledger item 1 fixed (open_count 0) |
-| G1 | (01-05 T1) overrides: frontmatter carries the ratified entries verbatim, attributed accepted_by "onokonem" with real UTC accepted_at | ✓ VERIFIED | All three entries carried in this report's frontmatter verbatim (entries 1-2 accepted_at 2026-10-31T18:41:25Z; entry 3 the sanctioned post-UAT addition, 2026-11-02T15:55:45Z) |
-| G2 | (01-05 T2) Gap-closure edits left the report byte-unchanged outside the overrides block | ✓ VERIFIED | Historical: PR #17 diff showed the overrides block as the only change. The body was since legitimately rewritten only by verifier action (sanctioned regenerations — PR #23, 821338a, the 2026-11-02 and 2026-11-03 passes, and this pass), the record-keeping plan 01-05's verification section anticipates; the covered-input fingerprint is recomputed each time (this pass: new digest over the identical 43-file set) |
-| G3 | (01-05 T3) REQUIREMENTS.md CI-02 annotated Partial: checkbox unchecked, row reads Partial with the ratified alerts deferral | ✓ VERIFIED | Re-read post-phase-4-edits this pass: `- [ ] **CI-02**` bullet; traceability row "Partial — version updates + scheduled govulncheck delivered and green; alerts half deferred (GHAS-gated on private tier), ratified accepted override 2026-10-31; unlocks at GHAS license or the deferred public flip" intact — phase-4's REQUIREMENTS edit touched REPL/TEST rows only |
-| G4 | (01-05 T4) REQUIREMENTS.md CI-03 row records the ratification of its deferral | ✓ VERIFIED | Re-read post-phase-4-edits: row carries "ratified 2026-10-31 as accepted override (no org plan upgrade, no public flip)" after decision `defer`, re-apply path mention intact |
-| G5 | (01-06 T1) branch-protection.md status states DEFERRED (accepted override) with ratification paragraph, decision line and every command verbatim | ✓ VERIFIED | Re-greped this pass (see truth 16): heading + decision line present exactly once each, zero pending-titled headings; file git-unchanged since prior pass |
-| G6 | (01-06 T2) PROJECT.md and .claude/CLAUDE.md Process constraints carry the identical deferral parenthetical (IN-02 closed at source) | ✓ VERIFIED | Re-verified this pass: `server-side ruleset deferred 2026-10-31` exactly once in each; diff of the extracted parentheticals → character-identical |
-| G7 | (01-06 T3) WINDOWS.md item 2 waived with the override reason; ledger consistent; item 1 resolved | ✓ VERIFIED | Verifier-run `gsd-tools windows status` this pass: open_count 0, waived_count 1, fixed_count 1 — item 1 status **fixed**; item 2 status waived with reason naming the ratified override, the 403 and the re-apply path |
-| G8 | (01-06 T4) STATE.md decision log carries one entry per ratified override, citing 2026-10-31 and gap-plan provenance | ✓ VERIFIED | Re-greped post-phase-4-edits: exactly one "Verification gap 1 ratified 2026-10-31" and one "Verification gap 2 ratified 2026-10-31" entry plus the plan 01-05 provenance entry — the decision log survived phase-4's STATE rewrite |
+| 1 | SC-1a: PR запускает полную матрицу гейтов (strict lint, go vet, race-тесты) на Linux/macOS × amd64/arm64 | ✓ VERIFIED | ci.yml перечитан: push(master)+pull_request, permissions contents:read, go-version-file: go.mod (обе задачи), pin v2.15.0 full-patch, fail-fast:false, 4 ячейки; buf-гейты добавлены шагом в lint-задачу (усиление, не ослабление). Live: `gh api commits/617951e/check-runs` — lint + 4 gate-ячейки success; последний CI-прогон PR #31 — success (run 42514571899, 2026-11-08T19:20Z) |
+| 2 | SC-1b: красный гейт блокирует merge | ✓ PASSED (override) | Красный путь перепроован живьём: обе depguard-пробы дали exit 1 с сообщениями своих списков (истина 7); на PR #31 гейт дважды честно красный до фиксов (runs 42509010340, 42513202587 — failure), merge не состоялся (master 617951e не двигался). Серверная половина — ратифицированный override №1 (accepted_by onokonem, 2026-10-31T18:41:25Z; предикат 403 переподтверждён live) |
+| 3 | SC-2a: прямые push в master отклоняются branch protection | ✓ PASSED (override) | `gh api repos/Djarvur/sup-kv/rulesets` → 403 «Upgrade to GitHub Pro or make this repository public» — предикат override жив (repo private=true, default=master переподтверждены). Все маркеры целы: REQUIREMENTS CI-03 suffix, branch-protection.md DEFERRED, WINDOWS waiver, STATE decision log |
+| 4 | SC-2b: каждое изменение (код и доки) идёт через PR | ✓ VERIFIED | Первая-родительская практика: origin/master не двигался с 617951e; вся работа фаз 4-5 идёт через открытый PR #31 (branch gsd/phase-4-...); 8 незапушенных локальных master-коммитов перепросканированы per-commit — все касаются только .planning-доков, ноль файлов реализации |
+| 5 | SC-3a: Dependabot активен (updates и alerts) | ✓ PASSED (override) | Updates: dependabot.yml git-неизменен с прошлого прогона; ignore golangci-lint/v2 с lockstep-обоснованием цел (старый WR-01, fixed). Alerts: GHAS-гейт на private tier — ратифицированный override №2; REQUIREMENTS CI-02 честно Partial (перечитано после правок фаз 4-5) |
+| 6 | SC-3b: запланированный govulncheck зелёный против БД уязвимостей Go | ✓ VERIFIED | Live: `gh run list --workflow=vulncheck.yml` — свежий недельный cron run 42644047095, event schedule, success, 2026-11-09T15:22:42Z (машина стреляет и после buf-миграции); плюс два PR-прогона vulncheck на ветке фазы 4 — success. Локально: `go tool govulncheck ./...` exit 0 на текущем графе (включая grpc v1.85.0). Заметное отличие от прошлого прогона: граф теперь содержит required-but-not-called уязвимости из grpc-зависимостей — семантика гейта («called vulns fail», exit 0/3) не нарушена, скан зелёный |
+| 7 | SC-4: граница зависимостей machine-enforced (net/os/grpc в internal/app, третьи стороны в internal/port — красный гейт) | ✓ VERIFIED | Обе красные пробы перезапущены на текущем дереве не-тестовыми файлами с правильными именами пакетов: `net` в internal/app/clock → `import 'net' is not allowed from list 'sup-kv-app-no-io'`; `golang.org/x/mod/semver` в internal/port → `not allowed from list 'sup-kv-port-stdlib-only'`. После удаления проб lint зелёный, `git status internal/` чист. Граница держит на графе с grpc/protobuf: deny `google.golang.org/` в internal/app байт-идентичен проверенному состоянию (конфиг git-неизменен, pristine-дифф — истина 8) |
+| 8 | .golangci.yml — вендоренный powerman 2.15.0, байт-нетронутый, ровно две аддитивные sup-kv правила | ✓ VERIFIED | Свежий fetch upstream-конфига 2.15.0 + diff: единственный hunk `64a65,88` — чистая вставка (два правила + баннер), ноль upstream-строк удалено/изменено; Origin-заголовок строка 1 цел; файл git-неизменен с e456764 |
+| 9 | go.mod пинует toolchain (golangci-lint v2.15.0, govulncheck v1.9.0) с минимальным policy-санкционированным runtime-графом | ✓ VERIFIED | Tool-блок: 5 директив (buf, golangci-lint v2.15.0 — строка 137, govulncheck x/vuln v1.9.0 — строка 292, protoc-gen-go, protoc-gen-go-grpc). Прямые require ровно пара санкционированных AGENTS.md («gRPC and protobuf enter go.mod in the phases that first use them»): grpc v1.85.0 + protobuf v1.36.13-0.20261016172727; google/uuid и x/sync остаются indirect. `go mod tidy` идемпотентен (`git diff --exit-code go.mod go.sum` чист) |
+| 10 | Strict lint-гейт жив и зелён; config verify exit 0 (QUAL-01) — постоянный гейт в Makefile и CI | ✓ VERIFIED | Вербификатор-прогон: `make lint` → exit 0 (config verify, затем run ./...) на полном текущем дереве. Постоянный verify-шаг перечитан в Makefile (строка 12) и ci.yml (строка 30); локальный/CI пин одинаков — v2.15.0 (go.mod 137 / ci.yml 51) |
+| 11 | Race-гейт не пустой (CI отчитывается ok по internal/app) | ✓ VERIFIED | Вербификатор-прогон с обходом кэша: `go build ./... && go vet ./... && go test -race -count=1 ./...` → exit 0; ok для 10 тестовых пакетов: cmd/sup-kv 3.093s, clock 1.070s, simnet 1.041s, persist 2.770s, repl 1.251s, storage 1.582s, version 1.035s, grpcapi 2.175s, persistfile 5.864s, udprepl 1.068s — фазовые race-цели clock/storage/version зеленны на текущем коде (включая OnChange-tap фазы 5 в storage) |
+| 12 | Ячейки матрицы независимы (fail-fast выключен) | ✓ VERIFIED | ci.yml перечитан: `fail-fast: false` с комментарием-обоснованием (строка 57); дифф buf-миграции матрицу и стратегию не трогал |
+| 13 | Push и PR одного ref не отменяют друг друга; superseded-прогоны отменяются | ✓ VERIFIED | ci.yml перечитан: concurrency group `ci-${{ github.event_name }}-${{ github.ref }}`, `cancel-in-progress: true` (строки 14-16) |
+| 14 | ruleset.json кодирует полный payload защиты master; контексты совпадают с именами check-run'ов дословно | ✓ VERIFIED | Python-сравнение: 5 контекстов == 5 именам ci.yml-check-run'ов на 617951e (lint + 4 gate-ячейки; совпадение 5/5; в live-списке дополнительно есть Dependabot/vuln из других workflows — они не контексты ruleset). Типы правил [pull_request, required_status_checks, non_fast_forward, deletion]; strict_required_status_checks_policy true; conditions ref_name refs/heads/master |
+| 15 | delete_branch_on_merge включён на репозитории | ✓ VERIFIED | `gh api repos/Djarvur/sup-kv` → delete_branch_on_merge=true, default_branch=master, private=true |
+| 16 | branch-protection.md хранит apply/verify/re-apply команды, zero-approval rationale, context-coupling и текущее ратифицированное состояние | ✓ VERIFIED | Перегреплено: `Status: DEFERRED (accepted override)` (строка 14), `Deferral decision 2026-10-31` (строка 24), ноль PENDING-заголовков; файл git-неизменен с 0a4ca44 |
+| 17 | Backstop: Dependabot открывает первый version-update PR в недельном окне | ✓ PASSED (override) | `gh pr list --author app/dependabot --state all` → 0; `gh api repos/golangci/golangci-lint/releases/latest` → v2.15.0 == пин (переподтверждено live 2026-11-11 — по-прежнему нечего обновлять); недельная машина стреляет — свежий scheduled vulncheck 42644047095 (schedule, success, 2026-11-09). Все фактические предикаты override №3 живы |
+| G1 | (01-05 T1) overrides: frontmatter несёт ратифицированные записи дословно, accepted_by «onokonem», реальные UTC accepted_at | ✓ VERIFIED | Все три записи перенесены в frontmatter этого отчёта дословно (№№ 1-2 — 2026-10-31T18:41:25Z; № 3 — санкционированное post-UAT дополнение 2026-11-02T15:55:45Z) |
+| G2 | (01-05 T2) Правки gap-closure не меняли тело отчёта вне overrides-блока | ✓ VERIFIED | Исторически: PR #17 — только overrides-блок. Тело с тех пор легитимно переписывалось только верификатором (санкционированные регенерации, включая эту); record-keeping план 01-05 это предвидит; fingerprint пересчитывается каждый раз |
+| G3 | (01-05 T3) REQUIREMENTS.md CI-02 аннотирован Partial: чекбокс снят, строка Partial с ратифицированной оговоркой | ✓ VERIFIED | Перечитано после правок фаз 4-5: `- [ ] **CI-02**` (строка 84); трейсабилити-строка «Partial — version updates + scheduled govulncheck delivered and green; alerts half deferred (GHAS-gated on private tier), ratified accepted override 2026-10-31; unlocks at GHAS license or the deferred public flip» (строка 140) цела |
+| G4 | (01-05 T4) REQUIREMENTS.md CI-03 фиксирует ратификацию деферрала | ✓ VERIFIED | Строка 141: «ratified 2026-10-31 as accepted override (no org plan upgrade, no public flip)» после решения `defer`, упоминание re-apply path цело |
+| G5 | (01-06 T1) branch-protection.md: статус DEFERRED (accepted override), параграф ратификации, строка решения, все команды дословно | ✓ VERIFIED | См. истину 16: заголовок + строка решения присутствуют ровно по разу, PENDING нет |
+| G6 | (01-06 T2) PROJECT.md и .claude/CLAUDE.md Process constraints несут идентичную deferral-parenthetical | ✓ VERIFIED | `server-side ruleset deferred 2026-10-31` ровно по разу в каждом (CLAUDE.md:17, PROJECT.md:77); оба файла пережили buf-миграцию и правки фазы 5 — parenthetical цел и идентичен в зеркалах |
+| G7 | (01-06 T3) WINDOWS.md: пункт 2 waived с reason override; ledger консистентен; пункт 1 resolved | ✓ VERIFIED | `gsd-tools windows status`: item 1 — fixed (resolved_at 2026-11-02), item 2 — waived, reason цитирует ратифицированный override, 403 и re-apply path. Замечание: в ledger появился третий пункт id=3 с phase=05 (Watch/Snapshot RPC) — вне контракта фазы 1, см. Anti-Patterns |
+| G8 | (01-06 T4) STATE.md decision log: по одной записи на каждый ратифицированный override с provenance плана | ✓ VERIFIED | Ровно по одной «Verification gap 1/2 ratified 2026-10-31» (строки 114-115) + provenance-записи плана 01-05 (строки 111-113) — decision log пережил 16 коммитов правок STATE и незакоммиченный phase-pointer |
 
-**Score:** 25/25 truths verified (4 via maintainer-ratified overrides; 0 present-but-behavior-unverified)
+**Score:** 25/25 истин verified (4 через ратифицированные maintainer'ом override; 0 present-but-behavior-unverified)
 
 ### Override Ratification Audit (Step 3b)
 
-Three maintainer-ratified overrides carry in the frontmatter, all verbatim from the prior report. Their
-factual predicates were re-verified live this pass: the rulesets endpoint still returns 403 on the
-still-private repo (entry 1); Dependabot still has zero PRs because golangci-lint v2.15.0 is still the
-upstream-latest release (re-queried 2026-11-08) and the weekly vulncheck cron demonstrably fired green
-(entry 3). Token-overlap matching maps entry 1 to truths 2+3 (SC-1b + SC-2a), entry 2 to truth 5
-(SC-3a), and entry 3 to truth 17: 4 truths PASSED (override). Every gap-closure marker still tells the
-one story (truths G3-G8 re-verified against the post-phase-4-edit planning files).
+Три ратифицированных override переносятся во frontmatter дословно. Фактические предикаты перепроверены
+live в этом прогоне: rulesets endpoint по-прежнему 403 на по-прежнему private репо (№ 1); Dependabot PR
+по-прежнему ноль, потому что golangci-lint v2.15.0 по-прежнему upstream-latest (переспрошено 2026-11-11),
+а недельная машина демонстративно стреляет зелёным — свежий scheduled vulncheck 2026-11-09 (№ 3).
+Сопоставление по token-overlap: № 1 → истины 2+3, № 2 → истина 5, № 3 → истина 17 — итого 4 PASSED
+(override). Все record-keeping маркеры рассказывают одну историю (G3-G8 перепроверены по текущим
+planning-файлам).
 
 ### Deferred Items
 
-None — no Phase 1 gap is scheduled into a later milestone phase; the original two gaps are closed by
-ratified override (entries 1-2), the backstop by override entry 3. The deferred halves (ruleset
-application, GHAS alerts) remain one-command / one-billing-decision away, tracked in WINDOWS.md
-(waived) and docs/setup/, not in a later phase.
+Нет — ни один gap фазы 1 не запланирован в более позднюю фазу milestone; исходные два gap закрыты
+ратифицированными override (№№ 1-2), backstop — override № 3. Деффернутые половины (применение ruleset,
+GHAS alerts) остаются в одном командном/биллинг-решении от закрытия, трекируются в WINDOWS.md (waived) и
+docs/setup/, а не в поздней фазе.
 
 ### Advisory (New Scope, Unevidenced)
 
-Re-verification ran; the Step-7 scan over everything changed since the prior verification (go.mod,
-Makefile, .gitignore, internal/port/doc.go, PROJECT.md, REQUIREMENTS.md, STATE.md, plus a hygiene scan
-of the phase-4 additions under internal/app/repl, internal/app/internal/simnet, internal/udprepl)
-found zero blockers, zero unreferenced debt markers, and zero stub patterns. The two prior advisories
-remain CLOSED (fixed by PR #29; clock files git-unchanged since):
+Повторная верификация выполнена; Step-7 скан по всем изменившимся покрытым файлам (buf-миграция + файлы
+фазы 5 + planning-доки) не нашёл ни блокеров, ни unreferenced debt-маркеров, ни стаб-паттернов. Две
+открытые находки инкрементального ревью 2026-11-11 (disposition open в 01-REVIEW-DISPOSITION.md) —
+new-scope, детерминированного доказательства не имеют, фиксируются как advisory, не блокируют:
 
 | # | Finding | Category | Why Advisory |
 |---|---------|----------|--------------|
-| 1 | WR-01: driftBetween int64 overflow at the domain ceiling — FIXED by PR #29 (closed prior pass) | other | regression test TestClock_driftSignalSaturates present and green under -race this pass |
-| 2 | WR-02: NewClock does not clamp initialL to the 48-bit domain — FIXED by PR #29 (closed prior pass) | other | regression test TestClock_watermarkClampedIntoDomain present and green under -race this pass |
-
-No new advisory findings this pass.
+| 1 | WR-01: ни одна CI-задача не задаёт timeout-minutes (6-часовой дефолт GitHub × fail-fast:false) | other | new-scope, нет детерминированного red-теста; не нарушает ни один must_have фазы; recorded open в disposition ledger |
+| 2 | IN-01: defer stop() отпускает сигналы до конца shutdown в main.go (код фазы 5) | other | new-scope, окно гонки сигнал/ширкдаун не воспроизведено тестом в этом прогоне; контракт фазы 1 не затрагивает; recorded open |
 
 ### Required Artifacts
 
-gsd-tools `verify.artifacts`: 18/20 pass across all 6 plans (01-02 through 01-06 all_passed true). The
-2 reported misses remain the superseded walking-skeleton paths — `internal/app/doc.go` and
-`internal/app/app_test.go` (plan 01-01 declarations), deleted by PR #28 in favor of the real engine.
-Their declared purpose is fulfilled by the replacements and verified live this pass: strict lint green
-(package-comment gate green over the full tree incl. phase-4 packages; storage carries its own doc.go),
-`go test -race -count=1` ok for internal/app/{clock,persist,repl,storage,version} + simnet +
-persistfile + udprepl. Supersession, not a gap.
+gsd-tools `verify.artifacts`: 18/20 по всем 6 планам (01-02…01-06 all_passed true; 01-01 — 6/8). Два
+«промаха» — известные superseded walking-skeleton пути `internal/app/doc.go` и `internal/app/app_test.go`
+(декларации плана 01-01), удалённые PR #28 в пользу реального движка. Их декларированное назначение
+выполнено заменителями и проверено live в этом прогоне: strict lint зелён (package-comments гейт по
+полному дереву; storage несёт собственный doc.go), `go test -race -count=1` ok по
+internal/app/{clock,persist,repl,storage,version} + simnet + grpcapi + persistfile + udprepl. Supersession,
+не gap.
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| go.mod | module + tool directives + pinned tools | ✓ VERIFIED | CHANGED (phase 4, sanctioned): 3 tool directives; single direct require protobuf v1.36.12 per AGENTS.md policy; tidy idempotent; lint/test/govulncheck green on the new graph |
-| cmd/sup-kv/main.go | Command doc comment, minimal main | ✓ VERIFIED | git-unchanged since prior pass |
-| internal/port/doc.go | Package comment, stdlib-only target | ✓ VERIFIED | CHANGED (phase 4): doc comment extended to name the Repl seam; package comment present; lint green; port red probe re-fired red this pass |
-| internal/app/doc.go | Package comment, pure-core target | ✓ SUPERSEDED (purpose fulfilled) | deleted by PR #28; internal/app packages documented per-package; lint's package-comments gate green this pass |
-| internal/app/app_test.go | Real race target (D-01) | ✓ SUPERSEDED (purpose fulfilled) | deleted by PR #28; replaced by real race-tested suites in clock/storage/version/persist/repl (+ persistfile, udprepl, simnet) — all ok under -race this pass |
-| .golangci.yml | Vendored strict config + boundary | ✓ VERIFIED | git-unchanged (e456764, 2026-10-31); LIVE pristine-diff vs fresh upstream fetch this pass: single pure insertion, zero upstream lines touched; boundary probes re-fired red |
-| Makefile | lint/test/generate/build via go tool | ✓ VERIFIED | CHANGED (phase 4): proto target ADDED; the four gate targets untouched; `make lint` verifier-run exit 0 (verify + run) |
-| AGENTS.md | Conventions + 3 deviations + D-03 reading | ✓ VERIFIED | git-unchanged; all three deviations, D-03 reading, tool-invocation rule re-read intact — and the dependency policy's protobuf clause is exactly what sanctions the go.mod change |
-| .github/workflows/ci.yml | lint + 4-cell matrix + hygiene | ✓ VERIFIED | git-unchanged; 5/5 gate/lint check-runs green live on 617951e (re-queried this pass) |
-| .github/workflows/vulncheck.yml | cron + paths trigger + dispatch, pinned scan | ✓ VERIFIED | git-unchanged; scheduled run green 2026-11-02 (latest — correct, no go.mod/go.sum push since); local scan on the phase-4 graph: no vulnerabilities |
-| .github/dependabot.yml | gomod + github-actions updates | ✓ VERIFIED | git-unchanged; WR-01 ignore with lockstep justification intact |
-| docs/setup/ruleset.json | Ruleset payload, 4 rule types, 5 contexts | ✓ VERIFIED | git-unchanged; contexts == live check-run names re-confirmed this pass on 617951e (python, match True 5/5) |
-| docs/setup/branch-protection.md | Apply/verify/re-apply + ratified DEFERRED marker | ✓ VERIFIED | git-unchanged; markers re-greped |
-| .planning/REQUIREMENTS.md | CI-02 Partial annotation + CI-03 ratification suffix | ✓ VERIFIED | re-read post-phase-4-edits; phase-1 rows byte-intact (phase-4 edit touched REPL/TEST rows only) |
-| .planning/WINDOWS.md | ledger item 2 waived; item 1 fixed | ✓ VERIFIED | open_count 0 / waived 1 / fixed 1 (tooling re-run this pass); git-unchanged |
-| .planning/STATE.md | decision-log entries for both ratified overrides | ✓ VERIFIED | exactly two gap-ratification entries + 01-05 provenance entry survive phase-4's STATE rewrite |
-| .planning/PROJECT.md | Process constraint stating the deferral honestly | ✓ VERIFIED | phase-4 row updates only; parenthetical present exactly once, character-identical to the mirror |
-| .claude/CLAUDE.md | generated mirror in sync (IN-02 closed) | ✓ VERIFIED | git-unchanged; parenthetical character-identical to source (diff this pass) |
+| go.mod | module + tool directives + пины инструментов | ✓ VERIFIED | CHANGED (buf-миграция + фаза 5, санкционировано): 5 tool-директив; ровно два прямых require (grpc + protobuf) per AGENTS.md policy; tidy идемпотентен; lint/test/govulncheck зелёные на новом графе |
+| cmd/sup-kv/main.go | Doc-комментарий команды, main() без тестируемой логики | ✓ VERIFIED | CHANGED (фаза 5): 507 строк — config resolution, version, wiring, ordered graceful shutdown; doc-комментарий цел; main() держит flags/env/signals/wiring по layout-контракту AGENTS.md; config-логика покрыта main_test.go (ok 3.093s под -race); cross-package wiring перепроверен ревью 2026-11-11 |
+| internal/port/doc.go | Package comment, stdlib-only target | ✓ VERIFIED | git-неизменен с прошлого прогона; package comment цел; port-красная проба fired в этом прогоне |
+| internal/app/doc.go | Package comment, pure-core target | ✓ SUPERSEDED (назначение выполнено) | удалён PR #28; пакеты internal/app документированы per-package; package-comments гейт lint зелён в этом прогоне |
+| internal/app/app_test.go | Реальная race-цель (D-01) | ✓ SUPERSEDED (назначение выполнено) | удалён PR #28; заменён реальными race-протестированными сьютами clock/storage/version/persist/repl (+ grpcapi, persistfile, udprepl, simnet) — все ok под -race в этом прогоне |
+| .golangci.yml | Вендоренный strict config + boundary | ✓ VERIFIED | git-неизменен (e456764); LIVE pristine-дифф против свежего upstream fetch: единственная чистая вставка, ноль upstream-строк тронато; обе boundary-пробы fired red |
+| Makefile | lint/test/generate/build через go tool | ✓ VERIFIED | CHANGED (buf-миграция): buf-цели ДОБАВЛЕНЫ; четыре гейт-цели не тронуты; `make lint` verifier-run exit 0 (verify + run) |
+| AGENTS.md | Конвенции + 3 deviations + reading D-03 | ✓ VERIFIED | git-неизменен; все три deviation, reading D-03, правило go tool перечитаны целыми — dependency policy санкционирует go.mod-изменения фаз 5 (grpc clause) |
+| .github/workflows/ci.yml | lint + 4-ячеечная матрица + гигиена | ✓ VERIFIED | CHANGED (buf-миграция, +20 строк): триггеры/permissions/go-version-file/пин/fail-fast/concurrency целы; buf-гейты добавлены шагом; 5/5 gate/lint check-runs зелёные live на 617951e |
+| .github/workflows/vulncheck.yml | cron + paths trigger + dispatch | ✓ VERIFIED | git-неизменен; scheduled прогон зелёный 2026-11-09 (свежий, run 42644047095) |
+| .github/dependabot.yml | gomod + github-actions updates | ✓ VERIFIED | git-неизменен; WR-01-lockstep ignore (старый WR-01, fixed) цел |
+| docs/setup/ruleset.json | Payload ruleset, 4 типа правил, 5 контекстов | ✓ VERIFIED | git-неизменен; контексты == имена live check-run'ов ci.yml переподтверждены в этом прогоне (5/5) |
+| docs/setup/branch-protection.md | Apply/verify/re-apply + ратифицированный DEFERRED-маркер | ✓ VERIFIED | git-неизменен; маркеры перегреплены |
+| .planning/REQUIREMENTS.md | CI-02 Partial + CI-03 ratification suffix | ✓ VERIFIED | перечитано после правок фаз 4-5; строки фазы 1 целы |
+| .planning/WINDOWS.md | ledger пункт 2 waived; пункт 1 fixed | ✓ VERIFIED | open 0/waived 1/fixed 1 по пунктам фазы 1 (tooling-прогон); третий open-пункт — phase=05, вне контракта |
+| .planning/STATE.md | decision-log записи по обоим override | ✓ VERIFIED | ровно две gap-ратификации + provenance 01-05 пережили rewrite'ы STATE фаз 4-5 и незакоммиченный phase-pointer |
+| .planning/PROJECT.md | Process constraint, честно фиксирующий деферрал | ✓ VERIFIED | правки только строк фаз 4-5; parenthetical ровно один раз |
+| .claude/CLAUDE.md | сгенерированное зеркало в синхроне (IN-02 закрыт) | ✓ VERIFIED | CHANGED (buf-миграция — правки тулинга): parenthetical пережил, посимвольно идентичен источнику |
 
 ### Key Link Verification
 
-gsd-tools `verify.key-links`: 9/13 automated-verified; the 4 "failures" are all the known tooling
-limitation (descriptive `from:` fields that are not relative file paths — "from: must be a relative
-file path"); each was verified manually with direct evidence this pass.
+gsd-tools `verify.key-links`: 9/15 automated-verified; все 6 «промахов» — известное ограничение тула
+(описательные `from:`, не являющиеся относительными путями: «from: must be a relative file path»); каждый
+перепроверен вручную прямым доказательством в этом прогоне.
 
 | From | To | Via | Status | Details |
 |------|----|----|--------|---------|
-| Makefile | go.mod | `go tool golangci-lint` | ✓ WIRED | Automated (01-01: 3/3) |
-| .golangci.yml | internal/app | `**/internal/app/**` deny rule | ✓ WIRED | Automated; red probe re-fired this pass — fires on the current tree incl. phase-4 code and the protobuf graph |
-| .golangci.yml | internal/port | `**/internal/port/**` strict list-mode | ✓ WIRED | Automated; red probe re-fired this pass |
-| ci.yml | go.mod | `version: v2.15.0` + `go-version-file` | ✓ WIRED | Automated |
-| ci.yml | .golangci.yml | lint job runs vendored config + standing verify step | ✓ WIRED | Automated |
-| ci.yml (gate display names) | docs/setup/ruleset.json | contexts verbatim | ✓ WIRED (manual) | Verifier-run python compare this pass: 5 contexts == 5 live check-run names on 617951e, match True |
-| vulncheck.yml | go.mod | `go tool govulncheck` | ✓ WIRED | Automated (01-03: 2/2) |
-| dependabot.yml | repo root | `directory: /` both ecosystems | ✓ WIRED | Automated |
-| ruleset.json | ci.yml check-run names | contexts == display names | ✓ WIRED | Automated (01-04: 2/2) |
-| branch-protection.md | GitHub rulesets API | re-runnable gh api commands | ✓ WIRED | Automated; GET re-run live this pass (403 as recorded) |
-| 01-VERIFICATION.md overrides entries | ratified override state | verbatim + ratification clause | ✓ WIRED (manual) | All three entries carried verbatim; predicates re-verified live this pass |
-| REQUIREMENTS.md CI-02 row | CI-03 row | same Partial-with-explanation pattern | ✓ WIRED (manual) | Both rows re-read post-phase-4-edits — same shape, phase-1 rows intact |
-| .claude/CLAUDE.md Process line | PROJECT.md Process constraint | identical parenthetical | ✓ WIRED (manual) | diff of extracted parentheticals → identical (this pass) |
-| WINDOWS.md item 2 reason | ratified override 2026-10-31 | reason names ratification + re-apply path | ✓ WIRED (manual) | Ledger reason re-read this pass via windows status — quotes both |
+| Makefile | go.mod | `go tool golangci-lint` | ✓ WIRED | Automated (01-01: 3/3); плюс новые buf-цели через `go tool buf` |
+| .golangci.yml | internal/app | `**/internal/app/**` deny rule | ✓ WIRED | Automated; красная проба re-fired в этом прогоне — срабатывает на текущем дереве с grpc/protobuf-графом |
+| .golangci.yml | internal/port | `**/internal/port/**` strict list-mode | ✓ WIRED | Automated; красная проба re-fired |
+| ci.yml | go.mod | `version: v2.15.0` + `go-version-file` | ✓ WIRED | Automated; absorbs go.mod-изменения (buf + grpc) без правки workflow |
+| ci.yml | .golangci.yml | lint job гоняет вендоренный config + standing verify | ✓ WIRED | Automated; строка 30 (verify) + строка 49-51 (action с пином) |
+| ci.yml (gate display names) | docs/setup/ruleset.json | контексты дословно | ✓ WIRED (manual) | Python-сравнение в этом прогоне: 5/5 на 617951e |
+| vulncheck.yml | go.mod | `go tool govulncheck` | ✓ WIRED | Automated (01-03: 2/2); scheduled прогон зелёный на новом графе |
+| dependabot.yml | repo root | `directory: /` обе экосистемы | ✓ WIRED | Automated |
+| ruleset.json | ci.yml check-run names | контексты == display names | ✓ WIRED | Automated (01-04: 2/2) |
+| branch-protection.md | GitHub rulesets API | перезапускаемые gh api команды | ✓ WIRED | Automated; GET перезапущен live (403 как записано) |
+| overrides-записи 01-VERIFICATION.md | ратифицированное override-состояние | дословно + клауза ратификации | ✓ WIRED (manual) | Все три записи перенесены дословно; предикаты перепроверены live |
+| REQUIREMENTS.md CI-02 строка | CI-03 строка | одинаковый паттерн Partial-with-explanation | ✓ WIRED (manual) | Обе строки перечитаны — форма одна, строки фазы 1 целы |
+| .claude/CLAUDE.md Process line | PROJECT.md Process constraint | идентичная parenthetical | ✓ WIRED (manual) | `server-side ruleset deferred 2026-10-31` ровно по разу в каждом, текст идентичен |
+| WINDOWS.md пункт 2 reason | ратифицированный override 2026-10-31 | reason называет ратификацию + re-apply path | ✓ WIRED (manual) | reason перечитан через windows status — цитирует оба |
+| branch-protection.md status | override entry 1 (план 01-05) | DEFERRED-маркер ссылается на ратификацию | ✓ WIRED (manual) | заголовок строки 14 + решение строки 24 перегреплены |
 
 ### Data-Flow Trace (Level 4)
 
-No UI/rendered data in this phase. Infrastructure equivalent re-confirmed this pass: lint job ←
-.golangci.yml (schema-verified via the standing `config verify` step, green in make lint); setup-go ←
-go.mod (go-version-file — absorbs the phase-4 go.mod edit without workflow change); govulncheck ←
-go.mod tool graph (pinned v1.9.0; scan of the new graph clean); check-runs ← real matrix execution
-(5/5 success observed live on 617951e); ledger counters ← gsd-tools windows status reading the actual
-file (open 0 / waived 1 / fixed 1). No static/hollow values.
+UI/рендеримых данных в фазе нет. Инфраструктурные эквиваленты переподтверждены: lint job ← .golangci.yml
+(схема верифицируется постоянным `config verify`, зелёный в make lint); setup-go ← go.mod
+(go-version-file — поглотил buf/grpc-изменения go.mod без правки workflow); govulncheck ← tool-граф
+go.mod (пин v1.9.0; скан нового графа exit 0); buf-гейты ← go.mod-пиновый `go tool buf` (локально
+lint/format exit 0); check-runs ← реальное исполнение матрицы (5/5 success наблюдено live на 617951e);
+ledger-счётчики ← gsd-tools windows status читает реальный файл. Ни статических, ни hollow-значений.
 
 ### Behavioral Spot-Checks
 
-All commands verifier-run in a fresh shell this pass; probe files created and removed by the verifier;
-tree verified clean after.
+Все команды исполнены верификатором в свежем шелле в этом прогоне; probe-файлы созданы и удалены
+верификатором; дерево чисто после.
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Build + vet + race tests (cache bypassed) | `go build ./... && go vet ./... && go test -race -count=1 ./...` | exit 0; ok clock 1.041s / simnet 1.029s / persist 2.866s / repl 1.202s / storage 1.583s / version 1.024s / persistfile 5.667s / udprepl 1.035s | ✓ PASS |
-| Full local gate incl. standing verify | `make lint` | exit 0 (config verify + run ./... both green, full tree incl. phase-4 packages) | ✓ PASS |
-| Module graph tidy (phase-4 go.mod) | `go mod tidy && git diff --exit-code go.mod go.sum` | exit 0 — idempotent, no churn | ✓ PASS |
-| Vulnerability scan on current graph | `go tool govulncheck ./...` | "No vulnerabilities found." exit 0 (incl. protobuf v1.36.12 direct) | ✓ PASS |
-| Depguard RED — net in internal/app (non-test file) | probe + lint run | `import 'net' is not allowed from list 'sup-kv-app-no-io'` (exit 1) | ✓ PASS (red as required) |
-| Depguard RED — third-party in internal/port | probe + lint run | `not allowed from list 'sup-kv-port-stdlib-only'` (exit 1) | ✓ PASS (red as required) |
-| Gate GREEN after probe removal | scoped `golangci-lint run` + `git status internal/` + `git diff --exit-code go.mod go.sum` | exit 0; tree clean; no module churn | ✓ PASS |
-| Vendored config pristine vs upstream | curl upstream 2.15.0 config + diff | single hunk 64a65,88 (pure insertion), zero `<` lines | ✓ PASS |
-| Matrix green on latest merged head | `gh api commits/617951e/check-runs` | lint + 4 gate cells, all success | ✓ PASS |
-| Scheduled vulncheck fired green | `gh run list --workflow=vulncheck.yml` | run 41466437895: event schedule, success, 2026-11-02 (latest — correct, no go.mod/go.sum push since; next cron 2026-11-09) | ✓ PASS |
-| Dependabot PR inventory | `gh pr list --author app/dependabot --state all` | 0 — nothing updatable (see override 3) | ✓ PASS (state as recorded) |
-| golangci-lint upstream latest | `gh api repos/golangci/golangci-lint/releases/latest` | v2.15.0 == the pin (re-confirmed 2026-11-08) | ✓ PASS |
-| Rulesets endpoint state | `gh api repos/Djarvur/sup-kv/rulesets` | 403 plan-gated — matches the ratified override's predicate | ✓ PASS (state as recorded) |
-| delete_branch_on_merge | `gh api repos/Djarvur/sup-kv` | true (default_branch master, private true) | ✓ PASS |
-| Ruleset contexts == live check-run names | python3 compare vs check-runs on 617951e | match: True (5/5); strict policy true; rule types complete | ✓ PASS |
-| Commit hash validity | `gsd-tools query verify.commits 617951e 22575e3` | all_valid: true | ✓ PASS |
-| Windows ledger state | `gsd-tools windows status` | open_count 0, waived_count 1, fixed_count 1 | ✓ PASS |
-| Non-PR commits never touch code | first-parent code-toucher scan on origin/master (PR squashes excluded by `(#N)` subject) | zero matches across entire history | ✓ PASS |
-| Unpushed local-master commits are docs-only | per-commit diff-tree scan over origin/master..master | 8/8 touch .planning docs only, zero implementation files | ✓ PASS |
-| nolint prohibition (D-12) | grep `//nolint` over cmd/ + internal/ | 13/13 name their linter and carry a written justification (12 prior + phase-4's udprepl/repl.go:412) | ✓ PASS |
+| Build + vet + race tests (кэш обходом) | `go build ./... && go vet ./... && go test -race -count=1 ./...` | exit 0; ok 10 тестовых пакетов (см. истину 11) | ✓ PASS |
+| Полный локальный гейт incl. standing verify | `make lint` | exit 0 (config verify + run ./... зелёные, полное дерево) | ✓ PASS |
+| Идемпотентность module-графа | `go mod tidy && git diff --exit-code go.mod go.sum` | exit 0 — без churn | ✓ PASS |
+| Скан уязвимостей на текущем графе | `go tool govulncheck ./...` | exit 0 (required-but-not-called vulns от grpc-графа; called — ноль) | ✓ PASS |
+| Depguard RED — net в internal/app (не-тест, `package clock`) | probe + lint run | `import 'net' is not allowed from list 'sup-kv-app-no-io'` (exit 1) | ✓ PASS (red как требуется) |
+| Depguard RED — третья сторона в internal/port (не-тест) | probe + lint run | `not allowed from list 'sup-kv-port-stdlib-only'` (exit 1) | ✓ PASS (red как требуется) |
+| GREEN после удаления проб | scoped `golangci-lint run` + `git status internal/` | exit 0; дерево чистое | ✓ PASS |
+| Вендоренный config pristine против upstream | curl upstream 2.15.0 + diff | единственный hunk 64a65,88 (чистая вставка), ноль `<` строк | ✓ PASS |
+| Матрица зелёная на последнем merged head | `gh api commits/617951e/check-runs` | lint + 4 gate-ячейки, все success | ✓ PASS |
+| CI на PR фазы 4/5 | `gh run list --workflow=ci.yml` | последний прогон PR #31 success (42514571899); два ранних — failure (гейт честно красный до фиксов; master не тронут) | ✓ PASS |
+| Scheduled vulncheck стреляет зелёным | `gh run list --workflow=vulncheck.yml` | run 42644047095: schedule, success, 2026-11-09T15:22:42Z (свежий недельный cron) | ✓ PASS |
+| Инвентарь Dependabot PR | `gh pr list --author app/dependabot --state all` | 0 — нечего обновлять (см. override 3) | ✓ PASS (состояние как записано) |
+| golangci-lint upstream latest | `gh api repos/golangci/golangci-lint/releases/latest` | v2.15.0 == пин (переподтверждено 2026-11-11) | ✓ PASS |
+| Состояние rulesets endpoint | `gh api repos/Djarvur/sup-kv/rulesets` | 403 plan-gated — предикат override жив | ✓ PASS (состояние как записано) |
+| delete_branch_on_merge | `gh api repos/Djarvur/sup-kv` | true (master, private true) | ✓ PASS |
+| Контексты ruleset == имена check-run | python3-сравнение против 617951e | 5/5 на именах ci.yml; strict policy true; 4 типа правил | ✓ PASS |
+| Состояние windows ledger | `gsd-tools windows status` | фаза 1: item 1 fixed, item 2 waived; плюс новый open id=3 phase=05 (вне контракта) | ✓ PASS (фазовая часть) |
+| Незапушенные master-коммиты docs-only | per-commit diff-tree scan origin/master..master | 8/8 — только .planning, ноль файлов реализации | ✓ PASS |
+| Запрет nolint (D-12) | grep `//nolint` по cmd/ + internal/ | 16/16 называют линтер и несут письменное обоснование (было 13 + 3 добавки фазы 5: main.go:48, udprepl/repl.go:611, grpcapi/wait.go:100,158) | ✓ PASS |
+| Новый buf-гейт (sanity) | `go tool buf lint` + `go tool buf format --diff --exit-code` | оба exit 0 локально | ✓ PASS |
 
 ### Probe Execution
 
-No `scripts/*/tests/probe-*.sh` probes exist (no scripts directory). The phase's probes are inline lint
-runs — executed directly by this verifier (Behavioral Spot-Checks rows 5-7), re-fired on the current
-tree because internal/ and go.mod changed since the prior pass (phase-4 repl/simnet/udprepl additions
-and the protobuf direct require). SUMMARY probe/gate claims were reproduced first-hand via file reads,
-live gh queries, and tooling queries, not trusted.
+`scripts/*/tests/probe-*.sh` не существует (нет каталога scripts). Пробы фазы — инлайн lint-прогоны,
+исполненные верификатором напрямую (Behavioral Spot-Checks, строки 5-7), перезапущенные на текущем
+дереве, потому что internal/ и go.mod изменились с прошлого прогона (OnChange-tap и grpc/protobuf-граф).
+Первый дубль пробы internal/app (probe в `_test.go`) не сработал — граница documented-освобождает
+тестовые файлы (`'!$test'`, находка IN-04 disposition); проба перезапущена не-тестовым файлом с правильным
+именем пакета и сработала как требуется. Claims SUMMARY о прогонах воспроизведены first-hand через
+чтение файлов, live gh-запросы и tooling-запросы, не приняты на веру.
 
 ### Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|------------|-------------|--------|----------|
-| QUAL-01 | 01-01 | Strict golangci-lint config + go-ultimate conventions govern every package; red gate blocks merge | ✓ SATISFIED | `make lint` verifier-run green on the full current tree incl. phase-4 code (standing config verify in Makefile and CI); vendored config byte-unmodified (LIVE pristine diff this pass); boundary red/green re-proven both lists; every one of the 13 `//nolint` suppressions project-wide names its linter and carries a written justification (D-12 — the phase-4 addition in udprepl/repl.go complies); merge-blocking half subject to the ratified override (CI-03 scope) |
-| CI-01 | 01-01, 01-02 | Actions runs quality gates on every push and PR, Linux/macOS, amd64/arm64 | ✓ SATISFIED | push+PR triggers, 4 cells re-read; 5/5 green live on 617951e (verifier-run); standing config-verify step in the lint job; go-version-file absorbs the phase-4 go.mod change |
-| CI-02 | 01-03, 01-05 | Dependabot current (updates and alerts) + scheduled govulncheck green | ✓ SATISFIED-BY-RATIFICATION (Partial) | Updates configured + live (WR-01 ignore hardening intact, config git-unchanged); scheduled govulncheck green on its cron occurrence (run 41466437895) AND verifier-run local scan of the current graph clean; alerts half deferred under ratified override entry 2; REQUIREMENTS.md honestly Partial/unchecked (re-read post-phase-4-edits); first-PR backstop resolved by override entry 3 (predicates re-verified live this pass) |
-| CI-03 | 01-04, 01-05, 01-06 | PR-only development — branch protection on master, direct pushes forbidden | ✓ SATISFIED-BY-RATIFICATION (Partial) | PR-only practiced and verified across the ENTIRE history (first-parent code-toucher scan: zero non-PR commits touch implementation files); phase-4 implementation correctly sits on an unpushed feature branch awaiting its PR; the 8 unpushed local-master commits are docs-only (scanned); server-side protection deferred under ratified override entry 1 (403 predicate re-verified live); payload + one-command re-apply scripted and verbatim-preserved; DEFERRED marker + ledger waiver + decision log all in place post-phase-4-edits |
+| QUAL-01 | 01-01 | Strict golangci-lint config + go-ultimate conventions над каждым пакетом; красный гейт блокирует merge | ✓ SATISFIED | `make lint` зелён на полном текущем дереве (standing config verify в Makefile и CI); вендоренный config байт-неизменен (LIVE pristine-дифф); boundary red/green перепроованы по обоим спискам; все 16 `//nolint` по проекту называют линтер и обоснованы (D-12, включая 4 добавки фазы 5); merge-blocking половина — под ратифицированным override (скоуп CI-03) |
+| CI-01 | 01-01, 01-02 | Actions гоняет гейты на каждый push и PR, Linux/macOS, amd64/arm64 | ✓ SATISFIED | push+PR триггеры, 4 ячейки перечитаны; 5/5 зелёных live на 617951e; последний CI-прогон PR #31 success; standing config-verify в lint job; go-version-file поглотил go.mod-изменения buf/grpc |
+| CI-02 | 01-03, 01-05, 01-06 | Dependabot актуален (updates и alerts) + scheduled govulncheck зелён | ✓ SATISFIED-BY-RATIFICATION (Partial) | Updates настроены и живы (lockstep-ignore цел, config git-неизменен); scheduled govulncheck зелён на свежем cron-возникновении (run 42644047095, 2026-11-09) + локальный скан нового графа exit 0; alerts-половина деферрована под override № 2; REQUIREMENTS честно Partial/unchecked; first-PR backstop решён override № 3 (предикаты перепроверены live) |
+| CI-03 | 01-04, 01-05, 01-06 | PR-only development — branch protection на master, прямые push запрещены | ✓ SATISFIED-BY-RATIFICATION (Partial) | PR-only практикуется и проверено на всей истории (origin/master не двигался; ноль не-PR коммитов касаются файлов реализации); работа фаз 4-5 корректно идёт через открытый PR #31 (дважды красный гейт до фиксов); 8 незапушенных master-коммитов — docs-only; серверная защита деферрована под override № 1 (403-предикат перепроверен live); payload + one-command re-apply сохранены дословно; DEFERRED-маркер + ledger waiver + decision log на месте |
 
-Orphaned requirements: none — REQUIREMENTS.md maps exactly CI-01, CI-02, CI-03, QUAL-01 to Phase 1
-(traceability rows re-read post-phase-4-edits); all four appear in plan frontmatter requirements.
+Осиротевших requirements нет — REQUIREMENTS.md мапит ровно CI-01, CI-02, CI-03, QUAL-01 на Phase 1
+(строки 83-85, 139-142); все четыре фигурируют во frontmatter plans requirements (01-01: QUAL-01, CI-01;
+01-02: CI-01; 01-03: CI-02; 01-04: CI-03; 01-05/01-06: CI-02, CI-03).
 
 ### Anti-Patterns Found
 
-Debt-marker gate over all covered files changed since the prior verification (go.mod, Makefile,
-.gitignore, internal/port/doc.go, PROJECT.md, REQUIREMENTS.md, STATE.md): zero
-TBD/FIXME/XXX/TODO/HACK/PLACEHOLDER matches. The vendored FIXME at .golangci.yml line 155 remains
-upstream powerman content (byte-unmodified prohibition forbids touching it).
+Debt-marker гейт по всем изменившимся покрытым файлам (.claude/CLAUDE.md, ci.yml, Makefile,
+cmd/sup-kv/main.go, go.mod, go.sum, storage/store.go, storage/store_test.go): ноль
+TBD/FIXME/XXX/TODO/HACK/PLACEHOLDER. Стаб-паттерны (placeholder/not yet implemented/empty returns) в
+изменённых файлах: ноль. Вендоренный FIXME .golangci.yml:155 остаётся upstream-контентом powerman
+(запрет байт-неизменности сильнее).
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| .planning/state.json | — | untracked planning-tooling state file in the working tree | ℹ️ Info | Not a covered input; planning bookkeeping — commit or ignore deliberately |
-| .planning/phases/04-.../04-REVIEW-FIX.md | — | untracked phase-4 working file | ℹ️ Info | Phase-4 bookkeeping, outside this phase's covered set; lands with phase 4 |
-| local master vs origin/master | — | 8 unpushed docs commits (phase-4 planning + phase-01/02 completion records) | ℹ️ Info | All 8 scanned: touch .planning docs only, zero implementation files; push with the phase's record-keeping PR |
-| internal/udprepl/smoke_test.go | 222, 232 | two `t.Skipf` (same-host UDP broadcast unavailable on platforms without broadcast fan-out) | ℹ️ Info | Phase-4 code, outside this phase's covered set; environment-conditional with detailed written reasons pointing at the deterministic simulator; suite green this pass |
-| internal/persistfile/dumpfile_test.go | 163 | one `t.Skip` (root ignores directory modes) | ℹ️ Info | Phase-3 code, outside covered set; environment-conditional skip with a written reason |
-| .golangci.yml | 155 | upstream FIXME (vendored, byte-unmodified rule) | ℹ️ Info | Carried forward; touching it would violate the stronger prohibition |
-| .planning/ROADMAP.md | 63+ | `**Plans**: TBD` for unplanned phases | ℹ️ Info | Planning-template placeholders naming their own follow-up phase |
-| AGENTS.md | 5 | IN-01: quotes `go 1.27`, go.mod pins 1.27.1 | ℹ️ Info | Open; harmless self-referential pointer ("as pinned in go.mod") |
-| ci.yml / vulncheck.yml | — | IN-03: actions pinned by mutable major tags | ℹ️ Info | Open hardening advice (bounded by contents:read, no secrets, no pull_request_target) |
-| internal/app/internal/testutil | — | IN-01 (review): NewRNG doc comment overstates the printed-seed contract | ℹ️ Info | Open review Info on phase-2 code; tracked in 01-REVIEW-DISPOSITION |
-| docs/setup/branch-protection.md | — | IN-05: "Apply command above" direction nit | ℹ️ Info | Open review Info; doc contains exactly one Apply command |
-| ci.yml lint job | — | IN-06: schema gate and lint run separately provisioned, both v2.15.0 | ℹ️ Info | Version parity holds (both pins re-checked); WR-01 ignore guards drift |
+| .github/workflows/ci.yml | 19-20, 53-55 | WR-01 (ревью 2026-11-11, disposition open): нет timeout-minutes — 6-часовой дефолт GitHub × fail-fast:false | ℹ️ Info | Advisory № 1; не нарушает must_have фазы; фикс — timeout-minutes: 15/20 |
+| cmd/sup-kv/main.go | 377-378, 397-428 | IN-01 (ревью 2026-11-11, disposition open): defer stop() отпускает сигналы до конца shutdown (код фазы 5) | ℹ️ Info | Advisory № 2; экспозиция ограничена; относится к фазе 5 |
+| .planning/state.json | — | untracked planning-tooling state | ℹ️ Info | Не покрытый вход; коммитить или игнорить сознательно |
+| .planning/phases/04-.../04-REVIEW-FIX.md | — | untracked рабочий файл фазы 4 | ℹ️ Info | Книжчество фазы 4, вне покрытого множества |
+| .planning/STATE.md | — | незакоммиченная правка phase-pointer (01 executing) верификационного workflow | ℹ️ Info | Planning-книжчество; decision log (G8) цел |
+| WINDOWS.md ledger | id=3 | open-пункт phase=05 «Watch/SnapshotCreate/SnapshotLoad Unimplemented until plans 05-04/05-05» — 05-04/05-05 уже завершены по git-истории | ℹ️ Info | Книжчество фазы 5 вне контракта фазы 1; возможно stale — закрывается верификацией фазы 5 |
+| ci.yml (buf-шаги) | 40-48 | новые buf-гейты ещё не исполнялись в CI (коммит 9727c80 не запушен — ветка впереди origin на 38 коммитов) | ℹ️ Info | Локально зелёные (buf lint + format exit 0); исполнятся при следующем push в PR #31 |
+| govulncheck | — | граф теперь содержит required-but-not-called уязвимости из grpc-зависимостей фазы 5 (прошлый прогон: «No vulnerabilities found») | ℹ️ Info | Семантика гейта сохранена (exit 0, called = fail); tracked Govulncheck-механикой, не suppressions |
+| .golangci.yml | 155 | upstream FIXME (вендор, запрет правки) | ℹ️ Info | Переносится; трогать нельзя |
+| .planning/ROADMAP.md | 63+ | `**Plans**: TBD` незапланированных фаз | ℹ️ Info | Планировочные placeholder'ы, называющие свою фазу |
+| AGENTS.md | 5 | IN-01 (старое): цитирует `go 1.27`, go.mod пинует 1.27.1 | ℹ️ Info | Открыто; безобидный само-ссылочный указатель |
+| ci.yml / vulncheck.yml | — | IN-03: actions запинены mutable major-тегами | ℹ️ Info | Открытый hardening-совет (ограничено contents:read, нет секретов) |
+| .golangci.yml | '!$test' | IN-04: граница освобождает тестовые файлы, x/sys не покрыт | ℹ️ Info | Открыто; задокументировано в самом конфиге; продемонстрировано первым дублем пробы в этом прогоне |
+| internal/app/internal/testutil | — | IN-01 (review): doc-комментарий NewRNG преувеличивает printed-seed контракт | ℹ️ Info | Открытый review Info на коде фазы 2; tracked в disposition ledger |
+| docs/setup/branch-protection.md | — | IN-05: «Apply command above» направляет не туда | ℹ️ Info | Открытый review Info; Apply-команда в доке ровно одна |
+| ci.yml lint job | — | IN-06: schema-гейт и lint run — два отдельно запиненных бинарника | ℹ️ Info | Паритет версий держится (оба пина v2.15.0 перепроверены); WR-01-lockstep ignore сторожит дрейф |
 
 ### Test Quality Audit
 
-The requirement-linked test files (internal/app/clock/{clock_test,hlc_prop_test}.go,
-internal/app/storage/{store_test,merge_test}.go, internal/app/version/version_test.go) are active with
-zero skips in the covered set, no circular generation (testutil generators are independent PCG-based
-constructors), and value/property-level assertions. The PR #29 regression tests
-(TestClock_watermarkClampedIntoDomain, TestClock_driftSignalSaturates) remain present and green under
--race this pass. Gate-teeth proofs are lint-probe based (red/green), exercised directly this pass. The
-phase-4 suites (repl, simnet, udprepl) are likewise green under -race with environment-conditional
-skips only (see Anti-Patterns).
+Requirement-linked тест-файлы фазы (internal/app/clock/{clock_test,hlc_prop_test}.go,
+internal/app/storage/{store_test,merge_test}.go, internal/app/version/version_test.go) активны, зелёные
+под -race в этом прогоне; в покрытом множестве ноль skip'ов. storage/store_test.go прирос OnChange-тестами
+фазы 5 (+262 строки) — сьют storage ok 1.582s под -race. PR #29 регрессионные тесты
+(TestClock_watermarkClampedIntoDomain, TestClock_driftSignalSaturates) присутствуют и зелёные. Циклической
+генерации нет (testutil — независимые PCG-конструкторы), ассерты на уровне значений/свойств.
+Gate-teeth-доказательства — lint-probe red/green, исполнены напрямую в этом прогоне.
 
 ### Decision Coverage
 
-`check.decision-coverage-verify` run this pass: skipped=false, 14/14 trackable CONTEXT.md decisions
-honored by shipped artifacts, not_honored empty. The substance also re-verified directly: D-03
-(AGENTS.md dependency policy + the sanctioned single protobuf direct require), D-08
-(branch-protection.md audit trail + ruleset.json payload), D-10/D-11 (.golangci.yml two additive
-rules, live pristine diff), D-12 (13/13 nolint suppressions named and justified).
+Тул `check.decision-coverage-verify` в этом прогоне: CONTEXT.md отсутствует — нечего трекать (skipped,
+blocking false). Существенная сторона перепроверена напрямую: D-03 (dependency policy AGENTS.md + ровно
+санкционированная пара прямых require), D-08 (branch-protection.md audit trail + ruleset.json payload +
+D-08-гард buf-breaking в ci.yml/Makefile), D-10/D-11 (.golangci.yml две аддитивные правила, live pristine
+дифф), D-12 (16/16 nolint названы и обоснованы), D-16/D-17/D-18/D-19 — решения фаз 5, их артефакты
+(main.go config/wiring, Makefile ldflags) вне контракта фазы 1 и покрыты ревью 2026-11-11.
 
 ## Human Verification Required
 
-None remaining. Infrastructure/foundation phase — no user-facing UAT steps, and no behavior-unverified
-truths. The prior open human item (first Dependabot PR observation) remains closed by the recorded
-2026-11-02 maintainer decision (01-UAT.md Test 1, UAT complete 3/3; WINDOWS ledger item 1 fixed,
-open_count 0). The judgment-tier prohibitions carry recorded maintainer concurrence (01-UAT.md Test
-2), and this verifier's independent scan found none violated: vendored config byte-unmodified (live
-pristine diff), every nolint justified and specific (13/13, including phase 4's addition), no
-gate-theater mechanism (the standing config-verify gate green in make lint this pass), local/CI linter
-versions identical at v2.15.0, the only runtime dependency in the graph is the policy-sanctioned
-protobuf require, no vulnerability suppressions in vulncheck.yml, no path-based protection exemptions
-in ruleset.json.
+Не осталось. Инфраструктурная/фундационная фаза — пользовательских UAT-шагов нет, behavior-unverified
+истин нет (все behavior-dependent истины — 6, 7, 10, 11 — несут behavioral evidence этого прогона:
+красные пробы исполнены, гейты перезапущены, live check-runs наблюдены). Prior open human item (первый
+Dependabot PR) закрыт recorded maintainer-решением 2026-11-02 (01-UAT.md Test 1, UAT complete 3/3;
+WINDOWS item 1 fixed). Judgment-tier prohibitions несут recorded maintainer concurrence (01-UAT.md Test
+2), и независимый скан этого верификатора не нашёл нарушенных: вендоренный config байт-неизменен (live
+pristine дифф), каждый nolint назван и обоснован (16/16), gate-theater-механизма нет (standing config
+verify зелён в make lint), локальная/CI версии линтера идентичны v2.15.0, единственные runtime
+зависимости графа — санкционированная пара, suppressions в vulncheck.yml нет (файл git-неизменен),
+path-based exemptions в ruleset.json нет (файл git-неизменен).
 
 ## Gaps Summary
 
-No gaps remain. The regeneration trigger was the phase goal working as designed once more: phase 4
-changed covered build inputs (go.mod protobuf require + protoc-gen-go tool, Makefile proto target,
-.gitignore, port/doc.go Repl seam doc) exactly as the AGENTS.md dependency policy prescribes — and the
-gates absorbed the change without weakening: lint green on the full tree with the standing config
-verify, both depguard red probes re-fired on the new graph (protobuf demonstrably cannot cross into
-internal/app), `go mod tidy` idempotent with zero churn, race tests green across all eight test
-packages, and a local govulncheck scan of the new graph clean. Every previously verified artifact
-that still exists is byte-unchanged since the prior pass except the seven re-verified changed inputs
-(phase-1 planning rows intact under phase-4 edits). The three maintainer-ratified overrides carry
-forward verbatim with their factual predicates re-verified live (403 rulesets, private repo, zero
-Dependabot PRs, upstream-latest v2.15.0, scheduled vulncheck green). The phase closes at 25/25 with
-no open ledger items (open_count 0), UAT complete 3/3; the phase-4 implementation correctly awaits
-its PR through the same gate it helped bootstrap.
+Гэпов нет. Триггер регенерации — вновь цель фазы, работающая как задумано: более поздние фазы изменили
+покрытые build-входы (buf-миграция тулинга; grpc-зависимость и полный main.go фазы 5; OnChange-tap в
+storage) — и гейты поглотили изменения без ослабления: lint зелён на полном дереве со стоящим config
+verify, обе depguard-красные пробы перезапущены на новом графе (protobuf/grpc демонстративно не могут
+пройти в internal/app), `go mod tidy` идемпотентен без churn, race-тесты зелёны по всем десяти
+тест-пакетам, локальный govulncheck нового графа exit 0, свежий недельный vulncheck cron зелён. Каждый
+ранее верифицированный артефакт, который ещё существует, байт-неизменен с прошлого прогона, кроме
+восьми перепроверенных изменившихся входов (маркеры фазы 1 целы под правками фаз 4-5). Три
+ратифицированных override переносятся дословно с перепроверенными live предикатами (403 rulesets,
+private repo, ноль Dependabot PR, upstream-latest v2.15.0, scheduled vulncheck зелён). Фаза закрывается
+на 25/25 без открытых пунктов ledger по фазе 1 (открытый id=3 — phase 05), UAT complete 3/3;
+реализация фаз 4-5 корректно ждёт своего merge через тот же гейт, который сама и бутстрапила.
 
 ---
 
-_Verified: 2026-11-08T18:01:26Z_
+_Verified: 2026-11-11T11:13:23Z_
 _Verifier: Claude (gsd-verifier)_
