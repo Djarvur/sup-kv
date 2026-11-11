@@ -21,10 +21,10 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-11-09)
+See: .planning/PROJECT.md (updated 2026-11-11)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 01 — CI Bootstrap and Repo Skeleton
+**Current focus:** Phase 06 — Hardening — Failure Scenarios, Observability, Benchmarks
 
 ## Current Position
 
@@ -197,6 +197,7 @@ None yet.
 - Phase 3 (Persistence): open planning decision — macOS F_FULLFSYNC durability policy (verify in Phase 6 crash scenarios).
 - D-08 macOS smoke RESOLVED empirically (first macos-15 CI run 2026-11-08, PR #31): darwin refuses the shared wildcard bind (EADDRINUSE; SO_REUSEADDR does not share there) — fixed as a loud skip in 507228a; macos-15 cell expected green-with-skip on re-run.
 - Phase 4 review: info-level findings IN-01 (write-only ownHandle dead state) and IN-02 (simnet Cluster.Write ignores store Set error) remain open by triage — see 04-REVIEW-DISPOSITION.md.
+- Phase 1 re-review (2026-11-11): advisory findings open by triage — WR-01 (ci.yml jobs lack timeout-minutes) and IN-01 (serve()'s defer stop() releases signal handling before shutdown completes) — see 01-REVIEW-DISPOSITION.md.
 
 ### Quick Tasks Completed
 
@@ -214,6 +215,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-09T15:10:00.000Z
+Last session: 2026-11-11T11:25:00.000Z
 Stopped at: Phase 01 complete, ready to plan Phase 6
 Resume file: None
