@@ -1,155 +1,173 @@
 ---
 phase: 01-ci-bootstrap-and-repo-skeleton
-reviewed: 2026-11-02T16:03:17Z
+reviewed: 2026-11-11T10:55:35Z
 depth: standard
-files_reviewed: 13
+files_reviewed: 8
 files_reviewed_list:
-  - AGENTS.md
-  - internal/app/clock/clock.go
-  - internal/app/clock/clock_test.go
-  - internal/app/clock/hlc_prop_test.go
-  - internal/app/internal/testutil/gen.go
-  - internal/app/internal/testutil/rng.go
-  - internal/app/storage/doc.go
-  - internal/app/storage/errors.go
-  - internal/app/storage/merge_test.go
-  - internal/app/storage/store.go
-  - internal/app/storage/store_test.go
-  - internal/app/version/version.go
-  - internal/app/version/version_test.go
+  - .claude/CLAUDE.md
+  - cmd/sup-kv/main.go
+  - .github/workflows/ci.yml
+  - .gitignore
+  - go.mod
+  - go.sum
+  - internal/port/doc.go
+  - Makefile
 findings:
   critical: 0
-  warning: 2
+  warning: 1
   info: 1
-  total: 3
+  total: 2
+  necessity: 0
 status: issues_found
 ---
 
 # Phase 01: Code Review Report
 
-**Reviewed:** 2026-11-02T16:03:17Z
+**Reviewed:** 2026-11-11T10:55:35Z
 **Depth:** standard
-**Files Reviewed:** 13
+**Files Reviewed:** 8
 **Status:** issues_found
 
 ## Summary
 
-Reviewed the current on-disk state of the AGENTS.md conventions update and the
-split of `internal/app` into the `version`, `clock` and `storage` packages plus
-the shared `internal/app/internal/testutil` generators (the delta since
-diff_base 0ca46c9 that touched phase-01's covered files).
+Incremental re-review of phase 01's own key files as they stand after later
+phases evolved them (commit adddd0b → HEAD: ci.yml +20 lines, Makefile +43,
+main.go +506, go.mod/go.sum tool-graph growth, doc.go reworded). The lens:
+phase 01's contract — zero unsanctioned direct runtime requires, the vendored
+strict `.golangci.yml` untouched upstream, Makefile lint/test/build intact,
+ci.yml matrix and hygiene intact, doc.go/package comments in place — as
+amended by the phases that legitimately grew these files.
 
-The core is well-built: the HLC Tick/Update state machines were traced through
-every Kulkarni branch including counter overflow, ceiling saturation and
-adversarial inputs (negative/over-domain remote readings, out-of-range
-counters) and are correct — every returned reading is strictly greater than
-the pre-state, and saturation pins at `(maxL, counterMax)` instead of wrapping.
-The RFC 9562 pack/unpack round-trip was verified against the layout vector,
-the 12/14-bit masking, and the truncation trick that drops the variant bits;
-byte-wise `Compare` order is sound. The LWW join laws, tombstone asymmetry and
-defensive copying in `storage` match the documented contract. Machine gates
-verified on this tree: `go test -race ./internal/...` passes,
-`go tool golangci-lint run ./internal/...` is clean, the depguard rules match
-AGENTS.md, the `# Origin:` header is in place, and all `//nolint` directives
-in scope name their linter and carry justifications per deviation #3.
+**Phase 01 contract verification (all hold):**
 
-Two warnings survive the adversarial pass, both in `clock.go` and both
-involving the 48-bit domain ceiling — the code carefully clamps every input
-into the domain (initialC, remoteC, ptMs, newL) except one, and the drift
-signal arithmetic overflows precisely in the saturated state it exists to
-report. Both were confirmed by execution, not just reading.
+- `go.mod` — direct runtime requires are exactly the sanctioned pair
+  `google.golang.org/grpc v1.85.0` and
+  `google.golang.org/protobuf v1.36.13-0.20261016172727-e9ee2a76ab8e`
+  (AGENTS.md documents gRPC/protobuf entering in their first-use phases;
+  `google/uuid` and `golang.org/x/sync` remain indirect). Five tool
+  directives, all sanctioned (buf, golangci-lint, govulncheck,
+  protoc-gen-go, protoc-gen-go-grpc); `go 1.27.1` matches the AGENTS.md pin.
+- `.golangci.yml` (checked as contract background, outside the formal file
+  list) — the `# Origin: powerman/golangci-lint-strict version 2.15.0`
+  header is intact and project additions are confined to the additive
+  depguard rules (`sup-kv-app-no-io`, `sup-kv-port-stdlib-only`).
+- `Makefile` — lint/test/build targets intact, recipes tab-indented, all
+  targets `.PHONY`-declared; the D-18 ldflags stamping matches main.go's
+  `version`/`commit` vars exactly.
+- `ci.yml` — the 4-cell matrix, check-run names ("lint", "gate (<cell>)"),
+  `permissions: contents: read`, and the concurrency group are intact. The
+  D-08 buf-breaking guard was verified live against this tree: the guarded
+  path `internal/udprepl/replproto/supkv.proto` matches the real file on
+  disk and is absent from `origin/master`, so the deferred branch is the
+  correct behavior today and the gate self-activates when the proto lands.
+- `internal/port/doc.go` — package comment intact and now accurate
+  (`repl.go` and `dump.go` exist; the described seams match the code).
+- `go.sum` — 1154 lines, no duplicate module@version entries; both direct
+  requires carry h1:/go.mod pairs.
+- Anti-pattern sweep across all 8 files (secrets, dangerous functions,
+  debug artifacts, empty catch): clean.
+
+**main.go cross-referencing (standard depth):** every cross-package call was
+verified against the real signatures — `persist.Open` argument order,
+`Engine.Run`/`Flush`, `WatchHub.Run`/`Ingest`, `Adapter.Run`/
+`NotifyLocalWrite`/`SyncArrived`/`KnownPeers`/`PendingCopy`,
+`NewServer`/`ServerOptions`/`LocalNotify`. All four service goroutines
+(engine, adapter, hub, gate) have context-driven exit conditions and
+buffered/single-use completion channels — no leaks on any wire() error path
+or the shutdown path. `Engine.Run`, `Adapter.Run` and `WatchHub.Run` all
+return `ctx.Err()` on cancellation, so main's `_ =` discards and the
+`errors.Is(runErr, context.Canceled)` classification are correct, not silent
+error swallowing. The health endpoint starts NOT_SERVING at construction
+(server.go) and only RunGate opens it, so the 1:1 gate binding holds;
+shutdown's shed-traffic-first order is correct. The D-19 shutdown ordering
+(health → apiCancel → GracefulStop/grace → repl → Flush → engineCancel) is
+deadlock-free: Flush runs while the Run goroutine is still alive. Config
+logic in package main is covered by `main_test.go`. The startup-gate
+lifecycle, zero-knob downstream normalization (persist/storage/repl all
+normalize zero/negative knobs to design defaults), and the
+`--version`-works-on-broken-env behavior all check out.
+
+**CI/CD rubric** (`cicd-review-patterns.md`): actions are tag-pinned
+(`@v7`/`@v9` — a pin per the rubric's negative space), concurrency guard
+present, no deploy steps (deploy checks N/A), no `continue-on-error`, no
+static credentials. One hit: missing job timeouts (WR-01).
+
+**Necessity rubric** (`necessity-review.md`): no necessity findings. The env/
+flag inputs main.go validates cross a trust boundary (never
+impossible-state guards), and the buf-breaking guard defends a state that is
+real today (proto absent from origin/master, probe-confirmed on this tree).
+
+No structural-findings pre-pass and no external reviewer evidence were
+provided for this run. Findings below are all narrative (direct review); no
+Critical issues were found.
+
+## Narrative Findings (AI reviewer)
+
+All findings in this report originate from the direct adversarial review
+above. Warnings and Info follow.
 
 ## Warnings
 
-### WR-01: driftBetween overflows int64 at the domain ceiling, corrupting the drift signal exactly when the clock is pathological
+### WR-01: Neither CI job sets a timeout-minutes bound — a wedged job holds its runner for GitHub's 6-hour default
 
-**File:** `internal/app/clock/clock.go:144`
-**Issue:** `d := (l - ptMs) * int64(time.Millisecond)` overflows when
-`|l - ptMs|` exceeds ~9.22e12 ms (~292 years). That state is reachable
-through the public API without any contract violation: `remoteL = maxL`
-(2^48-1) is a valid in-domain RFC 9562 timestamp, so a single
-`Store.Merge` of a peer record carrying `l = maxL` (or a clock seam past
-year ~8921) ratchets `l` to `maxL` permanently via `Update`'s documented
-saturation. With `l = maxL` and a realistic wall clock (2024-11), the true
-divergence is 279,744,976,710,655,000,000 ns (~+8871 years), but the int64
-product wraps to 3,043,815,605,011,725,760 ns (~+96 years) — wrong
-magnitude, and for other (l, ptMs) pairs the wrapped value flips sign or
-lands inside tolerance. The drift signal (VERS-05) is the operator's
-mechanism for detecting a stuck/lying clock; after the wrap it reports
-garbage in precisely the state that needs flagging. Verified by running
-the arithmetic: true delta ~8871 years, wrapped int64 delta ~96 years.
-Monotonicity and stored versions are unaffected (drift never feeds back
-into clock state), which is why this is a Warning, not a Critical.
-**Fix:** Compare in milliseconds before scaling, and saturate instead of
-wrapping:
+**File:** `.github/workflows/ci.yml:19-20` (job `lint`), `.github/workflows/ci.yml:53-55` (job `gate`)
+**Issue:** Both jobs declare `runs-on:` but neither sets a job-level
+`timeout-minutes:`. A hung `golangci-lint` download, a wedged `-race` test
+suite, or a stuck `go tool buf` invocation holds the runner until GitHub's
+6-hour default. The matrix multiplies the exposure: `fail-fast: false` keeps
+all four gate cells alive precisely so a red cell cannot cancel the others'
+evidence, so one wedged cell runs to the 6-hour limit alongside its three
+siblings — up to five held runners per pushed commit. Branch-protection
+rulesets imply a private/org-plan repo, so that is paid runner minutes.
+**Fix:** Bound each job to a generous-but-finite budget:
 
-```go
-func driftBetween(l, ptMs int64, warn time.Duration) time.Duration {
-	if warn <= 0 {
-		return 0
-	}
-	const maxDeltaMs = int64(math.MaxInt64 / int64(time.Millisecond)) // ±~292 years.
-	d := l - ptMs
-	if d > maxDeltaMs {
-		return time.Duration(maxDeltaMs) * time.Millisecond // saturate ahead, never wrap
-	}
-	if d < -maxDeltaMs {
-		return time.Duration(-maxDeltaMs) * time.Millisecond // saturate behind
-	}
-	scaled := d * int64(time.Millisecond)
-	if scaled > int64(warn) || scaled < -int64(warn) {
-		return time.Duration(scaled)
-	}
-	return 0
-}
-```
-
-### WR-02: NewClock never clamps initialL to the 48-bit domain — the one unclamped input silently defeats the documented wrap protection
-
-**File:** `internal/app/clock/clock.go:63-65`
-**Issue:** `NewClock` masks `initialC` (`& counterMask`), `Update` masks
-`remoteC`, clamps `newL` with `min(newL, maxL)`, and `Tick` clamps the wall
-reading with `min(ptMs, maxL)` — but `initialL` is stored raw with no clamp
-and, unlike `PackVersion`, its doc comment states no range constraint on the
-caller. For `initialL > maxL`: `Tick`'s saturation guard `c.l == maxL`
-(clock.go:85) never fires because `c.l > maxL`, `l` only grows, and every
-stamped version reaches `PackVersion` with `l` beyond the domain, where
-`l&tsMask` silently wraps it to the bottom — verified by execution:
-`initialL = maxL+5` ticks to `l = maxL+6`, and `PackVersion` packs `l = 6`.
-That is exactly the "silently wrap the timestamp" failure the package doc
-(clock.go:20-23) promises cannot happen ("readings saturate at the 48-bit
-timestamp ceiling instead of wrapping out of the version domain ... never a
-wrap to zero"): a node restarted with a corrupted out-of-range watermark
-would issue low versions that lose every future LWW merge against its own
-prior writes. Not reachable through the intended dump pipeline (`Unpack` is
-masking, so dump-derived watermarks are always ≤ maxL), hence Warning
-rather than Critical — but the package's stated totality philosophy makes
-this input the inconsistent one.
-**Fix:** Clamp in the constructor, matching the treatment of every other
-input:
-
-```go
-func NewClock(now func() time.Time, initialL int64, initialC uint16, driftWarn time.Duration) *Clock {
-	return &Clock{l: min(initialL, maxL), c: initialC & counterMask, now: now, driftWarn: driftWarn}
-}
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+  gate:
+    name: gate (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on || matrix.name }}
+    timeout-minutes: 20
 ```
 
 ## Info
 
-### IN-01: NewRNG doc comment overstates the printed-seed contract ("on every run")
+### IN-01: Signal handling is released before the D-19 shutdown runs — a second SIGTERM/SIGINT kills the process and forfeits the final write-confirmed dump
 
-**File:** `internal/app/internal/testutil/rng.go:38-40`
-**Issue:** The comment says the seed "is printed with the exact
-`property seed:` prefix on every run", but it is emitted via `t.Logf`,
-which `go test` suppresses for passing tests unless `-v` is given. The
-D-04 replay contract still holds where it matters — the output appears on
-failure, and every failure message says "replay with the property seed
-above" — so this is a doc-accuracy nit, not a broken contract.
-**Fix:** Reword to "printed with the exact `property seed:` prefix on every
-failing run (or under `-v`)".
+**File:** `cmd/sup-kv/main.go:377-378` (serve's `defer stop()`), affected window `cmd/sup-kv/main.go:397-428` (shutdown)
+**Issue:** `serve` defers `stop()`, so the moment the first SIGTERM/SIGINT
+returns from `serve`, `signal.NotifyContext` is unregistered and the
+disposition reverts to default — before `shutdown` starts. During the
+shutdown window (up to the 10 s `shutdownGrace` GracefulStop plus the final
+`engine.Flush()`), a second SIGTERM/SIGINT — the standard operator move when
+a service is slow to stop — terminates the process immediately with exit
+143: no final dump, and from the D-19 contract's perspective ("a clean exit
+0 is reserved for a shutdown whose final write-confirmed dump completed")
+an unconfirmed shutdown that no log line explains. Exposure is bounded —
+write-confirmed writes are already on disk via the engine's per-write
+`await`, and remote-merged-only dirt recovers from peers on restart
+(PERS-02), while the T-05-10 comment shows supervisors SIGKILL through hangs
+anyway — which is why this is Info, not a Warning. But the window is cheap
+to close, and the project treats the final dump as the shutdown contract.
+**Fix:** Keep SIGTERM/SIGINT registered (or ignored) until shutdown
+completes — e.g., create the NotifyContext in `main` and release it only
+after `shutdown` returns, or re-register the signals as no-ops for the
+shutdown duration so only SIGKILL can interrupt the final dump:
+
+```go
+signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+defer stop()
+// ... serve ...
+err = shutdown(node)
+// stop() now runs after the final dump, so a second SIGTERM during
+// GracefulStop/Flush is swallowed (handled, no action) instead of killing
+// the process with the dump incomplete.
+```
 
 ---
 
-_Reviewed: 2026-11-02T16:03:17Z_
+_Reviewed: 2026-11-11T10:55:35Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
