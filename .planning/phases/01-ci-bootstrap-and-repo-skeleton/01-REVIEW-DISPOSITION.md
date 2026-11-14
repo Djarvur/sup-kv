@@ -53,8 +53,8 @@ recorded: 2026-11-14T22:07:37.347Z
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
 | WR-01 | warning | open | - |
-| IN-07 | info | open | - |
-| IN-08 | info | open | - |
+| IN-07 | info | fixed | fixed in 4f76e26 — stale buf.gen.yaml references rewritten to buf.gen.*.yaml (review-day fix) |
+| IN-08 | info | fixed | fixed in 4f76e26 — buf.yaml comment corrected: bare workspace generate is gone, make proto is the path (review-day fix) |
 | IN-01 | info | open | - (not in the current review) |
 | WR-02 | warning | fixed | fix 64f2d24 (branch fix/clock-review-warnings): NewClock clamps initialL into [0, maxL]; regression test TestClock_watermarkClampedIntoDomain (not in the current review) |
 | IN-02 | info | fixed | PR #20 — .claude/CLAUDE.md deferral parenthetical; confirmed by incremental review 85fa4dc (not in the current review) |
