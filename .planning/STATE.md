@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 6
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: planning
-stopped_at: Phase 02 complete, ready to plan Phase 6
-last_updated: "2026-11-14T19:06:17.181Z"
+stopped_at: Phase 03 complete, ready to plan Phase 6
+last_updated: "2026-11-14T19:28:34.132Z"
 last_activity: 2026-11-14
-last_activity_desc: Phase 02 complete, transitioned to Phase 6
-state_head: f5f9dacb3d9c383969558985eb9c6154fbd661a2
+last_activity_desc: Phase 03 complete, transitioned to Phase 6
+state_head: c525c9c7a2953ad37ca8e88448d8c2808f0f4081
 progress:
   total_phases: 7
   completed_phases: 5
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-11)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 02 — Engine — HLC Versioning and LWW Store
+**Current focus:** Phase 03 — Persistence — Dump and Write Confirmation
 
 ## Current Position
 
 Phase: 6 — Hardening — Failure Scenarios, Observability, Benchmarks
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-11-14 — Phase 02 complete, transitioned to Phase 6
+Last activity: 2026-11-14 — Phase 03 complete, transitioned to Phase 6
 
 Progress: [███████░░░] 71%
 
@@ -48,7 +48,7 @@ Progress: [███████░░░] 71%
 |-------|-------|-------|----------|
 | 02 | 4 | - | - |
 | 01 | 6 | - | - |
-| 3 | 2 | - | - |
+| 03 | 2 | - | - |
 | 04 | 6 | - | - |
 | 05 | 6 | - | - |
 
@@ -216,5 +216,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-11-11T11:25:00.000Z
-Stopped at: Phase 02 complete, ready to plan Phase 6
+Stopped at: Phase 03 complete, ready to plan Phase 6
 Resume file: None
