@@ -3,35 +3,40 @@ phase: 04
 review: 04-REVIEW.md
 titles: json
 findings:
+  - id: WR-01
+    severity: warning
+    disposition: open
+    title: "Drained-row retention can publish a duplicate node id in Acked"
+  - id: WR-02
+    severity: warning
+    disposition: open
+    title: "SyncResponseRate above 1e9 silently disables the egress rate limiter"
+  - id: IN-01
+    severity: info
+    disposition: open
+    title: "NotifyLocalWrite pre-check leaves a narrow nil-return window during Run's exit"
+  - id: IN-02
+    severity: info
+    disposition: open
+    title: "Restore marks the engine dirty unconditionally, forcing a redundant dump on a no-op replay"
   - id: CR-01
     severity: critical
     disposition: fixed
     title: "applyRemote Acks — and supersedes pending tracking with — a record the store rejected"
-  - id: WR-01
-    severity: warning
-    disposition: fixed
-    title: "Adapter.NotifyLocalWrite blocks forever once Run has exited and the notify buffer fills"
-  - id: IN-01
-    severity: info
-    disposition: open
-    title: "Core.ownHandle is write-only dead state"
-  - id: IN-02
-    severity: info
-    disposition: open
-    title: "simnet Cluster.Write ignores the store Set error and logs a phantom write"
-open: 2
-total: 4
-recorded: 2026-11-06T20:39:38.629Z
+open: 4
+total: 5
+recorded: 2026-11-14T19:39:00.180Z
 ---
 
 # Phase 04: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | fixed | 04-REVIEW-FIX.md |
-| WR-01 | warning | fixed | 04-REVIEW-FIX.md |
+| WR-01 | warning | open | - |
+| WR-02 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
+| CR-01 | critical | fixed | 04-REVIEW-FIX.md (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
