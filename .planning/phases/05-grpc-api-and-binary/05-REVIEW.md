@@ -1,212 +1,133 @@
 ---
 phase: 05-grpc-api-and-binary
-reviewed: 2026-11-09T14:11:17Z
-depth: deep
-files_reviewed: 27
+reviewed: 2026-11-14T22:03:58Z
+depth: standard
+files_reviewed: 12
 files_reviewed_list:
+  - internal/grpcapi/apiproto/supkvapi/v1/supkvapi.proto
+  - internal/grpcapi/apiproto/supkvapi/v1/supkvapi.pb.go
+  - internal/grpcapi/apiproto/supkvapi/v1/supkvapi_grpc.pb.go
   - internal/grpcapi/server.go
   - internal/grpcapi/watch.go
-  - internal/grpcapi/gate.go
-  - internal/grpcapi/wait.go
-  - internal/grpcapi/apiproto/supkvapi.proto
-  - internal/grpcapi/server_test.go
-  - internal/grpcapi/watch_test.go
   - internal/grpcapi/gate_test.go
+  - internal/grpcapi/server_test.go
   - internal/grpcapi/wait_test.go
-  - internal/app/storage/store.go
-  - internal/app/storage/store_test.go
-  - internal/app/repl/core.go
-  - internal/app/repl/retransmit_test.go
-  - internal/app/repl/sync_test.go
-  - internal/app/persist/engine.go
-  - internal/app/persist/engine_test.go
-  - internal/udprepl/repl.go
-  - internal/udprepl/repl_test.go
+  - internal/grpcapi/wait_integration_test.go
+  - internal/grpcapi/watch_test.go
   - cmd/sup-kv/main.go
   - cmd/sup-kv/main_test.go
-  - Makefile
-  - buf.yaml
-  - buf.gen.yaml
-  - go.mod
-  - go.sum
-  - internal/grpcapi/apiproto/supkvapi.pb.go
-  - internal/grpcapi/apiproto/supkvapi_grpc.pb.go
 findings:
-  critical: 1
-  warning: 2
+  critical: 0
+  warning: 0
   info: 1
-  total: 4
+  total: 1
   necessity: 1
 status: issues_found
 ---
 
-# Phase 5: Code Review Report
+# Phase 5: Code Review Report (incremental — delta 7b55ad1)
 
-**Reviewed:** 2026-11-09T14:11:17Z
-**Depth:** deep (cross-file call chains traced: grpcapi wait ↔ repl core ↔ udprepl mirror)
-**Files Reviewed:** 27 (source + tests + toolchain pins + generated-code provenance)
+**Reviewed:** 2026-11-14T22:03:58Z
+**Depth:** standard
+**Files Reviewed:** 12
 **Status:** issues_found
 
 ## Summary
 
-Phase 5 adds the gRPC surface (`internal/grpcapi`: unary handlers, WatchHub, startup gate,
-wait_for_replication), the storage OnChange tap, the repl/udprepl read seams (`syncArrived`,
-`PendingInfo.Acked`, adapter atomics), the exported `persist.Engine.Flush` shutdown seam, and
-the `cmd/sup-kv` binary (flags/env, D-19 ordered shutdown). Verified during review:
-`go build ./...` and `go vet ./...` clean; `go test -race` over all touched packages passes;
-`golangci-lint config verify` + `go tool golangci-lint run ./...` clean; both generated files
-(`supkvapi.pb.go`, `supkvapi_grpc.pb.go`) are byte-identical to a fresh `go tool buf generate`
-run into a scratch directory — no hand edits; go.mod/grpc v1.85.0/protobuf/buf v1.75.0/
-golangci-lint v2.15.0 pins are consistent with AGENTS.md policy; depguard boundaries hold;
-every `//nolint` names its linter with a reason; the snapshot name path-traversal control is
-exercised through the real persistfile adapter.
+Incremental review of commit 7b55ad1's phase-5 slice (diff base 9e754b5,
+the phase's execution-era review): the client-facing schema's move into
+its package-derived tree (`internal/grpcapi/apiproto/supkvapi/v1/`) plus
+the service/message renames the buf STANDARD zero-waiver decision requires
+(SupKV → SupKVService, WatchEvent → WatchResponse) and every consumer
+update.
 
-The Watch surface (hub goroutine, exact cut, slow-consumer shed), the gate (resolver, health
-binding, write gating) and the binary shutdown order check out under adversarial reading —
-including the two-phase subscribe, the overflow-flag wake guarantee (a full ingress always has
-queued events that wake the loop before the flag is consulted), and the flush/runDone exit race
-in `persist`.
+**The rename is complete and consistent.** Repo-wide greps over Go and
+proto sources return ZERO hits for any stale symbol — `WatchEvent` (proto
+type), `RegisterSupKVServer`, `NewSupKVClient`, `SupKVClient`,
+`SupKVServer`, `UnimplementedSupKVServer`, `SupKV_WatchServer`, the
+`SupKV_*` method-constant prefix, and the old wire path
+`supkvapi.v1.SupKV/` (all now `SupKVService`-qualified). The remaining
+"SupKV" mentions in source are prose comments only (gate.go:95,
+server.go:2/64, server_test.go:170, main.go:358, main_test.go:271/369) —
+product-name prose, accepted per this review's criterion that comments
+are tolerated; the internal lower-case `watchEvent` domain type in
+watch.go is deliberately unrenamed (it is not the wire symbol).
 
-The one Critical finding is a cross-module semantic gap: **`wait_for_replication` cannot report
-`acked=true` on the healthy replication path.** Its success criterion requires observing an
-Acked-coverage state that the real repl core never publishes — the core deletes the pending
-entry in the same handler call that completes coverage, so the adapter mirror jumps straight
-from "partial Acked" to "absent". The unit tests pass only because the fake mirror publishes a
-state the real core never produces. Two Warnings cover a doc/contract contradiction in
-`handleAck` (outside-wait-set Acks are counted, contradicting both the doc comment and the
-D-08/D-10 report semantics) and an unvalidated `wait_timeout_ms` whose ns conversion can
-overflow. Known phase-4 info findings (IN-01 ownHandle dead state, IN-02 simnet Write error
-ignored) are not re-reported.
+**The generated code is a clean mechanical regeneration, not a hand
+edit.** Both new files carry intact DO-NOT-EDIT headers with the pinned
+generator stamps (protoc-gen-go v1.36.12-devel, protoc-gen-go-grpc
+v1.6.2), `source: supkvapi/v1/supkvapi.proto` (module-relative, matching
+the move), `ServiceName: "supkvapi.v1.SupKVService"`, all seven
+`SupKVService_*_FullMethodName` constants, and descriptor strings updated
+down to the message-name length changes (`\xea\x03` → `\xf4\x03`,
+`.supkvapi.v1.WatchEvent` → `.supkvapi.v1.WatchResponse`). The diff
+against 9e754b5's generated files contains nothing but the move/rename
+families plus the `file_internal_..._proto` → `file_supkvapi_v1_..._proto`
+symbol-prefix renames. `make proto` re-run during this review reproduces
+both files byte-identically; the `;apiproto` package alias preserves the
+Go package name, so consumer diffs are import-path + renamed symbols
+only.
 
-## Critical Issues
+**Consumers verified one by one:** server.go (embed
+`UnimplementedSupKVServiceServer`, doc comments updated), watch.go
+(`toProto` returns `*apiproto.WatchResponse`; `Watch`/`relayEvent` take
+`SupKVService_WatchServer`), gate/server/wait/watch tests (import,
+registration, client construction, `recvEvent` generic parameter), and
+main.go — whose entire delta is the import line plus
+`apiproto.RegisterSupKVServiceServer(gs, srv)`; `listenGRPC` and the rest
+of the binary's behavior are otherwise unchanged (read in full at
+main.go:356-369). `go build`/`go vet` clean; `go test -race` green on
+`internal/grpcapi` and `cmd/sup-kv`.
 
-### CR-01: wait_for_replication can never report acked=true against the real mirror — success criterion is observationally unsatisfiable, and fast replication burns the 500ms appearance bound
+**The wire-contract change is intentional and recorded.** Method paths
+move to `/supkvapi.v1.SupKVService/*` and the streamed message type name
+becomes `WatchResponse` (field numbers untouched — `Record record = 1`
+keeps its slot, so framed payloads are unchanged; the names are visible
+via descriptors/reflection). The maintainer decision (2026-11-14,
+pre-release window, no external clients) is recorded at
+`.planning/STATE.md:204` and acknowledged in
+`06-CONTEXT.md` (D-16 and the note that 05-CONTEXT's SupKV/WatchEvent
+name pins were superseded); buf breaking vs origin/master is correctly
+guard-deferred (origin/master is at the phase-3 head — the proto tree has
+never been compared against it).
 
-**File:** `internal/grpcapi/wait.go:113-156` (with `internal/app/repl/core.go:488-500`, `internal/udprepl/repl.go:200-228`, `internal/grpcapi/wait_test.go:153,258`)
-**Issue:** Both success branches of the drain phase require *observing* `len(Acked) == total`
-on a pending entry that is still present (`wait.go:123-127` on absence, `wait.go:134-141` on
-empty WaitingOn). But the real core deletes the entry in the same `handleAck` call that empties
-the wait-set (`core.go:495-497`: `if len(entry.waitSet) == 0 && len(c.peers) > 0 { delete(c.pending, ack.Key) }`),
-and the adapter mirror is refreshed only after full event-loop iterations, one datagram per
-iteration (`repl.go:208-226`). So the published mirror for a healthy replication transitions
-`{Acked: ≤ total-1, WaitingOn: non-empty}` → `absent` — **no mirror state ever exists with the
-entry present and full Acked coverage**. Every poll therefore observes either a partial count
-(drain → `lastAcked < total` → acked=false) or absence with `lastAcked` below total → acked=false.
-The only present-with-empty-WaitingOn state the core publishes is eviction suspension
-(all peers evicted, table empty), where acked=true additionally requires every peer to have
-delivered an Ack *after* eviction — the degenerate path `TestMirror_pendingAckVisible`
-(`repl_test.go:315-341`) itself has to resort to ("zero known peers — the suspension rule").
+No new findings in this delta. One still-open finding from the execution
+-era review (IN-01, necessity) lives in the in-scope file server.go and
+is re-reported unchanged below (same id, same finding — disposition row
+preserved; CR-01/WR-01/WR-02 from that review are disposition: fixed and
+stay closed). No structural-findings pre-pass and no external reviewer
+evidence were provided.
 
-Observable consequences on the production wiring (`main.go:324-330`):
-1. Every fully-successful replication reports `acked=false` with partial or zero counts —
-   API-05's D-08 report fails its purpose exactly when replication works.
-2. When the whole notify→broadcast→ack cycle completes inside one 5ms poll window (the normal
-   healthy-LAN case), the appearance phase sees only absence and polls until `waitAppear`
-   (500ms, `wait.go:32,79-96`) before returning `(false, 0, total)` — half a second of added
-   latency on the happy path, plus the false report.
+## Narrative Findings (AI reviewer)
 
-The unit tests mask this: `TestWait_acksArrive`/`TestWait_appearanceRace` publish
-`repl.PendingInfo{Version: ver, Acked: []uint16{1}}` with the entry *present* and WaitingOn
-*empty* (`wait_test.go:153,258`) — a state `TestRetransmit_ackDrainSemantics`
-(`retransmit_test.go:414-418`) proves the real core never produces ("pending entry retained
-after an Ack from every waited-on peer" fails if the entry survives). No test drives
-`waitForReplication` against the real adapter mirror with ≥1 known peer. Secondary note: the
-write-time `total` comes from the stale-by-one-iteration `KnownPeers` mirror while the wait-set
-is seeded later on the driver goroutine, so `total` can also disagree with the entry's actual
-wait-set across a discovery/eviction race.
-
-This does not lose writes (the wait never changes the write outcome — that contract holds), but
-it makes the shipped wait_for_replication feature functionally broken in its primary scenario.
-
-**Fix:** Treat post-appearance absence as drained success: the core's own contract is that an
-entry is deleted exactly when every write-time waiter Acked, so after the appearance phase has
-confirmed the entry existed with the tracked version, absence during drain should resolve
-`acked=true` (e.g. `return true, lastAcked, total` or `true, total, total`). The residual
-ambiguity — supersession (remote or local) deleting and draining the replacement within one
-poll window — is rare and strictly less dishonest than today's always-false. Alternatively (or
-additionally), have the adapter mirror retain recently drained entries for one bounded
-generation as resolved `{Version, Acked: full, WaitingOn: nil}` rows, which removes the
-ambiguity and yields exact counts without touching REPL-02 core semantics. Whichever shape is
-chosen, add an integration test that drives a Set with `wait_for_replication` through the real
-`udprepl.Adapter` mirror with at least one acking peer and asserts `acked=true`.
-
-## Warnings
-
-### WR-01: handleAck doc contradicts the code — Acks from peers outside the wait-set are counted, inflating acked_count beyond total_peers
-
-**File:** `internal/app/repl/core.go:482-494`
-**Issue:** The doc comment pins "an Ack from a peer outside the wait-set [is one of the]
-silent no-ops — no counter, no log (probe #2)" (`core.go:482-487`). The code does the
-opposite: after the stale/unknown-key guard, it runs `delete(entry.waitSet, peerID)` (a no-op
-for a foreign peer) and then `entry.acked = ackedInsert(entry.acked, peerID)` (`core.go:493-494`)
-— any node_id sending a matching (key, version) Ack joins the Acked set, wait-set membership
-or not. This doc/code contradiction was introduced when 05-02 added the Acked seam without
-revisiting the probe-#2 pin. Consequences: (a) `PendingInfo.Acked` — the T-05-04 honesty seam
-feeding the D-08 report — counts Acks from nodes outside the write-time peer snapshot,
-contradicting D-10's "peer set fixed at write time"; (b) `acked_count` can exceed
-`total_peers` in the report (e.g. total=1, two duplicate-Acking strangers → Acked=[7,9] →
-acked_count=2 > total_peers=1), and the inflated count interacts with the success criterion
-(`lastAcked == total`) in unpredictable ways.
-**Fix:** Pick one semantics and align code, doc and report: either restrict `ackedInsert` to
-peers that were in the entry's original write-time wait-set (requires keeping the original
-set on the entry), or update the doc comment to the counting behavior and clamp the report's
-`ackedCount` to `min(ackedLen, total)` in `waitForDrain`. The doc comment must stop asserting
-a no-op the code does not perform.
-
-### WR-02: wait_timeout_ms is converted to a duration without range validation — int64 overflow yields arbitrary (possibly unbounded) server-side waits
-
-**File:** `internal/grpcapi/wait.go:161-166` (fields at `internal/grpcapi/apiproto/supkvapi.proto:69,88`)
-**Issue:** `time.Duration(requestMs) * time.Millisecond` silently wraps for positive
-`wait_timeout_ms` above ~9.2×10¹² (int64-ns overflow). A hostile or buggy client can wrap the
-deadline negative (an immediate, wrong report) or to a huge positive value — the wait loop then
-polls every 5ms with an effectively unbounded deadline, holding the handler goroutine and timer
-until the client disconnects (server-side there is no per-RPC deadline; `ctx.Done()` is the only
-exit). Negative and zero values already fall back to the operator default, so only the
-positive-overflow path is unvalidated remote input.
-**Fix:** Validate/clamp at the handler: reject `wait_timeout_ms` above a sane ceiling (e.g.
-`math.MaxInt64/time.Millisecond` or `10*defaultWaitTimeout`) with InvalidArgument, or clamp it
-in `waitTimeout` to the ceiling. One guard covers both Set and Delete since they share
-`waitTimeout`.
+The single finding below is a carry-forward from the 2026-11-09 deep
+review, re-verified present in the current server.go; the 7b55ad1 delta
+touched server.go only in import/embed/comment lines.
 
 ## Info
 
-### IN-01: Generality without instantiation — mapError's status-passthrough branch is unreachable in this stack
+### IN-01: mapError's status.FromError passthrough branch is unreachable — no internal/app error can be a status error
 
 **File:** `internal/grpcapi/server.go:306-308`
 **Category:** necessity
-**Issue:** `if _, ok := status.FromError(err); ok { return err }` defends against double-mapping
-an already-status error into Internal. No caller can produce one: mapError's only call sites
-pass `persist.Engine`/persistfile errors, and the depguard rule `sup-kv-app-no-io` forbids
-`internal/app` from importing `google.golang.org/*`, so no engine error can implement
-`GRPCStatus()`. The branch cannot fire today (provable from `.golangci.yml` + the call sites);
-every engine error falls through the six mapped sentinels to the Internal branch as designed.
-**Fix:** Removal is a scope decision, not a defect fix — the branch is harmless forward
-compatibility for future wire additions (e.g. interceptors). If kept, it is adequately covered
-by the doc comment; if the phase wants a strict minimalism pass, delete it.
-
-## Verified-clean areas (adversarial reading, no findings)
-
-- **Watch exact cut:** snapshot is taken on the hub goroutine at registration; any event
-  dispatched after either predates `Records()` (suppressed by the equal-version rule) or
-  strictly dominates the snapshot (delivered) — no duplicate/hole. Overflow flag always wakes
-  (a full ingress guarantees queued events drain before the flag is consulted). Slow-consumer
-  shed mid-snapshot is wasteful but contract-correct (resubscribe re-snapshots).
-- **Gate:** resolver is the single opener with CAS-bound health flip; writes gated before
-  validation per A7/API-04; reads deliberately ungated per API-04.
-- **Binary D-19 order** (`main.go:397-428`): health NOT_SERVING → apiCancel (ends Watch, hub)
-  → bounded GracefulStop with Stop fallback → replCancel + join → `engine.Flush()` → engineCancel
-  → join. Matches the contract; flush/runDone exit races are regression-tested
-  (`TestEngine_flushRacesRunExit`, `TestEngine_flushRacesExitMidDump`).
-- **OnChange tap** (`store.go:251-261`): fires only from `install` on actual state change
-  (D-06); non-blocking Ingest under the write lock (T-05-05); checksum recompute in
-  `notifyLocalWrite` matches the store's own computation.
-- **Snapshot RPC security:** names cross to persistfile's `validateName` unchanged; hostile
-  names tested end-to-end through the real adapter (`gate_test.go:311-322`).
-- **Toolchain:** generated code provenance verified by regeneration diff; lint gate clean;
-  no debug artifacts; all `//nolint` carry linter name + reason.
+**Issue:** (Carry-forward, unchanged by 7b55ad1 — the
+`if _, ok := status.FromError(err); ok { return err }` branch is still
+present and still unreachable.) Generality without instantiation:
+mapError's inputs come from the engine, storage, persist and persistfile
+layers, none of which may import grpc (the depguard boundary
+`sup-kv-app-no-io`/stdlib-only port rules keep `google.golang.org/*` out
+of internal/app), so no error reaching this switch can be a status error;
+every real input resolves through the sentinel table above or falls to
+`codes.Internal`. The branch runs, but defends against nothing. It rests
+on judgment (a future in-package caller could theoretically construct a
+status error), hence Info rather than Warning.
+**Fix:** Remove the passthrough branch and let the sentinel table plus
+the Internal fallback be the whole contract — or keep it with a comment
+naming the concrete future caller that would justify it.
 
 ---
 
-_Reviewed: 2026-11-09T14:11:17Z_
+_Reviewed: 2026-11-14T22:03:58Z_
 _Reviewer: Claude (gsd-code-reviewer)_
-_Depth: deep_
+_Depth: standard_
+_Delta: 7b55ad1 (base 9e754b5)_
