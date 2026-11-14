@@ -1,14 +1,14 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 6
-current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
-status: planning
+current_phase: 01
+current_phase_name: CI Bootstrap and Repo Skeleton
+status: executing
 stopped_at: Phase 6 context gathered
-last_updated: "2026-11-14T21:54:02.021Z"
-last_activity: 2026-11-14
-last_activity_desc: Phase 04 complete, transitioned to Phase 6
-state_head: 9ba43e38c71a6ccab9ba87b958cb0fe654508751
+last_updated: "2026-11-14T21:56:53.093Z"
+last_activity: 2026-11-15
+last_activity_desc: Phase 01 execution started
+state_head: d2b1ad64d8a1e0e6b2274922c2ec5b92582b17aa
 progress:
   total_phases: 7
   completed_phases: 5
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-11)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 04 — Replication and Deterministic Simulator
+**Current focus:** Phase 01 — CI Bootstrap and Repo Skeleton
 
 ## Current Position
 
-Phase: 6 — Hardening — Failure Scenarios, Observability, Benchmarks
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-11-14 — Phase 04 complete, transitioned to Phase 6
+Phase: 01 (CI Bootstrap and Repo Skeleton) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 01
+Last activity: 2026-11-15 — Phase 01 execution started
 
 Progress: [███████░░░] 71%
 
@@ -203,6 +203,7 @@ None yet.
 - Phase 03 SECURITY.md was missing since the phase's original execution (2026-11-03) — created retroactively 2026-11-14 (7/7 threats closed, threats_open: 0).
 - [2026-11-14] Maintainer decision: buf STANDARD satisfied with ZERO waivers (7b55ad1, pre-release window) — protos moved to package-derived trees (replproto/supkv/v1, apiproto/supkvapi/v1), service renamed SupKV→SupKVService, WatchEvent→WatchResponse (wire method paths changed; breaking-guard deferred until the rename lands on master). Supersedes the phase-5 CONTEXT pin of those names and the quick-task D-06 waivers.
 - [2026-11-14] 7b55ad1 touched covered inputs of phases 1 (ci.yml, Makefile), 4 (udprepl/repl imports) and 5 (grpcapi surface) — their VERIFICATION.md fingerprints are stale again; phases 2/3 hold. Re-run /gsd-execute-phase 1/4/5 to regenerate before milestone close.
+- [2026-11-15] Maintainer decision: Go toolchain directive bumped to go1.27.4 (go 1.27.1 language pin unchanged) — closes called-vulnerability GO-2026-6859 (CVE-2026-97054, net/http MaxBytesReader header race, published 2026-11-11, reachable via grpc init chains in generated code; fixed in go1.27.4). govulncheck exit 0, tidy stable, make lint/test green. Toolchain-patch bump recorded as maintainer decision per AGENTS.md version policy, no ADR.
 
 ### Quick Tasks Completed
 

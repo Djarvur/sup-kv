@@ -2,6 +2,8 @@ module github.com/Djarvur/sup-kv
 
 go 1.27.1
 
+toolchain go1.27.4
+
 tool (
 	github.com/bufbuild/buf/cmd/buf
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
