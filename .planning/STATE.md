@@ -196,8 +196,12 @@ None yet.
 
 - Phase 3 (Persistence): open planning decision — macOS F_FULLFSYNC durability policy (verify in Phase 6 crash scenarios).
 - D-08 macOS smoke RESOLVED empirically (first macos-15 CI run 2026-11-08, PR #31): darwin refuses the shared wildcard bind (EADDRINUSE; SO_REUSEADDR does not share there) — fixed as a loud skip in 507228a; macos-15 cell expected green-with-skip on re-run.
-- Phase 4 review: info-level findings IN-01 (write-only ownHandle dead state) and IN-02 (simnet Cluster.Write ignores store Set error) remain open by triage — see 04-REVIEW-DISPOSITION.md.
+- Phase 4 review (old, 2026-11-06 era): info-level findings IN-01 (write-only ownHandle dead state) and IN-02 (simnet Cluster.Write ignores store Set error) remain open by triage — see 04-REVIEW-DISPOSITION.md.
 - Phase 1 re-review (2026-11-11): advisory findings open by triage — WR-01 (ci.yml jobs lack timeout-minutes) and IN-01 (serve()'s defer stop() releases signal handling before shutdown completes) — see 01-REVIEW-DISPOSITION.md.
+- Phase 2 re-review (2026-11-14): 3 info-level findings open — IN-01/IN-02 (OnChange doc-comment inaccuracies), IN-03 (duplicated subtest) — see 02-REVIEW-DISPOSITION.md.
+- Phase 3 re-review (2026-11-14): WR-01 (provably-unreachable above-cover guard in confirmWaiters — scope decision, do not auto-strip), IN-01 (dead Decode-error fallback in Open), IN-02 (ApplyRemote marks dirty on no-op merges) — see 03-REVIEW-DISPOSITION.md.
+- Phase 4 re-review (2026-11-14): WR-01 (drained-row Acked set can contain a duplicate after discovery flush — missing dedup in clone(prev.Acked)+prev.WaitingOn, fix: slices.Compact after sort) and WR-02 (sync-response-rate above 1e9 divides to zero and silently disables the egress limiter — clamp in normalized()) open; IN-01 (NotifyLocalWrite TOCTOU vs closed done), IN-02 (Restore marks dirty unconditionally) — see 04-REVIEW-DISPOSITION.md.
+- Phase 03 SECURITY.md was missing since the phase's original execution (2026-11-03) — created retroactively 2026-11-14 (7/7 threats closed, threats_open: 0).
 
 ### Quick Tasks Completed
 
@@ -215,6 +219,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-11T11:25:00.000Z
-Stopped at: Phase 04 complete, ready to plan Phase 6
+Last session: 2026-11-14
+Stopped at: Phases 1–4 re-verified (stale refresh) and complete; ready to discuss Phase 6
 Resume file: None
