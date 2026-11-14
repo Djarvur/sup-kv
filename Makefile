@@ -27,16 +27,19 @@ build:
 	go build ./...
 	CGO_ENABLED=0 go build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/sup-kv ./cmd/sup-kv
 
-## proto: regenerate the committed replication wire code (dev machines only —
-## CI never regenerates; internal/udprepl/replproto/supkv.pb.go is committed).
-## Runs buf (go.mod-pinned via the tool directive) with the go-tool
-## protoc-gen-go plugin at source-relative paths (buf.gen.yaml) — no system
-## compiler needed.
+## proto: regenerate the committed wire code (dev machines only — CI never
+## regenerates; the pb.go files are committed). One buf generate pass per
+## proto tree (go.mod-pinned buf via the tool directive): the input is the
+## tree itself so source-relative paths resolve against it, and each
+## template's out pins the generated code back inside the tree — the
+## per-tree buf.yaml modules make a single workspace-wide generate emit
+## module-relative paths at the repo root instead.
 proto:
-	go tool buf generate
+	go tool buf generate internal/udprepl/replproto --template buf.gen.repl.yaml
+	go tool buf generate internal/grpcapi/apiproto --template buf.gen.api.yaml
 
-## buf-lint: lint the proto module with the STANDARD (DEFAULT) rule set and
-## the one documented PACKAGE_DIRECTORY_MATCH exception (buf.yaml).
+## buf-lint: lint the proto workspace with the STANDARD (DEFAULT) rule set —
+## zero waivers (buf.yaml).
 buf-lint:
 	go tool buf lint
 
@@ -52,7 +55,7 @@ buf-format:
 ## and every later run does the real comparison (D-08).
 buf-breaking:
 	git fetch origin master
-	@if git cat-file -e refs/remotes/origin/master:internal/udprepl/replproto/supkv.proto; then \
+	@if git cat-file -e refs/remotes/origin/master:internal/udprepl/replproto/supkv/v1/supkv.proto; then \
 		go tool buf breaking --against '.git#ref=refs/remotes/origin/master'; \
 	else \
 		echo "buf breaking deferred: supkv.proto not on origin/master yet (D-08 guard)"; \

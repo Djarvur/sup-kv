@@ -12,7 +12,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
-	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 const (
@@ -52,11 +52,11 @@ type watchEvent struct {
 }
 
 // toProto maps one event onto the wire message (D-01): snapshot and live
-// events share the one WatchEvent shape, tombstones included with
+// events share the one WatchResponse shape, tombstones included with
 // deleted=true (D-02), and carry no origin field — local and replicated
 // changes are indistinguishable (D-07).
-func (e watchEvent) toProto() *apiproto.WatchEvent {
-	return &apiproto.WatchEvent{Record: recordToProto(e.key, e.rec)}
+func (e watchEvent) toProto() *apiproto.WatchResponse {
+	return &apiproto.WatchResponse{Record: recordToProto(e.key, e.rec)}
 }
 
 // watchSubscriber is one Watch RPC attached to the hub. Every field is
@@ -354,14 +354,14 @@ func (h *WatchHub) shutdownSubscribers() {
 	}
 }
 
-// Watch streams the subscriber's snapshot as ordinary WatchEvents (D-03)
+// Watch streams the subscriber's snapshot as ordinary WatchResponse events (D-03)
 // followed by every live change under the prefix in arrival order (D-05) —
 // tombstones included as deleted=true (D-02), no origin marking (D-07).
 // The hub owns the exact cut; the handler streams the snapshot, then
 // relays the hub's buffered events until the stream context ends or the
 // hub sheds this subscriber with ResourceExhausted — the slow-consumer
 // disconnect whose resubscribe-and-resnapshot heals the shed (D-02, A3).
-func (s *Server) Watch(req *apiproto.WatchRequest, stream apiproto.SupKV_WatchServer) error {
+func (s *Server) Watch(req *apiproto.WatchRequest, stream apiproto.SupKVService_WatchServer) error {
 	if s.hub == nil {
 		return status.Error(codes.Unimplemented, "watch requires a hub; construct the server through NewServer")
 	}
@@ -400,7 +400,7 @@ func (s *Server) Watch(req *apiproto.WatchRequest, stream apiproto.SupKV_WatchSe
 // relayEvent streams one relayed live event; a failed send means the
 // client is gone, so the subscriber is deregistered. Any non-nil error
 // ends the RPC.
-func (s *Server) relayEvent(stream apiproto.SupKV_WatchServer, sub *watchSubscriber, ev watchEvent) error {
+func (s *Server) relayEvent(stream apiproto.SupKVService_WatchServer, sub *watchSubscriber, ev watchEvent) error {
 	err := stream.Send(ev.toProto())
 	if err != nil {
 		s.hub.unsubscribe(sub)

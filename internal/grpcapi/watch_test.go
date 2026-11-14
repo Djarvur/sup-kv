@@ -14,7 +14,7 @@ import (
 
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
-	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 // watchTestTimeout bounds every wait for a delivery the pipeline owes the
@@ -38,14 +38,14 @@ const (
 // helpers below receive with a deadline, and Recv must run off the test
 // goroutine to make that possible.
 type watchRecv struct {
-	ev  *apiproto.WatchEvent
+	ev  *apiproto.WatchResponse
 	err error
 }
 
 // recvEvent receives one event from the stream or fails the test at the
 // deadline — the deterministic wait for a delivery the buffered pipeline
 // owes the subscriber.
-func recvEvent(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchEvent]) *apiproto.WatchEvent {
+func recvEvent(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchResponse]) *apiproto.WatchResponse {
 	t.Helper()
 	ch := make(chan watchRecv, 1)
 	go func() {
@@ -69,7 +69,7 @@ func recvEvent(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchEve
 // the pipeline is known empty when it runs — the preceding positive event
 // arrived through a synchronous Recv — so it must be the stream's final
 // assertion.
-func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchEvent], window time.Duration) {
+func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchResponse], window time.Duration) {
 	t.Helper()
 	ch := make(chan watchRecv, 1)
 	go func() {
@@ -85,7 +85,7 @@ func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchEven
 
 // TestWatch_snapshotThenLive proves the subscription contract (D-02, D-03
 // and the Q3 pin): the first events are the whole current state as ordinary
-// WatchEvents in sorted-key order — the tombstoned key included with
+// WatchResponse events in sorted-key order — the tombstoned key included with
 // deleted=true, exactly one message shape, no initial_state type — and the
 // next event is a live change whose version strictly dominates the
 // snapshot's.
@@ -354,7 +354,7 @@ func TestWatch_replicatedChange(t *testing.T) {
 	}
 
 	// A winning remote merge arrives indistinguishably (D-07): the same
-	// WatchEvent shape — full record, no origin field anywhere in it —
+	// WatchResponse shape — full record, no origin field anywhere in it —
 	// carrying exactly the applied record.
 	nowMs := time.Now().UnixMilli()
 	winner := storage.Record{Version: version.PackVersion(nowMs+2, 0, 0x0BBB), Data: []byte("remote")}

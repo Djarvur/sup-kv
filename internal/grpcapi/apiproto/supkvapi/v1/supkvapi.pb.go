@@ -12,7 +12,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12-devel
 // 	protoc        (unknown)
-// source: internal/grpcapi/apiproto/supkvapi.proto
+// source: supkvapi/v1/supkvapi.proto
 
 package apiproto
 
@@ -48,7 +48,7 @@ type Record struct {
 
 func (x *Record) Reset() {
 	*x = Record{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[0]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -60,7 +60,7 @@ func (x *Record) String() string {
 func (*Record) ProtoMessage() {}
 
 func (x *Record) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[0]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -73,7 +73,7 @@ func (x *Record) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Record.ProtoReflect.Descriptor instead.
 func (*Record) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{0}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Record) GetKey() string {
@@ -114,7 +114,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[1]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -126,7 +126,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[1]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -139,7 +139,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{1}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *GetRequest) GetKey() string {
@@ -160,7 +160,7 @@ type GetResponse struct {
 
 func (x *GetResponse) Reset() {
 	*x = GetResponse{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[2]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -172,7 +172,7 @@ func (x *GetResponse) String() string {
 func (*GetResponse) ProtoMessage() {}
 
 func (x *GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[2]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -185,7 +185,7 @@ func (x *GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{2}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *GetResponse) GetRecord() *Record {
@@ -214,7 +214,7 @@ type SetRequest struct {
 
 func (x *SetRequest) Reset() {
 	*x = SetRequest{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[3]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -226,7 +226,7 @@ func (x *SetRequest) String() string {
 func (*SetRequest) ProtoMessage() {}
 
 func (x *SetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[3]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -239,7 +239,7 @@ func (x *SetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRequest.ProtoReflect.Descriptor instead.
 func (*SetRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{3}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SetRequest) GetKey() string {
@@ -293,7 +293,7 @@ type SetResponse struct {
 
 func (x *SetResponse) Reset() {
 	*x = SetResponse{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[4]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -305,7 +305,7 @@ func (x *SetResponse) String() string {
 func (*SetResponse) ProtoMessage() {}
 
 func (x *SetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[4]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -318,7 +318,7 @@ func (x *SetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetResponse.ProtoReflect.Descriptor instead.
 func (*SetResponse) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{4}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *SetResponse) GetVersion() []byte {
@@ -362,7 +362,7 @@ type DeleteRequest struct {
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[5]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -374,7 +374,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[5]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -387,7 +387,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{5}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DeleteRequest) GetKey() string {
@@ -425,7 +425,7 @@ type DeleteResponse struct {
 
 func (x *DeleteResponse) Reset() {
 	*x = DeleteResponse{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[6]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -437,7 +437,7 @@ func (x *DeleteResponse) String() string {
 func (*DeleteResponse) ProtoMessage() {}
 
 func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[6]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -450,7 +450,7 @@ func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
 func (*DeleteResponse) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{6}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *DeleteResponse) GetVersion() []byte {
@@ -491,7 +491,7 @@ type ListRequest struct {
 
 func (x *ListRequest) Reset() {
 	*x = ListRequest{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[7]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -503,7 +503,7 @@ func (x *ListRequest) String() string {
 func (*ListRequest) ProtoMessage() {}
 
 func (x *ListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[7]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -516,7 +516,7 @@ func (x *ListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRequest.ProtoReflect.Descriptor instead.
 func (*ListRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{7}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ListRequest) GetPrefix() string {
@@ -537,7 +537,7 @@ type ListResponse struct {
 
 func (x *ListResponse) Reset() {
 	*x = ListResponse{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[8]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -549,7 +549,7 @@ func (x *ListResponse) String() string {
 func (*ListResponse) ProtoMessage() {}
 
 func (x *ListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[8]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -562,7 +562,7 @@ func (x *ListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResponse.ProtoReflect.Descriptor instead.
 func (*ListResponse) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{8}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ListResponse) GetKeys() []string {
@@ -583,7 +583,7 @@ type WatchRequest struct {
 
 func (x *WatchRequest) Reset() {
 	*x = WatchRequest{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[9]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -595,7 +595,7 @@ func (x *WatchRequest) String() string {
 func (*WatchRequest) ProtoMessage() {}
 
 func (x *WatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[9]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -608,7 +608,7 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRequest.ProtoReflect.Descriptor instead.
 func (*WatchRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{9}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *WatchRequest) GetPrefix() string {
@@ -618,31 +618,31 @@ func (x *WatchRequest) GetPrefix() string {
 	return ""
 }
 
-// WatchEvent is one change notification carrying the full record (D-01) —
+// WatchResponse is one change notification carrying the full record (D-01) —
 // snapshot and live events share this one shape (D-03), tombstones arrive
 // with deleted=true (D-02).
-type WatchEvent struct {
+type WatchResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Record        *Record                `protobuf:"bytes,1,opt,name=record,proto3" json:"record,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *WatchEvent) Reset() {
-	*x = WatchEvent{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[10]
+func (x *WatchResponse) Reset() {
+	*x = WatchResponse{}
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *WatchEvent) String() string {
+func (x *WatchResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*WatchEvent) ProtoMessage() {}
+func (*WatchResponse) ProtoMessage() {}
 
-func (x *WatchEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[10]
+func (x *WatchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -653,12 +653,12 @@ func (x *WatchEvent) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use WatchEvent.ProtoReflect.Descriptor instead.
-func (*WatchEvent) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{10}
+// Deprecated: Use WatchResponse.ProtoReflect.Descriptor instead.
+func (*WatchResponse) Descriptor() ([]byte, []int) {
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{10}
 }
 
-func (x *WatchEvent) GetRecord() *Record {
+func (x *WatchResponse) GetRecord() *Record {
 	if x != nil {
 		return x.Record
 	}
@@ -676,7 +676,7 @@ type SnapshotCreateRequest struct {
 
 func (x *SnapshotCreateRequest) Reset() {
 	*x = SnapshotCreateRequest{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[11]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -688,7 +688,7 @@ func (x *SnapshotCreateRequest) String() string {
 func (*SnapshotCreateRequest) ProtoMessage() {}
 
 func (x *SnapshotCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[11]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -701,7 +701,7 @@ func (x *SnapshotCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotCreateRequest.ProtoReflect.Descriptor instead.
 func (*SnapshotCreateRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{11}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SnapshotCreateRequest) GetName() string {
@@ -721,7 +721,7 @@ type SnapshotCreateResponse struct {
 
 func (x *SnapshotCreateResponse) Reset() {
 	*x = SnapshotCreateResponse{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[12]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -733,7 +733,7 @@ func (x *SnapshotCreateResponse) String() string {
 func (*SnapshotCreateResponse) ProtoMessage() {}
 
 func (x *SnapshotCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[12]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -746,7 +746,7 @@ func (x *SnapshotCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotCreateResponse.ProtoReflect.Descriptor instead.
 func (*SnapshotCreateResponse) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{12}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{12}
 }
 
 // SnapshotLoadRequest names the snapshot to replay as ordinary writes with
@@ -760,7 +760,7 @@ type SnapshotLoadRequest struct {
 
 func (x *SnapshotLoadRequest) Reset() {
 	*x = SnapshotLoadRequest{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[13]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -772,7 +772,7 @@ func (x *SnapshotLoadRequest) String() string {
 func (*SnapshotLoadRequest) ProtoMessage() {}
 
 func (x *SnapshotLoadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[13]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -785,7 +785,7 @@ func (x *SnapshotLoadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotLoadRequest.ProtoReflect.Descriptor instead.
 func (*SnapshotLoadRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{13}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SnapshotLoadRequest) GetName() string {
@@ -804,7 +804,7 @@ type SnapshotLoadResponse struct {
 
 func (x *SnapshotLoadResponse) Reset() {
 	*x = SnapshotLoadResponse{}
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[14]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -816,7 +816,7 @@ func (x *SnapshotLoadResponse) String() string {
 func (*SnapshotLoadResponse) ProtoMessage() {}
 
 func (x *SnapshotLoadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes[14]
+	mi := &file_supkvapi_v1_supkvapi_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -829,14 +829,14 @@ func (x *SnapshotLoadResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotLoadResponse.ProtoReflect.Descriptor instead.
 func (*SnapshotLoadResponse) Descriptor() ([]byte, []int) {
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP(), []int{14}
+	return file_supkvapi_v1_supkvapi_proto_rawDescGZIP(), []int{14}
 }
 
-var File_internal_grpcapi_apiproto_supkvapi_proto protoreflect.FileDescriptor
+var File_supkvapi_v1_supkvapi_proto protoreflect.FileDescriptor
 
-const file_internal_grpcapi_apiproto_supkvapi_proto_rawDesc = "" +
+const file_supkvapi_v1_supkvapi_proto_rawDesc = "" +
 	"\n" +
-	"(internal/grpcapi/apiproto/supkvapi.proto\x12\vsupkvapi.v1\"d\n" +
+	"\x1asupkvapi/v1/supkvapi.proto\x12\vsupkvapi.v1\"d\n" +
 	"\x06Record\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\fR\aversion\x12\x14\n" +
@@ -877,39 +877,38 @@ const file_internal_grpcapi_apiproto_supkvapi_proto_rawDesc = "" +
 	"\fListResponse\x12\x12\n" +
 	"\x04keys\x18\x01 \x03(\tR\x04keys\"&\n" +
 	"\fWatchRequest\x12\x16\n" +
-	"\x06prefix\x18\x01 \x01(\tR\x06prefix\"9\n" +
-	"\n" +
-	"WatchEvent\x12+\n" +
+	"\x06prefix\x18\x01 \x01(\tR\x06prefix\"<\n" +
+	"\rWatchResponse\x12+\n" +
 	"\x06record\x18\x01 \x01(\v2\x13.supkvapi.v1.RecordR\x06record\"+\n" +
 	"\x15SnapshotCreateRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x18\n" +
 	"\x16SnapshotCreateResponse\")\n" +
 	"\x13SnapshotLoadRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x16\n" +
-	"\x14SnapshotLoadResponse2\xea\x03\n" +
-	"\x05SupKV\x128\n" +
+	"\x14SnapshotLoadResponse2\xf4\x03\n" +
+	"\fSupKVService\x128\n" +
 	"\x03Get\x12\x17.supkvapi.v1.GetRequest\x1a\x18.supkvapi.v1.GetResponse\x128\n" +
 	"\x03Set\x12\x17.supkvapi.v1.SetRequest\x1a\x18.supkvapi.v1.SetResponse\x12A\n" +
 	"\x06Delete\x12\x1a.supkvapi.v1.DeleteRequest\x1a\x1b.supkvapi.v1.DeleteResponse\x12;\n" +
-	"\x04List\x12\x18.supkvapi.v1.ListRequest\x1a\x19.supkvapi.v1.ListResponse\x12=\n" +
-	"\x05Watch\x12\x19.supkvapi.v1.WatchRequest\x1a\x17.supkvapi.v1.WatchEvent0\x01\x12Y\n" +
+	"\x04List\x12\x18.supkvapi.v1.ListRequest\x1a\x19.supkvapi.v1.ListResponse\x12@\n" +
+	"\x05Watch\x12\x19.supkvapi.v1.WatchRequest\x1a\x1a.supkvapi.v1.WatchResponse0\x01\x12Y\n" +
 	"\x0eSnapshotCreate\x12\".supkvapi.v1.SnapshotCreateRequest\x1a#.supkvapi.v1.SnapshotCreateResponse\x12S\n" +
-	"\fSnapshotLoad\x12 .supkvapi.v1.SnapshotLoadRequest\x1a!.supkvapi.v1.SnapshotLoadResponseB>Z<github.com/Djarvur/sup-kv/internal/grpcapi/apiproto;apiprotob\x06proto3"
+	"\fSnapshotLoad\x12 .supkvapi.v1.SnapshotLoadRequest\x1a!.supkvapi.v1.SnapshotLoadResponseBJZHgithub.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1;apiprotob\x06proto3"
 
 var (
-	file_internal_grpcapi_apiproto_supkvapi_proto_rawDescOnce sync.Once
-	file_internal_grpcapi_apiproto_supkvapi_proto_rawDescData []byte
+	file_supkvapi_v1_supkvapi_proto_rawDescOnce sync.Once
+	file_supkvapi_v1_supkvapi_proto_rawDescData []byte
 )
 
-func file_internal_grpcapi_apiproto_supkvapi_proto_rawDescGZIP() []byte {
-	file_internal_grpcapi_apiproto_supkvapi_proto_rawDescOnce.Do(func() {
-		file_internal_grpcapi_apiproto_supkvapi_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_grpcapi_apiproto_supkvapi_proto_rawDesc), len(file_internal_grpcapi_apiproto_supkvapi_proto_rawDesc)))
+func file_supkvapi_v1_supkvapi_proto_rawDescGZIP() []byte {
+	file_supkvapi_v1_supkvapi_proto_rawDescOnce.Do(func() {
+		file_supkvapi_v1_supkvapi_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_supkvapi_v1_supkvapi_proto_rawDesc), len(file_supkvapi_v1_supkvapi_proto_rawDesc)))
 	})
-	return file_internal_grpcapi_apiproto_supkvapi_proto_rawDescData
+	return file_supkvapi_v1_supkvapi_proto_rawDescData
 }
 
-var file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
-var file_internal_grpcapi_apiproto_supkvapi_proto_goTypes = []any{
+var file_supkvapi_v1_supkvapi_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_supkvapi_v1_supkvapi_proto_goTypes = []any{
 	(*Record)(nil),                 // 0: supkvapi.v1.Record
 	(*GetRequest)(nil),             // 1: supkvapi.v1.GetRequest
 	(*GetResponse)(nil),            // 2: supkvapi.v1.GetResponse
@@ -920,29 +919,29 @@ var file_internal_grpcapi_apiproto_supkvapi_proto_goTypes = []any{
 	(*ListRequest)(nil),            // 7: supkvapi.v1.ListRequest
 	(*ListResponse)(nil),           // 8: supkvapi.v1.ListResponse
 	(*WatchRequest)(nil),           // 9: supkvapi.v1.WatchRequest
-	(*WatchEvent)(nil),             // 10: supkvapi.v1.WatchEvent
+	(*WatchResponse)(nil),          // 10: supkvapi.v1.WatchResponse
 	(*SnapshotCreateRequest)(nil),  // 11: supkvapi.v1.SnapshotCreateRequest
 	(*SnapshotCreateResponse)(nil), // 12: supkvapi.v1.SnapshotCreateResponse
 	(*SnapshotLoadRequest)(nil),    // 13: supkvapi.v1.SnapshotLoadRequest
 	(*SnapshotLoadResponse)(nil),   // 14: supkvapi.v1.SnapshotLoadResponse
 }
-var file_internal_grpcapi_apiproto_supkvapi_proto_depIdxs = []int32{
+var file_supkvapi_v1_supkvapi_proto_depIdxs = []int32{
 	0,  // 0: supkvapi.v1.GetResponse.record:type_name -> supkvapi.v1.Record
-	0,  // 1: supkvapi.v1.WatchEvent.record:type_name -> supkvapi.v1.Record
-	1,  // 2: supkvapi.v1.SupKV.Get:input_type -> supkvapi.v1.GetRequest
-	3,  // 3: supkvapi.v1.SupKV.Set:input_type -> supkvapi.v1.SetRequest
-	5,  // 4: supkvapi.v1.SupKV.Delete:input_type -> supkvapi.v1.DeleteRequest
-	7,  // 5: supkvapi.v1.SupKV.List:input_type -> supkvapi.v1.ListRequest
-	9,  // 6: supkvapi.v1.SupKV.Watch:input_type -> supkvapi.v1.WatchRequest
-	11, // 7: supkvapi.v1.SupKV.SnapshotCreate:input_type -> supkvapi.v1.SnapshotCreateRequest
-	13, // 8: supkvapi.v1.SupKV.SnapshotLoad:input_type -> supkvapi.v1.SnapshotLoadRequest
-	2,  // 9: supkvapi.v1.SupKV.Get:output_type -> supkvapi.v1.GetResponse
-	4,  // 10: supkvapi.v1.SupKV.Set:output_type -> supkvapi.v1.SetResponse
-	6,  // 11: supkvapi.v1.SupKV.Delete:output_type -> supkvapi.v1.DeleteResponse
-	8,  // 12: supkvapi.v1.SupKV.List:output_type -> supkvapi.v1.ListResponse
-	10, // 13: supkvapi.v1.SupKV.Watch:output_type -> supkvapi.v1.WatchEvent
-	12, // 14: supkvapi.v1.SupKV.SnapshotCreate:output_type -> supkvapi.v1.SnapshotCreateResponse
-	14, // 15: supkvapi.v1.SupKV.SnapshotLoad:output_type -> supkvapi.v1.SnapshotLoadResponse
+	0,  // 1: supkvapi.v1.WatchResponse.record:type_name -> supkvapi.v1.Record
+	1,  // 2: supkvapi.v1.SupKVService.Get:input_type -> supkvapi.v1.GetRequest
+	3,  // 3: supkvapi.v1.SupKVService.Set:input_type -> supkvapi.v1.SetRequest
+	5,  // 4: supkvapi.v1.SupKVService.Delete:input_type -> supkvapi.v1.DeleteRequest
+	7,  // 5: supkvapi.v1.SupKVService.List:input_type -> supkvapi.v1.ListRequest
+	9,  // 6: supkvapi.v1.SupKVService.Watch:input_type -> supkvapi.v1.WatchRequest
+	11, // 7: supkvapi.v1.SupKVService.SnapshotCreate:input_type -> supkvapi.v1.SnapshotCreateRequest
+	13, // 8: supkvapi.v1.SupKVService.SnapshotLoad:input_type -> supkvapi.v1.SnapshotLoadRequest
+	2,  // 9: supkvapi.v1.SupKVService.Get:output_type -> supkvapi.v1.GetResponse
+	4,  // 10: supkvapi.v1.SupKVService.Set:output_type -> supkvapi.v1.SetResponse
+	6,  // 11: supkvapi.v1.SupKVService.Delete:output_type -> supkvapi.v1.DeleteResponse
+	8,  // 12: supkvapi.v1.SupKVService.List:output_type -> supkvapi.v1.ListResponse
+	10, // 13: supkvapi.v1.SupKVService.Watch:output_type -> supkvapi.v1.WatchResponse
+	12, // 14: supkvapi.v1.SupKVService.SnapshotCreate:output_type -> supkvapi.v1.SnapshotCreateResponse
+	14, // 15: supkvapi.v1.SupKVService.SnapshotLoad:output_type -> supkvapi.v1.SnapshotLoadResponse
 	9,  // [9:16] is the sub-list for method output_type
 	2,  // [2:9] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
@@ -950,26 +949,26 @@ var file_internal_grpcapi_apiproto_supkvapi_proto_depIdxs = []int32{
 	0,  // [0:2] is the sub-list for field type_name
 }
 
-func init() { file_internal_grpcapi_apiproto_supkvapi_proto_init() }
-func file_internal_grpcapi_apiproto_supkvapi_proto_init() {
-	if File_internal_grpcapi_apiproto_supkvapi_proto != nil {
+func init() { file_supkvapi_v1_supkvapi_proto_init() }
+func file_supkvapi_v1_supkvapi_proto_init() {
+	if File_supkvapi_v1_supkvapi_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_grpcapi_apiproto_supkvapi_proto_rawDesc), len(file_internal_grpcapi_apiproto_supkvapi_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_supkvapi_v1_supkvapi_proto_rawDesc), len(file_supkvapi_v1_supkvapi_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_internal_grpcapi_apiproto_supkvapi_proto_goTypes,
-		DependencyIndexes: file_internal_grpcapi_apiproto_supkvapi_proto_depIdxs,
-		MessageInfos:      file_internal_grpcapi_apiproto_supkvapi_proto_msgTypes,
+		GoTypes:           file_supkvapi_v1_supkvapi_proto_goTypes,
+		DependencyIndexes: file_supkvapi_v1_supkvapi_proto_depIdxs,
+		MessageInfos:      file_supkvapi_v1_supkvapi_proto_msgTypes,
 	}.Build()
-	File_internal_grpcapi_apiproto_supkvapi_proto = out.File
-	file_internal_grpcapi_apiproto_supkvapi_proto_goTypes = nil
-	file_internal_grpcapi_apiproto_supkvapi_proto_depIdxs = nil
+	File_supkvapi_v1_supkvapi_proto = out.File
+	file_supkvapi_v1_supkvapi_proto_goTypes = nil
+	file_supkvapi_v1_supkvapi_proto_depIdxs = nil
 }

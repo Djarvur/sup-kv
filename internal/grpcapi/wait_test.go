@@ -9,7 +9,7 @@ import (
 
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/version"
-	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 // waitAssertBound is the generous elapsed bound the wait tests assert:

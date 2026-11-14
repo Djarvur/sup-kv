@@ -41,7 +41,7 @@ jobs:
         run: |
           go tool buf lint
           go tool buf format --diff --exit-code
-          if git cat-file -e refs/remotes/origin/master:internal/udprepl/replproto/supkv.proto; then
+          if git cat-file -e refs/remotes/origin/master:internal/udprepl/replproto/supkv/v1/supkv.proto; then
             go tool buf breaking --against '.git#ref=refs/remotes/origin/master'
           else
             echo "buf breaking deferred: supkv.proto not on origin/master yet (D-08 guard)"

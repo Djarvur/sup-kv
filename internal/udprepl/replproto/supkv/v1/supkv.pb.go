@@ -9,7 +9,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12-devel
 // 	protoc        (unknown)
-// source: internal/udprepl/replproto/supkv.proto
+// source: supkv/v1/supkv.proto
 
 package replproto
 
@@ -45,7 +45,7 @@ type Envelope struct {
 
 func (x *Envelope) Reset() {
 	*x = Envelope{}
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[0]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -57,7 +57,7 @@ func (x *Envelope) String() string {
 func (*Envelope) ProtoMessage() {}
 
 func (x *Envelope) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[0]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -70,7 +70,7 @@ func (x *Envelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Envelope.ProtoReflect.Descriptor instead.
 func (*Envelope) Descriptor() ([]byte, []int) {
-	return file_internal_udprepl_replproto_supkv_proto_rawDescGZIP(), []int{0}
+	return file_supkv_v1_supkv_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Envelope) GetProtoVersion() uint32 {
@@ -126,7 +126,7 @@ type Body struct {
 
 func (x *Body) Reset() {
 	*x = Body{}
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[1]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -138,7 +138,7 @@ func (x *Body) String() string {
 func (*Body) ProtoMessage() {}
 
 func (x *Body) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[1]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -151,7 +151,7 @@ func (x *Body) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Body.ProtoReflect.Descriptor instead.
 func (*Body) Descriptor() ([]byte, []int) {
-	return file_internal_udprepl_replproto_supkv_proto_rawDescGZIP(), []int{1}
+	return file_supkv_v1_supkv_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Body) GetMsg() isBody_Msg {
@@ -251,7 +251,7 @@ type Hello struct {
 
 func (x *Hello) Reset() {
 	*x = Hello{}
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[2]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -263,7 +263,7 @@ func (x *Hello) String() string {
 func (*Hello) ProtoMessage() {}
 
 func (x *Hello) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[2]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -276,7 +276,7 @@ func (x *Hello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Hello.ProtoReflect.Descriptor instead.
 func (*Hello) Descriptor() ([]byte, []int) {
-	return file_internal_udprepl_replproto_supkv_proto_rawDescGZIP(), []int{2}
+	return file_supkv_v1_supkv_proto_rawDescGZIP(), []int{2}
 }
 
 // DataReplication carries one full record: broadcast on every local change
@@ -294,7 +294,7 @@ type DataReplication struct {
 
 func (x *DataReplication) Reset() {
 	*x = DataReplication{}
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[3]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -306,7 +306,7 @@ func (x *DataReplication) String() string {
 func (*DataReplication) ProtoMessage() {}
 
 func (x *DataReplication) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[3]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -319,7 +319,7 @@ func (x *DataReplication) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataReplication.ProtoReflect.Descriptor instead.
 func (*DataReplication) Descriptor() ([]byte, []int) {
-	return file_internal_udprepl_replproto_supkv_proto_rawDescGZIP(), []int{3}
+	return file_supkv_v1_supkv_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *DataReplication) GetKey() string {
@@ -369,7 +369,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[4]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -381,7 +381,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[4]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -394,7 +394,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_internal_udprepl_replproto_supkv_proto_rawDescGZIP(), []int{4}
+	return file_supkv_v1_supkv_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Ack) GetKey() string {
@@ -421,7 +421,7 @@ type DataRequest struct {
 
 func (x *DataRequest) Reset() {
 	*x = DataRequest{}
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[5]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -433,7 +433,7 @@ func (x *DataRequest) String() string {
 func (*DataRequest) ProtoMessage() {}
 
 func (x *DataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[5]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -446,7 +446,7 @@ func (x *DataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataRequest.ProtoReflect.Descriptor instead.
 func (*DataRequest) Descriptor() ([]byte, []int) {
-	return file_internal_udprepl_replproto_supkv_proto_rawDescGZIP(), []int{5}
+	return file_supkv_v1_supkv_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DataRequest) GetKey() string {
@@ -467,7 +467,7 @@ type DataSync struct {
 
 func (x *DataSync) Reset() {
 	*x = DataSync{}
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[6]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -479,7 +479,7 @@ func (x *DataSync) String() string {
 func (*DataSync) ProtoMessage() {}
 
 func (x *DataSync) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[6]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -492,7 +492,7 @@ func (x *DataSync) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataSync.ProtoReflect.Descriptor instead.
 func (*DataSync) Descriptor() ([]byte, []int) {
-	return file_internal_udprepl_replproto_supkv_proto_rawDescGZIP(), []int{6}
+	return file_supkv_v1_supkv_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *DataSync) GetEntries() []*SyncEntry {
@@ -513,7 +513,7 @@ type SyncEntry struct {
 
 func (x *SyncEntry) Reset() {
 	*x = SyncEntry{}
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[7]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -525,7 +525,7 @@ func (x *SyncEntry) String() string {
 func (*SyncEntry) ProtoMessage() {}
 
 func (x *SyncEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_udprepl_replproto_supkv_proto_msgTypes[7]
+	mi := &file_supkv_v1_supkv_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -538,7 +538,7 @@ func (x *SyncEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncEntry.ProtoReflect.Descriptor instead.
 func (*SyncEntry) Descriptor() ([]byte, []int) {
-	return file_internal_udprepl_replproto_supkv_proto_rawDescGZIP(), []int{7}
+	return file_supkv_v1_supkv_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SyncEntry) GetKey() string {
@@ -555,11 +555,11 @@ func (x *SyncEntry) GetVersion() []byte {
 	return nil
 }
 
-var File_internal_udprepl_replproto_supkv_proto protoreflect.FileDescriptor
+var File_supkv_v1_supkv_proto protoreflect.FileDescriptor
 
-const file_internal_udprepl_replproto_supkv_proto_rawDesc = "" +
+const file_supkv_v1_supkv_proto_rawDesc = "" +
 	"\n" +
-	"&internal/udprepl/replproto/supkv.proto\x12\bsupkv.v1\"\x89\x01\n" +
+	"\x14supkv/v1/supkv.proto\x12\bsupkv.v1\"\x89\x01\n" +
 	"\bEnvelope\x12#\n" +
 	"\rproto_version\x18\x01 \x01(\rR\fprotoVersion\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\rR\x06nodeId\x12\x15\n" +
@@ -589,22 +589,22 @@ const file_internal_udprepl_replproto_supkv_proto_rawDesc = "" +
 	"\aentries\x18\x01 \x03(\v2\x13.supkv.v1.SyncEntryR\aentries\"7\n" +
 	"\tSyncEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\fR\aversionB@Z>github.com/Djarvur/sup-kv/internal/udprepl/replproto;replprotob\x06proto3"
+	"\aversion\x18\x02 \x01(\fR\aversionBIZGgithub.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1;replprotob\x06proto3"
 
 var (
-	file_internal_udprepl_replproto_supkv_proto_rawDescOnce sync.Once
-	file_internal_udprepl_replproto_supkv_proto_rawDescData []byte
+	file_supkv_v1_supkv_proto_rawDescOnce sync.Once
+	file_supkv_v1_supkv_proto_rawDescData []byte
 )
 
-func file_internal_udprepl_replproto_supkv_proto_rawDescGZIP() []byte {
-	file_internal_udprepl_replproto_supkv_proto_rawDescOnce.Do(func() {
-		file_internal_udprepl_replproto_supkv_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_udprepl_replproto_supkv_proto_rawDesc), len(file_internal_udprepl_replproto_supkv_proto_rawDesc)))
+func file_supkv_v1_supkv_proto_rawDescGZIP() []byte {
+	file_supkv_v1_supkv_proto_rawDescOnce.Do(func() {
+		file_supkv_v1_supkv_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_supkv_v1_supkv_proto_rawDesc), len(file_supkv_v1_supkv_proto_rawDesc)))
 	})
-	return file_internal_udprepl_replproto_supkv_proto_rawDescData
+	return file_supkv_v1_supkv_proto_rawDescData
 }
 
-var file_internal_udprepl_replproto_supkv_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
-var file_internal_udprepl_replproto_supkv_proto_goTypes = []any{
+var file_supkv_v1_supkv_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_supkv_v1_supkv_proto_goTypes = []any{
 	(*Envelope)(nil),        // 0: supkv.v1.Envelope
 	(*Body)(nil),            // 1: supkv.v1.Body
 	(*Hello)(nil),           // 2: supkv.v1.Hello
@@ -614,7 +614,7 @@ var file_internal_udprepl_replproto_supkv_proto_goTypes = []any{
 	(*DataSync)(nil),        // 6: supkv.v1.DataSync
 	(*SyncEntry)(nil),       // 7: supkv.v1.SyncEntry
 }
-var file_internal_udprepl_replproto_supkv_proto_depIdxs = []int32{
+var file_supkv_v1_supkv_proto_depIdxs = []int32{
 	2, // 0: supkv.v1.Body.hello:type_name -> supkv.v1.Hello
 	3, // 1: supkv.v1.Body.data_replication:type_name -> supkv.v1.DataReplication
 	4, // 2: supkv.v1.Body.ack:type_name -> supkv.v1.Ack
@@ -628,12 +628,12 @@ var file_internal_udprepl_replproto_supkv_proto_depIdxs = []int32{
 	0, // [0:6] is the sub-list for field type_name
 }
 
-func init() { file_internal_udprepl_replproto_supkv_proto_init() }
-func file_internal_udprepl_replproto_supkv_proto_init() {
-	if File_internal_udprepl_replproto_supkv_proto != nil {
+func init() { file_supkv_v1_supkv_proto_init() }
+func file_supkv_v1_supkv_proto_init() {
+	if File_supkv_v1_supkv_proto != nil {
 		return
 	}
-	file_internal_udprepl_replproto_supkv_proto_msgTypes[1].OneofWrappers = []any{
+	file_supkv_v1_supkv_proto_msgTypes[1].OneofWrappers = []any{
 		(*Body_Hello)(nil),
 		(*Body_DataReplication)(nil),
 		(*Body_Ack)(nil),
@@ -644,17 +644,17 @@ func file_internal_udprepl_replproto_supkv_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_udprepl_replproto_supkv_proto_rawDesc), len(file_internal_udprepl_replproto_supkv_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_supkv_v1_supkv_proto_rawDesc), len(file_supkv_v1_supkv_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_internal_udprepl_replproto_supkv_proto_goTypes,
-		DependencyIndexes: file_internal_udprepl_replproto_supkv_proto_depIdxs,
-		MessageInfos:      file_internal_udprepl_replproto_supkv_proto_msgTypes,
+		GoTypes:           file_supkv_v1_supkv_proto_goTypes,
+		DependencyIndexes: file_supkv_v1_supkv_proto_depIdxs,
+		MessageInfos:      file_supkv_v1_supkv_proto_msgTypes,
 	}.Build()
-	File_internal_udprepl_replproto_supkv_proto = out.File
-	file_internal_udprepl_replproto_supkv_proto_goTypes = nil
-	file_internal_udprepl_replproto_supkv_proto_depIdxs = nil
+	File_supkv_v1_supkv_proto = out.File
+	file_supkv_v1_supkv_proto_goTypes = nil
+	file_supkv_v1_supkv_proto_depIdxs = nil
 }

@@ -8,7 +8,7 @@ syntax = "proto3";
 
 package supkv.v1;
 
-option go_package = "github.com/Djarvur/sup-kv/internal/udprepl/replproto;replproto";
+option go_package = "github.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1;replproto";
 
 // Envelope is the outer frame of every replication datagram. run_id is 16
 // bytes; crc32 is the IEEE CRC32 over body — corruption detection only per

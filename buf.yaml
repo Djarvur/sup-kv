@@ -4,43 +4,29 @@
 version: v2
 
 modules:
-  # One root module covers both proto dirs — internal/udprepl/replproto now
-  # and internal/grpcapi/apiproto in phase 5 — with zero config change (D-06).
-  - path: .
-    # buf walks dot-directories by design; the repo-local module cache
-    # (.gomodcache, gitignored — CI never sees it) holds stray .proto files
-    # that would flood lint/format/breaking. This excludes entry exists only
-    # for local runs; buf v2 has no per-ignore field for this, so it lives on
-    # the module.
-    excludes:
-      - .gomodcache
+  # One module per proto tree, rooted at the tree itself so
+  # PACKAGE_DIRECTORY_MATCH resolves relative to it: package supkv.v1 at
+  # internal/udprepl/replproto/supkv/v1 and package supkvapi.v1 at
+  # internal/grpcapi/apiproto/supkvapi/v1 both match their package-derived
+  # paths with zero waivers. The former single root module needed the
+  # .gomodcache exclude (buf walks dot-directories by design and the
+  # repo-local, gitignored module cache holds stray .proto files); the two
+  # module roots sit above it, so the exclude is gone. buf generate covers
+  # every module in the workspace — one pass, both trees.
+  - path: internal/udprepl/replproto
+  - path: internal/grpcapi/apiproto
 
 lint:
   # STANDARD is buf v1.75's name for the DEFAULT rule set (rule lists verified
   # identical via `buf config ls-lint-rules`); the DEFAULT spelling additionally
   # prints a deprecation WARN on every invocation (D-02: DEFAULT rule set).
+  # Zero waivers: the protos live in their package-derived directories
+  # (replproto/supkv/v1, apiproto/supkvapi/v1) and the API schema uses the
+  # standard names (service SupKVService, Watch response WatchResponse) — the
+  # 2026-11-14 maintainer decision (pre-release window) replaced the former
+  # D-06 ignore_only waivers with code-direction fixes.
   use:
     - STANDARD
-  # The DEFAULT/STANDARD findings on this repo: package supkv.v1 lives in
-  # internal/udprepl/replproto and package supkvapi.v1 lives in
-  # internal/grpcapi/apiproto — neither matches the package-derived
-  # directory the rule expects. Moving the protos would churn import paths
-  # for no gain, so the rule is waived for these two files only (D-06:
-  # documented exception over file moves).
-  #
-  # The gRPC schema keeps the plan-pinned client-facing names — service
-  # SupKV (not SupKVService) and response message WatchEvent (not
-  # WatchResponse) — the wire contract (/supkvapi.v1.SupKV/Watch and the
-  # event message clients decode) pinned by the phase-5 plan; the generic
-  # naming rules are waived for that one file.
-  ignore_only:
-    PACKAGE_DIRECTORY_MATCH:
-      - internal/udprepl/replproto/supkv.proto
-      - internal/grpcapi/apiproto/supkvapi.proto
-    SERVICE_SUFFIX:
-      - internal/grpcapi/apiproto/supkvapi.proto
-    RPC_RESPONSE_STANDARD_NAME:
-      - internal/grpcapi/apiproto/supkvapi.proto
 
 breaking:
   # FILE policy: a deleted, renumbered or retyped field vs origin/master fails

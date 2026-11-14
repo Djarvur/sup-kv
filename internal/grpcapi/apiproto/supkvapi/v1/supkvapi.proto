@@ -11,7 +11,7 @@ syntax = "proto3";
 
 package supkvapi.v1;
 
-option go_package = "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto;apiproto";
+option go_package = "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1;apiproto";
 
 // Record carries one key's full state (D-01): key, the 16-byte RFC 9562
 // RecordVersion, the value bytes and the deleted tombstone flag. Deletes
@@ -25,9 +25,9 @@ message Record {
   bool deleted = 4;
 }
 
-// SupKV is the whole phase-5 RPC surface. Watch is server-streaming; every
+// SupKVService is the whole phase-5 RPC surface. Watch is server-streaming; every
 // other RPC is unary.
-service SupKV {
+service SupKVService {
   // Get returns the live record for one key.
   rpc Get(GetRequest) returns (GetResponse);
   // Set writes a value (or a create-if-absent variant of it).
@@ -37,7 +37,7 @@ service SupKV {
   // List returns the sorted live keys under a prefix.
   rpc List(ListRequest) returns (ListResponse);
   // Watch streams snapshot-then-live change events (phase-5 plan 05-04).
-  rpc Watch(WatchRequest) returns (stream WatchEvent);
+  rpc Watch(WatchRequest) returns (stream WatchResponse);
   // SnapshotCreate copies the confirmed dump under a name (plan 05-05).
   rpc SnapshotCreate(SnapshotCreateRequest) returns (SnapshotCreateResponse);
   // SnapshotLoad replays a named snapshot as ordinary writes (plan 05-05).
@@ -114,10 +114,10 @@ message WatchRequest {
   string prefix = 1;
 }
 
-// WatchEvent is one change notification carrying the full record (D-01) —
+// WatchResponse is one change notification carrying the full record (D-01) —
 // snapshot and live events share this one shape (D-03), tombstones arrive
 // with deleted=true (D-02).
-message WatchEvent {
+message WatchResponse {
   Record record = 1;
 }
 

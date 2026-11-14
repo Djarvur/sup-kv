@@ -20,7 +20,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
-	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -234,7 +234,7 @@ func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
 	go api.RunGate(gateCtx)
 
 	srv := grpc.NewServer()
-	apiproto.RegisterSupKVServer(srv, api)
+	apiproto.RegisterSupKVServiceServer(srv, api)
 	healthpb.RegisterHealthServer(srv, api.Health())
 
 	lis := bufconn.Listen(1 << 20)
@@ -251,7 +251,7 @@ func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
 		t.Fatalf("grpc.NewClient: want nil, got error: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	client := apiproto.NewSupKVClient(conn)
+	client := apiproto.NewSupKVServiceClient(conn)
 	health := healthpb.NewHealthClient(conn)
 	waitFor(t, gateWait, "the health endpoint to flip SERVING (gate open)", func() bool {
 		resp, err := health.Check(t.Context(), &healthpb.HealthCheckRequest{})

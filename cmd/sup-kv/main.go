@@ -34,7 +34,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
-	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
@@ -363,7 +363,7 @@ func listenGRPC(grpcAddr string, srv *grpcapi.Server) (net.Listener, *grpc.Serve
 		return nil, nil, fmt.Errorf("listen tcp %s: %w", grpcAddr, err)
 	}
 	gs := grpc.NewServer()
-	apiproto.RegisterSupKVServer(gs, srv)
+	apiproto.RegisterSupKVServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, srv.Health())
 	return listener, gs, nil
 }

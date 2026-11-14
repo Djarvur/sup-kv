@@ -26,7 +26,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
-	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
 )
 
@@ -37,13 +37,13 @@ import (
 // when it was dropped (udprepl.ErrRunLoopExited once that loop has exited).
 type LocalNotify func(key string, rec storage.Record) error
 
-// Server implements the apiproto.SupKVServer surface over one persist
-// Engine. The UnimplementedSupKVServer embed is mandatory with
+// Server implements the apiproto.SupKVServiceServer surface over one persist
+// Engine. The UnimplementedSupKVServiceServer embed is mandatory with
 // protoc-gen-go-grpc v1.6.2 (forward compatibility): every phase-5 RPC is
 // implemented on it today, and the embed is what future wire additions
 // would answer Unimplemented with until their plans land.
 type Server struct {
-	apiproto.UnimplementedSupKVServer
+	apiproto.UnimplementedSupKVServiceServer
 
 	engine *persist.Engine
 	notify LocalNotify

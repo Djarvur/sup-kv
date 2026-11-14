@@ -21,7 +21,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
-	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -97,7 +97,7 @@ func (*fakeDumpStore) ReadSnapshot(_ string) ([]byte, error) {
 // testHarness bundles one running engine, its watch hub, the
 // bufconn-dialed client and the health client.
 type testHarness struct {
-	client       apiproto.SupKVClient
+	client       apiproto.SupKVServiceClient
 	health       healthpb.HealthClient
 	engine       *persist.Engine
 	hub          *grpcapi.WatchHub
@@ -223,7 +223,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	go api.RunGate(gateCtx)
 
 	srv := grpc.NewServer()
-	apiproto.RegisterSupKVServer(srv, api)
+	apiproto.RegisterSupKVServiceServer(srv, api)
 	healthpb.RegisterHealthServer(srv, api.Health())
 
 	lis := bufconn.Listen(1 << 20)
@@ -242,7 +242,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	return &testHarness{
-		client:       apiproto.NewSupKVClient(conn),
+		client:       apiproto.NewSupKVServiceClient(conn),
 		health:       healthpb.NewHealthClient(conn),
 		engine:       eng,
 		hub:          hub,

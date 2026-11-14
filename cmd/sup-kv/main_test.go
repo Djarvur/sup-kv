@@ -31,7 +31,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	"github.com/Djarvur/sup-kv/internal/grpcapi/apiproto"
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 // Smoke-test constants: the wait deadlines with their poll cadence, the
@@ -389,7 +389,7 @@ func TestMain_lifecycle(t *testing.T) {
 	)
 	awaitServing(t, addr, servingDeadline)
 
-	client := apiproto.NewSupKVClient(supKVConn(t, addr))
+	client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
 	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
 	t.Cleanup(cancel)
 	setResp, err := client.Set(ctx, &apiproto.SetRequest{Key: smokeKey, Value: []byte(smokeValue)})

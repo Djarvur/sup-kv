@@ -29,7 +29,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
-	"github.com/Djarvur/sup-kv/internal/udprepl/replproto"
+	replproto "github.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1"
 )
 
 // maxNodeIDWire is the highest node_id the 16-bit NodeID domain admits;
