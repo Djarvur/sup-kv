@@ -114,7 +114,7 @@ For service builders on small HA clusters (e.g. two management boards in one app
 | cobra/viper | "flags/env config" is fully served by stdlib `flag`; viper's file/remote layers are out of scope | `flag` + `os.Getenv` |
 | Raft/quorum libraries (hashicorp/raft, etcd) | The design is decided CRDT/AP; any consensus lib contradicts the product's reason to exist | The decided LWW-Element-Map in-repo |
 | UUID libraries other than google/uuid (gofrs/uuid, etc.) | New modules in the graph for what is either in-repo (RecordVersion) or already free (RunID via grpc's graph) | In-repo RecordVersion packing; google/uuid v1.6.0 or crypto/rand for RunID |
-| BSR remote plugins in `buf.gen.yaml` | Codegen becomes network-dependent and non-hermetic; CI reproducibility suffers | `local: go tool protoc-gen-go` plugins |
+|  BSR remote plugins in the generate templates | Codegen becomes network-dependent and non-hermetic; CI reproducibility suffers | `local: go tool protoc-gen-go` plugins |
 | Antithesis / DST frameworks | No Go OSS DST framework exists; commercial service is out of scope for v1 | In-repo synctest simulator |
 | `encoding/json/v2` API migration mid-project | v2 engine is already default under the v1 API in Go 1.27; changing dump semantics risks the on-disk format contract for zero benefit | Keep v1 API; revisit post-1.0 with an ADR |
 
@@ -135,7 +135,7 @@ For service builders on small HA clusters (e.g. two management boards in one app
 | powerman/golangci-lint-strict 2.15.0 | golangci-lint exactly v2.15.0 | Config schema changes per version; mismatch fails to parse or silently drops sections |
 | golangci-lint-action v9 | golangci-lint v2.x only | v8+ dropped v1 support; pin `version: v2.15` in action inputs |
 | pgregory.net/rapid v1.3.0 | Go >= 1.18 | No constraints against 1.27 |
-| Buf v1.75.0 | buf.yaml/buf.gen.yaml `version: v2` configs | v2 config format is GA on all current buf 1.x |
+| Buf v1.75.0 | buf.yaml + buf.gen.repl.yaml/buf.gen.api.yaml `version: v2` configs | v2 config format is GA on all current buf 1.x |
 | actions/checkout@v7, actions/setup-go@v7 | Current runner images | setup-go v7 requires runner v2.327.1+ (all current hosted runners qualify); go-version-file pins to go.mod |
 
 ## Sources
@@ -144,7 +144,7 @@ For service builders on small HA clusters (e.g. two management boards in one app
 - GitHub Releases API — bufbuild/buf v1.75.0, actions/checkout v7.0.1, actions/setup-go v7.0.0, golangci-lint-action v9.3.0; google/uuid releases (v1.6.0 NewV7 monotonicity fix) — HIGH (machine-verified)
 - Go 1.27.1 GOROOT source — `SO_BROADCAST` default-on for `SOCK_DGRAM` (`net/sockopt_linux.go` et al.) — HIGH (source-verified)
 - github.com/grpc/grpc-go/releases — v1.85.0 release notes (2026-10-27) — MEDIUM
-- pkg.go.dev / buf.build docs — protoc-gen-go-grpc v1.6.2 semantics (Unimplemented embedding); buf.gen.yaml v2 local-plugin syntax (`local: go tool ...`) — MEDIUM
+- pkg.go.dev / buf.build docs — protoc-gen-go-grpc v1.6.2 semantics (Unimplemented embedding); buf.gen.*.yaml v2 local-plugin syntax (`local: go tool ...`) — MEDIUM
 - github.com/powerman/golangci-lint-strict — per-version strict configs, latest 2.15.0 — MEDIUM
 - github.com/Djarvur/go-ultimate skill v0.15.0 (`references/engineering-policy.md`, `references/repo-and-ci.md`, `references/libraries.md`) — mandated conventions: tool directives, go-version-file, tidy gate, slog + Prometheus-style registry floor, build stamping — MEDIUM (curated, project-mandated)
 - Go release history / jsonv2: Go 1.25 experiment → 1.27 default (`go.dev/doc/jsonv2-migration`, release coverage) — MEDIUM

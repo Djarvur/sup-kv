@@ -11,8 +11,10 @@ modules:
   # paths with zero waivers. The former single root module needed the
   # .gomodcache exclude (buf walks dot-directories by design and the
   # repo-local, gitignored module cache holds stray .proto files); the two
-  # module roots sit above it, so the exclude is gone. buf generate covers
-  # every module in the workspace — one pass, both trees.
+  # module roots sit above it, so the exclude is gone. NOTE: codegen does
+  # NOT run over this workspace — a bare `go tool buf generate` fails (the
+  # default template is gone); `make proto` generates per tree with the
+  # pinned-out templates (buf.gen.repl.yaml / buf.gen.api.yaml).
   - path: internal/udprepl/replproto
   - path: internal/grpcapi/apiproto
 
