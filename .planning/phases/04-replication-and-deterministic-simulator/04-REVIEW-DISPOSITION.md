@@ -7,14 +7,14 @@ findings:
     severity: warning
     disposition: open
     title: "Drained-row retention can publish a duplicate node id in Acked"
-  - id: WR-02
-    severity: warning
-    disposition: open
-    title: "SyncResponseRate above 1e9 silently disables the egress rate limiter"
   - id: IN-01
     severity: info
     disposition: open
     title: "NotifyLocalWrite pre-check leaves a narrow nil-return window during Run's exit"
+  - id: WR-02
+    severity: warning
+    disposition: open
+    title: "SyncResponseRate above 1e9 silently disables the egress rate limiter"
   - id: IN-02
     severity: info
     disposition: open
@@ -25,7 +25,7 @@ findings:
     title: "applyRemote Acks — and supersedes pending tracking with — a record the store rejected"
 open: 4
 total: 5
-recorded: 2026-11-14T19:39:00.180Z
+recorded: 2026-11-14T22:07:37.406Z
 ---
 
 # Phase 04: Code Review Disposition
@@ -33,9 +33,9 @@ recorded: 2026-11-14T19:39:00.180Z
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
 | WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
 | IN-01 | info | open | - |
-| IN-02 | info | open | - |
+| WR-02 | warning | open | - (not in the current review) |
+| IN-02 | info | open | - (not in the current review) |
 | CR-01 | critical | fixed | 04-REVIEW-FIX.md (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
