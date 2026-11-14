@@ -202,6 +202,8 @@ None yet.
 - Phase 3 re-review (2026-11-14): WR-01 (provably-unreachable above-cover guard in confirmWaiters — scope decision, do not auto-strip), IN-01 (dead Decode-error fallback in Open), IN-02 (ApplyRemote marks dirty on no-op merges) — see 03-REVIEW-DISPOSITION.md.
 - Phase 4 re-review (2026-11-14): WR-01 (drained-row Acked set can contain a duplicate after discovery flush — missing dedup in clone(prev.Acked)+prev.WaitingOn, fix: slices.Compact after sort) and WR-02 (sync-response-rate above 1e9 divides to zero and silently disables the egress limiter — clamp in normalized()) open; IN-01 (NotifyLocalWrite TOCTOU vs closed done), IN-02 (Restore marks dirty unconditionally) — see 04-REVIEW-DISPOSITION.md.
 - Phase 03 SECURITY.md was missing since the phase's original execution (2026-11-03) — created retroactively 2026-11-14 (7/7 threats closed, threats_open: 0).
+- [2026-11-14] Maintainer decision: buf STANDARD satisfied with ZERO waivers (7b55ad1, pre-release window) — protos moved to package-derived trees (replproto/supkv/v1, apiproto/supkvapi/v1), service renamed SupKV→SupKVService, WatchEvent→WatchResponse (wire method paths changed; breaking-guard deferred until the rename lands on master). Supersedes the phase-5 CONTEXT pin of those names and the quick-task D-06 waivers.
+- [2026-11-14] 7b55ad1 touched covered inputs of phases 1 (ci.yml, Makefile), 4 (udprepl/repl imports) and 5 (grpcapi surface) — their VERIFICATION.md fingerprints are stale again; phases 2/3 hold. Re-run /gsd-execute-phase 1/4/5 to regenerate before milestone close.
 
 ### Quick Tasks Completed
 
