@@ -7,6 +7,14 @@ findings:
     severity: warning
     disposition: open
     title: "Neither CI job sets a timeout-minutes bound — a wedged job holds its runner for GitHub's 6-hour default"
+  - id: IN-07
+    severity: info
+    disposition: open
+    title: "Three stale `buf.gen.yaml` references remain in .claude/CLAUDE.md after the file was deleted"
+  - id: IN-08
+    severity: info
+    disposition: open
+    title: "buf.yaml comment claims a single workspace-wide generate pass that no longer exists"
   - id: IN-01
     severity: info
     disposition: open
@@ -35,9 +43,9 @@ findings:
     severity: info
     disposition: open
     title: "CI's schema gate and CI's lint run use two separately-pinned binaries"
-open: 6
-total: 8
-recorded: 2026-11-11T10:59:26.661Z
+open: 8
+total: 10
+recorded: 2026-11-14T22:07:37.347Z
 ---
 
 # Phase 01: Code Review Disposition
@@ -45,7 +53,9 @@ recorded: 2026-11-11T10:59:26.661Z
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
 | WR-01 | warning | open | - |
-| IN-01 | info | open | - |
+| IN-07 | info | open | - |
+| IN-08 | info | open | - |
+| IN-01 | info | open | - (not in the current review) |
 | WR-02 | warning | fixed | fix 64f2d24 (branch fix/clock-review-warnings): NewClock clamps initialL into [0, maxL]; regression test TestClock_watermarkClampedIntoDomain (not in the current review) |
 | IN-02 | info | fixed | PR #20 — .claude/CLAUDE.md deferral parenthetical; confirmed by incremental review 85fa4dc (not in the current review) |
 | IN-03 | info | open | - (not in the current review) |
