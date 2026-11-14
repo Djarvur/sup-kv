@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 6
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: planning
-stopped_at: Phase 03 complete, ready to plan Phase 6
-last_updated: "2026-11-14T19:28:34.132Z"
+stopped_at: Phase 04 complete, ready to plan Phase 6
+last_updated: "2026-11-14T19:47:37.185Z"
 last_activity: 2026-11-14
-last_activity_desc: Phase 03 complete, transitioned to Phase 6
-state_head: c525c9c7a2953ad37ca8e88448d8c2808f0f4081
+last_activity_desc: Phase 04 complete, transitioned to Phase 6
+state_head: 0dbe81b667d409e8583919754f49898b7760e63f
 progress:
   total_phases: 7
   completed_phases: 5
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-11)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 03 — Persistence — Dump and Write Confirmation
+**Current focus:** Phase 04 — Replication and Deterministic Simulator
 
 ## Current Position
 
 Phase: 6 — Hardening — Failure Scenarios, Observability, Benchmarks
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-11-14 — Phase 03 complete, transitioned to Phase 6
+Last activity: 2026-11-14 — Phase 04 complete, transitioned to Phase 6
 
 Progress: [███████░░░] 71%
 
@@ -216,5 +216,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-11-11T11:25:00.000Z
-Stopped at: Phase 03 complete, ready to plan Phase 6
+Stopped at: Phase 04 complete, ready to plan Phase 6
 Resume file: None
