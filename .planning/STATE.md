@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: executing
-stopped_at: Phase 05 complete, ready to plan Phase 06
-last_updated: "2026-11-15T19:38:24.044Z"
-last_activity: 2026-11-15
-last_activity_desc: Phase 05 complete, transitioned to Phase 06
-state_head: 11dc175867a7e872e5f8093c59eaff3c6d09b582
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-11-15T22:16:38.665Z"
+last_activity: 2026-11-16
+last_activity_desc: Phase 06 execution started
+state_head: 0f5e03d90aeb2abd3a104887c1fbf7091883ad88
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 24
+  completed_plans: 25
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-11)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 05 — gRPC API and Binary
+**Current focus:** Phase 06 — Hardening — Failure Scenarios, Observability, Benchmarks
 
 ## Current Position
 
-Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — READY TO EXECUTE
-Plan: Not started
+Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
+Plan: 2 of 9
 Status: Ready to execute
-Last activity: 2026-11-15 — Phase 05 complete, transitioned to Phase 06
+Last activity: 2026-11-16 — Phase 06 execution started
 
 Progress: [███████░░░] 71%
 
@@ -84,6 +84,7 @@ Progress: [███████░░░] 71%
 | Phase 05 P04 | 12min | 2 tasks | 4 files |
 | Phase 05 P05 | 12min | 2 tasks | 7 files |
 | Phase 05 P06 | 24min | 3 tasks | 5 files |
+| Phase 06 P01 | 22min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -186,6 +187,13 @@ Recent decisions affecting current work:
 - [Phase 05]: Exit-code contract: exit 0 only after a confirmed final dump (D-19); failed Engine.Flush exits 1 (exitDumpFailed, Restart=on-failure reacts); missing/malformed config exits 2 (exitUsage) — malformed SUPKV_ env values are fatal, --version still works on a broken environment
 - [Phase 05]: revive deep-exit reshaped main.go: every exit in main, registerConfig/serve/shutdown return errors (errors.Join for env mistakes); funlen split wire() into startEngine/wire/listenGRPC wiring helpers — semantics identical to the plan sketch
 - [Phase 05]: Flush is export-by-delegation (unexported flush unchanged); gosec G115 nolints unnecessary on guarded uint64-to-uint16 conversions (directives removed as unused); sole remaining nolint is gochecknoglobals on commit (the -X ldflags mechanism, D-18)
+- [Phase 06]: D-15 P4-WR-02: SyncResponseRate clamps to 500/s outside (0, 1e9] via maxSyncResponseRate — floor(1s/rate) stays non-zero, the egress limiter is never silently off (plan 06-01)
+- [Phase 06]: D-15 P4-WR-01: the drained-row Acked union is sort-then-Compact — a stranger's Ack (counting behavior) plus a discovery-flush re-add legitimately puts one peer in both sets (plan 06-01)
+- [Phase 06]: D-15 P4-IN-01: NotifyLocalWrite is one select over notify+done with a post-send re-check (the review's own alternative shape) — a bare single select loses ~50% of post-Run calls to the uniform choice and breaks the pinned 1100-call regression (plan 06-01)
+- [Phase 06]: D-15 conditional dirty coded to Merge's Conflict contract: Winner=incoming is displacement, Winner=stored a rejection; the conflicts-nil ambiguity (new key vs equal redelivery) resolved by a Get pre-probe; equal-tombstone redelivery arms one redundant dump, the safe direction only (plan 06-01)
+- [Phase 06]: D-15 Restore no-op decided WHOLE-snapshot, never per-record: the per-record content-skip broke the pinned fresh-version dominance contract (TestEngine_snapshotCreateLoadRestore) and was reworked before commit (plan 06-01)
+- [Phase 06]: D-15 P3-WR-01: the above-cover guard is kept verbatim in intent plus an ADDED invariant assertion (kept waiters unresolved; resolved waiters never re-queued); white-box engine_internal_test.go follows the repl_internal_test.go precedent (plan 06-01)
+- [Phase 06]: D-15 P3-IN-01: Open decodes through Load's own oracle argument — Parse IS Decode's error channel, so the accepted generation is exactly the decoded one; the dead branch is removed, not comment-tightened (plan 06-01)
 
 ### Pending Todos
 
@@ -221,6 +229,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-14T21:54:01.285Z
-Stopped at: Phase 05 complete, ready to plan Phase 06
-Resume file: .planning/phases/06-hardening-failure-scenarios-observability-benchmarks/06-CONTEXT.md
+Last session: 2026-11-15T22:16:38.412Z
+Stopped at: Completed 06-01-PLAN.md
+Resume file: None
