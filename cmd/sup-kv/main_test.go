@@ -15,6 +15,7 @@ package main_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -156,13 +158,44 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 }
 
 // smokeNode is one running binary under test with its captured output and
-// its single Wait result.
+// its single Wait result. stderr holds the plain post-exit buffer or the
+// structured-logging tests' lock-guarded live buffer (outputCapture).
 type smokeNode struct {
 	cmd    *exec.Cmd
 	stdout *bytes.Buffer
-	stderr *bytes.Buffer
+	stderr outputCapture
 	exit   chan error
 	exited chan struct{}
+}
+
+// outputCapture is the stderr seam smokeNode holds: the plain bytes.Buffer
+// read only after exit and the logBuffer read while the process still runs
+// both satisfy it.
+type outputCapture interface {
+	Write(p []byte) (int, error)
+	String() string
+}
+
+// logBuffer is a mutex-guarded bytes.Buffer: the structured-logging tests
+// read the live process's stderr while the exec package's pump goroutine
+// still writes it — a bare bytes.Buffer is not safe for that concurrency.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+// Write buffers p under the lock.
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// String returns the buffered output under the lock.
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // startNode launches the binary with args (env appended to the inherited
@@ -170,8 +203,21 @@ type smokeNode struct {
 // never reaches its own SIGTERM still cannot leak the process.
 func startNode(t *testing.T, bin string, env []string, args ...string) *smokeNode {
 	t.Helper()
+	return launchNode(t, bin, &bytes.Buffer{}, env, args...)
+}
+
+// startLoggedNode is startNode with the lock-guarded live stderr buffer —
+// the shape the structured-logging tests poll while the node runs.
+func startLoggedNode(t *testing.T, bin string, env []string, args ...string) *smokeNode {
+	t.Helper()
+	return launchNode(t, bin, &logBuffer{}, env, args...)
+}
+
+// launchNode is the shared startNode body over one stderr capture.
+func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, args ...string) *smokeNode {
+	t.Helper()
 	cmd := exec.CommandContext(t.Context(), bin, args...)
-	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	stdout := &bytes.Buffer{}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
@@ -529,5 +575,240 @@ func TestShutdown_secondSignal(t *testing.T) {
 	}
 	if !strings.Contains(string(dump), smokeKey) {
 		t.Fatalf("the final dump at %s does not contain the committed key %q:\n%s", dumpPath, smokeKey, dump)
+	}
+}
+
+// Structured-logging test constants (D-06/D-07/D-08): the broadcast
+// capability probe's wait, and main's configuration-error exit code
+// (exitUsage — the collected env-error path the malformed SUPKV_LOG_* values
+// must abort through, never a silent default).
+const (
+	logProbeWait  = 300 * time.Millisecond
+	exitUsageCode = 2
+)
+
+// logProbeSocket binds a wildcard udp4 socket with SO_REUSEADDR and
+// SO_BROADCAST set before bind — the adapter's exact socket recipe, so the
+// capability probe measures the production topology (the smoke_test.go and
+// wait_integration_test.go precedent).
+func logProbeSocket(bindAddr string) (*net.UDPConn, error) {
+	var opErr error
+	lc := net.ListenConfig{
+		Control: func(_, _ string, c syscall.RawConn) error {
+			err := c.Control(func(fd uintptr) {
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				if opErr != nil {
+					return
+				}
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+			})
+			if err != nil {
+				return fmt.Errorf("socket control: %w", err)
+			}
+			if opErr != nil {
+				return fmt.Errorf("socket options: %w", opErr)
+			}
+			return nil
+		},
+	}
+	packetConn, err := lc.ListenPacket(context.Background(), "udp4", bindAddr)
+	if err != nil {
+		return nil, fmt.Errorf("bind udp4 %s: %w", bindAddr, err)
+	}
+	return packetConn.(*net.UDPConn), nil
+}
+
+// probeLoopbackBroadcast pre-flights the one platform capability the
+// two-node log tests need — a datagram sent to the loopback broadcast
+// address reaches the socket bound to the destination port (loopback
+// broadcast fan-out is a Linux-only kernel behavior; macOS lo0 carries no
+// BROADCAST flag — the wait_integration_test.go probe, D-12) — and skips
+// loudly naming what was probed when it is missing. The env-validation half
+// of the logging contract stays proven on every platform.
+func probeLoopbackBroadcast(t *testing.T, port int) {
+	t.Helper()
+	rx, err := logProbeSocket(fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		t.Fatalf("probe rx bind: %v", err)
+	}
+	defer func() { _ = rx.Close() }()
+	tx, err := logProbeSocket("0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("probe tx bind: %v", err)
+	}
+	defer func() { _ = tx.Close() }()
+	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
+	_, err = tx.WriteToUDP([]byte("sup-kv log smoke probe"), dst)
+	if err != nil {
+		t.Fatalf("probe send to %s: %v", dst, err)
+	}
+	err = rx.SetReadDeadline(time.Now().Add(logProbeWait))
+	if err != nil {
+		t.Fatalf("probe read deadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	for {
+		n, _, readErr := rx.ReadFromUDP(buf)
+		if readErr != nil {
+			t.Skipf(
+				"loopback broadcast to %s did not reach the bound socket within %v — platform lacks the capability (the env-validation half of the logging contract stays proven by TestLog_envValidation)",
+				dst,
+				logProbeWait,
+			)
+		}
+		if n > 0 {
+			return
+		}
+	}
+}
+
+// startLogPair launches the two-node asymmetric pair (research Pattern 5)
+// with BOTH nodes claiming node-id 1: A binds portA and broadcasts to
+// portB, B binds portB and broadcasts to portA — cross-delivery without
+// self-echo — so every Hello crossing the pair is the DuplicateNodeID
+// configuration error (REPL-08), the driven log event. Node A's stderr is
+// the lock-guarded live buffer; envA is prepended to A's environment only.
+func startLogPair(t *testing.T, bin string, envA []string, portA, portB int) (nodeA, nodeB *smokeNode) {
+	t.Helper()
+	grpcA, grpcB := freeTCPPort(t), freeTCPPort(t)
+	nodeA = startLoggedNode(t, bin, envA,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(portA),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(portB),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcA),
+		"--startup-gate=10ms",
+	)
+	nodeB = startNode(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(portB),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(portA),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcB),
+		"--startup-gate=10ms",
+	)
+	return nodeA, nodeB
+}
+
+// TestLog_jsonDefault pins D-06/D-07's default contract on the real binary:
+// with SUPKV_LOG_FORMAT unset every stderr line the running node emits is
+// one JSON object carrying non-empty level and msg keys, and the driven
+// event — the DuplicateNodeID configuration error crossing the asymmetric
+// pair — rides as the detail attr under the static tap msg, never as the
+// msg itself (D-08, T-6-05: the attr surface carries metadata only).
+func TestLog_jsonDefault(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	portA, portB := freeUDPPort(t), freeUDPPort(t)
+	probeLoopbackBroadcast(t, portB)
+	nodeA, nodeB := startLogPair(t, bin, nil, portA, portB)
+
+	waitFor(t, servingDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
+		return strings.Contains(nodeA.stderr.String(), "configuration error")
+	})
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the JSON-format run")
+
+	sawDetailEvent := false
+	for line := range strings.SplitSeq(nodeA.stderr.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			Level  string `json:"level"`
+			Msg    string `json:"msg"`
+			Detail string `json:"detail"`
+		}
+		err := json.Unmarshal([]byte(line), &rec)
+		if err != nil {
+			t.Fatalf("stderr line %q is not one JSON object: %v", line, err)
+		}
+		if rec.Level == "" || rec.Msg == "" {
+			t.Fatalf("stderr line %q lacks a non-empty level or msg key: %+v", line, rec)
+		}
+		if rec.Msg == "Replication adapter" && strings.Contains(rec.Detail, "configuration error") {
+			sawDetailEvent = true
+			if !strings.Contains(rec.Detail, "node_id 1") {
+				t.Fatalf("the driven event's detail %q does not name node_id 1", rec.Detail)
+			}
+		}
+	}
+	if !sawDetailEvent {
+		t.Fatalf("no Replication adapter record carrying the configuration error appeared in:\n%s", nodeA.stderr.String())
+	}
+}
+
+// TestLog_formatText pins the SUPKV_LOG_FORMAT=text half of D-06: the same
+// driven event surfaces as key=value text — no JSON object on stderr — with
+// the prebuilt message still riding the detail attr under the static msg.
+func TestLog_formatText(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	portA, portB := freeUDPPort(t), freeUDPPort(t)
+	probeLoopbackBroadcast(t, portB)
+	nodeA, nodeB := startLogPair(t, bin, []string{"SUPKV_LOG_FORMAT=text"}, portA, portB)
+
+	waitFor(t, servingDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
+		return strings.Contains(nodeA.stderr.String(), "configuration error")
+	})
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the text-format run")
+
+	sawDetailEvent := false
+	for line := range strings.SplitSeq(nodeA.stderr.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "{") {
+			t.Fatalf("text-format stderr line %q is a JSON object, want key=value text", line)
+		}
+		if strings.Contains(line, `msg="Replication adapter"`) && strings.Contains(line, `detail="sup-kv: configuration error`) {
+			sawDetailEvent = true
+			if !strings.Contains(line, "node_id 1") {
+				t.Fatalf("the driven event's line %q does not name node_id 1", line)
+			}
+		}
+	}
+	if !sawDetailEvent {
+		t.Fatalf("no Replication adapter text record carrying the configuration error appeared in:\n%s", nodeA.stderr.String())
+	}
+}
+
+// TestLog_envValidation pins the D-07 fail-closed contract: a malformed
+// SUPKV_LOG_LEVEL or SUPKV_LOG_FORMAT value aborts startup through the
+// collected env-error path with exitUsage — never a silent default.
+func TestLog_envValidation(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+	for _, tc := range []struct{ name, env string }{
+		{name: "malformed level", env: "SUPKV_LOG_LEVEL=bogus"},
+		{name: "malformed format", env: "SUPKV_LOG_FORMAT=bogus"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			udpPort := freeUDPPort(t)
+			node := startNode(t, bin, []string{tc.env},
+				"--node-id=1",
+				"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+				"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+				"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			)
+			var exitErr error
+			waitFor(t, exitDeadline, "process exit for "+tc.env, func() bool {
+				select {
+				case exitErr = <-node.exit:
+					return true
+				default:
+					return false
+				}
+			})
+			assertExitCode(t, exitErr, exitUsageCode)
+		})
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"net"
 	"os"
@@ -54,6 +55,7 @@ var (
 	errNodeIDRange     = errors.New("node-id exceeds the 16-bit node ID space")
 	errMissingRequired = errors.New("missing required knobs")
 	errNodeIDEnv       = errors.New("must be an integer within the 16-bit node ID space")
+	errLogFormatEnv    = errors.New("must be json or text")
 )
 
 // Process exit codes: a configuration error (missing or malformed knob)
@@ -98,6 +100,12 @@ const (
 	envDumpDebounce       = "SUPKV_DUMP_DEBOUNCE"
 	envDumpMaxWait        = "SUPKV_DUMP_MAX_WAIT"
 	envDriftWarn          = "SUPKV_DRIFT_WARN"
+
+	// The structured-logging env knobs (D-06/D-07) are env-only — no flag
+	// twins: they configure the process's own output format, not its
+	// service behavior.
+	envLogLevel  = "SUPKV_LOG_LEVEL"
+	envLogFormat = "SUPKV_LOG_FORMAT"
 )
 
 // The design defaults (docs/IDEA.md §Parameters, plus the two API-layer
@@ -118,6 +126,17 @@ const (
 	defaultDumpDebounce   = 50 * time.Millisecond
 	defaultDumpMaxWait    = time.Second
 	defaultDriftWarn      = 60 * time.Second
+
+	// The structured-logging defaults (D-06/D-07): JSON records on stderr,
+	// info level.
+	defaultLogLevel  = slog.LevelInfo
+	defaultLogFormat = logFormatJSON
+)
+
+// The accepted SUPKV_LOG_FORMAT values (D-06).
+const (
+	logFormatJSON = "json"
+	logFormatText = "text"
 )
 
 // config is the resolved launch configuration, built once at startup.
@@ -141,6 +160,8 @@ type config struct {
 	dumpDebounce       time.Duration
 	dumpMaxWait        time.Duration
 	driftWarn          time.Duration
+	logLevel           slog.Level
+	logFormat          string
 }
 
 // wired bundles the running services with their lifecycle handles — the
@@ -174,6 +195,12 @@ func main() {
 		os.Exit(exitUsage)
 	}
 
+	// The one slog handler install (D-06/D-07) precedes every service
+	// goroutine: the udprepl Log tap, the adapter's discard events and the
+	// log-package calls redirected through slog.SetDefault all flow through
+	// this handler for the process's whole life.
+	setupLogging(cfg)
+
 	node, listener, err := wire(cfg)
 	if err != nil {
 		log.Fatalf("sup-kv: %v", err)
@@ -195,6 +222,22 @@ func main() {
 		os.Exit(exitDumpFailed)
 	}
 	os.Exit(0)
+}
+
+// setupLogging installs the process's one slog handler on stderr (D-06,
+// D-07): JSON records by default, key=value text when SUPKV_LOG_FORMAT=text,
+// at the level SUPKV_LOG_LEVEL resolved (debug through error). Called once
+// from main before wire launches any goroutine. [slog.SetDefault] also
+// redirects the log package's default logger, so the remaining direct
+// [log.Printf] calls surface as level=INFO records in the same format —
+// every stderr line the running node emits is one handler-formatted record.
+func setupLogging(cfg config) {
+	opts := &slog.HandlerOptions{Level: cfg.logLevel}
+	var h slog.Handler = slog.NewJSONHandler(os.Stderr, opts)
+	if cfg.logFormat == logFormatText {
+		h = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(h))
 }
 
 // registerConfig declares every knob as a flag whose default is its SUPKV_
@@ -262,7 +305,27 @@ func registerConfig(cfg *config, nodeID *uint64, showVersion *bool) error {
 		"dump start bound from the oldest unconfirmed write (env SUPKV_DUMP_MAX_WAIT)")
 	flag.DurationVar(&cfg.driftWarn, "drift-warn", envDur(envDriftWarn, defaultDriftWarn),
 		"clock drift warning threshold (env SUPKV_DRIFT_WARN)")
+
+	resolveLogKnobs(cfg, &errs)
 	return errors.Join(errs...)
+}
+
+// resolveLogKnobs resolves the env-only structured-logging knobs (D-06/D-07)
+// into cfg, appending each malformed value to errs under its env name — the
+// same collected env-error contract registerConfig's fail() applies to the
+// flag twins: a malformed SUPKV_LOG_* value aborts startup with exitUsage,
+// never a silently-swallowed default.
+func resolveLogKnobs(cfg *config, errs *[]error) {
+	level, levelErr := envSlogLevel(envLogLevel, defaultLogLevel)
+	if levelErr != nil {
+		*errs = append(*errs, fmt.Errorf("%s: %w", envLogLevel, levelErr))
+	}
+	cfg.logLevel = level
+	format, formatErr := envLogValue(envLogFormat, defaultLogFormat)
+	if formatErr != nil {
+		*errs = append(*errs, fmt.Errorf("%s: %w", envLogFormat, formatErr))
+	}
+	cfg.logFormat = format
 }
 
 // finalizeConfig validates what only the parsed flags can decide — the
@@ -320,7 +383,11 @@ func wire(cfg config) (*wired, net.Listener, error) {
 		SyncInterval:       cfg.syncInterval,
 		SyncChunkBytes:     cfg.syncChunkBytes,
 		SyncResponseRate:   cfg.syncResponseRate,
-		Log:                func(msg string) { log.Printf("%s", msg) },
+		// The core's prebuilt metadata strings (REPL-08 configuration
+		// errors, apply failures) ride as the detail attr under a static
+		// capitalized msg — the sloglint static-msg discipline (D-08); a
+		// dynamic string never becomes the msg.
+		Log: func(msg string) { slog.Warn("Replication adapter", "detail", msg) },
 	})
 	if err != nil {
 		engineCancel()
@@ -541,4 +608,35 @@ func envDuration(env string, def time.Duration) (time.Duration, error) {
 		return def, fmt.Errorf("must be a duration: %w", err)
 	}
 	return d, nil
+}
+
+// envSlogLevel resolves the log-level env knob (D-07): debug, info, warn or
+// error, case-insensitively, per [slog.Level.UnmarshalText]. A malformed
+// value is an error, never a silently-swallowed default.
+func envSlogLevel(env string, def slog.Level) (slog.Level, error) {
+	raw := envOrDefault(env, "")
+	if raw == "" {
+		return def, nil
+	}
+	var lvl slog.Level
+	err := lvl.UnmarshalText([]byte(raw))
+	if err != nil {
+		return def, fmt.Errorf("must be debug, info, warn or error: %w", err)
+	}
+	return lvl, nil
+}
+
+// envLogValue resolves the log-format env knob (D-06): json (the default)
+// or text, case-insensitively. A malformed value is an error, never a
+// silently-swallowed default.
+func envLogValue(env, def string) (string, error) {
+	raw := envOrDefault(env, "")
+	switch strings.ToLower(raw) {
+	case "":
+		return def, nil
+	case logFormatJSON, logFormatText:
+		return strings.ToLower(raw), nil
+	default:
+		return def, fmt.Errorf("%w: %q", errLogFormatEnv, raw)
+	}
 }
