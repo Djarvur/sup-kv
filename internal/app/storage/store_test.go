@@ -219,32 +219,13 @@ func TestStore_Get(t *testing.T) {
 	})
 }
 
-// TestStore_Set covers the Set contract: unconditional LWW replace with
-// strictly increasing versions, same-millisecond disambiguation by the
-// counter, zero-length values, and fresh versions on repeat writes
-// (CORE-02).
+// TestStore_Set covers the Set contract: strictly increasing versions with
+// same-millisecond disambiguation by the counter, zero-length values, and
+// fresh versions on repeat writes (CORE-02; the replace-under-greater-
+// version observable, including the Get-read of the second write, is pinned
+// once in TestStore_endToEnd — the P2-IN-03 dedup).
 func TestStore_Set(t *testing.T) {
 	t.Parallel()
-	t.Run("a second set replaces the value under a strictly greater version", func(t *testing.T) {
-		t.Parallel()
-		store := newStore()
-		_, _, err := store.Set("k", []byte("one"))
-		if err != nil {
-			t.Fatalf("first Set() error = %v, want nil", err)
-		}
-		second, _, err := store.Set("k", []byte("two"))
-		if err != nil {
-			t.Fatalf("second Set() error = %v, want nil", err)
-		}
-		rec, err := store.Get("k")
-		if err != nil {
-			t.Fatalf("Get() error = %v, want nil", err)
-		}
-		if got := second.Compare(rec.Version); got != cmpSame || !bytes.Equal(rec.Data, []byte("two")) {
-			t.Errorf("stored = (%x, %q), want the second write (%x, %q)",
-				rec.Version[:], rec.Data, second[:], "two")
-		}
-	})
 	t.Run("two sets inside one millisecond get distinct strictly increasing versions", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()

@@ -5,7 +5,7 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Neither CI job sets a timeout-minutes bound — a wedged job holds its runner for GitHub's 6-hour default"
   - id: IN-07
     severity: info
@@ -43,7 +43,7 @@ findings:
     severity: info
     disposition: open
     title: "CI's schema gate and CI's lint run use two separately-pinned binaries"
-open: 7
+open: 6
 total: 10
 recorded: 2026-11-14T22:07:37.347Z
 ---
@@ -52,7 +52,7 @@ recorded: 2026-11-14T22:07:37.347Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
+| WR-01 | warning | fixed | fixed — timeout-minutes 15 on job lint and 20 on job gate, additive keys only: job ids and every check-run context (the gate (${{ matrix.name }}) names, the ruleset required_status_checks contract) byte-identical (plan 06-02, D-15) |
 | IN-07 | info | fixed | fixed in 4f76e26 — stale buf.gen.yaml references rewritten to buf.gen.*.yaml (review-day fix) |
 | IN-08 | info | fixed | fixed in 4f76e26 — buf.yaml comment corrected: bare workspace generate is gone, make proto is the path (review-day fix) |
 | IN-01 | info | fixed | fixed — serve() no longer releases signal ownership before shutdown: the armed SIGTERM/SIGINT channel spans serving and the D-19 sequence, a second signal during the GracefulStop drain takes the force path (Stop) and the final Flush still lands, exit 0; regression test TestShutdown_secondSignal in cmd/sup-kv/main_test.go (plan 06-02, D-15) |

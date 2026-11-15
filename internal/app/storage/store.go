@@ -29,14 +29,22 @@ type Config struct {
 	// OnChange, when non-nil, is the change tap the Watch stream consumes
 	// (API-03): install fires it under the store write lock with the record
 	// that just became the stored record — the exact record a subsequent
-	// Get returns, recomputed checksum included. Every change source
+	// Records() snapshot holds, recomputed checksum included, and the record
+	// a subsequent Get returns only when it is live. A tombstone install
+	// fires the tap exactly like any other change (a delete IS a change),
+	// yet a subsequent Get returns ErrNotFound for it — the tombstone is
+	// visible only through Records(). Every change source
 	// converges on install (local Set/SetIfAbsent/Delete writes, remote
 	// merges, replicated tombstone deletes, snapshot-restore replay), so the
 	// tap observes commit order for all of them, and the strictly-greater
 	// join law keeps a merge loser and an equal-version redelivery from ever
 	// reaching it (D-06: events fire only on actual state changes). The
-	// callback runs under the store write lock and must not block — fan-out
-	// belongs behind a non-blocking channel send. The handed record is the
+	// callback is invoked synchronously from the write paths under the
+	// store's locking discipline and must not block — fan-out belongs behind
+	// a non-blocking channel send — and it must not call back into the same
+	// store: the tap runs with the write lock held, Go's sync.RWMutex is
+	// not reentrant, and even a read-only Get self-deadlocks, stalling every
+	// store operation. The handed record is the
 	// store's stored copy: records are replaced wholesale on the next
 	// install, never mutated in place, so retaining it is safe.
 	OnChange func(key string, rec Record)
