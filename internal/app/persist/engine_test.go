@@ -1471,3 +1471,107 @@ func TestEngine_configShrunkValueLimits(t *testing.T) {
 		t.Errorf("post-restore Get(slim) = (%q, %v), want (slim, nil)", slimRec.Data, slimErr)
 	}
 }
+
+// redundantRemoteNode is the peer identity the redundant-dirty fixtures'
+// remote versions carry — distinct from synctestNodeID so the versions
+// never collide with locally stamped ones.
+const redundantRemoteNode = uint16(0x0303)
+
+// TestEngine_redundantDirty proves the conditional dirty (D-15, 03 IN-02 +
+// 04 IN-02, threat T-6-01): case (a) — after one establishing remote merge
+// has dumped, an equal-version redelivery of the same record, a stale
+// (rejected) redelivery, and a Restore whose snapshot content already
+// matches the store all leave the clean engine clean: no further dump
+// runs. Case (b) — a genuinely greater remote version on a clean engine
+// still arms the dump, and the one confirming dump covers a concurrent
+// local write's waiter too, so PERS-04's confirmation semantics are
+// unchanged.
+func TestEngine_redundantDirty(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		base := version.PackVersion(1730000000000, 0, redundantRemoteNode)
+		rec := storage.Record{Version: base, Data: []byte("remote value")}
+		_, _, err := eng.ApplyRemote("cfg/remote", rec)
+		if err != nil {
+			t.Fatalf("establishing ApplyRemote() error = %v, want nil", err)
+		}
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("the establishing remote merge ran %d saves, want 1", got)
+		}
+
+		// Equal-version redelivery over the live record: a full no-op.
+		_, _, err = eng.ApplyRemote("cfg/remote", rec)
+		if err != nil {
+			t.Fatalf("equal-redelivery ApplyRemote() error = %v, want nil", err)
+		}
+		// Stale redelivery: rejected with exactly one conflict naming the
+		// stored record as the winner, nothing installed.
+		stale := storage.Record{Version: version.PackVersion(1730000000000-1, 0, redundantRemoteNode), Data: []byte("stale value")}
+		conflicts, _, err := eng.ApplyRemote("cfg/remote", stale)
+		if err != nil {
+			t.Fatalf("stale ApplyRemote() error = %v, want nil", err)
+		}
+		if len(conflicts) != 1 || conflicts[0].Winner != base {
+			t.Fatalf("stale redelivery conflicts = %v, want exactly one with Winner = the stored version", conflicts)
+		}
+		// A snapshot of the current state replays entirely as skips: the
+		// restore marks nothing dirty and its final flush replies nil
+		// without a save.
+		err = dumps.CreateSnapshot("matching")
+		if err != nil {
+			t.Fatalf("CreateSnapshot(matching) error = %v, want nil", err)
+		}
+		err = eng.Restore("matching")
+		if err != nil {
+			t.Fatalf("Restore(matching) error = %v, want nil", err)
+		}
+
+		// Any wrongly armed dirty epoch would fire its save inside this
+		// window; a clean engine stays at exactly the one save.
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("no-op redelivery + matching restore ran %d extra dumps, want 0 — redundant dirty (D-15)", got-1)
+		}
+
+		// Case (b): the greater remote version alone arms a dump on a
+		// clean engine, and the same covering dump resolves the concurrent
+		// local write's waiter — one save covers both.
+		eng2, dumps2 := newFakeEngine()
+		defer startDumper(t, eng2)()
+		newer := version.PackVersion(1730000000001, 0, redundantRemoteNode)
+		_, _, err = eng2.ApplyRemote("cfg/remote", storage.Record{Version: newer, Data: []byte("newer value")})
+		if err != nil {
+			t.Fatalf("greater-version ApplyRemote() error = %v, want nil", err)
+		}
+		setDone := make(chan error, 1)
+		go func() {
+			_, _, err := eng2.Set("cfg/local", []byte("local value"))
+			setDone <- err
+		}()
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		err = <-setDone
+		if err != nil {
+			t.Fatalf("local Set() through the remote-armed epoch error = %v, want nil (PERS-04 unchanged)", err)
+		}
+		if got := dumps2.saveCount(); got != 1 {
+			t.Fatalf("the remote change plus the local waiter ran %d saves, want exactly 1 covering dump", got)
+		}
+		records, discarded, err := persist.Decode(dumps2.save(0).dump)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode(covering dump) = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		if r, ok := records["cfg/remote"]; !ok || r.Version != newer || string(r.Data) != "newer value" {
+			t.Fatalf("covering dump holds cfg/remote = (%v, %q), want (%v, %q)", r.Version, r.Data, newer, "newer value")
+		}
+		if r, ok := records["cfg/local"]; !ok || string(r.Data) != "local value" {
+			t.Fatalf("covering dump holds cfg/local = %q, want the confirmed local write", r.Data)
+		}
+	})
+}
