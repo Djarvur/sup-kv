@@ -152,11 +152,28 @@ Plans:
 **Depends on**: Phase 5
 **Requirements**: OBS-01, OBS-02, OBS-03, TEST-04, TEST-05
 **Success Criteria** (what must be TRUE):
-  1. Every failure scenario from the design doc is an automated test demonstrating convergence within the documented bounds — datagram and Ack loss, duplicates/reordering/own-echo, partitions for seconds and for days (both sides serving writes, deterministic winner, conflict-journal entries), one-way connectivity, node restart via RunID change, empty-disk recovery at `sync_response_rate`, both-nodes-down restart, corrupted dump records, wall-clock jumps live and across restarts, a far-ahead clock, ~1000 writes/s bursts, duplicate `node_id`, protocol version mismatch — including real-socket two-process runs in CI, not only simulation
+  1. Every failure scenario from the design doc is an automated test demonstrating convergence within the documented bounds — datagram and Ack loss, duplicates/reordering/own-echo, partitions for seconds and for days (both sides serving writes, deterministic winner asserted + merge-conflicts counter; conflict journal cancelled per phase-6 D-10), one-way connectivity, node restart via RunID change, empty-disk recovery at `sync_response_rate`, both-nodes-down restart, corrupted dump records, wall-clock jumps live and across restarts, a far-ahead clock, ~1000 writes/s bursts, duplicate `node_id`, protocol version mismatch — including real-socket two-process runs in CI, not only simulation
   2. The metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, clock-drift warnings, and discarded datagrams by class
   3. Logging is structured and every dropped-datagram class (bad CRC / own broadcast / bad proto version) is distinguishable in logs
   4. Benchmarks cover dump at 10k keys and replication throughput under burst writes, with confirmation latency staying bounded under bursts
-**Plans**: TBD
+**Plans**: 0/9 plans complete
+Plans:
+**Wave 1**
+- [ ] 06-01-PLAN.md — Hardening backlog I: replication/persistence review fixes with regression tests (D-15: P4-WR-01/02, P4-IN-01, P3-WR-01, P3-IN-01, P4-IN-02+P3-IN-02) (TEST-04)
+- [ ] 06-02-PLAN.md — Hardening backlog II: second-signal shutdown fix, ci.yml timeout-minutes, storage doc/subtest fixes (D-15: P1-IN-01, P1-WR-01, P2-IN-01..03) (TEST-04)
+
+**Wave 2** *(blocked on Wave 1)*
+- [ ] 06-03-PLAN.md — slog JSON pipeline (SUPKV_LOG_LEVEL/FORMAT, Log-tap bridge), OnDiscard seam, counter seams (MergeStats, DumpStats, unacked/sent mirrors) (OBS-01, OBS-03)
+- [ ] 06-06-PLAN.md — Real-socket scenarios: asymmetric-topology convergence + bad-CRC/proto-mismatch/duplicate-node_id classification (TEST-04)
+- [ ] 06-07-PLAN.md — Exec scenarios x4 on the existing harness: kill-9 restart, both-down (+ corrupted dump record), SIGTERM final dump, empty-disk recovery (D-11/D-12) (TEST-04)
+
+**Wave 3** *(blocked on 06-03/06-06)*
+- [ ] 06-04-PLAN.md — Metrics/debug endpoint: in-repo Prometheus text exporter, opt-in listener, optional mTLS, /debug/vars + pprof, supkv_ families (D-01..D-05) (OBS-01, OBS-02)
+- [ ] 06-05-PLAN.md — Simulator scenarios: partitions seconds/days, one-way, loss/duplicates/reordering, clock jumps/far-ahead, bursts, empty-disk bound, restart resync (TEST-04)
+- [ ] 06-08-PLAN.md — Benchmarks: BenchmarkDump10kKeys, BenchmarkReplicationBurst, BenchmarkConfirmationLatency + make bench (D-13/D-14) (TEST-05)
+
+**Wave 4** *(blocked on Waves 2-3)*
+- [ ] 06-09-PLAN.md — darwin F_FULLFSYNC sync, full phase gate, D-16 fingerprint regeneration checkpoint (TEST-04)
 
 ### Phase 7: v1.0 — Docs, Examples and Release
 **Goal**: A stranger can deploy and operate a two-node sup-kv cluster from the documentation alone, and v1.0 ships
@@ -180,5 +197,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Persistence — Dump and Write Confirmation | 2/2 | Complete    | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | 6/6 | Complete    | 2026-11-07 |
 | 5. gRPC API and Binary | 6/6 | Complete    | 2026-11-09 |
-| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 0/TBD | Not started | - |
+| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 0/9 | Not started | - |
 | 7. v1.0 — Docs, Examples and Release | 0/TBD | Not started | - |
