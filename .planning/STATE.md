@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: executing
-stopped_at: Completed 06-03-PLAN.md
-last_updated: "2026-11-15T23:08:19.291Z"
+stopped_at: Completed 06-06-PLAN.md
+last_updated: "2026-11-15T23:24:21.908Z"
 last_activity: 2026-11-16
 last_activity_desc: Phase 06 execution started
-state_head: 3ff81db163b6370a86f2e90d2a49645185425a06
+state_head: cb06fb53f9cc13e35794fd3b7ff68308845f2196
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 27
+  completed_plans: 28
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Last activity: 2026-11-16 — Phase 06 execution started
 
@@ -87,6 +87,7 @@ Progress: [███████░░░] 71%
 | Phase 06 P01 | 22min | 3 tasks | 9 files |
 | Phase 06 P02 | 9min | 2 tasks | 7 files |
 | Phase 06 P03 | 28min | 3 tasks | 11 files |
+| Phase 06 P06 | 12min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -205,6 +206,9 @@ Recent decisions affecting current work:
 - [Phase 06]: [Phase 06]: D-08/D-09: the OnDiscard-to-slog bridge lives in the ADAPTER (udprepl.New defaults a nil OnDiscard to logDiscard) — production discard events surface with zero main wiring and stay provable at the adapter seam; discard lines emit at Debug (T-6-06 flood bound) while the O(1) counters carry the signal (plan 06-03)
 - [Phase 06]: [Phase 06]: setupLogging runs after finalizeConfig and before wire — slog.SetDefault's log-package redirect keeps every remaining log.Printf call in the same handler format, so every stderr line of a running node is one handler-formatted record; the exit-2 usage path stays plain text (plan 06-03)
 - [Phase 06]: [Phase 06]: MergeStats.DriftWarnings counts clock.Update's own gated signal — the drift return is measured against the clock's pre-absorb l, so a far-ahead stamp warns on the NEXT apply, not its own arrival; TestMergeStats_counts pins the absorb-then-warn sequence (plan 06-03)
+- [Phase 06]: 06-06 per-case isolated converged pairs in TestScenario_discardClasses — the vendored paralleltest/tparallel gates demand parallel subtests and per-class exactness must not share a mutable Discards baseline across concurrent subtests; scenarioConvergedPair is the shared convergence prologue TestScenario_convergence reuses (plan 06-06)
+- [Phase 06]: 06-06 EncodeDatagramForTestVersion in repl_internal_test.go — the exported test-binary-only explicit-proto-version crafting seam with a production-faithful CRC (the receiver's CRC gate passes, the version check is the branch under test); the impostor pair rides plain EncodeDatagramForTest nodeID/runID parameters — production encode and New untouched (plan 06-06)
+- [Phase 06]: 06-06 the Ack-drain assertion reads PendingCopy emptiness — the 250ms drained-row retention sits inside the timer-derived 10x-hello converge bound, so an observably empty mirror is the honest full-Ack signal on the asymmetric topology; the scenario-local capability probe names the darwin lo0 reason per D-12 (plan 06-06)
 
 ### Pending Todos
 
@@ -240,6 +244,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-15T23:08:18.811Z
-Stopped at: Completed 06-03-PLAN.md
+Last session: 2026-11-15T23:24:21.196Z
+Stopped at: Completed 06-06-PLAN.md
 Resume file: None
