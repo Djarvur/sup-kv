@@ -23,6 +23,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +33,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
+	"github.com/Djarvur/sup-kv/internal/port"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -69,6 +73,22 @@ var (
 	scenarioValA = []byte("scenario-value-a-over-real-udp")
 	scenarioValB = []byte("scenario-value-b-over-real-udp")
 )
+
+// Adversarial-scenario constants: the impostor's arbitrary fresh identity —
+// a node id no scenario node owns, because claiming a live node's OWN id is
+// the own-echo/restart territory the core suites already cover — its fixed
+// 16-byte run id, and the wait bound for one crafted datagram's
+// classification to surface through the adapter atomics (loopback delivery
+// is sub-millisecond; two seconds is the established generous bound).
+const (
+	scenarioImpostorNode = uint16(47)
+	scenarioEffectWait   = 2 * time.Second
+)
+
+// scenarioImpostorRun is the impostor's fixed run id — the SAME value from
+// both adversarial sockets, because the second duplicate-node_id variant
+// keys on remembered run_id equality plus a differing source handle.
+var scenarioImpostorRun = [16]byte{0xC3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3}
 
 // scenarioProbeBroadcast pre-flights the one platform capability every
 // scenario in this file needs — a datagram sent to the loopback broadcast
@@ -174,6 +194,28 @@ func startScenarioPair(t *testing.T, cfgA, cfgB repl.Config) (a, b *scenarioNode
 		newScenarioNode(t, scenarioNodeB, pB, pA, cfgB), pA
 }
 
+// scenarioConvergedPair runs the convergence prologue every scenario shares:
+// start the asymmetric pair, wait for mutual discovery, write one record per
+// node, wait for each store to serve the peer's record byte-equal, and
+// return the pair, node A's bound port and both stores' full snapshots —
+// the quiescent converged baseline the adversarial cases fire at.
+func scenarioConvergedPair(t *testing.T, cfgA, cfgB repl.Config) (
+	a, b *scenarioNode, portA int, snapA, snapB map[string]storage.Record,
+) {
+	t.Helper()
+	a, b, portA = startScenarioPair(t, cfgA, cfgB)
+	waitFor(t, scenarioDiscoveryDeadline, "mutual discovery (both known-peer counts == 1)", func() bool {
+		return a.adapter.KnownPeers() == 1 && b.adapter.KnownPeers() == 1
+	})
+	verA := scenarioWrite(t, a, scenarioKeyA, scenarioValA)
+	verB := scenarioWrite(t, b, scenarioKeyB, scenarioValB)
+	waitFor(t, scenarioConvergeDeadline, "each store serving the peer's record byte-equal", func() bool {
+		return scenarioServes(b, scenarioKeyA, verA, scenarioValA) &&
+			scenarioServes(a, scenarioKeyB, verB, scenarioValB)
+	})
+	return a, b, portA, a.store.Records(), b.store.Records()
+}
+
 // scenarioWrite stores key=val on node n and announces it through the
 // author's explicit notification (D-05), returning the stored version.
 func scenarioWrite(t *testing.T, n *scenarioNode, key string, val []byte) version.RecordVersion {
@@ -211,27 +253,204 @@ func scenarioServes(n *scenarioNode, key string, ver version.RecordVersion, val 
 func TestScenario_convergence(t *testing.T) {
 	t.Parallel()
 	cfg := scenarioTimers(func(msg string) { t.Logf("%s", msg) })
-	a, b, _ := startScenarioPair(t, cfg, cfg)
-
-	// Mutual discovery from broadcast Hellos alone (REPL-01 — zero config).
-	waitFor(t, scenarioDiscoveryDeadline, "mutual discovery (both known-peer counts == 1)", func() bool {
-		return a.adapter.KnownPeers() == 1 && b.adapter.KnownPeers() == 1
-	})
-
-	// One local write per node, each announced by its author (D-05).
-	verA := scenarioWrite(t, a, scenarioKeyA, scenarioValA)
-	verB := scenarioWrite(t, b, scenarioKeyB, scenarioValB)
-
-	// Convergence: each store serves the peer's record byte-equal under the
-	// peer's exact version.
-	waitFor(t, scenarioConvergeDeadline, "each store serving the peer's record byte-equal", func() bool {
-		return scenarioServes(b, scenarioKeyA, verA, scenarioValA) &&
-			scenarioServes(a, scenarioKeyB, verB, scenarioValB)
-	})
+	a, b, _, _, _ := scenarioConvergedPair(t, cfg, cfg)
 
 	// The Ack path: both pending mirrors drain to empty — the drained rows'
 	// retention window included — proving the unicast Acks crossed.
 	waitFor(t, scenarioConvergeDeadline, "both pending mirrors to drain to empty (the unicast Ack path)", func() bool {
 		return len(a.adapter.PendingCopy()) == 0 && len(b.adapter.PendingCopy()) == 0
+	})
+}
+
+// logCapture records every core Log callback message under a mutex — the
+// adapter's event-loop goroutine is the only writer, the test goroutine the
+// only reader.
+type logCapture struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+// log appends one message.
+func (c *logCapture) log(msg string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs = append(c.msgs, msg)
+}
+
+// containing returns every captured message that contains needle.
+func (c *logCapture) containing(needle string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, msg := range c.msgs {
+		if strings.Contains(msg, needle) {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+// snapshot returns a copy of every captured message.
+func (c *logCapture) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.msgs)
+}
+
+// scenarioAssertClassExact fails unless the driven discard class rose by
+// exactly one while the other four classes stay at their pre-shot values —
+// per-class exactness over the real socket path.
+func scenarioAssertClassExact(t *testing.T, driven string, got, before repl.DiscardStats) {
+	t.Helper()
+	want := before
+	switch driven {
+	case repl.DiscardBadCRC:
+		want.BadCRC++
+	case repl.DiscardUndecodable:
+		want.Undecodable++
+	case repl.DiscardBadProtoVersion:
+		want.BadProtoVersion++
+	case repl.DiscardOwnBroadcast:
+		want.OwnEcho++
+	case repl.DiscardDuplicateNodeID:
+		want.DuplicateNodeID++
+	}
+	if got != want {
+		t.Fatalf("%s shot: discards = %+v, want exactly %+v — only %s incremented", driven, got, want, driven)
+	}
+}
+
+// scenarioAssertConvergenceIntact fails unless the converged state survives
+// an adversarial shot unchanged: both stores' full snapshots equal their
+// pre-shot snapshots and mutual discovery holds — node B still knows
+// exactly A (the impostor datagrams never reach B's port), node A still
+// knows at least B (it may additionally hold the learned impostor peer,
+// exactly as the duplicate_node_id case arranges).
+func scenarioAssertConvergenceIntact(t *testing.T, a, b *scenarioNode, snapA, snapB map[string]storage.Record) {
+	t.Helper()
+	if !recordsEqual(snapA, a.store.Records()) {
+		t.Fatalf("node A's store changed under adversarial fire: before %d records, now %d",
+			len(snapA), len(a.store.Records()))
+	}
+	if !recordsEqual(snapB, b.store.Records()) {
+		t.Fatalf("node B's store changed under adversarial fire: before %d records, now %d",
+			len(snapB), len(b.store.Records()))
+	}
+	if got := b.adapter.KnownPeers(); got != 1 {
+		t.Fatalf("node B known peers = %d, want exactly 1 (the adversarial datagrams never reach B)", got)
+	}
+	if got := a.adapter.KnownPeers(); got < 1 {
+		t.Fatal("node A no longer knows any peer — mutual discovery destroyed")
+	}
+}
+
+// TestScenario_discardClasses drives the receiver's classifier over real
+// sockets: two separately bound third-party sockets — two distinct source
+// handles — fire hand-crafted datagrams at node A's port, and each case —
+// isolated on its own converged pair, so the cases carry no baseline
+// coupling — asserts ONLY its own Discards class increments while the other
+// four stay at their pre-shot values and the converged two-node state
+// survives untouched. The duplicate-node_id case is phase 4's pinned second
+// variant: one node_id, remembered run_id equal, DIFFERENT source handles —
+// a run's identity never migrates handles — and the classifier must count
+// DuplicateNodeID and log the configuration error naming the node_id and
+// both handles (REPL-08). The impostor's datagrams ride the test-binary
+// encode helpers; the version-mismatch one carries a CORRECT CRC so the
+// core's version check is the branch under test.
+func TestScenario_discardClasses(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bad_crc", func(t *testing.T) {
+		t.Parallel()
+		cfg := scenarioTimers(func(msg string) { t.Logf("%s", msg) })
+		a, b, portA, snapA, snapB := scenarioConvergedPair(t, cfg, cfg)
+		sock3 := peerSocket(t)
+		before := a.adapter.Discards()
+		datagram, err := udprepl.EncodeDatagramForTest(port.Hello{}, scenarioImpostorNode, scenarioImpostorRun)
+		if err != nil {
+			t.Fatalf("encode Hello: %v", err)
+		}
+		// One byte flipped inside the CRC-covered region (the body's last
+		// byte): the envelope still parses, the CRC no longer covers the
+		// body — the framing class exactly.
+		datagram[len(datagram)-1] ^= corruptByte
+		sendDatagram(t, sock3, portA, datagram)
+		waitFor(t, scenarioEffectWait, "bad_crc to increment by exactly one", func() bool {
+			return a.adapter.Discards().BadCRC == before.BadCRC+1
+		})
+		scenarioAssertClassExact(t, repl.DiscardBadCRC, a.adapter.Discards(), before)
+		scenarioAssertConvergenceIntact(t, a, b, snapA, snapB)
+	})
+
+	t.Run("bad_proto_version", func(t *testing.T) {
+		t.Parallel()
+		cfg := scenarioTimers(func(msg string) { t.Logf("%s", msg) })
+		a, b, portA, snapA, snapB := scenarioConvergedPair(t, cfg, cfg)
+		sock3 := peerSocket(t)
+		before := a.adapter.Discards()
+		// A datagram carrying an unsupported proto version with a correct
+		// CRC — the core's version check only runs past a CRC-passing
+		// envelope, so the crafting rides the explicit-version test helper.
+		datagram, err := udprepl.EncodeDatagramForTestVersion(
+			port.Hello{},
+			scenarioImpostorNode,
+			scenarioImpostorRun,
+			repl.SupportedProtoVersion+1,
+		)
+		if err != nil {
+			t.Fatalf("encode version-mismatch Hello: %v", err)
+		}
+		sendDatagram(t, sock3, portA, datagram)
+		waitFor(t, scenarioEffectWait, "bad_proto_version to increment by exactly one", func() bool {
+			return a.adapter.Discards().BadProtoVersion == before.BadProtoVersion+1
+		})
+		scenarioAssertClassExact(t, repl.DiscardBadProtoVersion, a.adapter.Discards(), before)
+		scenarioAssertConvergenceIntact(t, a, b, snapA, snapB)
+	})
+
+	t.Run("duplicate_node_id", func(t *testing.T) {
+		t.Parallel()
+		logs := &logCapture{}
+		cfg := scenarioTimers(logs.log)
+		a, b, portA, snapA, snapB := scenarioConvergedPair(t, cfg, cfg)
+		// The adversarial sources: two separately bound loopback sockets
+		// held for the case's lifetime, one handle each — a per-datagram
+		// throwaway socket would itself look like a migrating identity to
+		// the duplicate-node_id classifier.
+		sock3 := peerSocket(t)
+		sock4 := peerSocket(t)
+		before := a.adapter.Discards()
+		// One identity, two handles. First the third-party socket's Hello
+		// claims node X with run id R, so node A learns peer X at that
+		// handle — one more known peer, observable through the mirror.
+		hello, err := udprepl.EncodeDatagramForTest(port.Hello{}, scenarioImpostorNode, scenarioImpostorRun)
+		if err != nil {
+			t.Fatalf("encode impostor Hello: %v", err)
+		}
+		sendDatagram(t, sock3, portA, hello)
+		waitFor(t, scenarioEffectWait, "node A to learn the impostor peer (known peers 1 -> 2)", func() bool {
+			return a.adapter.KnownPeers() == 2
+		})
+		// Then a DIFFERENT socket — a different source handle — claims the
+		// same node X with the SAME run id: the classifier counts
+		// DuplicateNodeID, the datagram is dropped, and the configuration
+		// error names the node_id and both conflicting handles.
+		sendDatagram(t, sock4, portA, hello)
+		waitFor(t, scenarioEffectWait, "duplicate_node_id to increment by exactly one", func() bool {
+			return a.adapter.Discards().DuplicateNodeID == before.DuplicateNodeID+1
+		})
+		scenarioAssertClassExact(t, repl.DiscardDuplicateNodeID, a.adapter.Discards(), before)
+		scenarioAssertConvergenceIntact(t, a, b, snapA, snapB)
+		handle3, handle4 := sock3.LocalAddr().String(), sock4.LocalAddr().String()
+		var configErrors []string
+		for _, msg := range logs.containing(fmt.Sprintf("node_id %d", scenarioImpostorNode)) {
+			if strings.Contains(msg, handle3) && strings.Contains(msg, handle4) {
+				configErrors = append(configErrors, msg)
+			}
+		}
+		if len(configErrors) == 0 {
+			t.Fatalf("no configuration-error log names node id %d with both handles %q and %q — captured: %v",
+				scenarioImpostorNode, handle3, handle4, logs.snapshot())
+		}
 	})
 }
