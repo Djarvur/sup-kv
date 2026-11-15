@@ -299,7 +299,7 @@ func assertExitCode(t *testing.T, err error, want int) {
 // awaitServing polls the gRPC health Check over real TCP until it reports
 // SERVING — the startup gate opened. Each poll uses a fresh client so the
 // poll cadence never couples to one connection's reconnect backoff.
-func awaitServing(t *testing.T, addr string, timeout time.Duration) {
+func awaitServing(t *testing.T, addr string, timeout time.Duration) { //nolint:unparam // every caller passes servingDeadline; stable harness shape, extended not rebuilt (06-07).
 	t.Helper()
 	waitFor(t, timeout, "health SERVING on "+addr, func() bool {
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
