@@ -17,7 +17,7 @@ findings:
     title: "buf.yaml comment claims a single workspace-wide generate pass that no longer exists"
   - id: IN-01
     severity: info
-    disposition: open
+    disposition: fixed
     title: "Signal handling is released before the D-19 shutdown runs — a second SIGTERM/SIGINT kills the process and forfeits the final write-confirmed dump"
   - id: WR-02
     severity: warning
@@ -43,7 +43,7 @@ findings:
     severity: info
     disposition: open
     title: "CI's schema gate and CI's lint run use two separately-pinned binaries"
-open: 8
+open: 7
 total: 10
 recorded: 2026-11-14T22:07:37.347Z
 ---
@@ -55,7 +55,7 @@ recorded: 2026-11-14T22:07:37.347Z
 | WR-01 | warning | open | - |
 | IN-07 | info | fixed | fixed in 4f76e26 — stale buf.gen.yaml references rewritten to buf.gen.*.yaml (review-day fix) |
 | IN-08 | info | fixed | fixed in 4f76e26 — buf.yaml comment corrected: bare workspace generate is gone, make proto is the path (review-day fix) |
-| IN-01 | info | open | - (not in the current review) |
+| IN-01 | info | fixed | fixed — serve() no longer releases signal ownership before shutdown: the armed SIGTERM/SIGINT channel spans serving and the D-19 sequence, a second signal during the GracefulStop drain takes the force path (Stop) and the final Flush still lands, exit 0; regression test TestShutdown_secondSignal in cmd/sup-kv/main_test.go (plan 06-02, D-15) |
 | WR-02 | warning | fixed | fix 64f2d24 (branch fix/clock-review-warnings): NewClock clamps initialL into [0, maxL]; regression test TestClock_watermarkClampedIntoDomain (not in the current review) |
 | IN-02 | info | fixed | PR #20 — .claude/CLAUDE.md deferral parenthetical; confirmed by incremental review 85fa4dc (not in the current review) |
 | IN-03 | info | open | - (not in the current review) |

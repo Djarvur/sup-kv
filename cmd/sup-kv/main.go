@@ -70,6 +70,12 @@ const (
 // would leave committed data only in memory when the supervisor SIGKILLs).
 const shutdownGrace = 10 * time.Second
 
+// signalBuffer is the armed signal channel's capacity: room for the first
+// signal (consumed by serve) plus one hurry-up signal held for shutdown's
+// force path while it is still selecting. Further signals are dropped by
+// the signal package — the force path is already taken.
+const signalBuffer = 2
+
 // The SUPKV_ env twins of the flags (D-16, the published operational
 // contract): one per knob, resolved as the flag's default value.
 const (
@@ -172,11 +178,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("sup-kv: %v", err)
 	}
-	err = serve(node, listener) // blocks until SIGTERM/SIGINT
+	// Signal ownership spans serving AND the D-19 shutdown (P1-IN-01): the
+	// armed channel is released only after shutdown completes, so a second
+	// SIGTERM during the graceful drain is observed as an operator's
+	// hurry-up — it takes the force-stop path — instead of killing the
+	// process with the default disposition and forfeiting the final dump.
+	sig := armSignals()
+	err = serve(node, listener, sig)
 	if err != nil {
 		log.Fatalf("sup-kv: grpc serve exited before the shutdown signal: %v", err)
 	}
-	err = shutdown(node) // D-19: the order is the contract
+	err = shutdown(node, sig) // D-19: the order is the contract
+	signal.Stop(sig)
 	if err != nil {
 		log.Printf("sup-kv: %v", err)
 		os.Exit(exitDumpFailed)
@@ -368,16 +381,30 @@ func listenGRPC(grpcAddr string, srv *grpcapi.Server) (net.Listener, *grpc.Serve
 	return listener, gs, nil
 }
 
+// armSignals takes ownership of SIGTERM/SIGINT for the whole run — serving
+// and the D-19 shutdown alike (P1-IN-01). The buffered channel holds the
+// first signal for serve and a possible second for shutdown's force path,
+// and nothing restores the default disposition until [signal.Stop] runs in
+// main after the final dump, so no repeated signal can kill the process
+// mid-shutdown.
+func armSignals() chan os.Signal {
+	sig := make(chan os.Signal, signalBuffer)
+	signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+	return sig
+}
+
 // serve launches gs.Serve on the listener and blocks until the first
-// SIGTERM or SIGINT. A Serve failure before any signal is an error return:
-// the node cannot do its one job, and main decides the verdict.
-func serve(node *wired, listener net.Listener) error {
+// SIGTERM or SIGINT arrives on sig (armSignals owns the channel; ownership
+// deliberately outlives serve — releasing it here would re-arm the default
+// disposition and let a second signal kill the D-19 shutdown with no final
+// dump, the P1-IN-01 regression). A Serve failure before any signal is an
+// error return: the node cannot do its one job, and main decides the
+// verdict.
+func serve(node *wired, listener net.Listener, sig <-chan os.Signal) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- node.gs.Serve(listener) }()
-	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-	defer stop()
 	select {
-	case <-signalCtx.Done():
+	case <-sig:
 		return nil
 	case err := <-serveErr:
 		return err
@@ -394,7 +421,13 @@ func serve(node *wired, listener net.Listener) error {
 // cancel the engine context, whose exit sweep now finds no waiters. A final
 // dump failure is the returned error: a clean exit is reserved for a
 // confirmed shutdown.
-func shutdown(node *wired) error {
+//
+// A second SIGTERM/SIGINT observed on sig while GracefulStop drains is an
+// operator's hurry-up: it takes the same force path as the grace deadline
+// (Stop) immediately. The final Flush sits after GracefulStop in the
+// sequence and therefore survives the force stop — the confirmed dump still
+// lands, and a clean shutdown still exits 0.
+func shutdown(node *wired, sig <-chan os.Signal) error {
 	node.health.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 	node.apiCancel()
 
@@ -405,6 +438,10 @@ func shutdown(node *wired) error {
 	}()
 	select {
 	case <-stopped:
+	case <-sig:
+		log.Print("sup-kv: second shutdown signal — forcing stop")
+		node.gs.Stop()
+		<-stopped
 	case <-time.After(shutdownGrace):
 		log.Printf("sup-kv: graceful stop exceeded %v — forcing stop", shutdownGrace)
 		node.gs.Stop()

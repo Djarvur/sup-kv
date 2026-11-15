@@ -418,3 +418,116 @@ func TestMain_lifecycle(t *testing.T) {
 		t.Fatalf("the final dump at %s does not contain the committed key %q:\n%s", dumpPath, smokeKey, dump)
 	}
 }
+
+// TestShutdown_secondSignal pins the P1-IN-01 contract end-to-end: signal
+// ownership stays armed across the whole D-19 shutdown, so a second SIGTERM
+// observed while the graceful drain is still in progress takes the force
+// path instead of killing the process — the final write-confirmed dump
+// still lands and the node still exits 0. The drain is held observably open
+// by a standard health Watch stream: unlike the SupKV Watch (ended by
+// apiCancel ahead of GracefulStop — the D-19 order), the health Watch is
+// not tied to the API context, so GracefulStop waits on it until the client
+// goes away or the server is forced. Against the pre-fix binary the same
+// second signal kills the process with the default disposition (exit 143)
+// and the final dump never happens.
+func TestShutdown_secondSignal(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+
+	node := startNode(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+	)
+
+	// The stream GracefulStop waits on. A reader goroutine drains the
+	// status updates (the flow-control window never fills), and the
+	// statuses observed on it prove where the server is in the D-19
+	// sequence — the initial SERVING doubles as the gate-open wait the
+	// other tests use awaitServing for.
+	wctx, wcancel := context.WithCancel(t.Context())
+	t.Cleanup(wcancel)
+	// WaitForReady: the stream may open before the node's gRPC listener is
+	// up — the call then waits for the connection instead of failing fast.
+	wstream, err := healthpb.NewHealthClient(supKVConn(t, addr)).Watch(wctx, &healthpb.HealthCheckRequest{}, grpc.WaitForReady(true))
+	if err != nil {
+		t.Fatalf("health Watch: %v", err)
+	}
+	statuses := make(chan healthpb.HealthCheckResponse_ServingStatus, 2)
+	go func() {
+		defer close(statuses)
+		for {
+			st, err := wstream.Recv()
+			if err != nil {
+				return
+			}
+			statuses <- st.GetStatus()
+		}
+	}()
+	waitForStatus := func(want healthpb.HealthCheckResponse_ServingStatus, what string) {
+		t.Helper()
+		waitFor(t, servingDeadline, what, func() bool {
+			select {
+			case st, ok := <-statuses:
+				return ok && st == want
+			default:
+				return false
+			}
+		})
+	}
+	waitForStatus(healthpb.HealthCheckResponse_SERVING, "the initial SERVING health status")
+
+	// The earlier write the final dump must still contain after the forced
+	// drain.
+	client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	t.Cleanup(cancel)
+	_, err = client.Set(ctx, &apiproto.SetRequest{Key: smokeKey, Value: []byte(smokeValue)})
+	if err != nil {
+		t.Fatalf("Set(%q): %v", smokeKey, err)
+	}
+
+	// SIGTERM #1: the D-19 sequence starts — its first statement flips the
+	// health status, which arrives on the stream while GracefulStop is (and
+	// stays) blocked on the still-open Watch.
+	err = node.cmd.Process.Signal(syscall.SIGTERM)
+	if err != nil {
+		t.Fatalf("first SIGTERM %d: %v", node.cmd.Process.Pid, err)
+	}
+	waitForStatus(healthpb.HealthCheckResponse_NOT_SERVING, "NOT_SERVING after the first SIGTERM (the graceful drain in progress)")
+
+	// SIGTERM #2 while the drain is blocked: the operator's hurry-up taking
+	// the force path.
+	err = node.cmd.Process.Signal(syscall.SIGTERM)
+	if err != nil {
+		t.Fatalf("second SIGTERM %d: %v", node.cmd.Process.Pid, err)
+	}
+
+	var exitErr error
+	waitFor(t, exitDeadline, "process exit after the second SIGTERM", func() bool {
+		select {
+		case exitErr = <-node.exit:
+			return true
+		default:
+			return false
+		}
+	})
+	assertExitCode(t, exitErr, 0)
+	assertNoPanic(t, node, "the second-signal shutdown run")
+
+	dump, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read dump %s: %v", dumpPath, err)
+	}
+	if !strings.Contains(string(dump), smokeKey) {
+		t.Fatalf("the final dump at %s does not contain the committed key %q:\n%s", dumpPath, smokeKey, dump)
+	}
+}
