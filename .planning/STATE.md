@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-11-15T22:16:38.665Z"
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-11-15T22:34:05.602Z"
 last_activity: 2026-11-16
 last_activity_desc: Phase 06 execution started
-state_head: 0f5e03d90aeb2abd3a104887c1fbf7091883ad88
+state_head: ba0d984fbbd69ee5080eca67a03f926c70e4699a
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 25
+  completed_plans: 26
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-11-16 — Phase 06 execution started
 
@@ -85,6 +85,7 @@ Progress: [███████░░░] 71%
 | Phase 05 P05 | 12min | 2 tasks | 7 files |
 | Phase 05 P06 | 24min | 3 tasks | 5 files |
 | Phase 06 P01 | 22min | 3 tasks | 9 files |
+| Phase 06 P02 | 9min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -194,6 +195,12 @@ Recent decisions affecting current work:
 - [Phase 06]: D-15 Restore no-op decided WHOLE-snapshot, never per-record: the per-record content-skip broke the pinned fresh-version dominance contract (TestEngine_snapshotCreateLoadRestore) and was reworked before commit (plan 06-01)
 - [Phase 06]: D-15 P3-WR-01: the above-cover guard is kept verbatim in intent plus an ADDED invariant assertion (kept waiters unresolved; resolved waiters never re-queued); white-box engine_internal_test.go follows the repl_internal_test.go precedent (plan 06-01)
 - [Phase 06]: D-15 P3-IN-01: Open decodes through Load's own oracle argument — Parse IS Decode's error channel, so the accepted generation is exactly the decoded one; the dead branch is removed, not comment-tightened (plan 06-01)
+- [Phase 06]: [Phase 06]: P1-IN-01: one armed signal channel (armSignals, buffer 2) spans serving and shutdown — serve consumes the first signal, shutdown selects the second as its force branch, signal.Stop runs in main only after shutdown returns (hurry-up semantics, Open Q4 recommendation b)
+- [Phase 06]: [Phase 06]: P1-IN-01: the final Flush sits after GracefulStop in the D-19 sequence and therefore survives the force stop — the confirmed dump still lands and the node exits 0
+- [Phase 06]: [Phase 06]: TestShutdown_secondSignal blocks the drain with a standard health Watch stream (not SupKV Watch, which apiCancel ends before GracefulStop by design) and observes NOT_SERVING on it as proof the D-19 sequence started before the second SIGTERM lands
+- [Phase 06]: [Phase 06]: P1-IN-01 mutation check: re-moving signal.Stop to the pre-fix position reproduces the exact regression (signal kill, want exit 0) — the test binds on the fix
+- [Phase 06]: [Phase 06]: P2-IN-03: the TestStore_Set copy of the duplicated subtest deleted, the TestStore_endToEnd copy kept byte-identical (endToEnd additionally asserts the unpacked l/counter/nodeID); cmpSame kept — still live in merge_test.go
+- [Phase 06]: [Phase 06]: P1-WR-01: timeout-minutes 15/20 added to ci.yml jobs as additive keys only — zero check-run context diffs, the ruleset required_status_checks contract intact
 
 ### Pending Todos
 
@@ -229,6 +236,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-15T22:16:38.412Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-11-15T22:34:04.951Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None
