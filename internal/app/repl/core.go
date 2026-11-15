@@ -43,6 +43,15 @@ const (
 	defaultSyncChunkBytes     = 1400
 	defaultSyncResponseRate   = 500
 
+	// maxSyncResponseRate is the top of SyncResponseRate's valid domain.
+	// At any rate above it, one second divided by the rate as a
+	// [time.Duration] truncates to a zero interval and silently disables
+	// the egress limiter (D-15 P4-WR-02), so normalized() clamps every
+	// out-of-domain rate — zero, negative or above this cap — to
+	// defaultSyncResponseRate: the floor(1s/rate) spacing stays non-zero
+	// at every configuration, and the limiter is never silently off.
+	maxSyncResponseRate = 1e9
+
 	// backoffGrowth is the retransmission ladder's doubling factor: each
 	// retry doubles the previous delay from ack_timeout up to the
 	// ack_timeout_max saturation cap (REPL-02, docs/IDEA.md §Parameters).
@@ -82,7 +91,10 @@ const (
 // doubles from AckTimeout and saturates at AckTimeoutMax — documented with
 // every step at Core.scanRetransmit. SyncResponseRate paces the egress
 // queue: responses are spaced floor(1s/SyncResponseRate) nanoseconds apart
-// by integer division (probe #16), the first response immediate.
+// by integer division (probe #16), the first response immediate. Rates
+// outside the domain (0, 1e9] clamp to the 500/s default — above 1e9 the
+// integer division truncates to a zero interval and would silently disable
+// the limiter (D-15 P4-WR-02, the maxSyncResponseRate cap).
 type Config struct {
 	HelloInterval      time.Duration
 	PeerTimeout        time.Duration
@@ -95,8 +107,10 @@ type Config struct {
 	Log                func(msg string)
 }
 
-// normalized returns cfg with zero or negative fields replaced by the
-// design defaults and a nil Log replaced by a no-op.
+// normalized returns cfg with out-of-domain fields replaced by the design
+// defaults — zero or negative everywhere, and SyncResponseRate additionally
+// above maxSyncResponseRate, where the spacing division would truncate to
+// zero (D-15 P4-WR-02) — and a nil Log replaced by a no-op.
 func (c Config) normalized() Config {
 	if c.HelloInterval <= 0 {
 		c.HelloInterval = defaultHelloInterval
@@ -119,7 +133,7 @@ func (c Config) normalized() Config {
 	if c.SyncChunkBytes <= 0 {
 		c.SyncChunkBytes = defaultSyncChunkBytes
 	}
-	if c.SyncResponseRate <= 0 {
+	if c.SyncResponseRate <= 0 || c.SyncResponseRate > maxSyncResponseRate {
 		c.SyncResponseRate = defaultSyncResponseRate
 	}
 	if c.Log == nil {

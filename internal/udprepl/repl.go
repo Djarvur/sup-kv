@@ -492,11 +492,16 @@ func (a *Adapter) mirrorState() {
 // just-processed event was the entry's own Ack, key and version matching
 // the last observed snapshot row — keeps a resolved row in the published
 // mirror for drainedRetention. The row's Acked set is the union of the
-// last observed WaitingOn and Acked: the core's deletion fires inside the
-// handleAck that empties the wait-set, so every peer neither Acked nor
-// evicted at the last observation Acked in this very iteration, and
-// eviction never adds to Acked (T-05-04) — the union is exactly the core's
-// acked set at deletion, evicted-never-acked peers honestly excluded. A
+// last observed WaitingOn and Acked, deduplicated by the sort-then-Compact
+// after it: a peer may legitimately sit in BOTH sets at the last
+// observation — it Acked while unknown to the peer table (the handleAck
+// counting behavior, WR-01) and a later discovery flush re-added it to the
+// wait-set (D-15 P4-WR-01) — and the naive union would publish it twice.
+// With the dedup the row is exactly the core's acked set at deletion: the
+// core's deletion fires inside the handleAck that empties the wait-set, so
+// every peer neither Acked nor evicted at the last observation Acked in
+// this very iteration, and eviction never adds to Acked (T-05-04) —
+// evicted-never-acked peers honestly excluded. A
 // vanishing on any other event (remote supersession, local replacement —
 // the latter keeps the key present anyway) retains nothing, so the mirror
 // never claims Acked coverage for a version the peers moved past (the Q2
@@ -512,6 +517,7 @@ func (a *Adapter) retainDrained(snap map[string]repl.PendingInfo, now time.Time)
 		}
 		acked := append(slices.Clone(prev.Acked), prev.WaitingOn...)
 		slices.Sort(acked)
+		acked = slices.Compact(acked)
 		a.drained[key] = drainedRow{
 			info: repl.PendingInfo{
 				Version:   prev.Version,

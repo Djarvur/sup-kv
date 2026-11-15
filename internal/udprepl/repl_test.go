@@ -429,3 +429,74 @@ func TestMirror_syncArrivedFlip(t *testing.T) {
 		t.Fatal("SyncArrived() = false after further events, want it sticky true — the flag never resets")
 	}
 }
+
+// TestMirror_drainedAckedDedup proves the drained-row Acked dedup (D-15
+// P4-WR-01): a peer can legitimately sit in BOTH the last observed Acked
+// and WaitingOn — it Acked while the peer table was empty (the handleAck
+// counting behavior), then a discovery flush re-added it to the wait-set —
+// so the drained row's Acked union would publish the peer twice without
+// the sort-then-Compact. The scenario drives exactly that shape through
+// the real event loop: write, stranger Ack, discovery Hello (the flush
+// re-add), then the draining Ack — and asserts the published drained row
+// holds the peer exactly once.
+func TestMirror_drainedAckedDedup(t *testing.T) {
+	t.Parallel()
+	adapter, udpPort := newMirrorAdapter(t)
+	tx := peerSocket(t)
+
+	// The notified entry appears waiting on nobody (empty peer table).
+	ver := version.PackVersion(testNowMs, 0, nodeIDA)
+	rec := storage.Record{Version: ver, Data: []byte("dedup me")}
+	err := adapter.NotifyLocalWrite(mirrorKey, rec)
+	if err != nil {
+		t.Fatalf("NotifyLocalWrite(%q): %v", mirrorKey, err)
+	}
+	waitFor(t, mirrorWait, "the pending entry to appear in PendingCopy", func() bool {
+		info, ok := adapter.PendingCopy()[mirrorKey]
+		return ok && info.Version == ver && len(info.WaitingOn) == 0 && len(info.Acked) == 0
+	})
+
+	// A stranger's Ack joins Acked while the entry survives in suspension
+	// (empty table): the peer is now in Acked and nowhere else.
+	datagram, err := udprepl.EncodeDatagramForTest(port.Ack{Key: mirrorKey, Version: ver}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Ack: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "the stranger Ack to surface in PendingCopy Acked", func() bool {
+		info, ok := adapter.PendingCopy()[mirrorKey]
+		return ok && slices.Equal(info.Acked, []uint16{nodeIDB}) && len(info.WaitingOn) == 0
+	})
+
+	// The peer's Hello ends the empty table — discovery — and the flush
+	// re-adds it to the wait-set: the last observed row now holds the peer
+	// in BOTH sets, the exact P4-WR-01 pre-state.
+	datagram, err = udprepl.EncodeDatagramForTest(port.Hello{}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Hello: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "the discovery flush to put the peer in both WaitingOn and Acked", func() bool {
+		info, ok := adapter.PendingCopy()[mirrorKey]
+		return ok && slices.Equal(info.WaitingOn, []uint16{nodeIDB}) && slices.Equal(info.Acked, []uint16{nodeIDB})
+	})
+
+	// The draining Ack empties the wait-set with the peer known: the entry
+	// leaves the core, retainDrained publishes the resolved row, and its
+	// Acked union must hold the peer exactly once — the naive
+	// clone(Acked)+WaitingOn union would hold it twice.
+	datagram, err = udprepl.EncodeDatagramForTest(port.Ack{Key: mirrorKey, Version: ver}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode draining Ack: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "the drained row to appear with each peer exactly once in Acked", func() bool {
+		info, ok := adapter.PendingCopy()[mirrorKey]
+		if !ok {
+			return false
+		}
+		deduped := slices.Compact(slices.Clone(info.Acked))
+		return len(info.WaitingOn) == 0 && len(info.Acked) == len(deduped) &&
+			slices.Equal(info.Acked, []uint16{nodeIDB})
+	})
+}

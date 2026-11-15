@@ -735,3 +735,64 @@ func TestSync_rateLimit(t *testing.T) {
 		}
 	})
 }
+
+// TestSync_responseRateClamp proves the SyncResponseRate domain clamp
+// (D-15 P4-WR-02): normalization keeps every in-domain rate's exact
+// floor(1s/rate) spacing — pinned to the nanosecond on both boundary
+// sides, 1s at rate 1 and 1ns at rate 1e9 — while every out-of-domain
+// rate (zero, negative, or above the 1e9 cap, where the division would
+// truncate to a zero interval and silently disable the limiter) clamps to
+// the 500/s default's exactly 2ms spacing. Each row observes the spacing
+// behaviorally through the egress queue: the first response is immediate,
+// an Advance one nanosecond before the second slot emits nothing, and the
+// slot Advance at exactly the expected spacing emits the second response —
+// a spacing even one nanosecond off either way fails the probe/slot pair.
+func TestSync_responseRateClamp(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		rate    int
+		spacing time.Duration
+	}{
+		{"rate 0 is out-of-domain: clamped to the 500/s default 2ms spacing", 0, 2 * time.Millisecond},
+		{"rate -1 is out-of-domain: clamped to the 500/s default 2ms spacing", -1, 2 * time.Millisecond},
+		{"rate 1 is in-domain: spacing exactly 1s", 1, time.Second},
+		{"rate 500 is in-domain: spacing exactly 2ms", 500, 2 * time.Millisecond},
+		{"rate 1e9 is in-domain: spacing exactly 1ns", 1e9, time.Nanosecond},
+		{"rate 1e9+1 is out-of-domain: clamped to the 500/s default 2ms spacing", 1e9 + 1, 2 * time.Millisecond},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Helper()
+			t.Parallel()
+			now := at(0)
+			core, _ := newSyncCore(repl.Config{SyncResponseRate: tt.rate})
+			var out port.Outbox
+			core.Advance(now, &out)
+			out.Drain()
+			entries := []port.SyncEntry{
+				{Key: "cfg/clamp-a", Version: version.PackVersion(testNowMs, 0, peerID1)},
+				{Key: "cfg/clamp-b", Version: version.PackVersion(testNowMs+1, 0, peerID1)},
+			}
+			core.HandleDatagram(now, syncFrom(peerID1, entries...), &out)
+			out.Drain()
+			if got := core.QueuedResponses(); got != 2 {
+				t.Fatalf("after the DataSync QueuedResponses() = %d, want 2", got)
+			}
+			core.Advance(now, &out)
+			if uni := unicasts(out.Drain()); len(uni) != 1 {
+				t.Fatalf("the first response drained %d unicasts, want 1 — immediate after idle regardless of rate", len(uni))
+			}
+			core.Advance(now.Add(tt.spacing-time.Nanosecond), &out)
+			if uni := unicasts(out.Drain()); len(uni) != 0 {
+				t.Fatalf("the probe Advance one nanosecond before the t0+%v slot emitted %d unicasts, want 0 — nothing emits before its slot", tt.spacing, len(uni))
+			}
+			core.Advance(now.Add(tt.spacing), &out)
+			if uni := unicasts(out.Drain()); len(uni) != 1 {
+				t.Fatalf("the slot Advance at exactly t0+%v emitted %d unicasts, want 1 — the pinned spacing", tt.spacing, len(uni))
+			}
+			if got := core.QueuedResponses(); got != 0 {
+				t.Fatalf("after both slots QueuedResponses() = %d, want 0", got)
+			}
+		})
+	}
+}
