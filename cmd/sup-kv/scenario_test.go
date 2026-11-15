@@ -25,11 +25,13 @@ package main_test
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,8 +58,10 @@ const (
 	// endpoint, derived from the shrunken timers rather than wall-clock
 	// precision (Pitfall 6): one hello round for discovery, a few sync
 	// rounds for the listing/request/replay ladder, and real-process
-	// scheduling slack — ten of each interval covers every contribution.
-	execConvergeDeadline = 10*execHelloInterval + 10*execSyncInterval
+	// scheduling slack on a loaded runner — twenty of each interval keeps
+	// every contribution covered with the harness's generous-deadline
+	// discipline (a healthy pair converges in well under one second).
+	execConvergeDeadline = 20*execHelloInterval + 20*execSyncInterval
 
 	execKeyKillA = "exec/kill9/key-on-a"
 	execKeyKillB = "exec/kill9/key-on-b"
@@ -72,7 +76,75 @@ const (
 	// the proof a corrupted record took the per-record discard path, not
 	// the whole-generation .prev fallback.
 	execDiscardLine = "discarded 1 undecodable dumped records at startup"
+
+	// The empty-disk scenario's scale: N keys on the seeded node and the
+	// shrunken sync response rate both nodes run with — the documented
+	// recovery bound is N/Rate seconds of paced egress (floor(1s/Rate) per
+	// datagram, the repl core's limiter arithmetic), small enough that the
+	// whole scenario stays far inside CI deadlines.
+	emptyDiskKeys = 20
+	emptyDiskRate = 50
+
+	// execEmptyKeyFmt derives the seeded keys; execKeyFromB is the
+	// recovered node's own post-recovery write.
+	execEmptyKeyFmt = "exec/emptydisk/key-%02d"
+	execKeyFromB    = "exec/emptydisk/from-b"
+
+	// The scenario UDP port window: strictly below the kernel's ephemeral
+	// range (ip_local_port_range starts at 32768 on Linux, 49152 on
+	// darwin), so no other test's :0 bind can ever be issued there — a
+	// scenario's picked port is unreachable to every rival socket until
+	// its nodes bind it, which removes structurally the pick-to-bind race
+	// every free-port picker in the shared ephemeral pool suffers under
+	// the parallel burst (Pitfall 6's observed flake: a probe or node
+	// losing its just-picked port to a rival's :0 assignment).
+	scenarioPortLo    = 21000
+	scenarioPortHi    = 32678
+	scenarioPortTries = 32
 )
+
+// The scenario tests' port registry: the in-use set keeps parallel
+// scenario siblings from picking each other's ports during the
+// pick-to-bind window. Entries live until the owning test's cleanup, so a
+// scenario's ports stay reserved across its restarts too.
+var (
+	scenarioPortsMu sync.Mutex
+	scenarioPorts   = make(map[int]bool)
+)
+
+// scenarioUDPPort picks one free UDP port from the private window: try
+// random candidates until one binds (anything off-suite holding a port
+// there just skips that candidate), claim it in the registry while STILL
+// holding the bind — the claim-then-release order closes the sibling race
+// — then release and hand the port to the test until its cleanup.
+func scenarioUDPPort(t *testing.T) int {
+	t.Helper()
+	for range scenarioPortTries {
+		candidate := scenarioPortLo + rand.IntN(scenarioPortHi-scenarioPortLo)
+		conn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", fmt.Sprintf("0.0.0.0:%d", candidate))
+		if err != nil {
+			continue
+		}
+		scenarioPortsMu.Lock()
+		taken := scenarioPorts[candidate]
+		if !taken {
+			scenarioPorts[candidate] = true
+		}
+		scenarioPortsMu.Unlock()
+		_ = conn.Close()
+		if taken {
+			continue
+		}
+		t.Cleanup(func() {
+			scenarioPortsMu.Lock()
+			delete(scenarioPorts, candidate)
+			scenarioPortsMu.Unlock()
+		})
+		return candidate
+	}
+	t.Fatalf("no free UDP port in the private window [%d, %d) after %d tries", scenarioPortLo, scenarioPortHi, scenarioPortTries)
+	return 0
+}
 
 // execValue is the deterministic per-key scenario value — every visibility
 // assertion checks it, so a stale or half-converged record never passes.
@@ -136,20 +208,20 @@ type execPair struct {
 // newExecPair probes the platform capability and reserves the topology's
 // ports and dump paths without starting anything — the empty-disk scenario
 // starts its nodes at different times, so the scaffold separates topology
-// construction from node launch. A probe bind error means a parallel test
-// won the picked port in the pick-to-probe gap (the free-port race the
-// whole harness shares): a fresh port pair is picked and the probe retried,
-// so the parallel scenario burst stays reliable (Pitfall 6); a platform
-// that cannot deliver loopback broadcast at all skips loudly naming what
-// was probed (D-12) — the asymmetric topology needs exactly that
-// capability for the pair's cross-delivery.
+// construction from node launch. The UDP ports come from the private
+// window below the kernel's ephemeral range, so no parallel test can take
+// them between pick and bind (scenarioUDPPort); a probe bind error anyway
+// (an off-suite holder in the window) just re-picks and retries. A
+// platform that cannot deliver loopback broadcast at all skips loudly
+// naming what was probed (D-12) — the asymmetric topology needs exactly
+// that capability for the pair's cross-delivery.
 func newExecPair(t *testing.T) *execPair {
 	t.Helper()
 	bin := smokeBinary(t)
 	const portAttempts = 5
 	var udpA, udpB int
 	for attempt := 1; ; attempt++ {
-		udpA, udpB = freeUDPPort(t), freeUDPPort(t)
+		udpA, udpB = scenarioUDPPort(t), scenarioUDPPort(t)
 		reached, err := probeLoopbackSend(udpB)
 		if err == nil {
 			if !reached {
@@ -208,7 +280,7 @@ func (p *execPair) slots(nodeID int) (bindPort, bcastPort int, grpcAddr, dumpPat
 
 // startExecNode launches one scenario node in its topology slot (extra
 // args appended by the scenarios that need them).
-func startExecNode(t *testing.T, p *execPair, nodeID int, extra ...string) *smokeNode { //nolint:unparam // bridging: the empty-disk scenario passes --sync-response-rate through extra.
+func startExecNode(t *testing.T, p *execPair, nodeID int, extra ...string) *smokeNode {
 	t.Helper()
 	return startNode(t, p.bin, nil, append(p.nodeArgs(nodeID), extra...)...)
 }
@@ -535,4 +607,74 @@ func TestExec_sigtermFinalDump(t *testing.T) {
 	assertNoPanic(t, nodeA, "the SIGTERM node A")
 	assertNoPanic(t, nodeB, "the stopped node B")
 	assertNoPanic(t, nodeARestart, "the lone restarted node A")
+}
+
+// TestExec_emptyDiskRecovery is TEST-04's empty-disk scenario on the real
+// binary: a live node A seeded with N keys, then node B started against it
+// with a genuinely empty dump directory — B's whole state can only come
+// from the live peer. Recovery — from B's process start to B serving all
+// N keys through its own gRPC endpoint — must complete within the
+// documented bound, derived in-test from the flags (never a magic
+// constant): N records at worst ride N limiter-paced datagrams at
+// floor(1s/rate) each, plus a margin for everything else the path spends.
+// After recovery, B's own write replicates to A: the recovered node is a
+// full participant, not a read-only mirror.
+func TestExec_emptyDiskRecovery(t *testing.T) {
+	t.Parallel()
+	p := newExecPair(t)
+
+	// Node A first, alone: the seeded node.
+	nodeA := startExecNode(t, p, execNodeAID)
+	awaitServing(t, p.grpcA, servingDeadline)
+	clientA := execClient(t, p.grpcA)
+
+	keys := make([]string, emptyDiskKeys)
+	for i := range keys {
+		keys[i] = fmt.Sprintf(execEmptyKeyFmt, i)
+		execSet(t, clientA, keys[i])
+	}
+
+	// The recovery bound, derived from the flags the nodes run with: the
+	// paced egress term is N * floor(1s/rate) — the limiter's own spacing
+	// arithmetic (core.go's time.Second / SyncResponseRate) times the
+	// record count. The margin covers, generously rather than precisely
+	// (Pitfall 6 — the documented bound is asserted, never wall-clock
+	// precision): B's startup gate window (the gate opens on the peer's
+	// sync arrival or the execStartupGate timeout, and B serves nothing
+	// before it opens), discovery plus one listing/request/reply ladder
+	// round at each timer (B's own requests ride B's limiter too), and
+	// real-process scheduling slack on a loaded CI runner.
+	paced := time.Duration(emptyDiskKeys) * (time.Second / time.Duration(emptyDiskRate))
+	margin := execStartupGate + 2*execHelloInterval + 2*execSyncInterval + 2*time.Second
+	deadline := paced + margin
+
+	// Node B against the live peer, empty disk: its dump directory is its
+	// own fresh temp dir — nothing to load, every key must arrive over the
+	// wire.
+	start := time.Now()
+	nodeB := startExecNode(t, p, execNodeBID, "--sync-response-rate="+strconv.Itoa(emptyDiskRate))
+	awaitServing(t, p.grpcB, servingDeadline)
+	clientB := execClient(t, p.grpcB)
+
+	waitFor(t, deadline, "the empty-disk node B serving every key within the paced bound", func() bool {
+		for _, key := range keys {
+			if !execServing(t, clientB, key) {
+				return false
+			}
+		}
+		return true
+	})
+	t.Logf("empty-disk recovery: %d keys in %v (paced bound %v, margin %v)", emptyDiskKeys, time.Since(start), paced, margin)
+
+	// The recovered node participates in replication immediately: its own
+	// write crosses to the seeded peer.
+	execSet(t, clientB, execKeyFromB)
+	waitFor(t, execConvergeDeadline, "the recovered node's write visible on node A", func() bool {
+		return execServing(t, clientA, execKeyFromB)
+	})
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the seeded node A")
+	assertNoPanic(t, nodeB, "the empty-disk recovered node B")
 }
