@@ -257,6 +257,51 @@ func TestNotifyLocalWrite_afterRunReturns(t *testing.T) {
 // two seconds is generous).
 const mirrorWait = 2 * time.Second
 
+// TestNotifyLocalWrite_afterDone proves the closed-loop NotifyLocalWrite
+// contract after the loop's done channel is closed (D-15 P4-IN-01): with
+// Run observed returned, the notification returns promptly with
+// ErrRunLoopExited — never a silent nil for a write nobody will ever
+// drain, never a hang, never a panic. The select deadline converts a hang
+// into a failure; no wall-clock sleep is asserted.
+func TestNotifyLocalWrite_afterDone(t *testing.T) {
+	t.Parallel()
+	udpPort := freeUDPPort(t)
+	adapter, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", udpPort),
+		fmt.Sprintf("127.255.255.255:%d", udpPort),
+		nodeIDA, newTestStore(nodeIDA), repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("adapter New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runReturned := make(chan error, 1)
+	go func() { runReturned <- adapter.Run(ctx) }()
+	cancel()
+	err = <-runReturned
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+
+	// Run has returned, so its deferred close(a.done) has run: the call
+	// must come back with the closed-loop error promptly — a wedged or
+	// nil-returning enqueue fails the deadline or the errors.Is check,
+	// and a panic in the enqueue path crashes the test binary outright.
+	got := make(chan error, 1)
+	go func() {
+		got <- adapter.NotifyLocalWrite("after-done/key", storage.Record{Data: []byte("post-done write")})
+	}()
+	select {
+	case err := <-got:
+		if !errors.Is(err, udprepl.ErrRunLoopExited) {
+			t.Fatalf("post-done NotifyLocalWrite = %v, want ErrRunLoopExited", err)
+		}
+	case <-time.After(postRunDeadline):
+		t.Fatalf("post-done NotifyLocalWrite blocked past %v — the closed loop wedged the write path", postRunDeadline)
+	}
+}
+
 // mirrorKey is the one key the mirror tests write and sync about.
 const mirrorKey = "mirror/key"
 

@@ -305,12 +305,18 @@ func (a *Adapter) Run(ctx context.Context) error {
 // NotifyLocalWrite enqueues the explicit post-write replication call
 // (D-05) for the event loop: it defensively copies the record and returns
 // without doing any protocol work, so the write path stays available. The
-// event loop's core handler broadcasts the DataReplication. The send is
-// guarded by the loop's done channel (the readLoop exit-guard precedent):
-// while Run is active it enqueues and reports nil; once Run has returned,
-// nothing drains the queue, so the notification is dropped and reported as
-// [ErrRunLoopExited] — a writer never blocks forever on a loop that no
-// longer receives, and the drop is surfaced to the author, never silent.
+// event loop's core handler broadcasts the DataReplication. The enqueue
+// and the closed-loop decision are one select over the notify channel and
+// the loop's done channel, with a re-check after a won send (D-15
+// P4-IN-01 — the former pre-check-then-enqueue pair raced Run's exit and
+// could report nil for a notification nobody will ever drain): while Run
+// is active the send enqueues into the bounded 1024-deep buffer (D-05) and
+// reports nil; once Run has returned, done is closed, so either the
+// select's done branch or — when a buffered send still won the uniform
+// choice against the already closed done — the post-send re-check reports
+// [ErrRunLoopExited]. A writer never blocks forever on a loop that no
+// longer receives, never panics, and the drop is surfaced to the author,
+// never silent.
 func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) error {
 	lw := localWrite{
 		key: key,
@@ -321,17 +327,18 @@ func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) error {
 			Checksum: rec.Checksum,
 		},
 	}
-	// The closed-loop pre-check makes the post-Run contract deterministic:
-	// without it a buffered send could still win the select's uniform
-	// random choice and report success for a notification nobody will ever
-	// drain.
-	select {
-	case <-a.done:
-		return ErrRunLoopExited
-	default:
-	}
 	select {
 	case a.notify <- lw:
+		// The send won, but a send into a buffer nobody drains proves
+		// nothing on its own: when the select ran with done already
+		// closed, the uniform choice may still have picked the buffered
+		// send. The re-check turns that overtaken enqueue into the same
+		// deterministic error — never a nil report for a dropped write.
+		select {
+		case <-a.done:
+			return ErrRunLoopExited
+		default:
+		}
 		return nil
 	case <-a.done:
 		return ErrRunLoopExited
