@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: executing
-stopped_at: Completed 06-02-PLAN.md
-last_updated: "2026-11-15T22:34:05.602Z"
+stopped_at: Completed 06-03-PLAN.md
+last_updated: "2026-11-15T23:08:19.291Z"
 last_activity: 2026-11-16
 last_activity_desc: Phase 06 execution started
-state_head: ba0d984fbbd69ee5080eca67a03f926c70e4699a
+state_head: 3ff81db163b6370a86f2e90d2a49645185425a06
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 26
+  completed_plans: 27
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
-Plan: 3 of 9
+Plan: 4 of 9
 Status: Ready to execute
 Last activity: 2026-11-16 — Phase 06 execution started
 
@@ -86,6 +86,7 @@ Progress: [███████░░░] 71%
 | Phase 05 P06 | 24min | 3 tasks | 5 files |
 | Phase 06 P01 | 22min | 3 tasks | 9 files |
 | Phase 06 P02 | 9min | 2 tasks | 7 files |
+| Phase 06 P03 | 28min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -201,6 +202,9 @@ Recent decisions affecting current work:
 - [Phase 06]: [Phase 06]: P1-IN-01 mutation check: re-moving signal.Stop to the pre-fix position reproduces the exact regression (signal kill, want exit 0) — the test binds on the fix
 - [Phase 06]: [Phase 06]: P2-IN-03: the TestStore_Set copy of the duplicated subtest deleted, the TestStore_endToEnd copy kept byte-identical (endToEnd additionally asserts the unpacked l/counter/nodeID); cmpSame kept — still live in merge_test.go
 - [Phase 06]: [Phase 06]: P1-WR-01: timeout-minutes 15/20 added to ci.yml jobs as additive keys only — zero check-run context diffs, the ruleset required_status_checks contract intact
+- [Phase 06]: [Phase 06]: D-08/D-09: the OnDiscard-to-slog bridge lives in the ADAPTER (udprepl.New defaults a nil OnDiscard to logDiscard) — production discard events surface with zero main wiring and stay provable at the adapter seam; discard lines emit at Debug (T-6-06 flood bound) while the O(1) counters carry the signal (plan 06-03)
+- [Phase 06]: [Phase 06]: setupLogging runs after finalizeConfig and before wire — slog.SetDefault's log-package redirect keeps every remaining log.Printf call in the same handler format, so every stderr line of a running node is one handler-formatted record; the exit-2 usage path stays plain text (plan 06-03)
+- [Phase 06]: [Phase 06]: MergeStats.DriftWarnings counts clock.Update's own gated signal — the drift return is measured against the clock's pre-absorb l, so a far-ahead stamp warns on the NEXT apply, not its own arrival; TestMergeStats_counts pins the absorb-then-warn sequence (plan 06-03)
 
 ### Pending Todos
 
@@ -236,6 +240,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-15T22:34:04.951Z
-Stopped at: Completed 06-02-PLAN.md
+Last session: 2026-11-15T23:08:18.811Z
+Stopped at: Completed 06-03-PLAN.md
 Resume file: None

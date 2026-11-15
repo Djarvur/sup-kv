@@ -156,14 +156,14 @@ Plans:
   2. The metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, clock-drift warnings, and discarded datagrams by class
   3. Logging is structured and every dropped-datagram class (bad CRC / own broadcast / bad proto version) is distinguishable in logs
   4. Benchmarks cover dump at 10k keys and replication throughput under burst writes, with confirmation latency staying bounded under bursts
-**Plans**: 2/9 plans executed
+**Plans**: 3/9 plans executed
 Plans:
 **Wave 1**
 - [x] 06-01-PLAN.md — Hardening backlog I: replication/persistence review fixes with regression tests (D-15: P4-WR-01/02, P4-IN-01, P3-WR-01, P3-IN-01, P4-IN-02+P3-IN-02) (TEST-04)
 - [x] 06-02-PLAN.md — Hardening backlog II: second-signal shutdown fix, ci.yml timeout-minutes, storage doc/subtest fixes (D-15: P1-IN-01, P1-WR-01, P2-IN-01..03) (TEST-04)
 
 **Wave 2** *(blocked on Wave 1)*
-- [ ] 06-03-PLAN.md — slog JSON pipeline (SUPKV_LOG_LEVEL/FORMAT, Log-tap bridge), OnDiscard seam, counter seams (MergeStats, DumpStats, unacked/sent mirrors) (OBS-01, OBS-03)
+- [x] 06-03-PLAN.md — slog JSON pipeline (SUPKV_LOG_LEVEL/FORMAT, Log-tap bridge), OnDiscard seam, counter seams (MergeStats, DumpStats, unacked/sent mirrors) (OBS-01, OBS-03)
 - [ ] 06-06-PLAN.md — Real-socket scenarios: asymmetric-topology convergence + bad-CRC/proto-mismatch/duplicate-node_id classification (TEST-04)
 - [ ] 06-07-PLAN.md — Exec scenarios x4 on the existing harness: kill-9 restart, both-down (+ corrupted dump record), SIGTERM final dump, empty-disk recovery (D-11/D-12) (TEST-04)
 
@@ -197,5 +197,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Persistence — Dump and Write Confirmation | 2/2 | Complete    | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | 6/6 | Complete    | 2026-11-07 |
 | 5. gRPC API and Binary | 6/6 | Complete    | 2026-11-09 |
-| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 2/9 | In Progress | - |
+| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 3/9 | In Progress | - |
 | 7. v1.0 — Docs, Examples and Release | 0/TBD | Not started | - |
