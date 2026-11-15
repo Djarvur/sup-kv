@@ -31,6 +31,19 @@ import (
 // whose version differs is discarded as BadProtoVersion (REPL-09).
 const SupportedProtoVersion = 1
 
+// The discard class tokens passed to [Config.OnDiscard] (D-08): stable
+// first-class strings — one per DiscardStats counter — that the
+// observability surfaces (structured log attrs, later the metrics labels)
+// key on. Metadata only: a token and its detail never carry record values,
+// user data or key names (the T-6-05 attr-surface contract).
+const (
+	DiscardBadCRC          = "bad_crc"
+	DiscardUndecodable     = "undecodable"
+	DiscardBadProtoVersion = "bad_proto_version"
+	DiscardOwnBroadcast    = "own_broadcast"
+	DiscardDuplicateNodeID = "duplicate_node_id"
+)
+
 // Design defaults a zero or negative Config field is normalized to, from
 // docs/IDEA.md §Parameters.
 const (
@@ -84,17 +97,17 @@ const (
 
 // Config holds the replication timing parameters; it is immutable once
 // handed to New. Zero or negative fields normalize to the docs/IDEA.md
-// §Parameters defaults, and a nil Log normalizes to a no-op: the core is
-// total over any Config. RetransmitInterval bounds how long the driver may
-// sleep while any pending entry exists (the scan-granularity reading of
-// IDEA.md's parameter list, research A5); the per-key backoff ladder itself
-// doubles from AckTimeout and saturates at AckTimeoutMax — documented with
-// every step at Core.scanRetransmit. SyncResponseRate paces the egress
-// queue: responses are spaced floor(1s/SyncResponseRate) nanoseconds apart
-// by integer division (probe #16), the first response immediate. Rates
-// outside the domain (0, 1e9] clamp to the 500/s default — above 1e9 the
-// integer division truncates to a zero interval and would silently disable
-// the limiter (D-15 P4-WR-02, the maxSyncResponseRate cap).
+// §Parameters defaults, and a nil Log or OnDiscard normalizes to a no-op:
+// the core is total over any Config. RetransmitInterval bounds how long the
+// driver may sleep while any pending entry exists (the scan-granularity
+// reading of IDEA.md's parameter list, research A5); the per-key backoff
+// ladder itself doubles from AckTimeout and saturates at AckTimeoutMax —
+// documented with every step at Core.scanRetransmit. SyncResponseRate paces
+// the egress queue: responses are spaced floor(1s/SyncResponseRate)
+// nanoseconds apart by integer division (probe #16), the first response
+// immediate. Rates outside the domain (0, 1e9] clamp to the 500/s default —
+// above 1e9 the integer division truncates to a zero interval and would
+// silently disable the limiter (D-15 P4-WR-02, the maxSyncResponseRate cap).
 type Config struct {
 	HelloInterval      time.Duration
 	PeerTimeout        time.Duration
@@ -105,12 +118,21 @@ type Config struct {
 	SyncChunkBytes     int
 	SyncResponseRate   int
 	Log                func(msg string)
+
+	// OnDiscard is invoked at every HandleDatagram discard site with the
+	// class token (DiscardBadCRC, ...) and a short metadata detail — the
+	// source handle, the offending node id (D-08). Additive to Log: the
+	// duplicate-node_id configuration errors keep their Log call, and the
+	// core itself stays silent (D-09) — this is a plain callback the
+	// adapter or main side may bridge into structured logging or counters;
+	// the class is a first-class value, never a message prefix to parse.
+	OnDiscard func(class, detail string)
 }
 
 // normalized returns cfg with out-of-domain fields replaced by the design
 // defaults — zero or negative everywhere, and SyncResponseRate additionally
 // above maxSyncResponseRate, where the spacing division would truncate to
-// zero (D-15 P4-WR-02) — and a nil Log replaced by a no-op.
+// zero (D-15 P4-WR-02) — and a nil Log or OnDiscard replaced by a no-op.
 func (c Config) normalized() Config {
 	if c.HelloInterval <= 0 {
 		c.HelloInterval = defaultHelloInterval
@@ -138,6 +160,9 @@ func (c Config) normalized() Config {
 	}
 	if c.Log == nil {
 		c.Log = func(_ string) {}
+	}
+	if c.OnDiscard == nil {
+		c.OnDiscard = func(_, _ string) {}
 	}
 	return c
 }
@@ -317,8 +342,11 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // restart branch (REPL-07, plan 04-04): this second variant requires run_id
 // EQUALITY with the remembered row, so a known node whose announced run_id
 // differs always reaches the Hello handler and fires its targeted-listing
-// restart reaction — a restart is never counted as a duplicate. Everything
-// else reaches protocol processing: Hello upserts the peer
+// restart reaction — a restart is never counted as a duplicate. Every
+// discard site additionally fires cfg.OnDiscard with its class token and a
+// metadata detail (D-08) — additive to the duplicate-node_id Log calls,
+// never their replacement. Everything else reaches protocol processing:
+// Hello upserts the peer
 // table and — when a known node's run_id changed — answers with the
 // targeted full listing toward the restarted peer (REPL-07),
 // DataReplication applies the record and Acks it, Ack drains
@@ -330,21 +358,26 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 	switch in.Status {
 	case port.BadCRC:
 		c.discards.BadCRC++
+		c.cfg.OnDiscard(DiscardBadCRC, in.Source)
 		return
 	case port.Undecodable:
 		c.discards.Undecodable++
+		c.cfg.OnDiscard(DiscardUndecodable, in.Source)
 		return
 	}
 	if in.ProtoVersion != SupportedProtoVersion {
 		c.discards.BadProtoVersion++
+		c.cfg.OnDiscard(DiscardBadProtoVersion, in.Source)
 		return
 	}
 	if in.NodeID == c.nodeID {
 		if in.RunID == c.runID {
 			c.discards.OwnEcho++
+			c.cfg.OnDiscard(DiscardOwnBroadcast, in.Source)
 			return
 		}
 		c.discards.DuplicateNodeID++
+		c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf("node_id %d at handle %q", in.NodeID, in.Source))
 		c.cfg.Log(fmt.Sprintf(
 			"sup-kv: configuration error: node_id %d announced by another run from handle %q, datagram discarded (REPL-08)",
 			in.NodeID, in.Source,
@@ -353,6 +386,7 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 	}
 	if known, ok := c.peers[in.NodeID]; ok && in.RunID == known.runID && in.Source != known.handle {
 		c.discards.DuplicateNodeID++
+		c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf("node_id %d handles %q/%q", in.NodeID, known.handle, in.Source))
 		c.cfg.Log(fmt.Sprintf(
 			"sup-kv: configuration error: node_id %d known at handle %q announced again from handle %q, datagram discarded (REPL-08)",
 			in.NodeID, known.handle, in.Source,

@@ -5,10 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"log/slog"
 	"net"
 	"slices"
+	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
@@ -16,6 +21,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
+	replproto "github.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1"
 )
 
 // Shared test constants: the fixed wall-clock millisecond (the D-02 now
@@ -543,5 +549,118 @@ func TestMirror_drainedAckedDedup(t *testing.T) {
 		deduped := slices.Compact(slices.Clone(info.Acked))
 		return len(info.WaitingOn) == 0 && len(info.Acked) == len(deduped) &&
 			slices.Equal(info.Acked, []uint16{nodeIDB})
+	})
+}
+
+// corruptByte is the bit pattern XORed into a body byte to build a bad-CRC
+// datagram: the envelope still parses, the CRC fails (D-08's framing class).
+const corruptByte = 0xFF
+
+// discardCapture is a slog.Handler recording every record it is handed —
+// the capturing sink TestDiscardLog_classes installs as the default logger
+// for the test's duration.
+type discardCapture struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+// Enabled reports every level recordable.
+func (*discardCapture) Enabled(context.Context, slog.Level) bool { return true }
+
+// Handle stores a clone of r under the lock.
+func (c *discardCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, r.Clone())
+	return nil
+}
+
+// WithAttrs returns the handler itself — the default logger adds no attrs.
+func (c *discardCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+
+// WithGroup returns the handler itself.
+func (c *discardCapture) WithGroup(string) slog.Handler { return c }
+
+// fromSource counts the captured Debug-level records carrying exactly the
+// class and detail attrs — the discard-event shape logDiscard emits. The
+// detail filter (this test's third-party sender handle) isolates the test's
+// own datagrams from any other parallel adapter's events riding the shared
+// default logger; counting only Debug records makes the level itself part
+// of the match (T-6-06: an Info-level discard line would never count).
+func (c *discardCapture) fromSource(class, source string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, r := range c.records {
+		if r.Level != slog.LevelDebug {
+			continue
+		}
+		var gotClass, gotDetail string
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "class":
+				gotClass = a.Value.String()
+			case "detail":
+				gotDetail = a.Value.String()
+			}
+			return true
+		})
+		if gotClass == class && gotDetail == source {
+			n++
+		}
+	}
+	return n
+}
+
+// TestDiscardLog_classes proves D-08's adapter half on a real socket: the
+// adapter's default OnDiscard bridge turns each discard into one slog
+// record at the Debug level whose class attr distinguishes bad_crc from
+// bad_proto_version with the sender's handle as the detail, and silence
+// reigns when nothing was sent. The bad-CRC datagram is an encoded Hello
+// with one body byte corrupted (the envelope parses, the CRC fails); the
+// proto-version datagram is a hand-built envelope whose CRC is correct —
+// the core's version check only runs past a CRC-passing envelope.
+func TestDiscardLog_classes(t *testing.T) {
+	t.Parallel()
+	_, udpPort := newMirrorAdapter(t)
+	tx := peerSocket(t)
+	source := tx.LocalAddr().String()
+
+	capture := &discardCapture{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if n := capture.fromSource(repl.DiscardBadCRC, source); n != 0 {
+		t.Fatalf("captured %d discard records from %s before anything was sent, want none", n, source)
+	}
+
+	datagram, err := udprepl.EncodeDatagramForTest(port.Hello{}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Hello: %v", err)
+	}
+	datagram[len(datagram)-1] ^= corruptByte
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "the bad_crc discard record", func() bool {
+		return capture.fromSource(repl.DiscardBadCRC, source) > 0
+	})
+
+	body, err := proto.Marshal(&replproto.Body{Msg: &replproto.Body_Hello{Hello: &replproto.Hello{}}})
+	if err != nil {
+		t.Fatalf("marshal proto-version probe body: %v", err)
+	}
+	mismatch, err := proto.Marshal(&replproto.Envelope{
+		ProtoVersion: repl.SupportedProtoVersion + 1,
+		NodeId:       uint32(nodeIDB),
+		RunId:        runIDB[:],
+		Crc32:        crc32.ChecksumIEEE(body),
+		Body:         body,
+	})
+	if err != nil {
+		t.Fatalf("marshal proto-version probe envelope: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, mismatch)
+	waitFor(t, mirrorWait, "the bad_proto_version discard record", func() bool {
+		return capture.fromSource(repl.DiscardBadProtoVersion, source) > 0
 	})
 }

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"log/slog"
 	"net"
 	"slices"
 	"sync/atomic"
@@ -194,8 +195,14 @@ type Adapter struct {
 // example "127.255.255.255:7900"); the core's own opaque handle (D-03) is
 // taken from the bound socket's local address. The socket is created with
 // SO_REUSEADDR and SO_BROADCAST set before bind (RESEARCH Pattern 3):
-// same-host nodes share the port and broadcast sends are permitted.
+// same-host nodes share the port and broadcast sends are permitted. A nil
+// cfg.OnDiscard is replaced by the adapter's own slog bridge (logDiscard,
+// D-08): production discards surface as distinguishable structured events
+// with no wiring at the call site.
 func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, cfg repl.Config) (*Adapter, error) {
+	if cfg.OnDiscard == nil {
+		cfg.OnDiscard = logDiscard
+	}
 	packetConn, err := reuseAddrBroadcastListenPacket(bindAddr)
 	if err != nil {
 		return nil, fmt.Errorf("udprepl: bind udp4 %s: %w", bindAddr, err)
@@ -223,6 +230,20 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 		done:          make(chan struct{}),
 		drained:       make(map[string]drainedRow),
 	}, nil
+}
+
+// logDiscard is the adapter's default repl.Config.OnDiscard bridge (D-08,
+// D-09): one structured event per discarded datagram with the class token
+// and the metadata detail as attrs, so every discard class stays
+// distinguishable in the log stream while the core stays silent — the class
+// arrives as a first-class value, never a message prefix to parse. Debug
+// level is deliberate hot-path discipline (T-6-06, 06-RESEARCH Pattern 4):
+// an attacker on the segment can flood discard-class events, and at the
+// default info level they are suppressed while the adapter's O(1) discard
+// counters (Discards) carry the reliable signal — only an
+// operator-configured SUPKV_LOG_LEVEL=debug ever lets a flood reach stderr.
+func logDiscard(class, detail string) {
+	slog.Debug("Discarded datagram", "class", class, "detail", detail)
 }
 
 // reuseAddrBroadcastListenPacket binds the udp4 socket with SO_REUSEADDR

@@ -410,3 +410,156 @@ func TestDiscard_totality(t *testing.T) {
 		t.Errorf("core peer table holds %d peers, model holds %d — processed and discarded disagree", len(table), len(peers))
 	}
 }
+
+// discardEvent is one captured Config.OnDiscard call.
+type discardEvent struct {
+	class  string
+	detail string
+}
+
+// TestDiscard_onDiscardSeam proves the D-08 seam: every discard branch of
+// HandleDatagram fires Config.OnDiscard exactly once with its stable class
+// token and a metadata detail naming the evidence (source handle, node id),
+// the DiscardStats total classification holds unchanged beside the seam, and
+// a healthy datagram fires nothing at all — the seam is additive and the
+// counters stay the reliable signal.
+func TestDiscard_onDiscardSeam(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	rows := []struct {
+		name          string
+		seedPeer1     bool
+		in            port.InboundDatagram
+		wantEvents    int
+		wantClass     string
+		wantDetailHas []string
+		wantDiscards  repl.DiscardStats
+	}{
+		{
+			name:         "zero-length datagram fires undecodable",
+			in:           port.InboundDatagram{Status: port.Undecodable},
+			wantEvents:   1,
+			wantClass:    repl.DiscardUndecodable,
+			wantDiscards: repl.DiscardStats{Undecodable: 1},
+		},
+		{
+			name: "CRC failure fires bad_crc",
+			in: port.InboundDatagram{
+				Status:       port.BadCRC,
+				ProtoVersion: repl.SupportedProtoVersion,
+				NodeID:       peerID1,
+				RunID:        testRunID(peerID1),
+			},
+			wantEvents:   1,
+			wantClass:    repl.DiscardBadCRC,
+			wantDiscards: repl.DiscardStats{BadCRC: 1},
+		},
+		{
+			name: "proto version mismatch fires bad_proto_version",
+			in: port.InboundDatagram{
+				Status:       port.Decoded,
+				ProtoVersion: repl.SupportedProtoVersion + 1,
+				NodeID:       peerID1,
+				RunID:        testRunID(peerID1),
+				Msg:          port.Hello{},
+			},
+			wantEvents:   1,
+			wantClass:    repl.DiscardBadProtoVersion,
+			wantDiscards: repl.DiscardStats{BadProtoVersion: 1},
+		},
+		{
+			name: "own broadcast echo fires own_broadcast",
+			in: port.InboundDatagram{
+				Source:       handleFor(localID),
+				Status:       port.Decoded,
+				ProtoVersion: repl.SupportedProtoVersion,
+				NodeID:       localID,
+				RunID:        testRunID(localID),
+				Msg:          port.Hello{},
+			},
+			wantEvents:   1,
+			wantClass:    repl.DiscardOwnBroadcast,
+			wantDiscards: repl.DiscardStats{OwnEcho: 1},
+		},
+		{
+			name: "foreign run claiming our node id fires duplicate_node_id",
+			in: port.InboundDatagram{
+				Source:       handleFor(peerID1),
+				Status:       port.Decoded,
+				ProtoVersion: repl.SupportedProtoVersion,
+				NodeID:       localID,
+				RunID:        testRunID(peerID1),
+				Msg:          port.Hello{},
+			},
+			wantEvents:    1,
+			wantClass:     repl.DiscardDuplicateNodeID,
+			wantDetailHas: []string{fmt.Sprintf("node_id %d", localID), handleFor(peerID1)},
+			wantDiscards:  repl.DiscardStats{DuplicateNodeID: 1},
+		},
+		{
+			name:      "second handle claiming a known identity fires duplicate_node_id naming both handles",
+			seedPeer1: true,
+			in: port.InboundDatagram{
+				Source:       cloneHandle,
+				Status:       port.Decoded,
+				ProtoVersion: repl.SupportedProtoVersion,
+				NodeID:       peerID1,
+				RunID:        testRunID(peerID1),
+				Msg:          port.Hello{},
+			},
+			wantEvents:    1,
+			wantClass:     repl.DiscardDuplicateNodeID,
+			wantDetailHas: []string{fmt.Sprintf("node_id %d", peerID1), handleFor(peerID1), cloneHandle},
+			wantDiscards:  repl.DiscardStats{DuplicateNodeID: 1},
+		},
+		{
+			name:       "a valid Hello from a stranger fires nothing",
+			in:         helloFrom(strangerID),
+			wantEvents: 0,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			var events []discardEvent
+			fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
+			st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
+			core := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{
+				OnDiscard: func(class, detail string) {
+					events = append(events, discardEvent{class: class, detail: detail})
+				},
+			})
+			if row.seedPeer1 {
+				var seed port.Outbox
+				core.HandleDatagram(now, helloFrom(peerID1), &seed)
+				seed.Drain()
+				events = nil
+			}
+			var out port.Outbox
+			core.HandleDatagram(now, row.in, &out)
+			if len(events) != row.wantEvents {
+				t.Fatalf("OnDiscard fired %d times, want %d: %+v", len(events), row.wantEvents, events)
+			}
+			if row.wantEvents == 0 {
+				if got := core.Discards(); got != row.wantDiscards {
+					t.Errorf("Discards() = %+v, want %+v — the total classification must hold beside the seam", got, row.wantDiscards)
+				}
+				return
+			}
+			if events[0].class != row.wantClass {
+				t.Fatalf("OnDiscard class = %q, want %q", events[0].class, row.wantClass)
+			}
+			for _, name := range row.wantDetailHas {
+				if !strings.Contains(events[0].detail, name) {
+					t.Errorf("OnDiscard detail %q does not name %q", events[0].detail, name)
+				}
+			}
+			if got := core.Discards(); got != row.wantDiscards {
+				t.Errorf("Discards() = %+v, want %+v — the total classification must hold beside the seam", got, row.wantDiscards)
+			}
+			if got := len(out.Drain()); got != 0 {
+				t.Errorf("handler emitted %d messages, want none — a discarded datagram is never also processed", got)
+			}
+		})
+	}
+}
