@@ -256,7 +256,7 @@ func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 		// An in-flight DataReplication from the old run carrying a strictly
 		// greater version supersedes a pending entry normally and is Acked.
 		ver2 := localWrite(t, core, st, now, keyBeta, "two")
-		greater := remoteRecord(testNowMs+1, 0, peerID1, "remote wins")
+		greater := remoteRecord(testNowMs+1, peerID1, "remote wins")
 		if greater.Version.Compare(ver2) <= 0 {
 			t.Fatalf("test remote version %x not strictly greater than the tracked %x", greater.Version[:], ver2[:])
 		}

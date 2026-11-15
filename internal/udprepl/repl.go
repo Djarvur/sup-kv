@@ -152,6 +152,23 @@ type Adapter struct {
 	duplicateNodeID atomic.Uint64
 	peerCount       atomic.Uint64
 
+	// The OBS-01 mirror set: the pending-set gauge (unacked count and
+	// oldest age), the remote-merge counters and the retransmissions
+	// counter — all copied from the single-driver core after every loop
+	// event (the Discards precedent) — plus the sent-by-type datagram
+	// counts, incremented in flush where the adapter itself sees every
+	// outbound message cross the encode step.
+	unackedCount      atomic.Int64
+	unackedOldestNs   atomic.Int64
+	mergeConflicts    atomic.Uint64
+	mergeDriftWarning atomic.Uint64
+	retransmitted     atomic.Uint64
+	sentHello         atomic.Uint64
+	sentData          atomic.Uint64
+	sentAck           atomic.Uint64
+	sentDataRequest   atomic.Uint64
+	sentSync          atomic.Uint64
+
 	// syncArrived mirrors the core's first-DataSync-received flag (the
 	// startup gate's sync half, API-04); pendingCopy mirrors the core's
 	// pending snapshot as a fresh copy-on-write map — the pointer is
@@ -384,6 +401,56 @@ func (a *Adapter) KnownPeers() uint64 {
 	return a.peerCount.Load()
 }
 
+// UnackedStats returns the pending-set gauge mirrored from the core's
+// [repl.Core.UnackedStats] after the latest event-loop iteration (the
+// OBS-01 unacked count and oldest-age seam) — safe from any goroutine.
+func (a *Adapter) UnackedStats() repl.UnackedStats {
+	return repl.UnackedStats{
+		Count:     int(a.unackedCount.Load()),
+		OldestAge: time.Duration(a.unackedOldestNs.Load()),
+	}
+}
+
+// MergeStats returns the remote-merge counters mirrored from the core after
+// the latest event-loop iteration (the OBS-01 merge-conflicts and
+// drift-warning seam) — safe from any goroutine.
+func (a *Adapter) MergeStats() repl.MergeStats {
+	return repl.MergeStats{
+		Conflicts:     a.mergeConflicts.Load(),
+		DriftWarnings: a.mergeDriftWarning.Load(),
+	}
+}
+
+// Retransmissions returns the retransmissions counter mirrored from the
+// core after the latest event-loop iteration (the OBS-01 seam) — safe from
+// any goroutine.
+func (a *Adapter) Retransmissions() uint64 {
+	return a.retransmitted.Load()
+}
+
+// SentByType counts the outbound datagrams this adapter has encoded and
+// handed to its socket, by message kind (the OBS-01 replication-topology
+// seam) — the vocabulary mirrors the wire Body oneof.
+type SentByType struct {
+	Hello       uint64
+	Data        uint64
+	Ack         uint64
+	DataRequest uint64
+	Sync        uint64
+}
+
+// SentByType returns the per-kind send counts — a value copy over the
+// atomics flush increments, safe from any goroutine.
+func (a *Adapter) SentByType() SentByType {
+	return SentByType{
+		Hello:       a.sentHello.Load(),
+		Data:        a.sentData.Load(),
+		Ack:         a.sentAck.Load(),
+		DataRequest: a.sentDataRequest.Load(),
+		Sync:        a.sentSync.Load(),
+	}
+}
+
 // SyncArrived reports whether the core has received its first DataSync
 // datagram (the startup gate's sync half, API-04), mirrored after the
 // latest event-loop iteration — safe from any goroutine. gRPC handler
@@ -440,9 +507,11 @@ func (a *Adapter) readLoop() {
 // flush encodes and sends every outbound message the core emitted for the
 // just-handled event: broadcast to the configured broadcast address,
 // unicast to the handle resolved through [net.ResolveUDPAddr] — handles are
-// opaque to the core; only here do they become addresses (D-03). Failures
-// are logged, never panics: a transient send error must not take the node
-// down.
+// opaque to the core; only here do they become addresses (D-03). Each
+// encode-successful message counts into its SentByType kind (OBS-01) — the
+// datagram is on its way to the socket; an encode failure counts nowhere.
+// Failures are logged, never panics: a transient send error must not take
+// the node down.
 func (a *Adapter) flush(out *port.Outbox) {
 	for _, ob := range out.Drain() {
 		datagram, err := encodeDatagram(a.nodeID, a.runID, ob.Msg)
@@ -450,6 +519,7 @@ func (a *Adapter) flush(out *port.Outbox) {
 			a.log(err.Error())
 			continue
 		}
+		a.countSent(ob.Msg)
 		if ob.Broadcast {
 			a.write(datagram, a.broadcastAddr)
 			continue
@@ -463,6 +533,24 @@ func (a *Adapter) flush(out *port.Outbox) {
 	}
 }
 
+// countSent adds one to the message kind's send counter (OBS-01) — the
+// five-kind vocabulary of the wire Body oneof, counted in flush where every
+// outbound message crosses the encode step on the event-loop goroutine.
+func (a *Adapter) countSent(msg port.Message) {
+	switch msg.(type) {
+	case port.Hello:
+		a.sentHello.Add(1)
+	case port.DataReplication:
+		a.sentData.Add(1)
+	case port.Ack:
+		a.sentAck.Add(1)
+	case port.DataRequest:
+		a.sentDataRequest.Add(1)
+	case port.DataSync:
+		a.sentSync.Add(1)
+	}
+}
+
 // write sends one datagram to addr, logging (never panicking on) a failure.
 func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) {
 	_, err := a.conn.WriteToUDP(datagram, addr)
@@ -471,9 +559,11 @@ func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) {
 	}
 }
 
-// mirrorStats copies the core's discard counters and known-peer count into
-// the atomics after each loop iteration (D-04): cross-goroutine readers —
-// the smoke test, later observability — never touch core state.
+// mirrorStats copies the core's discard counters, known-peer count and the
+// OBS-01 gauge set — the pending-set gauge, the remote-merge counters and
+// the retransmissions counter — into the atomics after each loop iteration
+// (D-04): cross-goroutine readers — the smoke test, later observability —
+// never touch core state.
 func (a *Adapter) mirrorStats() {
 	d := a.core.Discards()
 	a.badCRC.Store(d.BadCRC)
@@ -482,6 +572,13 @@ func (a *Adapter) mirrorStats() {
 	a.ownEcho.Store(d.OwnEcho)
 	a.duplicateNodeID.Store(d.DuplicateNodeID)
 	a.peerCount.Store(uint64(len(a.core.PeerSnapshot())))
+	u := a.core.UnackedStats(time.Now())
+	a.unackedCount.Store(int64(u.Count))
+	a.unackedOldestNs.Store(int64(u.OldestAge))
+	m := a.core.MergeStats()
+	a.mergeConflicts.Store(m.Conflicts)
+	a.mergeDriftWarning.Store(m.DriftWarnings)
+	a.retransmitted.Store(a.core.Retransmissions())
 }
 
 // mirrorState copies the core's replication read states into the atomics

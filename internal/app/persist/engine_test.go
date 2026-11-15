@@ -1575,3 +1575,49 @@ func TestEngine_redundantDirty(t *testing.T) {
 		}
 	})
 }
+
+// TestDumpStats_records proves the dump-cycle gauge (OBS-01): one forced
+// successful dump records a strictly positive duration with total 1 and
+// errors 0, and one failed Save through the fake port's injected failure
+// records the error with total 2 — real time, not a synctest bubble,
+// because the assertion is on a real monotonic span. The engine stops
+// immediately after the failure, ahead of the re-armed debounce retry, so
+// the totals stay exact.
+func TestDumpStats_records(t *testing.T) {
+	t.Parallel()
+	eng, dumps := newFakeEngine()
+	stop := runEngine(t, eng)
+
+	mkRecord := func(data string) storage.Record {
+		return storage.Record{
+			Version: version.PackVersion(time.Now().UnixMilli(), 0, synctestNodeID),
+			Data:    []byte(data),
+		}
+	}
+
+	_, _, err := eng.ApplyRemote("dumpstats/one", mkRecord("one"))
+	if err != nil {
+		t.Fatalf("ApplyRemote(dumpstats/one): %v", err)
+	}
+	err = eng.Flush()
+	if err != nil {
+		t.Fatalf("Flush #1: %v", err)
+	}
+	if got := eng.DumpStats(); got.Total != 1 || got.Errors != 0 || got.DurationSeconds <= 0 {
+		t.Fatalf("after the successful dump DumpStats() = %+v, want Total 1, Errors 0, a positive duration", got)
+	}
+
+	dumps.failSaves = 1
+	_, _, err = eng.ApplyRemote("dumpstats/two", mkRecord("two"))
+	if err != nil {
+		t.Fatalf("ApplyRemote(dumpstats/two): %v", err)
+	}
+	err = eng.Flush()
+	if !errors.Is(err, errFakeSave) {
+		t.Fatalf("Flush #2 = %v, want the injected fake save failure", err)
+	}
+	stop()
+	if got := eng.DumpStats(); got.Total != 2 || got.Errors != 1 || got.DurationSeconds <= 0 {
+		t.Fatalf("after the failed dump DumpStats() = %+v, want Total 2, Errors 1, a positive duration", got)
+	}
+}

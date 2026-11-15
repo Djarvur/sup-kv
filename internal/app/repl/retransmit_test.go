@@ -150,8 +150,8 @@ func localWrite(t *testing.T, core *repl.Core, st *stateStore, now time.Time, ke
 // remoteRecord builds an externally versioned record; the store recomputes
 // the checksum on install, so the wire checksum stays zero (the Merge
 // never trusts it).
-func remoteRecord(l int64, counter uint16, nodeID uint16, data string) storage.Record {
-	return storage.Record{Version: version.PackVersion(l, counter, nodeID), Data: []byte(data)}
+func remoteRecord(l int64, nodeID uint16, data string) storage.Record {
+	return storage.Record{Version: version.PackVersion(l, 0, nodeID), Data: []byte(data)}
 }
 
 // assertPending fails unless snap holds an entry under (key, ver) whose
@@ -524,7 +524,7 @@ func TestRetransmit_ackDrainSemantics(t *testing.T) {
 			out.Drain()
 			assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1, peerID2})
 
-			greater := remoteRecord(testNowMs+1, 0, peerID1, "remote wins")
+			greater := remoteRecord(testNowMs+1, peerID1, "remote wins")
 			if greater.Version.Compare(ver) <= 0 {
 				t.Fatalf("test remote version %x not strictly greater than the tracked %x", greater.Version[:], ver[:])
 			}
@@ -556,7 +556,7 @@ func TestRetransmit_ackDrainSemantics(t *testing.T) {
 			// shape: the version would win the merge, but the store refuses
 			// the record outright. It arrives from the second waited-on
 			// peer, proving the rejection holds regardless of sender.
-			rejected := remoteRecord(testNowMs+1, 0, peerID2, "remote payload over the local limit")
+			rejected := remoteRecord(testNowMs+1, peerID2, "remote payload over the local limit")
 			if rejected.Version.Compare(ver) <= 0 {
 				t.Fatalf("test remote version %x not strictly greater than the tracked %x", rejected.Version[:], ver[:])
 			}

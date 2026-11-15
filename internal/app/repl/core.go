@@ -210,6 +210,18 @@ type DiscardStats struct {
 	DuplicateNodeID uint64
 }
 
+// MergeStats counts the remote-merge observability signals (OBS-01, D-10):
+// Conflicts is every displaced-or-rejected version the store reported — an
+// LWW loser is an ordinary overwrite, counted and never journaled — and
+// DriftWarnings is every apply whose drift signal was nonzero: the store
+// clock gates the signal at its drift-warn threshold (zero drift is within
+// tolerance, any nonzero return is beyond it), so the counter mirrors
+// exactly the warnings storage.Merge already decided.
+type MergeStats struct {
+	Conflicts     uint64
+	DriftWarnings uint64
+}
+
 // PeerInfo is one known neighbour as exposed by PeerSnapshot: the opaque
 // address handle (D-03), the run_id it announced, and the time of its last
 // Hello. The run_id comparison against the stored one is what detects a
@@ -297,6 +309,12 @@ type Core struct {
 	syncResponseInterval time.Duration
 
 	discards DiscardStats
+
+	// mergeStats counts the remote-merge signals (OBS-01); retransmitted
+	// counts the ladder's retransmission emissions — driver-goroutine-only
+	// mutations behind the copying accessors, the Discards precedent.
+	mergeStats    MergeStats
+	retransmitted uint64
 
 	// syncArrived flips true on the first received DataSync datagram and
 	// never resets — the startup gate's sync half (API-04). Set by
@@ -498,14 +516,21 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 // signal of divergence, never a "delivered" report for a record that was
 // never stored. Merge idempotence keeps the error-free duplicate delivery
 // of an already-stored record a no-op that still Acks (REPL-09's adjacency
-// edge).
+// edge). The ApplyRemote returns feed the MergeStats counters (OBS-01,
+// D-10): every displaced-or-rejected version counts a conflict — counted
+// only, never journaled — and a nonzero drift return (the store clock's
+// beyond-threshold signal) counts a drift warning.
 func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Outbox) {
-	_, _, err := c.store.ApplyRemote(msg.Key, msg.Record)
+	conflicts, drift, err := c.store.ApplyRemote(msg.Key, msg.Record)
 	if err != nil {
 		c.cfg.Log(fmt.Sprintf("sup-kv: applying replicated record for key %q from handle %q: %v", msg.Key, source, err))
 		// Not applied: no Ack, no supersession — never confirm a record the
 		// store refused.
 		return
+	}
+	c.mergeStats.Conflicts += uint64(len(conflicts))
+	if drift != 0 {
+		c.mergeStats.DriftWarnings++
 	}
 	// Remote supersession: a strictly greater remote version under the same
 	// key fulfills the tracking promise by winning — the same byte order
@@ -842,7 +867,8 @@ func (c *Core) evictPeers(now time.Time) {
 // retry is honored at scan granularity (research A5); with no pending
 // entries this scanner contributes no deadline. Emission order is keys
 // sorted ascending: no map-iteration order ever reaches an emit path
-// (REPL-02, research Pitfall 1 / probe #9).
+// (REPL-02, research Pitfall 1 / probe #9). Every emission counts in the
+// retransmissions counter (OBS-01) — the adapter mirrors it post-event.
 func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
 	if len(c.peers) == 0 || len(c.pending) == 0 {
 		return
@@ -853,6 +879,7 @@ func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
 			continue
 		}
 		out.Broadcast(port.DataReplication{Key: key, Record: entry.rec})
+		c.retransmitted++
 		entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
 		entry.nextRetry = now.Add(entry.backoff)
 		c.pending[key] = entry
@@ -933,6 +960,21 @@ func (c *Core) earliestRetry() time.Time {
 // to read from any goroutine the driver permits.
 func (c *Core) Discards() DiscardStats {
 	return c.discards
+}
+
+// MergeStats returns the remote-merge counters (OBS-01, D-10) — a value
+// copy, safe to read from any goroutine the driver permits (the Discards
+// precedent); the production adapter mirrors them into atomics after every
+// loop event.
+func (c *Core) MergeStats() MergeStats {
+	return c.mergeStats
+}
+
+// Retransmissions returns the count of retransmission datagrams the backoff
+// ladder has emitted (OBS-01) — a value read the adapter mirrors post-event
+// like the discard counters.
+func (c *Core) Retransmissions() uint64 {
+	return c.retransmitted
 }
 
 // SyncArrived reports whether at least one DataSync datagram has been

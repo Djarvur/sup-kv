@@ -664,3 +664,116 @@ func TestDiscardLog_classes(t *testing.T) {
 		return capture.fromSource(repl.DiscardBadProtoVersion, source) > 0
 	})
 }
+
+// probeLoopbackBroadcast pre-flights the one platform capability the
+// asymmetric-topology tests need — a datagram sent to the loopback broadcast
+// address reaches the socket bound to the destination port (loopback
+// broadcast fan-out is a Linux-only kernel behavior; macOS lo0 carries no
+// BROADCAST flag — the wait_integration_test.go probe, D-12) — and skips
+// loudly naming what was probed when it is missing.
+func probeLoopbackBroadcast(t *testing.T, probePort int) {
+	t.Helper()
+	rx, err := smokeSocket(fmt.Sprintf("0.0.0.0:%d", probePort))
+	if err != nil {
+		t.Fatalf("probe rx bind: %v", err)
+	}
+	defer func() { _ = rx.Close() }()
+	tx, err := smokeSocket("0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("probe tx bind: %v", err)
+	}
+	defer func() { _ = tx.Close() }()
+	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: probePort}
+	_, err = tx.WriteToUDP([]byte("sup-kv mirror probe"), dst)
+	if err != nil {
+		t.Fatalf("probe send to %s: %v", dst, err)
+	}
+	err = rx.SetReadDeadline(time.Now().Add(probeWait))
+	if err != nil {
+		t.Fatalf("probe read deadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	for {
+		n, _, readErr := rx.ReadFromUDP(buf)
+		if readErr != nil {
+			t.Skipf(
+				"loopback broadcast to %s did not reach the bound socket within %v — platform lacks the capability (the mirror fixtures stay proven by TestMirror_pendingAckVisible and the core suites)",
+				dst,
+				probeWait,
+			)
+		}
+		if n > 0 {
+			return
+		}
+	}
+}
+
+// newAsymAdapter returns the node's adapter running its real event loop on
+// one port of an asymmetric pair (06-RESEARCH Pattern 5): the node binds
+// bindPort and broadcasts to crossPort — the only same-host topology whose
+// cross-unicast replies (an Ack above all) reach the peer deterministically.
+func newAsymAdapter(t *testing.T, nodeID uint16, bindPort, crossPort int) (*udprepl.Adapter, *stateStore) {
+	t.Helper()
+	st := newTestStore(nodeID)
+	adapter, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", bindPort),
+		fmt.Sprintf("127.255.255.255:%d", crossPort),
+		nodeID, st, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("adapter New (node %d, bind %d, cross %d): %v", nodeID, bindPort, crossPort, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() { _ = adapter.Run(ctx) }()
+	return adapter, st
+}
+
+// TestMirror_unackedSent proves the OBS-01 mirror set over a real write's
+// whole lifecycle on real sockets: node A notifies a local write while
+// alone — the entry parks in suspension with no known peer, so the unacked
+// gauge observably holds 1 — then node B joins the asymmetric pair; its
+// startup Hello is A's discovery, the flush broadcasts the pending entry, B
+// applies it, Acks, and the gauge drains to 0 with the peer known. The
+// sent-by-type counters corroborate the cycle (A's Hello and Data, B's
+// Ack) and node B's store serves the replicated record byte-equal.
+func TestMirror_unackedSent(t *testing.T) {
+	t.Parallel()
+	portA, portB := freeUDPPort(t), freeUDPPort(t)
+	probeLoopbackBroadcast(t, portA)
+
+	adapterA, stA := newAsymAdapter(t, nodeIDA, portA, portB)
+	ver, _, err := stA.store.Set(mirrorKey, []byte("unacked me"))
+	if err != nil {
+		t.Fatalf("store A Set(%q): %v", mirrorKey, err)
+	}
+	rec, err := stA.store.Get(mirrorKey)
+	if err != nil {
+		t.Fatalf("store A Get(%q): %v", mirrorKey, err)
+	}
+	err = adapterA.NotifyLocalWrite(mirrorKey, rec)
+	if err != nil {
+		t.Fatalf("NotifyLocalWrite(%q): %v", mirrorKey, err)
+	}
+	waitFor(t, mirrorWait, "the unacked gauge to reach 1", func() bool {
+		return adapterA.UnackedStats().Count == 1
+	})
+
+	adapterB, stB := newAsymAdapter(t, nodeIDB, portB, portA)
+	waitFor(t, mirrorWait, "the unacked gauge to drain to 0 with the peer known", func() bool {
+		return adapterA.UnackedStats().Count == 0 && adapterA.KnownPeers() == 1
+	})
+
+	sent := adapterA.SentByType()
+	if sent.Hello < 1 || sent.Data < 1 {
+		t.Fatalf("node A sent by type = %+v, want at least one Hello and one Data", sent)
+	}
+	if got := adapterB.SentByType().Ack; got < 1 {
+		t.Fatalf("node B sent %d Acks, want at least 1 — the drain must be a real Ack cycle", got)
+	}
+	served, err := stB.store.Get(mirrorKey)
+	if err != nil || served.Version != ver || !bytes.Equal(served.Data, []byte("unacked me")) {
+		t.Fatalf("node B serves (%x, %q, %v) for %q, want the replicated record (%x, %q)",
+			served.Version[:], served.Data, err, mirrorKey, ver[:], "unacked me")
+	}
+}

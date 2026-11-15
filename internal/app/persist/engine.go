@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/clock"
@@ -75,6 +76,22 @@ type Engine struct {
 	flushCh   chan chan error
 	runDone   chan struct{}
 	closed    bool
+
+	// dumpNanos, dumpTotal and dumpErrors carry DumpStats lock-free for
+	// scrapers (OBS-01): runDump is the single writer — the serialized
+	// dumper — so atomic reads need no engine mutex.
+	dumpNanos  atomic.Int64
+	dumpTotal  atomic.Uint64
+	dumpErrors atomic.Uint64
+}
+
+// DumpStats is the dump-cycle gauge OBS-01 reads: the last dump's
+// Encode+Save span in seconds — recorded on success and failure alike —
+// the total dump attempts, and the failed ones.
+type DumpStats struct {
+	DurationSeconds float64
+	Total           uint64
+	Errors          uint64
 }
 
 // New returns an engine persisting store's state through dumps. store and
@@ -260,17 +277,18 @@ func (e *Engine) sweepClosed() {
 // runDump is the serialized dump cycle: under the mutex it captures the
 // cover version and the current waiter list and clears the dirty epoch,
 // then releases the mutex before any encode or I/O — write-path
-// dirty-marking must never block on adapter I/O. On success every captured
-// waiter resolves nil: the cover discipline is the PERS-04 invariant —
-// lastLocal is updated under the mutex by every write path after its store
-// write installed the record, so any waiter whose version is not greater
-// than the captured cover had its record installed before the capture,
-// hence inside the Records snapshot taken after, and confirmation always
-// means on-disk containment, never elapsed time. On failure every current
-// waiter resolves ErrDumpFailed while the state stays readable in memory,
-// dirty re-arms from a fresh epoch and the re-armed debounce timer starts
-// the next attempt one interval later — never a tight retry loop (D-05,
-// research A8).
+// dirty-marking must never block on adapter I/O. The Encode+Save span is
+// measured and recorded into the DumpStats atomics on success and failure
+// alike (OBS-01). On success every captured waiter resolves nil: the cover
+// discipline is the PERS-04 invariant — lastLocal is updated under the
+// mutex by every write path after its store write installed the record, so
+// any waiter whose version is not greater than the captured cover had its
+// record installed before the capture, hence inside the Records snapshot
+// taken after, and confirmation always means on-disk containment, never
+// elapsed time. On failure every current waiter resolves ErrDumpFailed
+// while the state stays readable in memory, dirty re-arms from a fresh
+// epoch and the re-armed debounce timer starts the next attempt one
+// interval later — never a tight retry loop (D-05, research A8).
 func (e *Engine) runDump() error {
 	e.mu.Lock()
 	cover := e.lastLocal
@@ -279,16 +297,39 @@ func (e *Engine) runDump() error {
 	e.dirty = false
 	e.mu.Unlock()
 
+	start := time.Now()
 	block, err := Encode(e.store.Records())
 	if err == nil {
 		err = e.dumps.Save(block)
 	}
+	e.recordDump(time.Since(start), err)
 	if err != nil {
 		e.failWaiters(captured)
 		return err
 	}
 	e.confirmWaiters(captured, cover)
 	return nil
+}
+
+// recordDump stores one dump cycle's observability (OBS-01): the span of
+// the Encode+Save pair, the attempt total and — when err is non-nil — the
+// error count, all through the lock-free atomics DumpStats reads.
+func (e *Engine) recordDump(span time.Duration, err error) {
+	e.dumpNanos.Store(int64(span))
+	e.dumpTotal.Add(1)
+	if err != nil {
+		e.dumpErrors.Add(1)
+	}
+}
+
+// DumpStats returns the dump-cycle counters (OBS-01) — a value copy over
+// the atomics, safe from any goroutine; runDump is the single writer.
+func (e *Engine) DumpStats() DumpStats {
+	return DumpStats{
+		DurationSeconds: float64(e.dumpNanos.Load()) / float64(time.Second),
+		Total:           e.dumpTotal.Load(),
+		Errors:          e.dumpErrors.Load(),
+	}
 }
 
 // confirmWaiters resolves the covered waiters of a completed dump with nil.
