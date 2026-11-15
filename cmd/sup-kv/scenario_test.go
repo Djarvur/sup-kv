@@ -26,8 +26,10 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +61,17 @@ const (
 
 	execKeyKillA = "exec/kill9/key-on-a"
 	execKeyKillB = "exec/kill9/key-on-b"
+
+	execKeyBothA = "exec/bothdown/key-on-a"
+	execKeyBothB = "exec/bothdown/key-on-b"
+
+	execKeySigterm = "exec/sigterm/key-on-b"
+
+	// execDiscardLine is the startup line main prints when the loader
+	// discarded undecodable records (startEngine's discarded-count log) —
+	// the proof a corrupted record took the per-record discard path, not
+	// the whole-generation .prev fallback.
+	execDiscardLine = "discarded 1 undecodable dumped records at startup"
 )
 
 // execValue is the deterministic per-key scenario value — every visibility
@@ -67,48 +80,42 @@ func execValue(key string) string {
 	return "exec-scenario-value:" + key
 }
 
-// scenarioProbeLoopback pre-flights the one platform capability the exec
-// scenarios need — a datagram sent to the loopback broadcast address
-// reaches the socket bound to the destination port (loopback broadcast
-// fan-out is a Linux-only kernel behavior; macOS lo0 carries no BROADCAST
-// flag — D-12/A6) — and skips loudly naming what was probed when it is
-// missing. The asymmetric topology needs exactly this capability for the
-// pair's cross-delivery; TEST-04's in-process real-socket half and the
-// single-node lifecycle stay proven on every platform by
-// internal/udprepl/scenario_test.go and TestMain_lifecycle.
-func scenarioProbeLoopback(t *testing.T, port int) {
-	t.Helper()
-	rx, err := logProbeSocket(fmt.Sprintf("0.0.0.0:%d", port))
+// probeLoopbackSend probes whether a datagram sent to the loopback
+// broadcast address reaches the socket bound to dstPort (loopback
+// broadcast fan-out is a Linux-only kernel behavior; macOS lo0 carries no
+// BROADCAST flag — D-12/A6). Three outcomes, kept distinct so the caller
+// can act: reached (the capability holds), not reached within the wait
+// (the platform lacks the capability — the loud-skip reason), or a probe
+// error (the free-port race: a parallel test's socket won the port between
+// the pick and this bind — the caller picks a fresh port and retries).
+func probeLoopbackSend(dstPort int) (reached bool, err error) {
+	rx, err := logProbeSocket(fmt.Sprintf("0.0.0.0:%d", dstPort))
 	if err != nil {
-		t.Fatalf("probe rx bind: %v", err)
+		return false, fmt.Errorf("probe rx bind: %w", err)
 	}
 	defer func() { _ = rx.Close() }()
 	tx, err := logProbeSocket("0.0.0.0:0")
 	if err != nil {
-		t.Fatalf("probe tx bind: %v", err)
+		return false, fmt.Errorf("probe tx bind: %w", err)
 	}
 	defer func() { _ = tx.Close() }()
-	dstAddr := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
+	dstAddr := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: dstPort}
 	_, err = tx.WriteToUDP([]byte("sup-kv exec scenario probe"), dstAddr)
 	if err != nil {
-		t.Fatalf("probe send to %s: %v", dstAddr, err)
+		return false, fmt.Errorf("probe send to %s: %w", dstAddr, err)
 	}
 	err = rx.SetReadDeadline(time.Now().Add(logProbeWait))
 	if err != nil {
-		t.Fatalf("probe read deadline: %v", err)
+		return false, fmt.Errorf("probe read deadline: %w", err)
 	}
 	buf := make([]byte, 64)
 	for {
 		n, _, readErr := rx.ReadFromUDP(buf)
 		if readErr != nil {
-			t.Skipf(
-				"loopback broadcast to %s did not reach the bound socket within %v — platform lacks the capability the two-process scenarios need (the in-process real-socket scenarios stay proven by internal/udprepl/scenario_test.go and the single-node lifecycle by TestMain_lifecycle)",
-				dstAddr,
-				logProbeWait,
-			)
+			return false, nil
 		}
 		if n > 0 {
-			return
+			return true, nil
 		}
 	}
 }
@@ -129,12 +136,35 @@ type execPair struct {
 // newExecPair probes the platform capability and reserves the topology's
 // ports and dump paths without starting anything — the empty-disk scenario
 // starts its nodes at different times, so the scaffold separates topology
-// construction from node launch.
+// construction from node launch. A probe bind error means a parallel test
+// won the picked port in the pick-to-probe gap (the free-port race the
+// whole harness shares): a fresh port pair is picked and the probe retried,
+// so the parallel scenario burst stays reliable (Pitfall 6); a platform
+// that cannot deliver loopback broadcast at all skips loudly naming what
+// was probed (D-12) — the asymmetric topology needs exactly that
+// capability for the pair's cross-delivery.
 func newExecPair(t *testing.T) *execPair {
 	t.Helper()
 	bin := smokeBinary(t)
-	udpA, udpB := freeUDPPort(t), freeUDPPort(t)
-	scenarioProbeLoopback(t, udpB)
+	const portAttempts = 5
+	var udpA, udpB int
+	for attempt := 1; ; attempt++ {
+		udpA, udpB = freeUDPPort(t), freeUDPPort(t)
+		reached, err := probeLoopbackSend(udpB)
+		if err == nil {
+			if !reached {
+				t.Skipf(
+					"loopback broadcast to 127.255.255.255:%d did not reach the bound socket within %v — platform lacks the capability the two-process scenarios need (the in-process real-socket scenarios stay proven by internal/udprepl/scenario_test.go and the single-node lifecycle by TestMain_lifecycle)",
+					udpB,
+					logProbeWait,
+				)
+			}
+			break
+		}
+		if attempt >= portAttempts {
+			t.Fatalf("probe could not bind a fresh UDP port in %d attempts: %v", portAttempts, err)
+		}
+	}
 	return &execPair{
 		bin:   bin,
 		udpA:  udpA,
@@ -146,12 +176,13 @@ func newExecPair(t *testing.T) *execPair {
 	}
 }
 
-// execNodeArgs builds the flag set every scenario node runs with: identity,
-// the node's asymmetric topology slots, its dump path and gRPC endpoint,
-// and the shrunken timers (the TestMain_precedence/lifecycle precedent for
+// nodeArgs builds the flag set the named node runs with: its identity,
+// its asymmetric topology slots, its dump path and gRPC endpoint, and the
+// shrunken timers (the TestMain_precedence/lifecycle precedent for
 // --startup-gate, plus the discovery and sync rounds — 06-RESEARCH
 // Pattern 6).
-func execNodeArgs(nodeID, bindPort, bcastPort int, grpcAddr, dumpPath string) []string {
+func (p *execPair) nodeArgs(nodeID int) []string {
+	bindPort, bcastPort, grpcAddr, dumpPath := p.slots(nodeID)
 	return []string{
 		"--node-id=" + strconv.Itoa(nodeID),
 		"--bind-addr=0.0.0.0:" + strconv.Itoa(bindPort),
@@ -164,11 +195,30 @@ func execNodeArgs(nodeID, bindPort, bcastPort int, grpcAddr, dumpPath string) []
 	}
 }
 
-// startExecNode launches one scenario node with the scaffold's flag set
-// (extra args appended by the scenarios that need them).
-func startExecNode(t *testing.T, p *execPair, nodeID, bindPort, bcastPort int, grpcAddr, dumpPath string, extra ...string) *smokeNode {
+// slots returns the named node's (bindPort, bcastPort, grpcAddr, dumpPath)
+// from the pair's topology: node A binds A's port broadcasting to B's,
+// node B the mirror — a restart asks for its own slots and stays the SAME
+// node by construction.
+func (p *execPair) slots(nodeID int) (bindPort, bcastPort int, grpcAddr, dumpPath string) {
+	if nodeID == execNodeAID {
+		return p.udpA, p.udpB, p.grpcA, p.dumpA
+	}
+	return p.udpB, p.udpA, p.grpcB, p.dumpB
+}
+
+// startExecNode launches one scenario node in its topology slot (extra
+// args appended by the scenarios that need them).
+func startExecNode(t *testing.T, p *execPair, nodeID int, extra ...string) *smokeNode { //nolint:unparam // bridging: the empty-disk scenario passes --sync-response-rate through extra.
 	t.Helper()
-	return startNode(t, p.bin, nil, append(execNodeArgs(nodeID, bindPort, bcastPort, grpcAddr, dumpPath), extra...)...)
+	return startNode(t, p.bin, nil, append(p.nodeArgs(nodeID), extra...)...)
+}
+
+// startExecLoggedNode is startExecNode with the lock-guarded live stderr
+// buffer — the shape the discard-line assertion polls while the process
+// still runs.
+func startExecLoggedNode(t *testing.T, p *execPair, nodeID int, extra ...string) *smokeNode {
+	t.Helper()
+	return launchNode(t, p.bin, &logBuffer{}, nil, append(p.nodeArgs(nodeID), extra...)...)
 }
 
 // startExecPair launches both nodes of a fresh topology — the three
@@ -177,8 +227,8 @@ func startExecNode(t *testing.T, p *execPair, nodeID, bindPort, bcastPort int, g
 func startExecPair(t *testing.T) (p *execPair, nodeA, nodeB *smokeNode) {
 	t.Helper()
 	p = newExecPair(t)
-	nodeA = startExecNode(t, p, execNodeAID, p.udpA, p.udpB, p.grpcA, p.dumpA)
-	nodeB = startExecNode(t, p, execNodeBID, p.udpB, p.udpA, p.grpcB, p.dumpB)
+	nodeA = startExecNode(t, p, execNodeAID)
+	nodeB = startExecNode(t, p, execNodeBID)
 	return p, nodeA, nodeB
 }
 
@@ -296,7 +346,7 @@ func TestExec_killNineRestart(t *testing.T) {
 
 	// Restart node A: same dump path, same ports — a fresh process with a
 	// fresh run id (the REPL-07 path).
-	nodeARestart := startExecNode(t, p, execNodeAID, p.udpA, p.udpB, p.grpcA, p.dumpA)
+	nodeARestart := startExecNode(t, p, execNodeAID)
 	awaitServing(t, p.grpcA, servingDeadline)
 
 	// Convergence with no operator action: both pre-kill keys readable via
@@ -313,4 +363,176 @@ func TestExec_killNineRestart(t *testing.T) {
 	assertNoPanic(t, nodeA, "the kill -9 node A")
 	assertNoPanic(t, nodeARestart, "the restarted node A")
 	assertNoPanic(t, nodeB, "node B through the peer's death and restart")
+}
+
+// corruptDumpRecord surgically corrupts the named record's line in the dump
+// file on disk: one bit flipped inside the record's Checksum field (the
+// value XOR 1 — guaranteed different, still a valid uint32), every other
+// byte of the file untouched. On the next load the generation still parses
+// — the JSONL line is structurally sound — but the record's checksum no
+// longer matches storage.RecordChecksum, so the loader discards exactly
+// that record (PERS-02's bad-checksum path) and keeps the rest.
+func corruptDumpRecord(t *testing.T, dumpPath, key string) {
+	t.Helper()
+	dump, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read dump %s: %v", dumpPath, err)
+	}
+	marker := `"key":"` + key + `"`
+	lines := strings.Split(string(dump), "\n")
+	corrupted := false
+	for i, line := range lines {
+		if !strings.Contains(line, marker) {
+			continue
+		}
+		if corrupted {
+			t.Fatalf("dump %s carries more than one record line for %q", dumpPath, key)
+		}
+		const checksumTag = `"checksum":`
+		at := strings.Index(line, checksumTag)
+		if at < 0 {
+			t.Fatalf("record line for %q carries no checksum field: %s", key, line)
+		}
+		digitsStart := at + len(checksumTag)
+		digitsEnd := strings.IndexByte(line[digitsStart:], '}')
+		if digitsEnd < 0 {
+			t.Fatalf("record line for %q has no closing brace after the checksum: %s", key, line)
+		}
+		digitsEnd += digitsStart
+		value, parseErr := strconv.ParseUint(line[digitsStart:digitsEnd], 10, 32)
+		if parseErr != nil {
+			t.Fatalf("record line for %q carries a non-numeric checksum: %s", key, line)
+		}
+		lines[i] = line[:digitsStart] + strconv.FormatUint(value^1, 10) + line[digitsEnd:]
+		corrupted = true
+	}
+	if !corrupted {
+		t.Fatalf("dump %s carries no record line for %q:\n%s", dumpPath, key, dump)
+	}
+	err = os.WriteFile(dumpPath, []byte(strings.Join(lines, "\n")), 0o600)
+	if err != nil {
+		t.Fatalf("write the corrupted dump %s: %v", dumpPath, err)
+	}
+}
+
+// TestExec_bothNodesDown is the TEST-04 corrupted-dump-records scenario
+// inside a both-nodes-down restart: both nodes exit cleanly through the
+// D-19 SIGTERM contract, ONE record of node A's dump is corrupted on disk
+// while both are down, and the restart proves the two halves separately —
+// A restarted alone serves every uncorrupted record from its own disk but
+// NOT the corrupted one (the loader discarded it, and with no peer nothing
+// can heal it), then B's restart heals the discarded record back onto A
+// through replication alone. No operator action beyond restarting the
+// processes.
+func TestExec_bothNodesDown(t *testing.T) {
+	t.Parallel()
+	p, nodeA, nodeB := startExecPair(t)
+	awaitServing(t, p.grpcA, servingDeadline)
+	awaitServing(t, p.grpcB, servingDeadline)
+
+	clientA := execClient(t, p.grpcA)
+	clientB := execClient(t, p.grpcB)
+
+	// Baseline: one local write per node, converged both ways.
+	execSet(t, clientA, execKeyBothA)
+	execSet(t, clientB, execKeyBothB)
+	waitFor(t, execConvergeDeadline, "the baseline pair converged (both keys on both endpoints)", func() bool {
+		return execServing(t, clientA, execKeyBothA) && execServing(t, clientA, execKeyBothB) &&
+			execServing(t, clientB, execKeyBothA) && execServing(t, clientB, execKeyBothB)
+	})
+
+	// Both nodes down, cleanly: the D-19 exit on each (assertExitCode 0 is
+	// signalAndWaitExit's contract).
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+
+	// While both are down, corrupt A's own local write in A's dump: one
+	// checksum bit of one record, file otherwise valid.
+	corruptDumpRecord(t, p.dumpA, execKeyBothA)
+
+	// Restart A ALONE first: with B still down, nothing can heal the
+	// discarded record, so A's own endpoint proves the load's two halves —
+	// the corrupted record gone, every other record served from disk.
+	nodeARestart := startExecLoggedNode(t, p, execNodeAID)
+	awaitServing(t, p.grpcA, servingDeadline)
+	waitFor(t, servingDeadline, "the discard line in restarted A's stderr", func() bool {
+		return strings.Contains(nodeARestart.stderr.String(), execDiscardLine)
+	})
+	if _, found := execGet(t, clientA, execKeyBothA); found {
+		t.Fatalf("the corrupted record %q survived the load — the discard path did not run", execKeyBothA)
+	}
+	if value, found := execGet(t, clientA, execKeyBothB); !found || value != execValue(execKeyBothB) {
+		t.Fatalf("the uncorrupted record %q did not survive on disk: (%q, %t)", execKeyBothB, value, found)
+	}
+
+	// Bring B back: B's own dump kept the replicated copy of the discarded
+	// record, and replication heals A — no operator action beyond the
+	// restarts.
+	nodeBRestart := startExecNode(t, p, execNodeBID)
+	awaitServing(t, p.grpcB, servingDeadline)
+	waitFor(t, execConvergeDeadline, "the corrupted record healed back from node B", func() bool {
+		return execServing(t, clientA, execKeyBothA) && execServing(t, clientA, execKeyBothB) &&
+			execServing(t, clientB, execKeyBothA) && execServing(t, clientB, execKeyBothB)
+	})
+
+	signalAndWaitExit(t, nodeARestart)
+	signalAndWaitExit(t, nodeBRestart)
+	assertNoPanic(t, nodeA, "the first-run node A")
+	assertNoPanic(t, nodeB, "the first-run node B")
+	assertNoPanic(t, nodeARestart, "the restarted node A through the corrupted dump")
+	assertNoPanic(t, nodeBRestart, "the restarted node B")
+}
+
+// TestExec_sigtermFinalDump pins the D-19 final-dump contract's replicated
+// half end to end: a write made on node B and replicated to node A is in
+// A's FINAL confirmed dump after SIGTERM (the final Flush covers
+// remote-merged dirtiness, not just local writes), the exit is 0 (a clean
+// exit is reserved for a confirmed dump), and a LONE restart of A — B
+// stopped before the restart, so no peer interaction can supply the record
+// — serves the replicated key purely from the final dump on disk. The
+// exit-code negatives (exitDumpFailed, exitUsage) are already pinned by
+// the 06-02 and main-test suites and are not duplicated here.
+func TestExec_sigtermFinalDump(t *testing.T) {
+	t.Parallel()
+	p, nodeA, nodeB := startExecPair(t)
+	awaitServing(t, p.grpcA, servingDeadline)
+	awaitServing(t, p.grpcB, servingDeadline)
+
+	clientA := execClient(t, p.grpcA)
+	clientB := execClient(t, p.grpcB)
+
+	// A replicated write on A: written on B, converged across.
+	execSet(t, clientB, execKeySigterm)
+	waitFor(t, execConvergeDeadline, "the replicated write visible on node A", func() bool {
+		return execServing(t, clientA, execKeySigterm)
+	})
+
+	// SIGTERM node A: exit 0 only after the final confirmed dump.
+	signalAndWaitExit(t, nodeA)
+
+	// The final dump on disk contains the REPLICATED record — the
+	// TestMain_lifecycle dump-grep precedent.
+	dump, err := os.ReadFile(p.dumpA)
+	if err != nil {
+		t.Fatalf("read the final dump %s: %v", p.dumpA, err)
+	}
+	if !strings.Contains(string(dump), execKeySigterm) {
+		t.Fatalf("the final dump at %s does not contain the replicated key %q:\n%s", p.dumpA, execKeySigterm, dump)
+	}
+
+	// Stop B before the restart: with the peer gone, the only possible
+	// source for the record on a restarted A is the final dump itself.
+	killAndReap(t, nodeB)
+
+	nodeARestart := startExecNode(t, p, execNodeAID)
+	awaitServing(t, p.grpcA, servingDeadline)
+	if value, found := execGet(t, clientA, execKeySigterm); !found || value != execValue(execKeySigterm) {
+		t.Fatalf("the lone restarted node A does not serve the replicated record from its final dump: (%q, %t)",
+			value, found)
+	}
+
+	signalAndWaitExit(t, nodeARestart)
+	assertNoPanic(t, nodeA, "the SIGTERM node A")
+	assertNoPanic(t, nodeB, "the stopped node B")
+	assertNoPanic(t, nodeARestart, "the lone restarted node A")
 }
