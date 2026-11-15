@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: executing
-stopped_at: Completed 06-06-PLAN.md
-last_updated: "2026-11-15T23:24:21.908Z"
+stopped_at: Completed 06-07-PLAN.md
+last_updated: "2026-11-15T23:54:12.096Z"
 last_activity: 2026-11-16
 last_activity_desc: Phase 06 execution started
-state_head: cb06fb53f9cc13e35794fd3b7ff68308845f2196
+state_head: f9c1bc2c15735970362eb97e4f4e87424c3de6df
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 28
+  completed_plans: 29
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
-Plan: 5 of 9
+Plan: 6 of 9
 Status: Ready to execute
 Last activity: 2026-11-16 — Phase 06 execution started
 
@@ -88,6 +88,7 @@ Progress: [███████░░░] 71%
 | Phase 06 P02 | 9min | 2 tasks | 7 files |
 | Phase 06 P03 | 28min | 3 tasks | 11 files |
 | Phase 06 P06 | 12min | 2 tasks | 2 files |
+| Phase 06 P07 | 26min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -209,6 +210,9 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-06 per-case isolated converged pairs in TestScenario_discardClasses — the vendored paralleltest/tparallel gates demand parallel subtests and per-class exactness must not share a mutable Discards baseline across concurrent subtests; scenarioConvergedPair is the shared convergence prologue TestScenario_convergence reuses (plan 06-06)
 - [Phase 06]: 06-06 EncodeDatagramForTestVersion in repl_internal_test.go — the exported test-binary-only explicit-proto-version crafting seam with a production-faithful CRC (the receiver's CRC gate passes, the version check is the branch under test); the impostor pair rides plain EncodeDatagramForTest nodeID/runID parameters — production encode and New untouched (plan 06-06)
 - [Phase 06]: 06-06 the Ack-drain assertion reads PendingCopy emptiness — the 250ms drained-row retention sits inside the timer-derived 10x-hello converge bound, so an observably empty mirror is the honest full-Ack signal on the asymmetric topology; the scenario-local capability probe names the darwin lo0 reason per D-12 (plan 06-06)
+- [Phase 06]: 06-07 exec scenarios: the two-sided corrupted-record proof — A restarted ALONE first (absence/other-keys-present is provably its own disk load), then B back (heal is provably replication); corruption = one checksum bit (XOR 1) so the generation parses and PERS-02 discards exactly that record, evidenced by the restarted node's own discard stderr line
+- [Phase 06]: 06-07 scenario UDP ports picked from a private window [21000, 32678) below ip_local_port_range with a claim-then-release registry held to test cleanup — no rival :0 bind can be issued there; structurally removes the pick-to-bind race that flaked the parallel suite 3/12 runs (zero after), and the scenarios leave the shared ephemeral pool so existing tests' exposure returns to its historical level
+- [Phase 06]: 06-07 empty-disk bound derived in-test (N*floor(1s/rate)=400ms paced + gate/timer/CI margin), measured 116-195ms — flagged assumption A5 held, the documented fallback was not needed; awaitServing carries the sole new nolint (unparam, documented: the code-direction fix is barred by the no-harness-changes rule)
 
 ### Pending Todos
 
@@ -244,6 +248,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-15T23:24:21.196Z
-Stopped at: Completed 06-06-PLAN.md
+Last session: 2026-11-15T23:54:11.636Z
+Stopped at: Completed 06-07-PLAN.md
 Resume file: None
