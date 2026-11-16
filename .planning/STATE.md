@@ -1,19 +1,20 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 06
-current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
-status: verifying
-stopped_at: Completed 06-09-PLAN.md (executor portion; D-16 /gsd-execute-phase 1/4/5 re-runs pending in main session)
-last_updated: "2026-11-16T01:35:44.881Z"
+current_phase: 7
+current_phase_name: v1.0 — Docs, Examples and Release
+status: planning
+stopped_at: Phase 06 complete, ready to plan Phase 7
+last_updated: "2026-11-16T20:37:25.203Z"
 last_activity: 2026-11-16
-last_activity_desc: Phase 06 execution started
-state_head: 4f75a3b771d585015e72de0474e2b7f5228ca246
+last_activity_desc: Phase 06 complete, transitioned to Phase 7
+state_head: 29b2f076a5e1ebf40207ad49dc52e83c4a1240f1
 progress:
   total_phases: 7
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 33
   completed_plans: 33
+  percent: 86
 ---
 
 # Project State
@@ -23,21 +24,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-11)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 06 — Hardening — Failure Scenarios, Observability, Benchmarks
+**Current focus:** Phase 07 — v1.0 — Docs, Examples and Release
 
 ## Current Position
 
-Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
-Plan: 9 of 9
-Status: Phase complete — ready for verification
-Last activity: 2026-11-16 — Phase 06 execution started
+Phase: 7 — v1.0 — Docs, Examples and Release
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-16 — Phase 06 complete, transitioned to Phase 7
 
-Progress: [███████░░░] 71%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 24
+- Total plans completed: 33
 - Average duration: 10min
 - Total execution time: ~1 hour (60 min of plan execution)
 
@@ -50,6 +51,7 @@ Progress: [███████░░░] 71%
 | 03 | 2 | - | - |
 | 04 | 6 | - | - |
 | 05 | 6 | - | - |
+| 06 | 9 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -266,6 +268,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-16T01:35:44.349Z
-Stopped at: Completed 06-09-PLAN.md (executor portion; D-16 /gsd-execute-phase 1/4/5 re-runs pending in main session)
+Last session: 2026-11-16T20:45:00.000Z
+Stopped at: Phase 06 complete (verified, UAT passed), ready to discuss/plan Phase 07
 Resume file: None

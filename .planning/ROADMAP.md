@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Persistence — Dump and Write Confirmation** - Human-readable JSON dumps with atomic write, `.prev` fallback chain and snapshots; a confirmed write is always on disk (completed 2026-11-03)
 - [x] **Phase 4: Replication and Deterministic Simulator** - UDP broadcast replication (Hello, DataReplication/Ack, DataSync) with N-peer tracking, plus the seeded-chaos simulator that proves the convergence bounds (completed 2026-11-07)
 - [x] **Phase 5: gRPC API and Binary** - The user-facing surface: Get/Set/Delete/List/Watch, startup gate, `wait_for_replication`, health endpoint, snapshots, single static binary (completed 2026-11-09)
-- [ ] **Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks** - Every documented failure scenario as an automated test (simulator plus real sockets), metrics endpoint, structured logs, benchmarks
+- [x] **Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks** - Every documented failure scenario as an automated test (simulator plus real sockets), metrics endpoint, structured logs, benchmarks (completed 2026-11-16)
 - [ ] **Phase 7: v1.0 — Docs, Examples and Release** - Verified quickstart, ops docs with trust model and drift runbook, API examples, release tag
 
 ## Phase Details
@@ -156,7 +156,7 @@ Plans:
   2. The metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, clock-drift warnings, and discarded datagrams by class
   3. Logging is structured and every dropped-datagram class (bad CRC / own broadcast / bad proto version) is distinguishable in logs
   4. Benchmarks cover dump at 10k keys and replication throughput under burst writes, with confirmation latency staying bounded under bursts
-**Plans**: 9/9 plans executed
+**Plans**: 9/9 plans complete
 Plans:
 **Wave 1**
 - [x] 06-01-PLAN.md — Hardening backlog I: replication/persistence review fixes with regression tests (D-15: P4-WR-01/02, P4-IN-01, P3-WR-01, P3-IN-01, P4-IN-02+P3-IN-02) (TEST-04)
@@ -197,5 +197,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Persistence — Dump and Write Confirmation | 2/2 | Complete    | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | 6/6 | Complete    | 2026-11-07 |
 | 5. gRPC API and Binary | 6/6 | Complete    | 2026-11-09 |
-| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 9/9 | In Progress | - |
+| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 9/9 | Complete    | 2026-11-16 |
 | 7. v1.0 — Docs, Examples and Release | 0/TBD | Not started | - |

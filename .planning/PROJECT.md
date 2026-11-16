@@ -24,13 +24,14 @@ Every node stays writable at all times with no coordination, and a write confirm
 - ✓ **Deterministic simulator** — Phase 4 (simnet: goroutine-free discrete-event virtual network with loss/duplication/reordering/partition; convergence bounds proven on the virtual clock; chaos suite seeded and replayable via `SUPKV_SIM_SEED`)
 - ✓ **API** — Phase 5 (gRPC service: Get/Set/SetIfAbsent/Delete/List, Watch stream with exact snapshot-then-live cut, startup gate + standard health, `wait_for_replication`, snapshot RPCs)
 - ✓ **Tooling** — Phase 5 (single static binary, 19 flags with SUPKV_ env twins, `--version`, D-19 ordered graceful shutdown; systemd unit lands in Phase 7)
+- ✓ **Observability** — Phase 6 (opt-in mTLS metrics/debug endpoint with in-repo Prometheus text exporter at `/metrics` + expvar/pprof `/debug`; slog JSON default with SUPKV_LOG_LEVEL/FORMAT; OnDiscard seam with distinguishable discard classes and per-class counters; counter seams across repl/persist/udprepl)
+- ✓ **Testing (remaining)** — Phase 6 (TEST-04 failure-scenario suite: 9 deterministic simulator scenarios, real-socket two-node scenarios, 4 two-process exec scenarios on the real binary; TEST-05 benchmarks behind `make bench`: dump-10k, replication burst ~975 w/s, confirmation latency ~10ms under 1000 w/s load)
 
 ### Active
 
 All Active requirements are hypotheses until shipped and validated.
 
-- [ ] **Observability**: metrics endpoint; structured logs; discarded-datagram counters
-- [ ] **Testing (remaining)**: failure-scenario suite for the documented scenarios; benchmarks (dump at 10k keys, replication throughput)
+*(none — the v1.0 feature scope is fully delivered through Phase 6; Phase 7 is documentation, examples and release)*
 
 ### Out of Scope
 
@@ -92,6 +93,9 @@ Target workloads: service configuration (writes/hour, KiB values, hundreds of ke
 | Trusted-segment trust model in v1 (CRC32 only, no HMAC) | Accepted limitation; HMAC is documented future work | ✓ Validated (Phase 4 — accepted risks AR-04-01..03 in 04-SECURITY.md)
 | Quality gates from first commit (strict golangci-lint + go-ultimate, PR-only, CI matrix, Dependabot, govulncheck) | Correctness-critical infrastructure; gates are cheaper the earlier they land | ✓ Validated (Phase 1)
 | Deterministic simulation testing as a first-class feature | Replication correctness under chaos cannot be shown by unit tests alone | ✓ Validated (Phase 4) |
+| In-repo Prometheus text exporter; opt-in mTLS metrics/debug endpoint | Counters/gauges only — client_golang would add 3+ modules against the "gRPC + protobuf only" bar; opt-in + mTLS keeps the pprof/expvar surface closed by default (T-6-07..10) | ✓ Validated (Phase 6) |
+| slog JSON at the binary, OnDiscard seam in the core | Structured logs as the inspectability floor; `internal/app` stays free of slog — the adapter bridges the tap at its own edge (D-08/D-09) | ✓ Validated (Phase 6) |
+| darwin F_FULLFSYNC durability flush in persistfile | Strict superset of File.Sync on darwin (fcntl(2)); closes the phase-3 open planning decision resolved-with-code; other platforms byte-identical | ✓ Validated (Phase 6) |
 
 ## Evolution
 
@@ -111,4 +115,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-11 after Phase 1 re-verification (stale-verification refresh; no requirement changes)*
+*Last updated: 2026-11-16 after Phase 6 (observability + failure-scenario suite + benchmarks delivered — Active requirements empty; v1.0 feature scope complete, Phase 7 docs/release remains)*
