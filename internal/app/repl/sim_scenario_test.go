@@ -12,6 +12,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/internal/simnet"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // The TEST-04 simulator scenario suite (plan 06-05): the deterministic,
@@ -704,5 +705,333 @@ func TestScenario_loss(t *testing.T) {
 	if faults.Dropped == 0 || faults.Duplicated == 0 {
 		t.Fatalf("the chaos phase observed dropped=%d duplicated=%d, want both live %s",
 			faults.Dropped, faults.Duplicated, scnReplay(seed, test))
+	}
+}
+
+// TestScenario_burst proves TEST-04's ~1000 writes/s burst scenario: a
+// write every virtual millisecond over a multi-second window — one hot key
+// hammered by every node plus a spread of distinct keys — sustains without
+// loss and converges to the pointwise supremum within the documented
+// bounds once the burst ends. This is the correctness half only: the 06-08
+// benchmark measures throughput separately, so no performance is asserted
+// here — bounded convergence and zero lost writes are.
+func TestScenario_burst(t *testing.T) {
+	t.Parallel()
+	seed := chaosSeed(t)
+	const test = "burst"
+	t.Logf("%s", scnReplay(seed, test))
+	rng := simRNG(seed)
+
+	// Scenario draws, fixed before any event runs: the writing node per
+	// millisecond. Every tenth write goes to a fresh spread key; the other
+	// nine hammer the one hot key — 3000 writes, 301 distinct keys.
+	const burstWrites = 3000
+	type scnBurstWrite struct {
+		off  time.Duration
+		node int
+		key  string
+		data string
+	}
+	script := make([]scnBurstWrite, 0, burstWrites)
+	for i := range burstWrites {
+		key := "burst/hot"
+		if i%10 == 9 {
+			key = fmt.Sprintf("burst/spread/%04d", i/10)
+		}
+		script = append(script, scnBurstWrite{
+			off:  time.Duration(i) * time.Millisecond,
+			node: rng.IntN(3),
+			key:  key,
+			data: fmt.Sprintf("burst-%d", i),
+		})
+	}
+	const burstKeys = 1 + burstWrites/10
+
+	sched := simnet.NewScheduler(at(0))
+	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{}, simFixedDelay(nil))
+	quiesceDiscovery(t, sched, cluster)
+
+	t0 := sched.Now()
+	for _, w := range script {
+		sched.RunUntil(t0.Add(w.off))
+		cluster.Write(w.node, w.key, []byte(w.data))
+	}
+	if got := len(cluster.WriteLog()); got != burstWrites {
+		t.Fatalf("the write log captured %d of %d writes %s", got, burstWrites, scnReplay(seed, test))
+	}
+
+	// The documented bounds once the burst ends: the largest documented
+	// convergence window — the partition-heal bound over the burst's
+	// distinct keys — covers the post-burst divergence (every write was
+	// broadcast; stragglers ride the ladder far inside it).
+	lastOff := script[len(script)-1].off
+	sched.RunUntil(t0.Add(lastOff + boundPartitionHeal(burstKeys)))
+	model := chaosModelStore(cluster.WriteLog())
+	for i := range cluster.Nodes() {
+		if !recordMapsEqual(cluster.Store(i).Records(), model.Records()) {
+			t.Fatalf("node %d has not converged to the supremum by %v after the burst ended %s",
+				i, boundPartitionHeal(burstKeys), scnReplay(seed, test))
+		}
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the cluster did not quiesce after the burst %s", scnReplay(seed, test))
+	}
+	scnAssertConverged(t, cluster, model, seed, test)
+}
+
+// TestScenario_emptyDisk proves TEST-04's empty-disk recovery bound: a
+// converged two-node cluster gains a brand-new member with an empty store
+// (fresh node id and handle — a join, never a restart listing), and the
+// joiner converges to the full state within N/sync_response_rate plus the
+// documented pacing margin. The bound's arithmetic, from the mechanism:
+// the joiner learns state only from the peers' periodic DataSync listings
+// (a new node id is never targeted), so the fill starts at their next
+// sync_interval tick — at most one sync_interval after the join — and then
+// rides the egress limiter: BOTH peers' listings (their sync timers share
+// the cluster's start, so both fire in the same virtual millisecond)
+// enqueue up to 2N DataRequests on the joiner's single FIFO, spaced
+// floor(1s/rate) with the first immediate, so the last departs at
+// (2N-1)*spacing and its reply lands one spacing later; the measurement
+// step is one spacing wide, adding at most one more. Bound:
+// sync_interval + 2N*spacing + 2*spacing, all stated terms.
+func TestScenario_emptyDisk(t *testing.T) {
+	t.Parallel()
+	seed := chaosSeed(t)
+	const test = "emptyDisk"
+	t.Logf("%s", scnReplay(seed, test))
+	rng := simRNG(seed)
+
+	const nKeys = 50
+	pace := time.Second / time.Duration(simDefaultResponseRate)
+	bound := syncInterval + time.Duration(2*nKeys+2)*pace
+
+	sched := simnet.NewScheduler(at(0))
+	cluster := simnet.NewCluster(sched, rng, 2, repl.Config{}, simFixedDelay(nil))
+	quiesceDiscovery(t, sched, cluster)
+	for i := range nKeys {
+		sched.RunUntil(sched.Now().Add(time.Millisecond))
+		cluster.Write(i%2, fmt.Sprintf("emptydisk/key/%02d", i), []byte(fmt.Sprintf("value-%d-%d", i, rng.IntN(1000))))
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the seed cluster did not quiesce before the join %s", scnReplay(seed, test))
+	}
+	model := chaosModelStore(cluster.WriteLog())
+
+	// The join: fresh node id, derived fresh run id, empty store, clock on
+	// cluster time. The measurement starts at the joiner's first Hello.
+	tJoin := sched.Now()
+	joiner := cluster.AddNode(0)
+	if got := cluster.Nodes(); got != 3 {
+		t.Fatalf("the cluster holds %d nodes after the join, want 3", got)
+	}
+	sched.RunUntil(tJoin) // fire the joiner's startup pump at tJoin exactly
+
+	// Drive at the pacing granularity until the recovery COMPLETES — the
+	// joiner holding the full state AND the three-seam quiescence (bare
+	// quiescence is not recovery: the cluster is also quiescent in the
+	// gap before the peers' next periodic listing starts the fill) — or
+	// the bound passes; then assert the elapsed virtual time inside the
+	// bound.
+	capTime := tJoin.Add(bound)
+	recovered := false
+	for {
+		next := sched.Now().Add(pace)
+		if !next.Before(capTime) {
+			next = capTime
+		}
+		sched.RunUntil(next)
+		if chaosQuiescent(cluster, next) && recordMapsEqual(cluster.Store(joiner).Records(), model.Records()) {
+			recovered = true
+			break
+		}
+		if !next.Before(capTime) {
+			break
+		}
+	}
+	if !recovered {
+		t.Fatalf("the joiner did not recover the full state within the empty-disk bound %v %s", bound, scnReplay(seed, test))
+	}
+	if elapsed := sched.Now().Sub(tJoin); elapsed > bound {
+		t.Fatalf("the empty-disk recovery took %v of virtual time, want <= %v (N/rate plus the documented pacing margin) %s",
+			elapsed, bound, scnReplay(seed, test))
+	}
+	scnAssertConverged(t, cluster, model, seed, test)
+}
+
+// TestScenario_restart proves TEST-04's restart-via-RunID scenario in
+// cluster (REPL-07): a converged node restarts in place — same node id and
+// handle, fresh run id, empty store — and (a) the peers detect the run_id
+// change and answer with the targeted full listing, so the replacement
+// re-converges in milliseconds, far inside one sync_interval (the listing
+// is immediate; only a brand-new node id waits for the periodic rounds —
+// the empty-disk scenario's path); (b) the replay traffic the listing
+// solicits rides the egress limiter on both sides (the replacement's
+// DataRequests and the peers' DataReplication replies — the plan-04-04
+// reconciliation contract observed live), while the listing itself never
+// queues; and (c) an in-flight write from the old run — its broadcast
+// stranded by a directed block at send time, so it reached nobody before
+// the disk went empty — still merges by version merit when it finally
+// arrives under the old run id: run ids gate the restart reaction, never
+// the record join.
+func TestScenario_restart(t *testing.T) {
+	t.Parallel()
+	seed := chaosSeed(t)
+	const test = "restart"
+	t.Logf("%s", scnReplay(seed, test))
+	rng := simRNG(seed)
+
+	// The stranded-write block: on while node 1's outbound broadcast is
+	// absorbed by the restart, off afterwards.
+	strandOn := false
+	policy := simFixedDelay(func(from, to string, _ time.Time) bool {
+		return strandOn && from == "n2" && (to == "n1" || to == "n3")
+	})
+	sched := simnet.NewScheduler(at(0))
+	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{}, policy)
+	quiesceDiscovery(t, sched, cluster)
+	for i := range 6 {
+		sched.RunUntil(sched.Now().Add(time.Millisecond))
+		cluster.Write(i%3, fmt.Sprintf("restart/key/%d", i), []byte(fmt.Sprintf("value-%d", i)))
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the seed cluster did not quiesce before the restart %s", scnReplay(seed, test))
+	}
+
+	// The stranded write: broadcast with node 1's outbound blocked, so it
+	// reaches nobody (own echo aside) and dies with the old run's disk.
+	strandOn = true
+	stranded := cluster.Write(1, "restart/stranded", []byte("from the old run"))
+	oldRun := scnRunID(2, 2) // node id 2's derived run id, exactly as NewCluster built it
+	newRun := scnRunID(2, 9)
+
+	// The restart, in place: the peers' rows for node id 2 still carry
+	// oldRun, so the replacement's first Hello fires the targeted listing.
+	tReplace := sched.Now()
+	strandOn = false
+	cluster.ReplaceNode(1, newRun, 0)
+	sched.RunUntil(tReplace)
+
+	// Re-convergence is immediate (the targeted listing bypasses the
+	// periodic rounds), so drive with a fine step and a cap far under one
+	// sync_interval, polling the replacement's egress queue for the
+	// limiter-paced replay.
+	maxQueued := 0
+	capTime := tReplace.Add(2 * time.Second)
+	quiesced := false
+	for {
+		next := sched.Now().Add(5 * time.Millisecond)
+		if !next.Before(capTime) {
+			next = capTime
+		}
+		sched.RunUntil(next)
+		if q := cluster.Core(1).QueuedResponses(); q > maxQueued {
+			maxQueued = q
+		}
+		if chaosQuiescent(cluster, next) {
+			quiesced = true
+			break
+		}
+		if !next.Before(capTime) {
+			break
+		}
+	}
+	if !quiesced {
+		t.Fatalf("the cluster did not re-converge within one sync_interval of the restart — the targeted listing is immediate %s", scnReplay(seed, test))
+	}
+
+	// The stranded write is the one logged write nobody holds: convergence
+	// is asserted against the model of everything else.
+	model := chaosModelStore(nil)
+	for _, w := range cluster.WriteLog() {
+		if w.Key != "restart/stranded" {
+			_, _, _ = model.Merge(w.Key, w.Rec)
+		}
+	}
+	scnAssertConverged(t, cluster, model, seed, test)
+
+	// REPL-07's row update: exactly one row per node id, carrying the new
+	// run id, on a peer that saw the replacement's Hello.
+	snap := cluster.Core(0).PeerSnapshot()
+	if len(snap) != 2 {
+		t.Fatalf("node 0's peer table holds %d rows after the restart, want exactly 2 — a run_id change never forks the table %s", len(snap), scnReplay(seed, test))
+	}
+	if got := snap[2].RunID; got != newRun {
+		t.Fatalf("node 0's row for node id 2 carries run %x after the restart, want the replacement's %x %s",
+			got[:], newRun[:], scnReplay(seed, test))
+	}
+
+	// The limiter-paced replay, observed live in the cluster: the targeted
+	// listing itself never queues (plan-04-04's scope pin, pinned at the
+	// seam by TestRestart_runIDChangeTriggersFullSync), but the replay it
+	// solicits does — the replacement's DataRequests for the listed keys
+	// pile onto its single egress FIFO when both peers' listings land
+	// together, so its queue observably holds a backlog while the limiter
+	// drains it at the response spacing. The peers' reply queues are
+	// structurally invisible to boundary polling by the same contract: the
+	// replacement's own limiter spaces its requests one spacing apart, so
+	// each reply's egress slot is already due when its request arrives and
+	// the peer's queue empties inside the same delivery cascade — the
+	// pacing governs the emission times either way, which is what the
+	// queue-depth observation of the replacement's side witnesses.
+	if maxQueued == 0 {
+		t.Fatalf("the replacement's egress queue never held a response — the replay the targeted listing solicits must be limiter-gated %s", scnReplay(seed, test))
+	}
+
+	// The stale-runID in-flight write: the stranded record finally arrives
+	// at node 0 under the old run's id. It merges by version merit —
+	// nobody else ever wrote the key, so it installs — the Ack routes to
+	// the replacement as a stale no-op, and the periodic rounds spread the
+	// key until the whole cluster holds it.
+	var out port.Outbox
+	cluster.Core(0).HandleDatagram(sched.Now(), port.InboundDatagram{
+		Source:       cluster.Handle(1),
+		Status:       port.Decoded,
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeID:       2,
+		RunID:        oldRun,
+		Msg:          port.DataReplication{Key: "restart/stranded", Record: stranded},
+	}, &out)
+	for _, ob := range out.Drain() {
+		if ob.Broadcast {
+			cluster.Network().Broadcast(cluster.Handle(0), ob.Msg)
+			continue
+		}
+		cluster.Network().Send(cluster.Handle(0), ob.To, ob.Msg)
+	}
+	// The spread rides the periodic rounds (node 0 wrote nothing — a
+	// remote apply retransmits nothing), so drive until every node holds
+	// the model-with-stranded-key, not merely until quiescence: the
+	// cluster is quiescent while the key sits on node 0 alone.
+	_, _, _ = model.Merge("restart/stranded", stranded)
+	capTime = sched.Now().Add(10 * syncInterval)
+	converged := false
+	for {
+		next := sched.Now().Add(chaosQuiesceStep)
+		if !next.Before(capTime) {
+			next = capTime
+		}
+		sched.RunUntil(next)
+		equal := true
+		for i := range cluster.Nodes() {
+			equal = equal && recordMapsEqual(cluster.Store(i).Records(), model.Records())
+		}
+		if equal {
+			converged = true
+			break
+		}
+		if !next.Before(capTime) {
+			break
+		}
+	}
+	if !converged {
+		t.Fatalf("the stranded key did not spread to the whole cluster within the periodic rounds %s", scnReplay(seed, test))
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the cluster did not settle after the stale-run spread %s", scnReplay(seed, test))
+	}
+	scnAssertConverged(t, cluster, model, seed, test)
+	if got := cluster.Core(0).PeerSnapshot()[2].RunID; got != newRun {
+		t.Fatalf("node 0's row for node id 2 carries run %x after the stale-run delivery, want the replacement's %x — an old-run datagram must not flip the table %s",
+			got[:], newRun[:], scnReplay(seed, test))
 	}
 }
