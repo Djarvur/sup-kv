@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: executing
-stopped_at: Completed 06-07-PLAN.md
-last_updated: "2026-11-15T23:54:12.096Z"
+stopped_at: Completed 06-04-PLAN.md
+last_updated: "2026-11-16T00:20:49.941Z"
 last_activity: 2026-11-16
 last_activity_desc: Phase 06 execution started
-state_head: f9c1bc2c15735970362eb97e4f4e87424c3de6df
+state_head: b29600697039aeee1c9df355b3182923791dc645
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 29
+  completed_plans: 30
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
-Plan: 6 of 9
+Plan: 7 of 9
 Status: Ready to execute
 Last activity: 2026-11-16 — Phase 06 execution started
 
@@ -89,6 +89,7 @@ Progress: [███████░░░] 71%
 | Phase 06 P03 | 28min | 3 tasks | 11 files |
 | Phase 06 P06 | 12min | 2 tasks | 2 files |
 | Phase 06 P07 | 26min | 3 tasks | 2 files |
+| Phase 06 P04 | 19min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -213,6 +214,9 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-07 exec scenarios: the two-sided corrupted-record proof — A restarted ALONE first (absence/other-keys-present is provably its own disk load), then B back (heal is provably replication); corruption = one checksum bit (XOR 1) so the generation parses and PERS-02 discards exactly that record, evidenced by the restarted node's own discard stderr line
 - [Phase 06]: 06-07 scenario UDP ports picked from a private window [21000, 32678) below ip_local_port_range with a claim-then-release registry held to test cleanup — no rival :0 bind can be issued there; structurally removes the pick-to-bind race that flaked the parallel suite 3/12 runs (zero after), and the scenarios leave the shared ephemeral pool so existing tests' exposure returns to its historical level
 - [Phase 06]: 06-07 empty-disk bound derived in-test (N*floor(1s/rate)=400ms paced + gate/timer/CI margin), measured 116-195ms — flagged assumption A5 held, the documented fallback was not needed; awaitServing carries the sole new nolint (unparam, documented: the code-direction fix is barred by the no-harness-changes rule)
+- [Phase 06]: 06-04: the D-01 guard lives in wire() (empty metricsAddr means no listenMetrics call at all — no listener, no goroutine) while listenMetrics keeps the fatal listen-then-serve bind split; the fatal bind is what makes TestMetrics_noDefaultListener's two-node collision shape discriminate against a default metrics port (plan 06-04)
+- [Phase 06]: 06-04: metrics Shutdown sits immediately after the health NOT_SERVING flip in the D-19 sequence (documented in the shutdown doc comment, Pitfall 7) — scrapers see the close the moment the node stops serving; the mTLS tests' closing SIGTERM walks exercise the position with TLS active (plan 06-04)
+- [Phase 06]: 06-04: the TLS builder landed in Task 2 as metrics.NewTLSConfig (the plan's sanctioned either-or) and Go's plaintext-to-TLS 400 record-header probe is asserted honestly — a plain GET must never yield the metrics surface, not must-error at the transport (plan 06-04)
 
 ### Pending Todos
 
@@ -248,6 +252,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-15T23:54:11.636Z
-Stopped at: Completed 06-07-PLAN.md
+Last session: 2026-11-16T00:20:49.512Z
+Stopped at: Completed 06-04-PLAN.md
 Resume file: None

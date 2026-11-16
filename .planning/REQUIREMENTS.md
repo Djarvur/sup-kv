@@ -58,8 +58,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Observability
 
-- [ ] **OBS-01**: A metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, and clock-drift warnings
-- [ ] **OBS-02**: Discarded datagrams are counted by class (bad CRC / own broadcast / bad proto version)
+- [x] **OBS-01**: A metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, and clock-drift warnings
+- [x] **OBS-02**: Discarded datagrams are counted by class (bad CRC / own broadcast / bad proto version)
 - [x] **OBS-03**: Logging is structured and every dropped-datagram class is distinguishable in logs
 
 ### Testing
@@ -178,8 +178,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | API-06 | Phase 5 | Complete |
 | API-07 | Phase 5 | Complete |
 | TOOL-01 | Phase 5 | Complete |
-| OBS-01 | Phase 6 | Pending |
-| OBS-02 | Phase 6 | Pending |
+| OBS-01 | Phase 6 | Complete |
+| OBS-02 | Phase 6 | Complete |
 | OBS-03 | Phase 6 | Complete |
 | TEST-04 | Phase 6 | Pending |
 | TEST-05 | Phase 6 | Pending |
