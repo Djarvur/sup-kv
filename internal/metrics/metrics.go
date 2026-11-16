@@ -12,11 +12,22 @@
 package metrics
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+
+	"github.com/Djarvur/sup-kv/internal/app/persist"
+	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
 // FamilyType is a metric family's exposition type — the two kinds the sup-kv
@@ -29,6 +40,18 @@ const (
 	Counter FamilyType = "counter"
 	Gauge   FamilyType = "gauge"
 )
+
+// The label names of the two labeled families — the only labels the sup-kv
+// exposition defines, and their values are fixed enums (bounded cardinality
+// by construction).
+const (
+	labelType  = "type"
+	labelClass = "class"
+)
+
+// errNoClientCertPEM reports a client-CA file whose bytes hold no PEM
+// certificate — wrapped with the file path at the failure site.
+var errNoClientCertPEM = errors.New("client CA file contains no PEM certificate")
 
 // Label is one sample label. Label values are the fixed class/type enums
 // only (bounded cardinality) — key names, record values and other user data
@@ -146,4 +169,237 @@ func NewHandler(snapshot func() []Family) http.Handler {
 		w.Header().Set("Content-Type", contentType)
 		_ = Render(w, snapshot()) // a vanished scraper mid-write is not an error worth acting on.
 	})
+}
+
+// Sources is the closed set of value accessors the exporter snapshots (the
+// 06-03 counter seams; D-04's "no registry" reading made structural): main
+// supplies one function per seam and Snapshot reads each once per scrape.
+// There is no registration lifecycle — the family set is fixed, and adding
+// a family means editing Snapshot, not calling a registry at init time.
+type Sources struct {
+	Discards      func() repl.DiscardStats
+	KnownPeers    func() uint64
+	Unacked       func() repl.UnackedStats
+	Sent          func() udprepl.SentByType
+	Retransmitted func() uint64
+	MergeStats    func() repl.MergeStats
+	DumpStats     func() persist.DumpStats
+}
+
+// Snapshot reads every source once and returns the whole family table: the
+// supkv_ families over the supplied seams (D-04/D-05's final names —
+// counters carry _total, units are base seconds/bytes, the only labels are
+// the fixed class and type enums) plus the go_*/process_* runtime families
+// read here, at scrape time, from the runtime and the kernel. A zero-state
+// snapshot renders every family with zero-valued samples — an idle node
+// still publishes its full surface.
+func Snapshot(s Sources) []Family {
+	families := replicationFamilies(s.Unacked(), s.KnownPeers(), s.Retransmitted(), s.MergeStats())
+	families = append(families, trafficFamilies(s.Discards(), s.Sent())...)
+	families = append(families, dumpFamilies(s.DumpStats())...)
+	return append(families, runtimeFamilies()...)
+}
+
+// replicationFamilies builds the peer/unacked/retransmit/merge families (the
+// unlabeled half of the OBS-01 replication surface) over one reading of the
+// replication seams.
+func replicationFamilies(
+	un repl.UnackedStats,
+	peers uint64,
+	retr uint64,
+	merged repl.MergeStats,
+) []Family {
+	return []Family{
+		{
+			Name: "supkv_replication_unacked_records", Type: Gauge,
+			Help: "Replication records awaiting acknowledgement.",
+			Samples: []Sample{
+				{Value: float64(un.Count)},
+			},
+		},
+		{
+			Name: "supkv_replication_unacked_oldest_age_seconds", Type: Gauge,
+			Help: "Age of the oldest unacknowledged replication record in seconds.",
+			Samples: []Sample{
+				{Value: un.OldestAge.Seconds()},
+			},
+		},
+		{
+			Name: "supkv_replication_peers", Type: Gauge,
+			Help: "Currently known replication peers.",
+			Samples: []Sample{
+				{Value: float64(peers)},
+			},
+		},
+		{
+			Name: "supkv_replication_datagrams_retransmitted_total", Type: Counter,
+			Help: "Replication datagram retransmissions.",
+			Samples: []Sample{
+				{Value: float64(retr)},
+			},
+		},
+		{
+			Name: "supkv_merges_conflicts_total", Type: Counter,
+			Help: "Remote merges that displaced a stored record.",
+			Samples: []Sample{
+				{Value: float64(merged.Conflicts)},
+			},
+		},
+		{
+			Name: "supkv_clock_drift_warnings_total", Type: Counter,
+			Help: "Remote timestamps absorbed beyond the drift-warn threshold.",
+			Samples: []Sample{
+				{Value: float64(merged.DriftWarnings)},
+			},
+		},
+	}
+}
+
+// trafficFamilies builds the two labeled families — outbound datagrams by
+// message type and inbound discards by classification (the OBS-02 surface in
+// full) — and always publishes the whole label vocabulary: a zero count is
+// information, not absence.
+func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family {
+	return []Family{
+		{
+			Name: "supkv_replication_datagrams_sent_total", Type: Counter,
+			Help: "Replication datagrams sent, by message type.",
+			Samples: []Sample{
+				{Labels: []Label{{Name: labelType, Value: "hello"}}, Value: float64(sentBy.Hello)},
+				{Labels: []Label{{Name: labelType, Value: "data"}}, Value: float64(sentBy.Data)},
+				{Labels: []Label{{Name: labelType, Value: "ack"}}, Value: float64(sentBy.Ack)},
+				{Labels: []Label{{Name: labelType, Value: "data_request"}}, Value: float64(sentBy.DataRequest)},
+				{Labels: []Label{{Name: labelType, Value: "sync"}}, Value: float64(sentBy.Sync)},
+			},
+		},
+		{
+			Name: "supkv_datagrams_discarded_total", Type: Counter,
+			Help: "Inbound replication datagrams discarded, by classification.",
+			Samples: []Sample{
+				{Labels: []Label{{Name: labelClass, Value: "bad_crc"}}, Value: float64(disc.BadCRC)},
+				{Labels: []Label{{Name: labelClass, Value: "undecodable"}}, Value: float64(disc.Undecodable)},
+				{Labels: []Label{{Name: labelClass, Value: "bad_proto_version"}}, Value: float64(disc.BadProtoVersion)},
+				{Labels: []Label{{Name: labelClass, Value: "own_broadcast"}}, Value: float64(disc.OwnEcho)},
+				{Labels: []Label{{Name: labelClass, Value: "duplicate_node_id"}}, Value: float64(disc.DuplicateNodeID)},
+			},
+		},
+	}
+}
+
+// dumpFamilies builds the persistence-cycle families over one reading of the
+// engine's DumpStats seam.
+func dumpFamilies(stats persist.DumpStats) []Family {
+	return []Family{
+		{
+			Name: "supkv_dumps_duration_seconds", Type: Gauge,
+			Help: "Duration of the last dump's encode and save in seconds.",
+			Samples: []Sample{
+				{Value: stats.DurationSeconds},
+			},
+		},
+		{
+			Name: "supkv_dumps_total", Type: Counter,
+			Help: "Dump attempts.",
+			Samples: []Sample{
+				{Value: float64(stats.Total)},
+			},
+		},
+		{
+			Name: "supkv_dumps_errors_total", Type: Counter,
+			Help: "Failed dumps.",
+			Samples: []Sample{
+				{Value: float64(stats.Errors)},
+			},
+		},
+	}
+}
+
+// runtimeFamilies reads the go_*/process_* runtime families (06-RESEARCH A2's
+// minimal D-04 enumeration) at scrape time — fresh gauges of the process
+// itself, never cached.
+func runtimeFamilies() []Family {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	cpu, rss := processUsage()
+	return []Family{
+		{
+			Name: "go_goroutines", Type: Gauge,
+			Help: "Number of goroutines that currently exist.",
+			Samples: []Sample{
+				{Value: float64(runtime.NumGoroutine())},
+			},
+		},
+		{
+			Name: "go_memstats_alloc_bytes", Type: Gauge,
+			Help: "Number of bytes allocated and still in use.",
+			Samples: []Sample{
+				{Value: float64(ms.Alloc)},
+			},
+		},
+		{
+			Name: "go_memstats_sys_bytes", Type: Gauge,
+			Help: "Number of bytes obtained from system.",
+			Samples: []Sample{
+				{Value: float64(ms.Sys)},
+			},
+		},
+		{
+			Name: "process_cpu_seconds_total", Type: Counter,
+			Help: "Total user and system CPU time spent in seconds.",
+			Samples: []Sample{
+				{Value: cpu},
+			},
+		},
+		{
+			Name: "process_resident_memory_bytes", Type: Gauge,
+			Help: "Resident memory size in bytes.",
+			Samples: []Sample{
+				{Value: rss},
+			},
+		},
+	}
+}
+
+// processUsage reads this process's CPU time and resident set size through
+// [syscall.Getrusage] — Linux and darwin both provide it (06-RESEARCH A2's
+// minimal process_* enumeration under D-04). CPU is user+system seconds;
+// ru_maxrss is KiB on Linux and bytes on darwin, normalized here to bytes.
+func processUsage() (cpuSeconds, rssBytes float64) {
+	var ru syscall.Rusage
+	err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
+	if err != nil {
+		return 0, 0
+	}
+	sec := func(t syscall.Timeval) float64 { return float64(t.Sec) + float64(t.Usec)/1e6 }
+	rss := float64(ru.Maxrss)
+	if rss > 0 && runtime.GOOS != "darwin" {
+		rss *= 1024
+	}
+	return sec(ru.Utime) + sec(ru.Stime), rss
+}
+
+// NewTLSConfig builds the metrics listener's server-side TLS configuration
+// (D-02): the certificate/key pair from disk, the client CA pool from the CA
+// file, client certificates required and verified, and an explicit TLS 1.2
+// floor. No custom cipher configuration — the crypto/tls defaults (the
+// T-6-08 mitigation).
+func NewTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load key pair: %w", err)
+	}
+	caPEM, err := os.ReadFile(caFile) //nolint:gosec // G304: the path derives from the operator's SUPKV_METRICS_CLIENT_CA env, never caller input.
+	if err != nil {
+		return nil, fmt.Errorf("read client CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("%s: %w", caFile, errNoClientCertPEM)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    pool,
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }

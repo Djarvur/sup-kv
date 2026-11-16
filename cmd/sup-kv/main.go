@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -36,6 +38,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
 	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/metrics"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
@@ -52,10 +55,11 @@ var (
 // Configuration-error sentinels the startup path wraps with the offending
 // detail; callers match them with [errors.Is], never identity comparison.
 var (
-	errNodeIDRange     = errors.New("node-id exceeds the 16-bit node ID space")
-	errMissingRequired = errors.New("missing required knobs")
-	errNodeIDEnv       = errors.New("must be an integer within the 16-bit node ID space")
-	errLogFormatEnv    = errors.New("must be json or text")
+	errNodeIDRange       = errors.New("node-id exceeds the 16-bit node ID space")
+	errMissingRequired   = errors.New("missing required knobs")
+	errNodeIDEnv         = errors.New("must be an integer within the 16-bit node ID space")
+	errLogFormatEnv      = errors.New("must be json or text")
+	errIncompleteCertSet = errors.New("the metrics certificate envs must be set together")
 )
 
 // Process exit codes: a configuration error (missing or malformed knob)
@@ -71,6 +75,11 @@ const (
 // gs.Stop() force-closes whatever is still open (T-05-10 — a hang here
 // would leave committed data only in memory when the supervisor SIGKILLs).
 const shutdownGrace = 10 * time.Second
+
+// readHeaderTimeout bounds one metrics/debug connection's header read — the
+// explicit [http.Server] construction's timeout floor (never a bare
+// [http.ListenAndServe]; the gosec-clean shape).
+const readHeaderTimeout = 5 * time.Second
 
 // signalBuffer is the armed signal channel's capacity: room for the first
 // signal (consumed by serve) plus one hurry-up signal held for shutdown's
@@ -106,6 +115,14 @@ const (
 	// service behavior.
 	envLogLevel  = "SUPKV_LOG_LEVEL"
 	envLogFormat = "SUPKV_LOG_FORMAT"
+
+	// The metrics/debug endpoint knobs (D-01/D-02): the listen address has
+	// a flag twin with NO default — unset means no listener at all; the
+	// certificate triple is env-only and all-or-nothing.
+	envMetricsAddr     = "SUPKV_METRICS_ADDR"
+	envMetricsCert     = "SUPKV_METRICS_CERT"
+	envMetricsKey      = "SUPKV_METRICS_KEY"
+	envMetricsClientCA = "SUPKV_METRICS_CLIENT_CA"
 )
 
 // The design defaults (docs/IDEA.md §Parameters, plus the two API-layer
@@ -162,10 +179,16 @@ type config struct {
 	driftWarn          time.Duration
 	logLevel           slog.Level
 	logFormat          string
+	metricsAddr        string
+	metricsCert        string
+	metricsKey         string
+	metricsClientCA    string
 }
 
 // wired bundles the running services with their lifecycle handles — the
-// plumbing main's shutdown path needs, no behavior of its own.
+// plumbing main's shutdown path needs, no behavior of its own. metricsSrv is
+// nil when --metrics-addr is unset: the endpoint is opt-in with no listener
+// at all (D-01).
 type wired struct {
 	engine       *persist.Engine
 	engineCancel context.CancelFunc
@@ -175,6 +198,7 @@ type wired struct {
 	apiCancel    context.CancelFunc
 	health       *health.Server
 	gs           *grpc.Server
+	metricsSrv   *http.Server
 }
 
 func main() {
@@ -277,6 +301,8 @@ func registerConfig(cfg *config, nodeID *uint64, showVersion *bool) error {
 		"required dump file path (env SUPKV_DUMP_PATH)")
 	flag.StringVar(&cfg.grpcAddr, "grpc-addr", envOrDefault(envGRPCAddr, defaultGRPCAddr),
 		"gRPC listen address, distinct from the UDP bind (env SUPKV_GRPC_ADDR)")
+	flag.StringVar(&cfg.metricsAddr, "metrics-addr", envOrDefault(envMetricsAddr, ""),
+		"optional metrics/debug listen address — unset means no listener (env SUPKV_METRICS_ADDR)")
 	flag.DurationVar(&cfg.startupGate, "startup-gate", envDur(envStartupGate, defaultStartupGate),
 		"gate backstop: writable this long after start even without a sync round (env SUPKV_STARTUP_GATE)")
 	flag.DurationVar(&cfg.waitTimeout, "wait-timeout", envDur(envWaitTimeout, defaultWaitTimeout),
@@ -285,6 +311,22 @@ func registerConfig(cfg *config, nodeID *uint64, showVersion *bool) error {
 		"maximum value size in bytes (env SUPKV_VALUE_MAX_BYTES)")
 	flag.IntVar(&cfg.syncChunkBytes, "sync-chunk-bytes", envNum(envSyncChunkBytes, defaultSyncChunkBytes),
 		"DataSync chunk byte budget (env SUPKV_SYNC_CHUNK_BYTES)")
+	flag.IntVar(&cfg.syncResponseRate, "sync-response-rate", envNum(envSyncResponseRate, defaultSyncRespRate),
+		"sync responses per second cap (env SUPKV_SYNC_RESPONSE_RATE)")
+	registerDurationFlags(cfg, envDur)
+
+	resolveLogKnobs(cfg, &errs)
+	resolveMetricsCerts(cfg)
+	return errors.Join(errs...)
+}
+
+// registerDurationFlags declares the replication-timing and dump-cycle knobs
+// — every duration flag except startup-gate and wait-timeout, which sit with
+// the API-facing registrations. The envDur closure is registerConfig's
+// collected-error resolution, shared so a malformed SUPKV_ duration twin
+// aborts startup through the same path regardless of which helper declared
+// the flag.
+func registerDurationFlags(cfg *config, envDur func(env string, def time.Duration) time.Duration) {
 	flag.DurationVar(&cfg.helloInterval, "hello-interval", envDur(envHelloInterval, defaultHelloInterval),
 		"discovery broadcast period (env SUPKV_HELLO_INTERVAL)")
 	flag.DurationVar(&cfg.peerTimeout, "peer-timeout", envDur(envPeerTimeout, defaultPeerTimeout),
@@ -297,17 +339,22 @@ func registerConfig(cfg *config, nodeID *uint64, showVersion *bool) error {
 		"retransmit scan period (env SUPKV_RETRANSMIT_INTERVAL)")
 	flag.DurationVar(&cfg.syncInterval, "sync-interval", envDur(envSyncInterval, defaultSyncInterval),
 		"proactive sync listing period (env SUPKV_SYNC_INTERVAL)")
-	flag.IntVar(&cfg.syncResponseRate, "sync-response-rate", envNum(envSyncResponseRate, defaultSyncRespRate),
-		"sync responses per second cap (env SUPKV_SYNC_RESPONSE_RATE)")
 	flag.DurationVar(&cfg.dumpDebounce, "dump-debounce", envDur(envDumpDebounce, defaultDumpDebounce),
 		"dump quiet window (env SUPKV_DUMP_DEBOUNCE)")
 	flag.DurationVar(&cfg.dumpMaxWait, "dump-max-wait", envDur(envDumpMaxWait, defaultDumpMaxWait),
 		"dump start bound from the oldest unconfirmed write (env SUPKV_DUMP_MAX_WAIT)")
 	flag.DurationVar(&cfg.driftWarn, "drift-warn", envDur(envDriftWarn, defaultDriftWarn),
 		"clock drift warning threshold (env SUPKV_DRIFT_WARN)")
+}
 
-	resolveLogKnobs(cfg, &errs)
-	return errors.Join(errs...)
+// resolveMetricsCerts reads the env-only metrics certificate triple (D-02,
+// the 06-RESEARCH A4 env-only reading) into cfg — file paths, so no
+// malformed-value error exists here; the all-or-nothing check runs in
+// finalizeConfig, before any bind (Pitfall 8).
+func resolveMetricsCerts(cfg *config) {
+	cfg.metricsCert = envOrDefault(envMetricsCert, "")
+	cfg.metricsKey = envOrDefault(envMetricsKey, "")
+	cfg.metricsClientCA = envOrDefault(envMetricsClientCA, "")
 }
 
 // resolveLogKnobs resolves the env-only structured-logging knobs (D-06/D-07)
@@ -341,7 +388,22 @@ func finalizeConfig(cfg *config, nodeID uint64, envErr error) error {
 	if missing := missingRequired(*cfg); len(missing) > 0 {
 		return fmt.Errorf("%w: %s", errMissingRequired, strings.Join(missing, ", "))
 	}
-	return nil
+	return checkMetricsCerts(*cfg)
+}
+
+// checkMetricsCerts enforces D-02's all-or-nothing contract before any bind
+// (Pitfall 8): any of the three certificate envs set without all three is a
+// startup error naming every env of the triple — no code path can reach the
+// TLS builder with a half-loaded set, and with none set the listener serves
+// plaintext (the loopback/debug mode).
+func checkMetricsCerts(cfg config) error {
+	noneSet := cfg.metricsCert == "" && cfg.metricsKey == "" && cfg.metricsClientCA == ""
+	allSet := cfg.metricsCert != "" && cfg.metricsKey != "" && cfg.metricsClientCA != ""
+	if noneSet || allSet {
+		return nil
+	}
+	return fmt.Errorf("%w: %s, %s and %s",
+		errIncompleteCertSet, envMetricsCert, envMetricsKey, envMetricsClientCA)
 }
 
 // startEngine opens the real dump store at the configured path, resolves
@@ -374,21 +436,7 @@ func wire(cfg config) (*wired, net.Listener, error) {
 	hub := grpcapi.NewWatchHub()
 	engine, engineCancel, engineDone := startEngine(cfg, hub)
 
-	adapter, err := udprepl.New(cfg.bindAddr, cfg.broadcastAddr, cfg.nodeID, engine, repl.Config{
-		HelloInterval:      cfg.helloInterval,
-		PeerTimeout:        cfg.peerTimeout,
-		AckTimeout:         cfg.ackTimeout,
-		AckTimeoutMax:      cfg.ackTimeoutMax,
-		RetransmitInterval: cfg.retransmitInterval,
-		SyncInterval:       cfg.syncInterval,
-		SyncChunkBytes:     cfg.syncChunkBytes,
-		SyncResponseRate:   cfg.syncResponseRate,
-		// The core's prebuilt metadata strings (REPL-08 configuration
-		// errors, apply failures) ride as the detail attr under a static
-		// capitalized msg — the sloglint static-msg discipline (D-08); a
-		// dynamic string never becomes the msg.
-		Log: func(msg string) { slog.Warn("Replication adapter", "detail", msg) },
-	})
+	adapter, err := newReplicationAdapter(cfg, engine)
 	if err != nil {
 		engineCancel()
 		return nil, nil, fmt.Errorf("bind replication socket: %w", err)
@@ -415,10 +463,17 @@ func wire(cfg config) (*wired, net.Listener, error) {
 
 	listener, gs, err := listenGRPC(cfg.grpcAddr, srv)
 	if err != nil {
-		engineCancel()
-		replCancel()
-		apiCancel()
+		abortWire(engineCancel, replCancel, apiCancel, nil)
 		return nil, nil, err
+	}
+
+	var metricsSrv *http.Server
+	if cfg.metricsAddr != "" { // D-01: unset means no listener, no goroutine.
+		metricsSrv, err = listenMetrics(cfg, metricsSources(adapter, engine))
+		if err != nil {
+			abortWire(engineCancel, replCancel, apiCancel, listener)
+			return nil, nil, err
+		}
 	}
 
 	return &wired{
@@ -430,7 +485,91 @@ func wire(cfg config) (*wired, net.Listener, error) {
 		apiCancel:    apiCancel,
 		health:       srv.Health(),
 		gs:           gs,
+		metricsSrv:   metricsSrv,
 	}, listener, nil
+}
+
+// abortWire cancels every context wire() opened — the compensation path when
+// a later wiring step fails, with the already-open gRPC listener closed when
+// the failure came after it.
+func abortWire(engineCancel, replCancel, apiCancel context.CancelFunc, listener net.Listener) {
+	engineCancel()
+	replCancel()
+	apiCancel()
+	if listener != nil {
+		_ = listener.Close()
+	}
+}
+
+// newReplicationAdapter builds the UDP replication adapter over the engine
+// with the resolved replication knobs.
+func newReplicationAdapter(cfg config, engine *persist.Engine) (*udprepl.Adapter, error) {
+	return udprepl.New(cfg.bindAddr, cfg.broadcastAddr, cfg.nodeID, engine, repl.Config{
+		HelloInterval:      cfg.helloInterval,
+		PeerTimeout:        cfg.peerTimeout,
+		AckTimeout:         cfg.ackTimeout,
+		AckTimeoutMax:      cfg.ackTimeoutMax,
+		RetransmitInterval: cfg.retransmitInterval,
+		SyncInterval:       cfg.syncInterval,
+		SyncChunkBytes:     cfg.syncChunkBytes,
+		SyncResponseRate:   cfg.syncResponseRate,
+		// The core's prebuilt metadata strings (REPL-08 configuration
+		// errors, apply failures) ride as the detail attr under a static
+		// capitalized msg — the sloglint static-msg discipline (D-08); a
+		// dynamic string never becomes the msg.
+		Log: func(msg string) { slog.Warn("Replication adapter", "detail", msg) },
+	})
+}
+
+// metricsSources collects the 06-03 seam accessors the exporter snapshots —
+// method values over the adapter and engine wire() already holds.
+func metricsSources(adapter *udprepl.Adapter, engine *persist.Engine) metrics.Sources {
+	return metrics.Sources{
+		Discards:      adapter.Discards,
+		KnownPeers:    adapter.KnownPeers,
+		Unacked:       adapter.UnackedStats,
+		Sent:          adapter.SentByType,
+		Retransmitted: adapter.Retransmissions,
+		MergeStats:    adapter.MergeStats,
+		DumpStats:     engine.DumpStats,
+	}
+}
+
+// listenMetrics opens the opt-in metrics/debug listener (D-01/D-02) — called
+// only with a non-empty metrics address (wire guards the D-01 opt-in: unset
+// means no listener at all). An address that cannot bind is fatal exactly
+// like listenGRPC's listen half (the node never runs with its observability
+// surface silently missing), and the certificate triple — already validated
+// complete by checkMetricsCerts — turns the listener into the mTLS one when
+// set, the plaintext loopback/debug listener when not. Serve runs on its own
+// goroutine; the lifecycle handle shutdown() needs is the [http.Server].
+func listenMetrics(cfg config, sources metrics.Sources) (*http.Server, error) {
+	inner, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", cfg.metricsAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen tcp %s: %w", cfg.metricsAddr, err)
+	}
+	listener := inner
+	if cfg.metricsCert != "" {
+		tlsCfg, tlsErr := metrics.NewTLSConfig(cfg.metricsCert, cfg.metricsKey, cfg.metricsClientCA)
+		if tlsErr != nil {
+			_ = inner.Close()
+			return nil, fmt.Errorf("metrics TLS: %w", tlsErr)
+		}
+		listener = tls.NewListener(inner, tlsCfg)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.NewHandler(func() []metrics.Family { return metrics.Snapshot(sources) }))
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: readHeaderTimeout,
+	}
+	go func() {
+		serveErr := srv.Serve(listener)
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			slog.Error("Metrics endpoint", "detail", serveErr.Error())
+		}
+	}()
+	return srv, nil
 }
 
 // listenGRPC opens the gRPC TCP listener — distinct from the UDP bind
@@ -480,7 +619,10 @@ func serve(node *wired, listener net.Listener, sig <-chan os.Signal) error {
 
 // shutdown runs the pinned graceful-shutdown sequence (D-19 — the order is
 // the contract, RESEARCH Pattern 6): shed client traffic through the health
-// endpoint, cancel the API context to end Watch streams and the hub
+// endpoint, shut the opt-in metrics/debug listener down — positioned right
+// after the health flip so scrapers see the close the moment the node stops
+// serving, while the rest of the drain stays observable through logs
+// (Pitfall 7) — cancel the API context to end Watch streams and the hub
 // (GracefulStop blocks forever while any stream is open), bound
 // GracefulStop with the grace period and fall back to Stop, stop
 // replication and wait for the adapter goroutine, Flush — the final
@@ -496,6 +638,14 @@ func serve(node *wired, listener net.Listener, sig <-chan os.Signal) error {
 // lands, and a clean shutdown still exits 0.
 func shutdown(node *wired, sig <-chan os.Signal) error {
 	node.health.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	if node.metricsSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		err := node.metricsSrv.Shutdown(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("sup-kv: metrics listener shutdown: %v", err)
+		}
+	}
 	node.apiCancel()
 
 	stopped := make(chan struct{})

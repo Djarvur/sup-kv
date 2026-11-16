@@ -18,7 +18,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -810,5 +812,156 @@ func TestLog_envValidation(t *testing.T) {
 			})
 			assertExitCode(t, exitErr, exitUsageCode)
 		})
+	}
+}
+
+// httpGetBody GETs url and returns the status with the body — the metrics
+// tests' scrape helper (the noctx-clean request shape).
+func httpGetBody(t *testing.T, url string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext(%s): %v", url, err)
+	}
+	client := &http.Client{Timeout: rpcTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body of %s: %v", url, readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close body of %s: %v", url, closeErr)
+	}
+	return resp.StatusCode, string(body)
+}
+
+// TestMetrics_optIn pins D-01's set half end-to-end on the real binary: a
+// node started with --metrics-addr serves /metrics over plain HTTP — the
+// loopback/debug mode D-02 documents — and the scrape carries the full
+// supkv_ family surface over the 06-03 seams plus the runtime families.
+func TestMetrics_optIn(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+	metricsPort := freeTCPPort(t)
+	grpcAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+	metricsURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", metricsPort)
+
+	node := startNode(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--grpc-addr="+grpcAddr,
+		"--metrics-addr=127.0.0.1:"+strconv.Itoa(metricsPort),
+		"--startup-gate=10ms",
+	)
+	awaitServing(t, grpcAddr, servingDeadline)
+
+	status, body := httpGetBody(t, metricsURL)
+	if status != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want %d", metricsURL, status, http.StatusOK)
+	}
+	for _, name := range []string{
+		"supkv_replication_unacked_records",
+		"supkv_replication_unacked_oldest_age_seconds",
+		"supkv_replication_peers",
+		"supkv_replication_datagrams_sent_total",
+		"supkv_replication_datagrams_retransmitted_total",
+		"supkv_datagrams_discarded_total",
+		"supkv_merges_conflicts_total",
+		"supkv_clock_drift_warnings_total",
+		"supkv_dumps_duration_seconds",
+		"supkv_dumps_total",
+		"supkv_dumps_errors_total",
+		"go_goroutines",
+		"process_cpu_seconds_total",
+	} {
+		if !strings.Contains(body, name) {
+			t.Errorf("the scrape of %s lacks the family %q:\n%s", metricsURL, name, body)
+		}
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the opt-in metrics run")
+}
+
+// TestMetrics_noDefaultListener pins D-01's unset half discriminatingly. A
+// refused dial on an arbitrary unpassed port would prove nothing — any
+// implementation refuses there, including one with a default metrics
+// listener on a fixed port, the exact D-01 regression this test exists to
+// catch — so the assertion runs through a collision instead: two concurrent
+// nodes, neither given --metrics-addr nor SUPKV_METRICS_ADDR, mutually
+// isolated (distinct node ids, UDP bind/broadcast ports, dump dirs and
+// gRPC ports), both must reach SERVING and both must exit 0. Under the
+// regression — a default metrics address introduced the way defaultGRPCAddr
+// was, a non-empty defaults-block value flowing through wire() — the second
+// node's fixed-port metrics bind collides with the first node's, the fatal
+// bind aborts its startup and its awaitServing times out. The mechanism is
+// pure loopback TCP with per-node ports: portable to every matrix cell,
+// deliberately not /proc or socket enumeration.
+func TestMetrics_noDefaultListener(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	launch := func(nodeID int) (node *smokeNode, grpcAddr string) {
+		udpPort := freeUDPPort(t)
+		grpcPort := freeTCPPort(t)
+		return startNode(t, bin, nil,
+			"--node-id="+strconv.Itoa(nodeID),
+			"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcPort),
+			"--startup-gate=10ms",
+		), fmt.Sprintf("127.0.0.1:%d", grpcPort)
+	}
+	nodeA, addrA := launch(1)
+	nodeB, addrB := launch(2)
+
+	awaitServing(t, addrA, servingDeadline)
+	awaitServing(t, addrB, servingDeadline)
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+}
+
+// TestMetrics_incompleteCertSet pins D-02's fail-closed contract: one
+// certificate env set without the other two aborts startup through the
+// collected-error path with exitUsage — before any bind (Pitfall 8: no path
+// can reach the TLS builder with a half-loaded set) — and the message names
+// all three envs of the triple. The cert envs have no flags, so the usage
+// dump cannot mention them: only the error line can carry the names.
+func TestMetrics_incompleteCertSet(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	udpPort := freeUDPPort(t)
+	node := startNode(t, bin, []string{"SUPKV_METRICS_CERT=" + filepath.Join(t.TempDir(), "server-cert.pem")},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+	)
+	var exitErr error
+	waitFor(t, exitDeadline, "process exit for the incomplete cert set", func() bool {
+		select {
+		case exitErr = <-node.exit:
+			return true
+		default:
+			return false
+		}
+	})
+	assertExitCode(t, exitErr, exitUsageCode)
+	stderr := node.stderr.String()
+	for _, env := range []string{"SUPKV_METRICS_CERT", "SUPKV_METRICS_KEY", "SUPKV_METRICS_CLIENT_CA"} {
+		if !strings.Contains(stderr, env) {
+			t.Errorf("stderr of the incomplete-cert-set run lacks %q:\n%s", env, stderr)
+		}
 	}
 }

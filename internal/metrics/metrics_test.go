@@ -14,7 +14,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Djarvur/sup-kv/internal/app/persist"
+	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/metrics"
+	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
 // renderTo renders families into a string, failing the test on a write
@@ -175,5 +178,87 @@ func TestMetricsHandler_serves(t *testing.T) {
 	sampleAt := strings.Index(out, "\nh_family 7\n")
 	if helpAt != 0 || typeAt < 0 || sampleAt < 0 || typeAt <= helpAt || sampleAt <= typeAt {
 		t.Fatalf("output lacks HELP/TYPE before the sample (help %d, type %d, sample %d):\n%s", helpAt, typeAt, sampleAt, out)
+	}
+}
+
+// families pins the complete D-04/D-05 family set — names, types and the
+// fixed label vocabularies — as the table TestMetrics_families asserts over.
+var families = []struct {
+	name string
+	typ  string
+}{
+	{"supkv_replication_unacked_records", "gauge"},
+	{"supkv_replication_unacked_oldest_age_seconds", "gauge"},
+	{"supkv_replication_peers", "gauge"},
+	{"supkv_replication_datagrams_sent_total", "counter"},
+	{"supkv_replication_datagrams_retransmitted_total", "counter"},
+	{"supkv_datagrams_discarded_total", "counter"},
+	{"supkv_merges_conflicts_total", "counter"},
+	{"supkv_clock_drift_warnings_total", "counter"},
+	{"supkv_dumps_duration_seconds", "gauge"},
+	{"supkv_dumps_total", "counter"},
+	{"supkv_dumps_errors_total", "counter"},
+	{"go_goroutines", "gauge"},
+	{"go_memstats_alloc_bytes", "gauge"},
+	{"go_memstats_sys_bytes", "gauge"},
+	{"process_cpu_seconds_total", "counter"},
+	{"process_resident_memory_bytes", "gauge"},
+}
+
+// zeroSources is the fake seam snapshot: every accessor returns its type's
+// zero value — a node that has never replicated, merged or dumped.
+func zeroSources() metrics.Sources {
+	return metrics.Sources{
+		Discards:      func() repl.DiscardStats { return repl.DiscardStats{} },
+		KnownPeers:    func() uint64 { return 0 },
+		Unacked:       func() repl.UnackedStats { return repl.UnackedStats{} },
+		Sent:          func() udprepl.SentByType { return udprepl.SentByType{} },
+		Retransmitted: func() uint64 { return 0 },
+		MergeStats:    func() repl.MergeStats { return repl.MergeStats{} },
+		DumpStats:     func() persist.DumpStats { return persist.DumpStats{} },
+	}
+}
+
+// TestMetrics_families asserts the closed family contract over a fake
+// snapshot: every D-04/D-05 family name appears exactly once with its TYPE
+// line, every class and type label of the fixed enums renders, and the
+// zero-state snapshot still publishes zero-valued samples — an idle node's
+// scrape is complete, not empty (the empty-state edge).
+func TestMetrics_families(t *testing.T) {
+	t.Parallel()
+	out := renderTo(t, metrics.Snapshot(zeroSources()))
+	for _, tc := range families {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			typeLine := "# TYPE " + tc.name + " " + tc.typ
+			if n := strings.Count(out, typeLine); n != 1 {
+				t.Errorf("family %s: %q appears %d times, want exactly 1:\n%s", tc.name, typeLine, n, out)
+			}
+		})
+	}
+	for _, line := range []string{
+		"supkv_replication_unacked_records 0\n",
+		"supkv_replication_unacked_oldest_age_seconds 0\n",
+		"supkv_replication_peers 0\n",
+		"supkv_replication_datagrams_retransmitted_total 0\n",
+		"supkv_merges_conflicts_total 0\n",
+		"supkv_clock_drift_warnings_total 0\n",
+		"supkv_dumps_duration_seconds 0\n",
+		"supkv_dumps_total 0\n",
+		"supkv_dumps_errors_total 0\n",
+		"supkv_datagrams_discarded_total{class=\"bad_crc\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"undecodable\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"bad_proto_version\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"own_broadcast\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"duplicate_node_id\"} 0\n",
+		"supkv_replication_datagrams_sent_total{type=\"hello\"} 0\n",
+		"supkv_replication_datagrams_sent_total{type=\"data\"} 0\n",
+		"supkv_replication_datagrams_sent_total{type=\"ack\"} 0\n",
+		"supkv_replication_datagrams_sent_total{type=\"data_request\"} 0\n",
+		"supkv_replication_datagrams_sent_total{type=\"sync\"} 0\n",
+	} {
+		if !strings.Contains(out, line) {
+			t.Errorf("zero-state output lacks the sample line %q:\n%s", line, out)
+		}
 	}
 }
