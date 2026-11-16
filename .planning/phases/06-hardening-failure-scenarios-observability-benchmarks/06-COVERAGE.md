@@ -12,12 +12,12 @@ created: 2026-11-16
 
 | Capability | Decision | Reason |
 |------------|----------|--------|
-| External/third-party APIs (any) | OPT-OUT | None integrated. Phase 6 is hardening of sup-kv's own code: review-fix backlogs, slog observability seams, an opt-in metrics/debug listener served by sup-kv itself (in-repo exporter, no client library), simulator/real-socket/exec scenario suites, benchmarks, and a darwin F_FULLFSYNC flush. Zero outbound calls to any external service; zero new client SDKs; the shipped dependency graph remains grpc + protobuf only. |
-| sup-kv's own gRPC surface | N/A (own product surface) | The gate's detection signals — ("surface", "api") and ("wire", "endpoint") — match planning prose referring to sup-kv's OWN gRPC API (phase 5 deliverable, unchanged in phase 6: `internal/grpcapi` byte-identical per the phase-5 regeneration audit) and its own UDP wire protocol. An internal product surface is not an external API integration. |
+| External/third-party APIs (any) | OPT-OUT | None integrated: hardening of sup-kv's own code only; zero outbound calls, zero new client SDKs; shipped deps remain grpc + protobuf. |
+| sup-kv's own gRPC/UDP surface | OPT-OUT | Own product surface, not an external API; internal/grpcapi byte-identical to phase 5 per its regeneration audit. |
 
 ## Verdict
 
-**No external API coverage obligations for this phase.** The detection that produced this matrix was a keyword false positive on self-referential surface prose. Re-evaluate if a future phase integrates an outbound/third-party API (the gate remains enabled project-wide).
+**No external API coverage obligations for this phase.** The gate's detection signals — ("surface", "api") and ("wire", "endpoint") — matched planning prose referring to sup-kv's OWN gRPC API and its own UDP wire protocol. Keyword false positive on self-referential surface prose; recorded here so the audit trail shows why the matrix is all-OPT-OUT. Re-evaluate if a future phase integrates an outbound/third-party API (the gate remains enabled project-wide).
 
 ## Audit Trail
 
