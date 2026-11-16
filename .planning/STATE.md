@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: executing
-stopped_at: Completed 06-05-PLAN.md
-last_updated: "2026-11-16T00:59:49.735Z"
+stopped_at: Completed 06-08-PLAN.md
+last_updated: "2026-11-16T01:22:35.046Z"
 last_activity: 2026-11-16
 last_activity_desc: Phase 06 execution started
-state_head: 703996371609dd693e3e9bcddccaa8f5ff259cc4
+state_head: ccf4a0aac0de5b32586892b93936e850ef373a49
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 31
+  completed_plans: 32
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
-Plan: 8 of 9
+Plan: 9 of 9
 Status: Ready to execute
 Last activity: 2026-11-16 — Phase 06 execution started
 
@@ -91,6 +91,7 @@ Progress: [███████░░░] 71%
 | Phase 06 P07 | 26min | 3 tasks | 2 files |
 | Phase 06 P04 | 19min | 3 tasks | 4 files |
 | Phase 06 P05 | 35min | 3 tasks | 3 files |
+| Phase 06 P08 | 18min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -222,6 +223,9 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-05: partitionDays scales only the periodic cadence (hello+scan to one sync_interval, peer_timeout to three hellos) — multi-day runs at defaults cost ~20s wall in hello events plus no-op retransmit scans over retained suspended entries; every asserted semantic is cadence-independent (plan 06-05)
 - [Phase 06]: 06-05: scenario drives are convergence-driven, not quiescence-driven — bare three-seam quiescence also holds in the pre-fill/pre-periodic-round gaps (emptyDisk's join wait, the restart stranded-key spread), so the loops bind on store equality with the pointwise-supremum model (plan 06-05)
 - [Phase 06]: 06-05: the loss scenario's identical-supremum assertion compares winning DATA per key, never version bytes — a node's l watermark depends on absorption order before a local write, so versions are delivery-order-dependent by design; the join law makes the fixpoint data order-independent (CORE-06 at cluster scale) (plan 06-05)
+- [Phase 06]: 06-08: benchmarks reuse the exact 06-06 asymmetric-topology helpers via *testing.T -> testing.TB generalization (thelper tb naming) — no second topology implementation; newScenarioNode cleanup waits for Run's return so -count reruns never leak ports
+- [Phase 06]: 06-08: testing.TB carries neither Context() nor Deadline() (Go 1.24 added them to T and B only) — Deadline read through a structural type assertion in waitFor; two documented usetesting nolints where the linter's suggested tb.Context() cannot compile
+- [Phase 06]: 06-08: correctness inside the benchmarks — burst run ends only when node B serves every written key (per-run namespaced keys so escalation residue cannot satisfy the check); confirmation-latency run fails on any unacked report (b.Fatalf naming the key); latency benchmark's background burst writes via the author-notification path so the 1ms cadence never serializes on dump confirmation
 
 ### Pending Todos
 
@@ -257,6 +261,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-16T00:59:48.990Z
-Stopped at: Completed 06-05-PLAN.md
+Last session: 2026-11-16T01:22:06.352Z
+Stopped at: Completed 06-08-PLAN.md
 Resume file: None

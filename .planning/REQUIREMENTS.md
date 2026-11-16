@@ -68,7 +68,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **TEST-02**: HLC property tests prove monotonicity under adversarial clock input, post-receive ordering and version uniqueness; counter-reset and restart-from-dump-max cases included
 - [x] **TEST-03**: A deterministic multi-node simulation runs 2..N nodes over a virtual network that loses, duplicates and reorders datagrams and simulates partitions, with seeded runs
 - [ ] **TEST-04**: Every documented failure scenario is an automated test demonstrating convergence within the documented bounds: datagram loss; Ack loss; duplicates/reordering/own-broadcast echo; partition for seconds and for days (both sides serving writes, deterministic winner asserted + merge-conflicts counter — conflict journal cancelled per phase-6 D-10); one-way connectivity; node restart (RunID change triggers resync); empty-disk recovery at `sync_response_rate`; both-nodes-down restart; corrupted dump records; wall-clock jumps live and between restarts; a node's clock far ahead; ~1000 writes/s bursts; duplicate `node_id`; protocol version mismatch
-- [ ] **TEST-05**: Benchmarks cover dump at 10k keys and replication throughput (burst writes), with bounded confirmation latency under bursts
+- [x] **TEST-05**: Benchmarks cover dump at 10k keys and replication throughput (burst writes), with bounded confirmation latency under bursts
 
 ### Tooling
 
@@ -182,7 +182,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OBS-02 | Phase 6 | Complete |
 | OBS-03 | Phase 6 | Complete |
 | TEST-04 | Phase 6 | Pending |
-| TEST-05 | Phase 6 | Pending |
+| TEST-05 | Phase 6 | Complete |
 | DOCS-01 | Phase 7 | Pending |
 | DOCS-02 | Phase 7 | Pending |
 | DOCS-03 | Phase 7 | Pending |
