@@ -20,6 +20,7 @@ package simnet
 import (
 	"container/heap"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"strings"
 	"time"
@@ -217,6 +218,21 @@ func (n *Network) Register(nodeID uint16, runID [16]byte, handle string, deliver
 	n.nodes = append(n.nodes, netNode{id: nodeID, runID: runID, handle: handle, deliver: deliver})
 }
 
+// Reregister atomically replaces the registration of an already-registered
+// handle: the node id, run id and delivery function swap in place, keeping
+// the entry's position in the registration slice — broadcast fan-out order
+// and therefore rng draw order stay exactly as before (the in-place node
+// replacement the scenario suite drives; a fresh handle still goes through
+// Register). It reports false when handle is not registered.
+func (n *Network) Reregister(nodeID uint16, runID [16]byte, handle string, deliver func(port.InboundDatagram)) bool {
+	i, ok := n.byHandle[handle]
+	if !ok {
+		return false
+	}
+	n.nodes[i] = netNode{id: nodeID, runID: runID, handle: handle, deliver: deliver}
+	return true
+}
+
 // Send injects one datagram from fromHandle toward toHandle (D-06/D-07): a
 // blocked pair counts partitioned and drops the send; otherwise the fate is
 // drawn at send time — drop, duplicate or deliver — with the delays drawn
@@ -333,9 +349,10 @@ func simRunID(nodeID uint16) [16]byte {
 }
 
 // clusterNode is one simulated node: a real storage.Store whose clock reads
-// the scheduler's virtual time (the D-02 seam), and a real repl.Core. The
-// timerGen counter is the live-timer generation drive's scheduling
-// discipline.
+// the scheduler's virtual time plus the node's cluster-owned offset slot
+// (the D-02 seam), and a real repl.Core. The timerGen counter is the
+// live-timer generation drive's scheduling discipline — and the restart
+// seams' stale-timer supersession.
 type clusterNode struct {
 	id       uint16
 	runID    [16]byte
@@ -347,38 +364,39 @@ type clusterNode struct {
 
 // Cluster is the N-node harness: n repl.Core instances over n real stores,
 // wired to one virtual network, with the write log capturing the production
-// author sequence (D-05).
+// author sequence (D-05). Each node's store clock reads the scheduler's
+// virtual time plus the node's mutable offset slot (SetClockOffset — the
+// wall-clock seam), and the remembered cfg rebuilds nodes for the restart
+// seams (ReplaceNode, AddNode).
 type Cluster struct {
-	sched  *Scheduler
-	net    *Network
-	nodes  []clusterNode
-	writes []LoggedWrite
+	sched   *Scheduler
+	net     *Network
+	nodes   []clusterNode
+	writes  []LoggedWrite
+	offsets []time.Duration
+	cfg     repl.Config
 }
 
 // NewCluster builds n nodes — node_id 1..n, handles n1..nN in node_id order
 // — over sched, each a real storage.Store whose clock now func returns the
-// scheduler's current virtual time (the D-02 fake-clock idiom) and a
-// repl.Core built with cfg; rng is the network's fault-draw source, policy
-// its fault profile. Construction schedules each node's first timer pump at
-// the scheduler's current time, so the first RunUntil fires every node's
-// startup Hello and DataSync (the adapter's Run-startup mirror).
+// scheduler's current virtual time plus the node's offset slot (the D-02
+// fake-clock idiom; offsets start at zero, so the clock is sched.Now until
+// test code moves it) and a repl.Core built with cfg; rng is the network's
+// fault-draw source, policy its fault profile. Construction schedules each
+// node's first timer pump at the scheduler's current time, so the first
+// RunUntil fires every node's startup Hello and DataSync (the adapter's
+// Run-startup mirror).
 func NewCluster(sched *Scheduler, rng *rand.Rand, n int, cfg repl.Config, policy Policy) *Cluster {
 	c := &Cluster{
-		sched: sched,
-		net:   NewNetwork(sched, rng, policy),
-		nodes: make([]clusterNode, n),
+		sched:   sched,
+		net:     NewNetwork(sched, rng, policy),
+		nodes:   make([]clusterNode, n),
+		offsets: make([]time.Duration, n),
+		cfg:     cfg,
 	}
 	for i := range c.nodes {
 		nodeID := uint16(i + 1)
-		handle := fmt.Sprintf("n%d", nodeID)
-		store := storage.NewStore(nodeID, clock.NewClock(sched.Now, 0, 0, clusterDriftWarn), storage.Config{})
-		c.nodes[i] = clusterNode{
-			id:     nodeID,
-			runID:  simRunID(nodeID),
-			handle: handle,
-			store:  store,
-			core:   repl.New(nodeID, simRunID(nodeID), handle, nodeStore{store: store}, cfg),
-		}
+		c.nodes[i] = c.newClusterNode(i, nodeID, simRunID(nodeID))
 	}
 	for i := range c.nodes {
 		c.net.Register(c.nodes[i].id, c.nodes[i].runID, c.nodes[i].handle, func(in port.InboundDatagram) {
@@ -387,6 +405,100 @@ func NewCluster(sched *Scheduler, rng *rand.Rand, n int, cfg repl.Config, policy
 		c.sched.Schedule(sched.Now(), func() { c.drive(i, sched.Now()) })
 	}
 	return c
+}
+
+// newClusterNode builds node index i's harness node: a fresh store whose
+// clock reads the scheduler's virtual time plus the node's offset slot,
+// over a fresh core announcing runID under the node's derived handle. The
+// shared construction of NewCluster, ReplaceNode and AddNode — one wiring,
+// never three.
+func (c *Cluster) newClusterNode(i int, nodeID uint16, runID [16]byte) clusterNode {
+	handle := fmt.Sprintf("n%d", nodeID)
+	now := func() time.Time { return c.sched.Now().Add(c.offsets[i]) }
+	store := storage.NewStore(nodeID, clock.NewClock(now, 0, 0, clusterDriftWarn), storage.Config{})
+	return clusterNode{
+		id:     nodeID,
+		runID:  runID,
+		handle: handle,
+		store:  store,
+		core:   repl.New(nodeID, runID, handle, nodeStore{store: store}, c.cfg),
+	}
+}
+
+// SetClockOffset re-aims node i's store clock at the scheduler's virtual
+// time plus offset — the wall-clock seam the scenario suite drives
+// (TEST-04: live jumps forward and backward, a far-ahead node). The offset
+// is live: the next clock read observes it, so a jump between RunUntil
+// calls re-times every subsequent stamp of that node while its HLC carries
+// the pre-jump l (monotonicity is the clock's, never the wall's).
+//
+// Determinism contract: offsets are plain harness state mutated only by
+// test code between RunUntil calls — the seam consumes no rng draws and
+// schedules no events, so for any fixed sequence of SetClockOffset calls
+// the event stream stays a pure function of the seed (06-RESEARCH Open
+// Question 3: the Cluster-method shape).
+func (c *Cluster) SetClockOffset(i int, offset time.Duration) {
+	c.checkIndex(i, "SetClockOffset")
+	c.offsets[i] = offset
+}
+
+// ReplaceNode restarts node i as a fresh process: the node keeps its id and
+// handle but boots a new empty store and a new core announcing runID, with
+// its clock offset set to offset — the REPL-07 replacement shape
+// (restart_test.go's hand-built cores, wired into the virtual network).
+// The network registration is replaced in place through Reregister;
+// datagrams already in flight from the old run still carry the old run id
+// (the envelope identity was copied at send time), while everything the new
+// run sends carries runID. The old run's pending state and timers vanish
+// with its core — the generation counter supersedes every timer the old
+// run had scheduled — and the startup pump scheduled at the current virtual
+// time fires the new run's Hello and DataSync on the next RunUntil.
+// Determinism contract: as SetClockOffset — plain harness state, no rng.
+func (c *Cluster) ReplaceNode(i int, runID [16]byte, offset time.Duration) {
+	c.checkIndex(i, "ReplaceNode")
+	gen := c.nodes[i].timerGen + 1
+	c.offsets[i] = offset
+	replacement := c.newClusterNode(i, c.nodes[i].id, runID)
+	replacement.timerGen = gen
+	c.nodes[i] = replacement
+	if !c.net.Reregister(replacement.id, runID, replacement.handle, func(in port.InboundDatagram) {
+		c.deliver(i, in)
+	}) {
+		panic(fmt.Sprintf("simnet: Cluster.ReplaceNode: handle %q of node %d is not registered", replacement.handle, replacement.id))
+	}
+	c.sched.Schedule(c.sched.Now(), func() { c.drive(i, c.sched.Now()) })
+}
+
+// AddNode boots one fresh cluster member: the next node id with its derived
+// handle and a deterministically derived fresh run id, over an empty store
+// whose clock starts at the scheduler's virtual time plus offset — the
+// empty-disk join shape (a brand-new node reconciling through the periodic
+// rounds, never a targeted listing). It returns the new node's index
+// (nodes keep index = node_id-1). Determinism contract: as SetClockOffset —
+// the derived identity draws no randomness, so the event stream stays a
+// pure function of the seed.
+func (c *Cluster) AddNode(offset time.Duration) int {
+	i := len(c.nodes)
+	if i >= math.MaxUint16 {
+		panic(fmt.Sprintf("simnet: Cluster.AddNode: node id %d overflows uint16", i+1))
+	}
+	nodeID := uint16(i + 1)
+	c.offsets = append(c.offsets, offset)
+	c.nodes = append(c.nodes, clusterNode{})
+	c.nodes[i] = c.newClusterNode(i, nodeID, simRunID(nodeID))
+	c.net.Register(nodeID, c.nodes[i].runID, c.nodes[i].handle, func(in port.InboundDatagram) {
+		c.deliver(i, in)
+	})
+	c.sched.Schedule(c.sched.Now(), func() { c.drive(i, c.sched.Now()) })
+	return i
+}
+
+// checkIndex fails loudly on an out-of-range node index — always a
+// driving test's indexing mistake, never a protocol condition.
+func (c *Cluster) checkIndex(i int, op string) {
+	if i < 0 || i >= len(c.nodes) {
+		panic(fmt.Sprintf("simnet: Cluster.%s: node index %d out of range (0..%d)", op, i, len(c.nodes)-1))
+	}
 }
 
 // deliver hands one inbound datagram to node i's core at the current virtual
