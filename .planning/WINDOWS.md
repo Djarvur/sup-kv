@@ -18,7 +18,7 @@ last_updated: 2026-11-16T01:34:11.794Z
 | 1 | 01 | unmet-truth | .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-03-SUMMARY.md |  | Backstop truth D5: Dependabot's first version-update PR not yet observed — weekly schedule window has not elapsed since dependabot.yml landed (2026-10-31) | fixed |  | 2026-10-31T15:45:51.348Z | 2026-11-02T15:55:45.509Z |
 | 2 | 01 | unmet-truth | docs/setup/branch-protection.md | 14 | CI-03 protection sub-item deferred (org plan 403, decision defer 2026-10-31): direct pushes to master are not server-side rejected until the ruleset is applied; PENDING marker records the one-command re-apply path | waived | Ratified accepted override 2026-10-31 (maintainer): org plan gates rulesets on this private repo (403); no plan upgrade, no public flip; payload + one-command re-apply kept in docs/setup/branch-protection.md | 2026-10-31T16:00:46.876Z | 2026-10-31T18:59:31.534Z |
 | 3 | 05 | stub | internal/grpcapi/server.go |  | Watch/SnapshotCreate/SnapshotLoad intentionally Unimplemented (UnimplementedSupKVServer embed) until plans 05-04/05-05 | open |  | 2026-11-09T10:49:45.242Z |  |
-| 4 | 06 | unrun-verify | .planning/phases/06-hardening-failure-scenarios-observability-benchmarks/06-09-PLAN.md |  | D-16 pending main-session work: re-run /gsd-execute-phase for phases 1, 4 and 5 to regenerate VERIFICATION.md fingerprints staled by the 2026-11-14 buf zero-waiver refactor (7b55ad1) — plan 06-09 task 3 is a checkpoint:human-action, not subagent-executable | open |  | 2026-11-16T01:34:11.794Z |  |
+| 4 | 06 | unrun-verify | .planning/phases/06-hardening-failure-scenarios-observability-benchmarks/06-09-PLAN.md |  | D-16 pending main-session work: re-run /gsd-execute-phase for phases 1, 4 and 5 to regenerate VERIFICATION.md fingerprints staled by the 2026-11-14 buf zero-waiver refactor (7b55ad1) — plan 06-09 task 3 is a checkpoint:human-action, not subagent-executable | fixed | Resolved 2026-11-16 in the main session: all five stale phases regenerated with fresh fingerprints (1: 72497d7, 4: e47733c, 5: 9b87620, 2: 5e62bc7 toolchain staleness, 3: 8c548d8 phase-6 covered-input staleness), all passed; STATE.md 945f80f; confirmed by the phase-6 verifier | 2026-11-16T01:34:11.794Z | 2026-11-16T12:55:00.000Z |
 
 ````json
 [
@@ -68,10 +68,10 @@ last_updated: 2026-11-16T01:34:11.794Z
     "file": ".planning/phases/06-hardening-failure-scenarios-observability-benchmarks/06-09-PLAN.md",
     "line": null,
     "description": "D-16 pending main-session work: re-run /gsd-execute-phase for phases 1, 4 and 5 to regenerate VERIFICATION.md fingerprints staled by the 2026-11-14 buf zero-waiver refactor (7b55ad1) — plan 06-09 task 3 is a checkpoint:human-action, not subagent-executable",
-    "status": "open",
-    "reason": "",
+    "status": "fixed",
+    "reason": "Resolved 2026-11-16 in the main session: all five stale phases regenerated with fresh fingerprints (1: 72497d7, 4: e47733c, 5: 9b87620, 2: 5e62bc7 toolchain staleness, 3: 8c548d8 phase-6 covered-input staleness), all passed; STATE.md 945f80f; confirmed by the phase-6 verifier",
     "recorded_at": "2026-11-16T01:34:11.794Z",
-    "resolved_at": null,
+    "resolved_at": "2026-11-16T12:55:00.000Z",
     "milestone": "v1.0"
   }
 ]
