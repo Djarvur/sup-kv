@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
-status: executing
-stopped_at: Completed 06-08-PLAN.md
-last_updated: "2026-11-16T01:22:35.046Z"
+status: verifying
+stopped_at: Completed 06-09-PLAN.md (executor portion; D-16 /gsd-execute-phase 1/4/5 re-runs pending in main session)
+last_updated: "2026-11-16T01:35:44.881Z"
 last_activity: 2026-11-16
 last_activity_desc: Phase 06 execution started
-state_head: ccf4a0aac0de5b32586892b93936e850ef373a49
+state_head: 4f75a3b771d585015e72de0474e2b7f5228ca246
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 32
+  completed_plans: 33
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 
 Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
 Plan: 9 of 9
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-16 — Phase 06 execution started
 
 Progress: [███████░░░] 71%
@@ -92,6 +92,7 @@ Progress: [███████░░░] 71%
 | Phase 06 P04 | 19min | 3 tasks | 4 files |
 | Phase 06 P05 | 35min | 3 tasks | 3 files |
 | Phase 06 P08 | 18min | 3 tasks | 8 files |
+| Phase 06 P09 | 12min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -226,6 +227,10 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-08: benchmarks reuse the exact 06-06 asymmetric-topology helpers via *testing.T -> testing.TB generalization (thelper tb naming) — no second topology implementation; newScenarioNode cleanup waits for Run's return so -count reruns never leak ports
 - [Phase 06]: 06-08: testing.TB carries neither Context() nor Deadline() (Go 1.24 added them to T and B only) — Deadline read through a structural type assertion in waitFor; two documented usetesting nolints where the linter's suggested tb.Context() cannot compile
 - [Phase 06]: 06-08: correctness inside the benchmarks — burst run ends only when node B serves every written key (per-run namespaced keys so escalation residue cannot satisfy the check); confirmation-latency run fails on any unacked report (b.Fatalf naming the key); latency benchmark's background burst writes via the author-notification path so the 1ms cadence never serializes on dump confirmation
+- [Phase 06]: [Phase 06]: 06-09: F_FULLFSYNC REPLACES File.Sync on darwin rather than wrapping it — fcntl(2) defines it as fsync-plus-drive-flush (strict superset), a preceding Sync would flush the same data twice; closes the Phase-3 macOS durability blocker as resolved-with-code (4f75a3b)
+- [Phase 06]: [Phase 06]: 06-09: no darwin-only test file — no CI test can assert real power-loss behavior; both-arch cross-compile plus the unchanged linux race suite is the honest evidence (kill -9 durability unaffected on every platform)
+- [Phase 06]: [Phase 06]: 06-09: Task 2 phase gate is evidence-only (no commit): lint 7.6s + race suite 7.7s + bench smoke green, go mod tidy byte-identical, zero slog under internal/app, zero blank pprof/expvar imports, all 12 D-15 rows fixed — recorded in 06-09-SUMMARY
+- [Phase 06]: [Phase 06]: 06-09: D-16 fingerprint regeneration surfaced as pending-main-session work (checkpoint:human-action gate=blocking) — /gsd-execute-phase 1, 4, 5 before verify-work and milestone close; WINDOWS.md carries the open unrun-verify entry; no VERIFICATION.md hand-edited
 
 ### Pending Todos
 
@@ -233,7 +238,7 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 3 (Persistence): open planning decision — macOS F_FULLFSYNC durability policy (verify in Phase 6 crash scenarios).
+- Phase 3 (Persistence): macOS F_FULLFSYNC durability policy RESOLVED WITH CODE (plan 06-09 Task 1, 4f75a3b): research resolved it — Go's darwin Fsync binds libc_fsync only, never F_FULLFSYNC; the build-tagged fcntl(fd, F_FULLFSYNC, 0) helper (internal/persistfile/fsync_darwin.go, replacing File.Sync per fcntl(2) superset semantics) makes the durability flush platform-uniform; kill -9 crash tests unaffected on every platform (only power loss distinguishes the two, no CI test simulates it).
 - D-08 macOS smoke RESOLVED empirically (first macos-15 CI run 2026-11-08, PR #31): darwin refuses the shared wildcard bind (EADDRINUSE; SO_REUSEADDR does not share there) — fixed as a loud skip in 507228a; macos-15 cell expected green-with-skip on re-run.
 - Phase 4 review (old, 2026-11-06 era): info-level findings IN-01 (write-only ownHandle dead state) and IN-02 (simnet Cluster.Write ignores store Set error) remain open by triage — see 04-REVIEW-DISPOSITION.md.
 - Phase 1 re-review (2026-11-11): advisory findings open by triage — WR-01 (ci.yml jobs lack timeout-minutes) and IN-01 (serve()'s defer stop() releases signal handling before shutdown completes) — see 01-REVIEW-DISPOSITION.md.
@@ -242,7 +247,7 @@ None yet.
 - Phase 4 re-review (2026-11-14): WR-01 (drained-row Acked set can contain a duplicate after discovery flush — missing dedup in clone(prev.Acked)+prev.WaitingOn, fix: slices.Compact after sort) and WR-02 (sync-response-rate above 1e9 divides to zero and silently disables the egress limiter — clamp in normalized()) open; IN-01 (NotifyLocalWrite TOCTOU vs closed done), IN-02 (Restore marks dirty unconditionally) — see 04-REVIEW-DISPOSITION.md.
 - Phase 03 SECURITY.md was missing since the phase's original execution (2026-11-03) — created retroactively 2026-11-14 (7/7 threats closed, threats_open: 0).
 - [2026-11-14] Maintainer decision: buf STANDARD satisfied with ZERO waivers (7b55ad1, pre-release window) — protos moved to package-derived trees (replproto/supkv/v1, apiproto/supkvapi/v1), service renamed SupKV→SupKVService, WatchEvent→WatchResponse (wire method paths changed; breaking-guard deferred until the rename lands on master). Supersedes the phase-5 CONTEXT pin of those names and the quick-task D-06 waivers.
-- [2026-11-14] 7b55ad1 touched covered inputs of phases 1 (ci.yml, Makefile), 4 (udprepl/repl imports) and 5 (grpcapi surface) — their VERIFICATION.md fingerprints are stale again; phases 2/3 hold. Re-run /gsd-execute-phase 1/4/5 to regenerate before milestone close.
+- [2026-11-14] 7b55ad1 touched covered inputs of phases 1 (ci.yml, Makefile), 4 (udprepl/repl imports) and 5 (grpcapi surface) — their VERIFICATION.md fingerprints are stale again; phases 2/3 hold. Re-run /gsd-execute-phase 1/4/5 to regenerate before milestone close. [2026-11-16] Surfaced by plan 06-09 Task 3 as PENDING MAIN-SESSION work (checkpoint:human-action, gate=blocking): run the three re-verifications before /gsd:verify-work for Phase 6; WINDOWS.md tracks the open unrun-verify entry.
 - [2026-11-15] Maintainer decision: Go toolchain directive bumped to go1.27.4 (go 1.27.1 language pin unchanged) — closes called-vulnerability GO-2026-6859 (CVE-2026-97054, net/http MaxBytesReader header race, published 2026-11-11, reachable via grpc init chains in generated code; fixed in go1.27.4). govulncheck exit 0, tidy stable, make lint/test green. Toolchain-patch bump recorded as maintainer decision per AGENTS.md version policy, no ADR.
 
 ### Quick Tasks Completed
@@ -261,6 +266,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-16T01:22:06.352Z
-Stopped at: Completed 06-08-PLAN.md
+Last session: 2026-11-16T01:35:44.349Z
+Stopped at: Completed 06-09-PLAN.md (executor portion; D-16 /gsd-execute-phase 1/4/5 re-runs pending in main session)
 Resume file: None
