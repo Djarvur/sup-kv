@@ -42,13 +42,15 @@ Seeded from `07-RESEARCH.md` §Validation Architecture. Task IDs finalize at pla
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | TBD | TBD | DOCS-01 | T-7-01 / — | N/A | integration (real binary, real sockets, real processes) | `go test -race ./cmd/sup-kv/ -run TestReadmeQuickstart` | ❌ W0 (`cmd/sup-kv/readme_test.go`) | ⬜ pending |
-| TBD | TBD | TBD | DOCS-01 (macOS leg) | — | N/A | integration (platform-gated by RESEARCH Open Question 1 outcome) | same (runs in `gate (macos-15)` cell) | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | DOCS-02 | T-7-02 / — | docs must not overstate safety | docs presence-guard (optional; content truth is UAT) | `go test ./cmd/sup-kv/ -run TestOperationsDoc` (if adopted) | ❌ W0 (optional) | ⬜ pending |
-| TBD | TBD | TBD | DOCS-03 | — | N/A | integration (real binary + pinned grpcurl) | `go test -race ./cmd/sup-kv/ -run TestExamplesDoc` | ❌ W0 (`cmd/sup-kv/examples_test.go`) | ⬜ pending |
-| TBD | TBD | TBD | (release) | T-7-03 / — | supply-chain hardening of artifacts | manual gate in task | `make release-snapshot` (`go tool goreleaser release --snapshot --clean`) | ❌ W0 (Makefile target) | ⬜ pending |
-| TBD | TBD | TBD | (release) | — | N/A | e2e, once | push tag → observe release.yml + Release assets | n/a (one-shot) | ⬜ pending |
-| TBD | TBD | TBD | D-11 | — | N/A | ops, once | `gh api` POST + verify read per docs/setup/branch-protection.md | n/a (one-shot) | ⬜ pending |
+| 07-01 T1 | 07-01 | 1 | DOCS-03 (D-04/D-05 slice) | T-7-01 | reflection disclosure accepted + documented | integration (real binary + pinned grpcurl) | `go test -race ./cmd/sup-kv/ -run TestExamplesDoc` | ❌ W0 (`cmd/sup-kv/examples_test.go`) | ⬜ pending |
+| 07-01 T2 | 07-01 | 1 | DOCS-01 (macOS leg prerequisite) | — | N/A | capability probe (verdict via gate-cell pass/fail) | `go test -race ./cmd/sup-kv/ -run TestProbeQuickstartBroadcast` (macos-15 cell outcome = the verdict) | ❌ W0 (`cmd/sup-kv/broadcast_probe_test.go`) | ⬜ pending |
+| 07-01 T3 | 07-01 | 1 | DOCS-01 (option selection) | — | N/A | checkpoint:decision (Option A/B/C) | recorded verdict in 07-01-SUMMARY.md `## Broadcast probe verdict` | n/a | ⬜ pending |
+| 07-02 T1+T2 | 07-02 | 2 | DOCS-01 | T-7-03 | marked-block contract is opt-in | integration (real binary, real sockets, real processes) | `go test -race ./cmd/sup-kv/ -run TestReadmeQuickstart` | ❌ W0 (`cmd/sup-kv/readme_test.go`) | ⬜ pending |
+| 07-03 T1 | 07-03 | 2 | DOCS-03 | — | N/A | integration (every-RPC blocks, output-asserted) | `go test -race ./cmd/sup-kv/ -run TestExamplesDoc` | ❌ W0 (extends 07-01 file) | ⬜ pending |
+| 07-03 T2 | 07-03 | 2 | DOCS-02 | T-7-04 | docs must not overstate safety | docs presence-guard (content truth is UAT) | `go test ./cmd/sup-kv/ -run TestOperationsDoc` | ❌ W0 (`cmd/sup-kv/operations_test.go`) | ⬜ pending |
+| 07-04 T2 | 07-04 | 2 | (release) | T-7-05/T-7-06 | supply-chain hardening of artifacts | manual gate in task | `make release-snapshot` (`go tool goreleaser release --snapshot --clean`) | ❌ W0 (Makefile target) | ⬜ pending |
+| 07-05 T1 | 07-05 | 3 | (release) | T-7-07 | N/A | e2e, once | push tag → observe release.yml + Release assets (≥9) + --version identity | n/a (one-shot) | ⬜ pending |
+| 07-05 T2 | 07-05 | 3 | D-11 | T-7-08 | N/A | ops, once | `gh api` POST + verify read per docs/setup/branch-protection.md | n/a (one-shot) | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
