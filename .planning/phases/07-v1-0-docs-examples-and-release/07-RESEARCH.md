@@ -588,21 +588,27 @@ kill $NODE_A $NODE_B 2>/dev/null; wait 2>/dev/null || true   # cleanup (CI hygie
 | A8 | `--version` output shape `sup-kv <version> <commit> <goversion>` satisfies D-18 consistency with goreleaser stamping `{{ .Version }}` (no `v`) | Pitfall 6 | Low — cosmetic identity question; one conscious plan decision resolves it |
 | A9 | README/EXAMPLES docs on a private repo are fine for release (public flip is a separate deferred decision) | Summary / Scope | Low — the release ships regardless; "stranger" in the success criteria is prospective |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All four resolved by phase-plan content. Per-question disposition:
 
 1. **The macOS quickstart leg (BLOCKING for the README contract — probe before freezing the doc).**
    - What we know: macOS lo0 has no BROADCAST flag → loopback broadcast (`127.255.255.255`) does not fan out on darwin (phase-6 empirical finding, macos-15 CI skips all two-node socket/exec scenarios today). D-06 demands the quickstart run for real on macos-15. Phase-6 research A6 explicitly left subnet broadcast unprobed.
    - What's unclear: whether (a) subnet broadcast via the runner's real interface (`ipconfig getoption en0 broadcast`) or (b) limited broadcast `255.255.255.255` fans out to local sockets on darwin, and whether the runner network permits it.
    - Recommendation: one probe run on macos-15 (a tiny workflow_dispatch job or a PR whose gate cell runs a `probeLoopbackSend`-shaped probe against both address forms) as the phase's FIRST executed check. Then: **Option A** — works: README derives the broadcast address per-platform in one verbatim shell line (`BCAST=$(ipconfig getoption en0 broadcast 2>/dev/null || echo 127.255.255.255)`), CI runs for real on both OSes. **Option B** — only Linux loopback works but macOS subnet works only off-CI: README shows the Linux block verified + a marked macOS variant block skipped loudly in CI with the probe reason (matches the phase-6 loud-skip precedent, partially satisfying D-06). **Option C** — nothing works on darwin: maintainer amends DOCS-01's macOS claim (docs-level success-criterion change, recorded in REQUIREMENTS/ROADMAP); CI loud-skips on macos-15 naming the probe. Do NOT write the README before this resolves.
+   - **Resolution (structural):** resolved by plan structure, not a pre-planning answer — 07-01's blocking `checkpoint:decision` runs the probe on the macos-15 gate cell as the phase's first executed check and gates the README contract on the recorded verdict; the Option A/B/C outcome lands in 07-01-SUMMARY.md § Broadcast probe verdict, and 07-02's TestReadmeQuickstart consumes the recorded option (real run under Option A, loud skip naming the probe under B/C). The question cannot stay open past that checkpoint.
 2. **goreleaser-action vs tool-directive invocation in the workflow.**
    - What we know: both are standard; the action (v7.3.0) downloads its own pinned binary; the tool directive keeps go.mod as the single version record.
    - Recommendation (decided direction, planner confirms): tool directive — `go tool goreleaser release --clean` — repo convention parity (AGENTS.md tool-pinning mandate).
+   - **Resolution:** tool-directive invocation adopted (the recommendation as-is) — goreleaser v2.20.2 pinned as a go.mod tool directive (landed in 07-01); 07-04's release.yml and the Makefile `release`/`release-snapshot` targets invoke it via `go tool goreleaser`; goreleaser-action is not used.
 3. **Draft vs published Release.**
    - What we know: goreleaser default publishes; `release.draft: true` allows review before going public.
    - Recommendation: publish directly (solo maintainer, snapshot-verified pipeline); flip to draft only if the first release reveals formatting problems.
+   - **Resolution:** publish directly (the recommendation as-is) — 07-04's release.yml runs the publish form on tag push with no `release.draft` setting; 07-05 observes the published Release (asset count + `--version` spot-check); flip to draft only if the first release reveals formatting problems.
 4. **Does OPERATIONS.md get a CI presence-guard (a cheap test asserting the file contains its five mandated topics)?**
    - What we know: DOCS-02 verification is otherwise manual/UAT; the two other docs get hard CI.
    - Recommendation: optional one-page test (`strings.Contains` on the five headings/keywords) — cheap drift-guard for deletion/moves; content truth stays UAT. Planner's call; not required by the requirement text.
+   - **Resolution:** adopted (the recommendation as-is) — 07-03 Task 2 adds `TestOperationsDoc` in cmd/sup-kv/operations_test.go pinning the five mandated topic anchors in docs/OPERATIONS.md; content truth stays UAT per 07-VALIDATION.md's manual table.
 
 ## Environment Availability
 
