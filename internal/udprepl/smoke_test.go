@@ -39,13 +39,19 @@ const (
 var smokeValue = []byte("smoke-value-over-real-udp")
 
 // freeUDPPort picks one free UDP port: bind a throwaway wildcard socket to
-// :0, read its port, close it.
-func freeUDPPort(t *testing.T) int {
-	t.Helper()
+// :0, read its port, close it. Takes testing.TB so the benchmarks reuse the
+// same picker; the context is [context.Background] because the TB interface
+// carries no Context method (T and B grew one in Go 1.24; the shared
+// interface could not without breaking its implementers).
+func freeUDPPort(tb testing.TB) int {
+	tb.Helper()
 	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(t.Context(), "udp4", "0.0.0.0:0")
+	// tb.Context() does not exist (testing.TB carries no Context method,
+	// Go 1.24 added it to T and B only), so usetesting's suggested fix does
+	// not compile — the documented-nolint case.
+	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:0") //nolint:usetesting // suggestion does not compile on TB
 	if err != nil {
-		t.Fatalf("bind throwaway port-picking socket: %v", err)
+		tb.Fatalf("bind throwaway port-picking socket: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
 	return conn.LocalAddr().(*net.UDPAddr).Port
@@ -186,13 +192,20 @@ func (s smokeStore) Records() map[string]storage.Record { return s.store.Records
 
 // waitFor polls cond every pollInterval until it holds or the deadline —
 // the earlier of timeout and the test's own hard deadline minus a margin —
-// and fails with what on expiry.
-func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
-	t.Helper()
+// and fails with what on expiry. Takes testing.TB so the benchmarks reuse
+// the same bounded poll.
+func waitFor(tb testing.TB, timeout time.Duration, what string, cond func() bool) {
+	tb.Helper()
 	deadline := time.Now().Add(timeout)
-	if d, ok := t.Deadline(); ok {
-		if hard := d.Add(-hardDeadlineMargin); hard.Before(deadline) {
-			deadline = hard
+	// The TB interface exposes no Deadline (T and B carry it; the shared
+	// interface could not take it without breaking its implementers), so the
+	// hard-deadline clamp reads it through the structural type — both *T and
+	// *B match, keeping the clamp for tests and benchmarks alike.
+	if dl, ok := tb.(interface{ Deadline() (time.Time, bool) }); ok {
+		if d, hasDeadline := dl.Deadline(); hasDeadline {
+			if hard := d.Add(-hardDeadlineMargin); hard.Before(deadline) {
+				deadline = hard
+			}
 		}
 	}
 	for time.Now().Before(deadline) {
@@ -201,7 +214,7 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 		}
 		time.Sleep(pollEvery)
 	}
-	t.Fatalf("timed out after %v waiting for %s", timeout, what)
+	tb.Fatalf("timed out after %v waiting for %s", timeout, what)
 }
 
 // probeBroadcastAddr runs the capability probe — loopback broadcast first,

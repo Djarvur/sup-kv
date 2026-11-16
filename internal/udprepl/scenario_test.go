@@ -98,33 +98,34 @@ var scenarioImpostorRun = [16]byte{0xC3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 
 // darwin's lo0 carries no BROADCAST flag (D-12). No build tag hides the
 // scenarios — the capability gate is the darwin story; protocol correctness
 // under its absence stays proven by the deterministic simulator (plans
-// 04-02..04-05) and the core suites.
-func scenarioProbeBroadcast(t *testing.T, probePort int) {
-	t.Helper()
+// 04-02..04-05) and the core suites. Takes testing.TB so the burst
+// benchmark (bench_test.go) skips through the SAME gate, never a copy.
+func scenarioProbeBroadcast(tb testing.TB, probePort int) {
+	tb.Helper()
 	rx, err := smokeSocket(fmt.Sprintf("0.0.0.0:%d", probePort))
 	if err != nil {
-		t.Fatalf("probe rx bind: %v", err)
+		tb.Fatalf("probe rx bind: %v", err)
 	}
 	defer func() { _ = rx.Close() }()
 	tx, err := smokeSocket("0.0.0.0:0")
 	if err != nil {
-		t.Fatalf("probe tx bind: %v", err)
+		tb.Fatalf("probe tx bind: %v", err)
 	}
 	defer func() { _ = tx.Close() }()
 	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: probePort}
 	_, err = tx.WriteToUDP([]byte("sup-kv scenario probe"), dst)
 	if err != nil {
-		t.Fatalf("probe send to %s: %v", dst, err)
+		tb.Fatalf("probe send to %s: %v", dst, err)
 	}
 	err = rx.SetReadDeadline(time.Now().Add(scenarioProbeWait))
 	if err != nil {
-		t.Fatalf("probe read deadline: %v", err)
+		tb.Fatalf("probe read deadline: %v", err)
 	}
 	buf := make([]byte, 64)
 	for {
 		n, _, readErr := rx.ReadFromUDP(buf)
 		if readErr != nil {
-			t.Skipf(
+			tb.Skipf(
 				"loopback broadcast to %s did not reach the bound socket within %v — platform lacks broadcast fan-out (loopback broadcast fan-out is a Linux-only kernel behavior; darwin lo0 carries no BROADCAST flag — D-12); protocol correctness stays proven by the deterministic simulator (plans 04-02..04-05) and the core suites",
 				dst,
 				scenarioProbeWait,
@@ -160,8 +161,13 @@ type scenarioNode struct {
 // time across the two nodes' real convergence window) wrapped in the
 // smoke-test StateStore adapter, plus the node's adapter bound to bindPort
 // with its broadcast aimed at crossPort, running its real event loop.
-func newScenarioNode(t *testing.T, nodeID uint16, bindPort, crossPort int, cfg repl.Config) *scenarioNode {
-	t.Helper()
+// Takes testing.TB so the burst benchmark (bench_test.go) rides the exact
+// same topology constructor. The context is [context.Background] because
+// the TB interface carries no Context method, and the cleanup waits for
+// Run's return: the adapter closes its socket only there, so repeated
+// benchmark runs (go test -count) never leak bound ports.
+func newScenarioNode(tb testing.TB, nodeID uint16, bindPort, crossPort int, cfg repl.Config) *scenarioNode {
+	tb.Helper()
 	store := storage.NewStore(nodeID, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
 	adapter, err := udprepl.New(
 		fmt.Sprintf("0.0.0.0:%d", bindPort),
@@ -169,11 +175,21 @@ func newScenarioNode(t *testing.T, nodeID uint16, bindPort, crossPort int, cfg r
 		nodeID, smokeStore{store: store}, cfg,
 	)
 	if err != nil {
-		t.Fatalf("node %d adapter New (bind %d, cross %d): %v", nodeID, bindPort, crossPort, err)
+		tb.Fatalf("node %d adapter New (bind %d, cross %d): %v", nodeID, bindPort, crossPort, err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	go func() { _ = adapter.Run(ctx) }()
+	// tb.Context() does not exist (testing.TB carries no Context method,
+	// Go 1.24 added it to T and B only), so usetesting's suggested fix does
+	// not compile — the documented-nolint case.
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:usetesting // suggestion does not compile on TB
+	runDone := make(chan struct{})
+	tb.Cleanup(func() {
+		cancel()
+		<-runDone
+	})
+	go func() {
+		defer close(runDone)
+		_ = adapter.Run(ctx)
+	}()
 	return &scenarioNode{adapter: adapter, store: store}
 }
 
@@ -186,12 +202,12 @@ func newScenarioNode(t *testing.T, nodeID uint16, bindPort, crossPort int, cfg r
 // path the shared-port smoke topology cannot carry — is deterministic
 // here. Returns the pair plus node A's bound port, the target the
 // adversarial datagrams of the discard scenarios aim at.
-func startScenarioPair(t *testing.T, cfgA, cfgB repl.Config) (a, b *scenarioNode, portA int) {
-	t.Helper()
-	pA, pB := freeUDPPort(t), freeUDPPort(t)
-	scenarioProbeBroadcast(t, pA)
-	return newScenarioNode(t, scenarioNodeA, pA, pB, cfgA),
-		newScenarioNode(t, scenarioNodeB, pB, pA, cfgB), pA
+func startScenarioPair(tb testing.TB, cfgA, cfgB repl.Config) (a, b *scenarioNode, portA int) {
+	tb.Helper()
+	pA, pB := freeUDPPort(tb), freeUDPPort(tb)
+	scenarioProbeBroadcast(tb, pA)
+	return newScenarioNode(tb, scenarioNodeA, pA, pB, cfgA),
+		newScenarioNode(tb, scenarioNodeB, pB, pA, cfgB), pA
 }
 
 // scenarioConvergedPair runs the convergence prologue every scenario shares:
@@ -218,19 +234,20 @@ func scenarioConvergedPair(t *testing.T, cfgA, cfgB repl.Config) (
 
 // scenarioWrite stores key=val on node n and announces it through the
 // author's explicit notification (D-05), returning the stored version.
-func scenarioWrite(t *testing.T, n *scenarioNode, key string, val []byte) version.RecordVersion {
-	t.Helper()
+// Takes testing.TB so the burst benchmark writes through the same path.
+func scenarioWrite(tb testing.TB, n *scenarioNode, key string, val []byte) version.RecordVersion {
+	tb.Helper()
 	ver, _, err := n.store.Set(key, val)
 	if err != nil {
-		t.Fatalf("node store Set(%q): %v", key, err)
+		tb.Fatalf("node store Set(%q): %v", key, err)
 	}
 	rec, err := n.store.Get(key)
 	if err != nil {
-		t.Fatalf("node store Get(%q): %v", key, err)
+		tb.Fatalf("node store Get(%q): %v", key, err)
 	}
 	err = n.adapter.NotifyLocalWrite(key, rec)
 	if err != nil {
-		t.Fatalf("NotifyLocalWrite(%q): %v", key, err)
+		tb.Fatalf("NotifyLocalWrite(%q): %v", key, err)
 	}
 	return ver
 }
