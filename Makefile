@@ -1,4 +1,4 @@
-.PHONY: lint test generate build proto buf-lint buf-format buf-breaking
+.PHONY: lint test bench generate build proto buf-lint buf-format buf-breaking
 
 # Version stamping for the build target (D-18): version from git describe,
 # commit from the short sha, "dev" when git is unavailable.
@@ -15,6 +15,16 @@ lint:
 ## test: race-detector tests with coverage.
 test:
 	go test -race -cover ./...
+
+## bench: the three TEST-05 benchmarks (D-13) — dump at 10k keys
+## (BenchmarkDump10kKeys), replication burst throughput
+## (BenchmarkReplicationBurst) and bounded confirmation latency
+## (BenchmarkConfirmationLatency). Manual before/after comparison target
+## ONLY: CI never runs it and there are no thresholds — shared-runner noise
+## makes those flaky (D-13) — and no profiles are stored (D-14). Unit tests
+## stay excluded (-run anchored empty); compare two runs by hand.
+bench:
+	go test -run '^$$' -bench . ./internal/app/persist/ ./internal/udprepl/ ./internal/grpcapi/
 
 ## generate: run go:generate directives.
 generate:
