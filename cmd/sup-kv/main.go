@@ -557,8 +557,7 @@ func listenMetrics(cfg config, sources metrics.Sources) (*http.Server, error) {
 		}
 		listener = tls.NewListener(inner, tlsCfg)
 	}
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.NewHandler(func() []metrics.Family { return metrics.Snapshot(sources) }))
+	mux := metrics.NewMux(sources)
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,

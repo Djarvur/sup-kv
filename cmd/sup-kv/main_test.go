@@ -15,10 +15,18 @@ package main_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -964,4 +972,260 @@ func TestMetrics_incompleteCertSet(t *testing.T) {
 			t.Errorf("stderr of the incomplete-cert-set run lacks %q:\n%s", env, stderr)
 		}
 	}
+}
+
+// metricsCertSuite is the in-test PKI the mTLS tests drive: one self-signed
+// CA, a server leaf valid for the loopback IPs, and a client leaf — all
+// generated at test runtime with crypto/x509 + crypto/ecdsa, no committed
+// fixtures and no openssl (06-RESEARCH Pattern 3).
+type metricsCertSuite struct {
+	serverCertFile string
+	serverKeyFile  string
+	caFile         string
+	caPool         *x509.CertPool
+	clientCert     tls.Certificate
+}
+
+// generateMetricsCerts writes the suite's CA and server pair into dir and
+// keeps the client pair in memory. Validity spans an hour around now so a
+// slow cell never trips NotYetValid or Expired.
+func generateMetricsCerts(t *testing.T, dir string) metricsCertSuite {
+	t.Helper()
+	notBefore := time.Now().Add(-time.Hour)
+	notAfter := time.Now().Add(time.Hour)
+
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "sup-kv-metrics-test-ca"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA certificate: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA certificate: %v", err)
+	}
+	caPool := x509.NewCertPool()
+	caPool.AddCert(caCert)
+
+	newLeaf := func(serial int64, commonName string, usage []x509.ExtKeyUsage, ips []net.IP) ([]byte, *ecdsa.PrivateKey) {
+		key, keyErr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if keyErr != nil {
+			t.Fatalf("generate %s key: %v", commonName, keyErr)
+		}
+		template := &x509.Certificate{
+			SerialNumber: big.NewInt(serial),
+			Subject:      pkix.Name{CommonName: commonName},
+			NotBefore:    notBefore,
+			NotAfter:     notAfter,
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:  usage,
+			IPAddresses:  ips,
+		}
+		der, crtErr := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+		if crtErr != nil {
+			t.Fatalf("create %s certificate: %v", commonName, crtErr)
+		}
+		return der, key
+	}
+	serverDER, serverKey := newLeaf(2, "sup-kv-metrics-test-server",
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		[]net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
+	clientDER, clientKey := newLeaf(3, "sup-kv-metrics-test-client",
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+
+	serverKeyDER, err := x509.MarshalPKCS8PrivateKey(serverKey)
+	if err != nil {
+		t.Fatalf("marshal server key: %v", err)
+	}
+	write := func(name string, data []byte) string {
+		path := filepath.Join(dir, name)
+		wErr := os.WriteFile(path, data, 0o600)
+		if wErr != nil {
+			t.Fatalf("write %s: %v", path, wErr)
+		}
+		return path
+	}
+	certPEM := func(der []byte) []byte {
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	}
+	return metricsCertSuite{
+		serverCertFile: write("server-cert.pem", certPEM(serverDER)),
+		serverKeyFile: write("server-key.pem",
+			pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: serverKeyDER})),
+		caFile:     write("ca.pem", certPEM(caDER)),
+		caPool:     caPool,
+		clientCert: tls.Certificate{Certificate: [][]byte{clientDER}, PrivateKey: clientKey},
+	}
+}
+
+// startMTLSNode starts the real binary with the complete certificate triple
+// and --metrics-addr, waiting for the gRPC gate — the shared setup of the
+// mTLS enforcement and debug-surface tests.
+func startMTLSNode(t *testing.T, bin string, certs metricsCertSuite, metricsPort int) (node *smokeNode, metricsAddr string) {
+	t.Helper()
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+	grpcAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+	metricsAddr = fmt.Sprintf("127.0.0.1:%d", metricsPort)
+	node = startNode(t, bin, []string{
+		"SUPKV_METRICS_CERT=" + certs.serverCertFile,
+		"SUPKV_METRICS_KEY=" + certs.serverKeyFile,
+		"SUPKV_METRICS_CLIENT_CA=" + certs.caFile,
+	},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--grpc-addr="+grpcAddr,
+		"--metrics-addr="+metricsAddr,
+		"--startup-gate=10ms",
+	)
+	awaitServing(t, grpcAddr, servingDeadline)
+	return node, metricsAddr
+}
+
+// tlsGet fetches url over the suite's authorized client — the mTLS read
+// path of the enforcement and debug-surface tests.
+func tlsGet(t *testing.T, certs metricsCertSuite, url string) (status int, contentType, body string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext(%s): %v", url, err)
+	}
+	client := &http.Client{
+		Timeout: rpcTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:      certs.caPool,
+				Certificates: []tls.Certificate{certs.clientCert},
+			},
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("authorized GET %s: %v", url, err)
+	}
+	raw, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body of %s: %v", url, readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close body of %s: %v", url, closeErr)
+	}
+	return resp.StatusCode, resp.Header.Get("Content-Type"), string(raw)
+}
+
+// TestMetricsTLS_required pins D-02's enforcement half on the real binary:
+// with the full certificate triple the listener speaks TLS and requires a
+// verified client certificate — a plain HTTP GET fails against it and a TLS
+// client without a certificate fails the handshake — while the client pair
+// generated in-test scrapes both /metrics and /debug/vars (D-03's one
+// surface). The closing SIGTERM walk exercises the metrics Shutdown in its
+// D-19 position with TLS active.
+func TestMetricsTLS_required(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+	certs := generateMetricsCerts(t, t.TempDir())
+	node, metricsAddr := startMTLSNode(t, bin, certs, freeTCPPort(t))
+
+	plainReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+metricsAddr+"/metrics", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	plainClient := &http.Client{Timeout: rpcTimeout}
+	// A plain HTTP GET fails against the TLS listener. Go's stack answers
+	// plaintext-to-TLS with a 400 "Client sent an HTTP request to an HTTPS
+	// server" (net/http's record-header probe), so the failure surfaces as
+	// that rejection or as a transport error — never as a served body.
+	plainResp, plainErr := plainClient.Do(plainReq)
+	if plainErr == nil {
+		raw, readErr := io.ReadAll(plainResp.Body)
+		closeErr := plainResp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read the plain-HTTP body: %v", readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close the plain-HTTP body: %v", closeErr)
+		}
+		if plainResp.StatusCode == http.StatusOK || strings.Contains(string(raw), "supkv_") {
+			t.Fatalf("a plain HTTP GET against %s answered with the metrics surface (status %d) — the cert-triple listener is not speaking TLS:\n%s",
+				metricsAddr, plainResp.StatusCode, raw)
+		}
+	}
+
+	noCertReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+metricsAddr+"/metrics", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	noCertClient := &http.Client{
+		Timeout:   rpcTimeout,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: certs.caPool}},
+	}
+	_, handshakeErr := noCertClient.Do(noCertReq)
+	if handshakeErr == nil {
+		t.Fatalf("a TLS client without a certificate scraped %s — RequireAndVerifyClientCert is not enforced", metricsAddr)
+	}
+
+	status, _, body := tlsGet(t, certs, "https://"+metricsAddr+"/metrics")
+	if status != http.StatusOK {
+		t.Fatalf("authorized GET /metrics status = %d, want %d", status, http.StatusOK)
+	}
+	if !strings.Contains(body, "supkv_replication_unacked_records") {
+		t.Fatalf("the authorized /metrics scrape lacks the supkv_ family surface:\n%s", body)
+	}
+	status, _, body = tlsGet(t, certs, "https://"+metricsAddr+"/debug/vars")
+	if status != http.StatusOK {
+		t.Fatalf("authorized GET /debug/vars status = %d, want %d", status, http.StatusOK)
+	}
+	if !strings.Contains(body, `"cmdline"`) {
+		t.Fatalf("the authorized /debug/vars body lacks expvar's cmdline key:\n%s", body)
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the mTLS metrics run")
+}
+
+// TestDebugSurface pins D-03's debug half behind the same mTLS: the pprof
+// index page answers the authorized client, and a named profile route —
+// heap, mounted through pprof.Handler — returns profile content on the same
+// listener as /metrics.
+func TestDebugSurface(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+	certs := generateMetricsCerts(t, t.TempDir())
+	node, metricsAddr := startMTLSNode(t, bin, certs, freeTCPPort(t))
+
+	status, _, index := tlsGet(t, certs, "https://"+metricsAddr+"/debug/pprof/")
+	if status != http.StatusOK {
+		t.Fatalf("authorized GET /debug/pprof/ status = %d, want %d", status, http.StatusOK)
+	}
+	if !strings.Contains(index, "heap") {
+		t.Fatalf("the pprof index page does not list the heap profile:\n%s", index)
+	}
+
+	status, contentType, heap := tlsGet(t, certs, "https://"+metricsAddr+"/debug/pprof/heap")
+	if status != http.StatusOK {
+		t.Fatalf("authorized GET /debug/pprof/heap status = %d, want %d", status, http.StatusOK)
+	}
+	if heap == "" {
+		t.Fatalf("the heap profile at %s is empty", metricsAddr)
+	}
+	if !strings.HasPrefix(contentType, "application/octet-stream") {
+		t.Fatalf("heap profile Content-Type = %q, want application/octet-stream", contentType)
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the debug-surface run")
 }
