@@ -113,8 +113,10 @@ func boundLossEpisode(ackTimeoutMax time.Duration) time.Duration { return ackTim
 // arithmetic for replaying the given key count — (keys-1) × floor(1s/rate)
 // integer nanoseconds, the first response immediate (docs/IDEA.md:100;
 // RESEARCH Pattern 7's response-time math, the plan 04-03 spacing pin).
-func boundPartitionHeal(syncInterval time.Duration, keys, responseRate int) time.Duration {
-	return 2*syncInterval + time.Duration(keys-1)*(time.Second/time.Duration(responseRate))
+// The sync_interval and rate terms are the shared constants themselves —
+// every caller means the normalized defaults, so they live here.
+func boundPartitionHeal(keys int) time.Duration {
+	return 2*syncInterval + time.Duration(keys-1)*(time.Second/time.Duration(simDefaultResponseRate))
 }
 
 // TestBound_normalOneRTT proves the first documented convergence bound
@@ -236,12 +238,12 @@ func TestBound_partitionHeal(t *testing.T) {
 
 	// The documented bound, inclusive: every node converges to the pointwise
 	// supremum of all three writes by t2 + 2*sync_interval + (K-1)*spacing.
-	sched.RunUntil(partEnd.Add(boundPartitionHeal(syncInterval, healKeys, simDefaultResponseRate)))
+	sched.RunUntil(partEnd.Add(boundPartitionHeal(healKeys)))
 	for i := range cluster.Nodes() {
 		for j := i + 1; j < cluster.Nodes(); j++ {
 			if !recordMapsEqual(cluster.Store(i).Records(), cluster.Store(j).Records()) {
 				t.Fatalf("nodes %d and %d hold different stores by t2+%v: %d vs %d records",
-					i, j, boundPartitionHeal(syncInterval, healKeys, simDefaultResponseRate),
+					i, j, boundPartitionHeal(healKeys),
 					len(cluster.Store(i).Records()), len(cluster.Store(j).Records()))
 			}
 		}
