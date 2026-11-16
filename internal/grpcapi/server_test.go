@@ -262,9 +262,10 @@ const (
 
 // waitFor polls cond every gatePoll until it holds or the deadline — the
 // smoke waitFor pattern (udprepl/smoke_test.go) — and fails with what on
-// expiry.
-func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
-	t.Helper()
+// expiry. Takes testing.TB so the confirmation-latency benchmark reuses the
+// same bounded poll.
+func waitFor(tb testing.TB, timeout time.Duration, what string, cond func() bool) {
+	tb.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if cond() {
@@ -272,7 +273,7 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 		}
 		time.Sleep(gatePoll)
 	}
-	t.Fatalf("timed out after %v waiting for %s", timeout, what)
+	tb.Fatalf("timed out after %v waiting for %s", timeout, what)
 }
 
 // awaitGateOpen blocks until the health endpoint reports SERVING for the

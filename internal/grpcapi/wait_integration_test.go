@@ -57,13 +57,17 @@ const (
 // integrationUDPPort picks one free UDP port: bind a throwaway wildcard
 // socket to :0, read its port, close it (the udprepl smoke-test recipe —
 // the adapter keeps no local-address accessor, so the test must know the
-// ports before constructing the nodes).
-func integrationUDPPort(t *testing.T) int {
-	t.Helper()
+// ports before constructing the nodes). Takes testing.TB so the
+// confirmation-latency benchmark reuses the same picker.
+func integrationUDPPort(tb testing.TB) int {
+	tb.Helper()
 	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(t.Context(), "udp4", "0.0.0.0:0")
+	// tb.Context() does not exist (testing.TB carries no Context method,
+	// Go 1.24 added it to T and B only), so usetesting's suggested fix does
+	// not compile — the documented-nolint case.
+	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:0") //nolint:usetesting // suggestion does not compile on TB
 	if err != nil {
-		t.Fatalf("bind throwaway port-picking socket: %v", err)
+		tb.Fatalf("bind throwaway port-picking socket: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
 	return conn.LocalAddr().(*net.UDPAddr).Port
@@ -106,33 +110,35 @@ func integrationSocket(bindAddr string) (*net.UDPConn, error) {
 // Linux-only kernel behavior; macOS lo0 carries no BROADCAST flag — the
 // udprepl smoke test's D-08 probe matrix) — and skips loudly when it is
 // missing, naming the probed address. Protocol correctness under absence of
-// the capability stays proven by wait_test.go's mirror fixtures.
-func probeLoopbackBroadcast(t *testing.T, port int) {
-	t.Helper()
+// the capability stays proven by wait_test.go's mirror fixtures. Takes
+// testing.TB so the confirmation-latency benchmark skips through the SAME
+// gate.
+func probeLoopbackBroadcast(tb testing.TB, port int) {
+	tb.Helper()
 	rx, err := integrationSocket(fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
-		t.Fatalf("probe rx bind: %v", err)
+		tb.Fatalf("probe rx bind: %v", err)
 	}
 	defer func() { _ = rx.Close() }()
 	tx, err := integrationSocket("0.0.0.0:0")
 	if err != nil {
-		t.Fatalf("probe tx bind: %v", err)
+		tb.Fatalf("probe tx bind: %v", err)
 	}
 	defer func() { _ = tx.Close() }()
 	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
 	_, sendErr := tx.WriteToUDP([]byte("sup-kv wait integration probe"), dst)
 	if sendErr != nil {
-		t.Fatalf("probe send to %s: %v", dst, sendErr)
+		tb.Fatalf("probe send to %s: %v", dst, sendErr)
 	}
 	deadlineErr := rx.SetReadDeadline(time.Now().Add(integrationProbeWait))
 	if deadlineErr != nil {
-		t.Fatalf("probe read deadline: %v", deadlineErr)
+		tb.Fatalf("probe read deadline: %v", deadlineErr)
 	}
 	buf := make([]byte, 64)
 	for {
 		n, _, readErr := rx.ReadFromUDP(buf)
 		if readErr != nil {
-			t.Skipf("loopback broadcast to %s did not reach the bound socket within %v — platform lacks the capability (protocol correctness stays proven by the mirror fixtures)",
+			tb.Skipf("loopback broadcast to %s did not reach the bound socket within %v — platform lacks the capability (protocol correctness stays proven by the mirror fixtures)",
 				dst, integrationProbeWait)
 		}
 		if n > 0 {
