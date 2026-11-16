@@ -133,13 +133,14 @@ func syncedTemp(dir string, data []byte) (tmpName string, err error) {
 	return tmpName, nil
 }
 
-// writeSynced writes data into tmp and fsyncs it.
+// writeSynced writes data into tmp and durably syncs it through
+// syncDurable — F_FULLFSYNC on darwin, File.Sync everywhere else.
 func writeSynced(tmp *os.File, data []byte) error {
 	_, err := tmp.Write(data)
 	if err != nil {
 		return err
 	}
-	return tmp.Sync()
+	return syncDurable(tmp)
 }
 
 // placeFile rotates an existing target to prevPath — only when prevPath is
@@ -162,7 +163,8 @@ func targetExists(path string) bool {
 	return err == nil
 }
 
-// syncDir fsyncs the directory entry so a completed rename under it
+// syncDir durably syncs the directory entry — through syncDurable, the
+// same platform flush as the file data — so a completed rename under it
 // becomes durable too; the file's own data was synced before the rename.
 func syncDir(dir string) error {
 	d, err := os.Open(dir) //nolint:gosec // G304: dir derives from the configured dump path, never caller input
@@ -170,5 +172,5 @@ func syncDir(dir string) error {
 		return err
 	}
 	defer func() { _ = d.Close() }()
-	return d.Sync()
+	return syncDurable(d)
 }
