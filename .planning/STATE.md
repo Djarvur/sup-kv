@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: Hardening — Failure Scenarios, Observability, Benchmarks
 status: executing
-stopped_at: Completed 06-04-PLAN.md
-last_updated: "2026-11-16T00:20:49.941Z"
+stopped_at: Completed 06-05-PLAN.md
+last_updated: "2026-11-16T00:59:49.735Z"
 last_activity: 2026-11-16
 last_activity_desc: Phase 06 execution started
-state_head: b29600697039aeee1c9df355b3182923791dc645
+state_head: 703996371609dd693e3e9bcddccaa8f5ff259cc4
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 33
-  completed_plans: 30
+  completed_plans: 31
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 06 (Hardening — Failure Scenarios, Observability, Benchmarks) — EXECUTING
-Plan: 7 of 9
+Plan: 8 of 9
 Status: Ready to execute
 Last activity: 2026-11-16 — Phase 06 execution started
 
@@ -90,6 +90,7 @@ Progress: [███████░░░] 71%
 | Phase 06 P06 | 12min | 2 tasks | 2 files |
 | Phase 06 P07 | 26min | 3 tasks | 2 files |
 | Phase 06 P04 | 19min | 3 tasks | 4 files |
+| Phase 06 P05 | 35min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -217,6 +218,10 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-04: the D-01 guard lives in wire() (empty metricsAddr means no listenMetrics call at all — no listener, no goroutine) while listenMetrics keeps the fatal listen-then-serve bind split; the fatal bind is what makes TestMetrics_noDefaultListener's two-node collision shape discriminate against a default metrics port (plan 06-04)
 - [Phase 06]: 06-04: metrics Shutdown sits immediately after the health NOT_SERVING flip in the D-19 sequence (documented in the shutdown doc comment, Pitfall 7) — scrapers see the close the moment the node stops serving; the mTLS tests' closing SIGTERM walks exercise the position with TLS active (plan 06-04)
 - [Phase 06]: 06-04: the TLS builder landed in Task 2 as metrics.NewTLSConfig (the plan's sanctioned either-or) and Go's plaintext-to-TLS 400 record-header probe is asserted honestly — a plain GET must never yield the metrics surface, not must-error at the transport (plan 06-04)
+- [Phase 06]: 06-05: simnet gained ReplaceNode/AddNode/Network.Reregister beyond the planned SetClockOffset (Rule 3) — in-place node replacement wired into the virtual network was required by the restart scenarios; Register appends and would leave a stale registration broadcasting, so the swap is in-place; test-harness package only, zero production code
+- [Phase 06]: 06-05: partitionDays scales only the periodic cadence (hello+scan to one sync_interval, peer_timeout to three hellos) — multi-day runs at defaults cost ~20s wall in hello events plus no-op retransmit scans over retained suspended entries; every asserted semantic is cadence-independent (plan 06-05)
+- [Phase 06]: 06-05: scenario drives are convergence-driven, not quiescence-driven — bare three-seam quiescence also holds in the pre-fill/pre-periodic-round gaps (emptyDisk's join wait, the restart stranded-key spread), so the loops bind on store equality with the pointwise-supremum model (plan 06-05)
+- [Phase 06]: 06-05: the loss scenario's identical-supremum assertion compares winning DATA per key, never version bytes — a node's l watermark depends on absorption order before a local write, so versions are delivery-order-dependent by design; the join law makes the fixpoint data order-independent (CORE-06 at cluster scale) (plan 06-05)
 
 ### Pending Todos
 
@@ -252,6 +257,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-16T00:20:49.512Z
-Stopped at: Completed 06-04-PLAN.md
+Last session: 2026-11-16T00:59:48.990Z
+Stopped at: Completed 06-05-PLAN.md
 Resume file: None

@@ -156,7 +156,7 @@ Plans:
   2. The metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, clock-drift warnings, and discarded datagrams by class
   3. Logging is structured and every dropped-datagram class (bad CRC / own broadcast / bad proto version) is distinguishable in logs
   4. Benchmarks cover dump at 10k keys and replication throughput under burst writes, with confirmation latency staying bounded under bursts
-**Plans**: 6/9 plans executed
+**Plans**: 7/9 plans executed
 Plans:
 **Wave 1**
 - [x] 06-01-PLAN.md — Hardening backlog I: replication/persistence review fixes with regression tests (D-15: P4-WR-01/02, P4-IN-01, P3-WR-01, P3-IN-01, P4-IN-02+P3-IN-02) (TEST-04)
@@ -169,7 +169,7 @@ Plans:
 
 **Wave 3** *(blocked on 06-03/06-06)*
 - [x] 06-04-PLAN.md — Metrics/debug endpoint: in-repo Prometheus text exporter, opt-in listener, optional mTLS, /debug/vars + pprof, supkv_ families (D-01..D-05) (OBS-01, OBS-02)
-- [ ] 06-05-PLAN.md — Simulator scenarios: partitions seconds/days, one-way, loss/duplicates/reordering, clock jumps/far-ahead, bursts, empty-disk bound, restart resync (TEST-04)
+- [x] 06-05-PLAN.md — Simulator scenarios: partitions seconds/days, one-way, loss/duplicates/reordering, clock jumps/far-ahead, bursts, empty-disk bound, restart resync (TEST-04)
 - [ ] 06-08-PLAN.md — Benchmarks: BenchmarkDump10kKeys, BenchmarkReplicationBurst, BenchmarkConfirmationLatency + make bench (D-13/D-14) (TEST-05)
 
 **Wave 4** *(blocked on Waves 2-3)*
@@ -197,5 +197,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Persistence — Dump and Write Confirmation | 2/2 | Complete    | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | 6/6 | Complete    | 2026-11-07 |
 | 5. gRPC API and Binary | 6/6 | Complete    | 2026-11-09 |
-| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 6/9 | In Progress | - |
+| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 7/9 | In Progress | - |
 | 7. v1.0 — Docs, Examples and Release | 0/TBD | Not started | - |
