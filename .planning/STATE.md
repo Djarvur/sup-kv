@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 7
 current_phase_name: v1.0 — Docs, Examples and Release
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-11-17T12:46:04.162Z"
+stopped_at: Completed 07-02-PLAN.md
+last_updated: "2026-11-17T13:03:20.974Z"
 last_activity: 2026-11-17
 last_activity_desc: Phase 06 complete, transitioned to Phase 7
-state_head: 64a3cbb72b712816fbceced35dfb10dc8edd59b6
+state_head: 0a0c25535a5e88df3a37ef5f64e5567d0f82d46b
 progress:
   total_phases: 7
   completed_phases: 6
   total_plans: 38
-  completed_plans: 34
+  completed_plans: 35
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 7 (v1.0 — Docs, Examples and Release) — EXECUTING
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 5
 Status: Executing — plan 07-01 complete
 Last activity: 2026-11-17 — Plan 07-01 complete (option-b broadcast verdict recorded)
@@ -97,6 +97,7 @@ Progress: [██████████] 100%
 | Phase 06 P08 | 18min | 3 tasks | 8 files |
 | Phase 06 P09 | 12min | 3 tasks | 3 files |
 | Phase 07 P01 | 23min | 3 tasks | 8 files |
+| Phase 07 P02 | 12min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -238,6 +239,9 @@ Recent decisions affecting current work:
 - [Phase 07]: [Phase 07]: Option-b selected by maintainer (2026-11-17, plan 07-01 Task 3): README quickstart ships a CI-verified Linux block plus a marked darwin variant block; the probe's darwin leg is a named skip carrying the recorded macos-15 verdict (PR #32 run 44083351667: sendto 255.255.255.255 no route to host). D-06/D-07 PARTIALLY satisfied — macos-15 leg is a named skip, not a real run; WINDOWS.md deviation entry open, surfaces at phase verification (plan 07-01)
 - [Phase 07]: [Phase 07]: Plan 07-01 requirements-completed empty — DOCS-01 (README quickstart) is 07-02's deliverable, DOCS-03 (full examples) is 07-03's; the tracer delivered prerequisites only (reflection, pinned tools, seed EXAMPLES.md, probe verdict). 01-05-SUMMARY precedent: declared-but-not-delivered requirements stay unchecked (plan 07-01)
 - [Phase 07]: [Phase 07]: The probe's darwin loud-skip fires before any probing — determinism of the macos-15 gate cell beats re-gathering evidence the verdict already recorded; send-error exhaustion on darwin is moot post-decision (plan 07-01)
+- [Phase 07]: Option-b README shape landed (plan 07-02): BOTH marked blocks (Linux literal 127.255.255.255 + darwin BCAST derive variant) carry the quickstart-verify marker so CI executes both on Linux — the variant runs via its || echo fallback arm there and cannot rot, while its macOS broadcast form stays documented-not-CI-verified
+- [Phase 07]: TestReadmeQuickstart darwin leg skips deterministically before any probing (quickstartBroadcastOption constant, the 64a3cbb precedent) — determinism of the macos-15 gate cell beats re-gathering evidence the 07-01 verdict recorded
+- [Phase 07]: Plan 07-02 requirements-completed empty: DOCS-01 stays unchecked because D-06/D-07 are partially satisfied (macos-15 leg is a named skip under option-b) — adjudication belongs to phase verification where option-c remains available (01-05/01-06/07-01 precedent)
 
 ### Pending Todos
 
@@ -273,6 +277,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-17T12:46:03.318Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-11-17T13:03:20.251Z
+Stopped at: Completed 07-02-PLAN.md
 Resume file: None

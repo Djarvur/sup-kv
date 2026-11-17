@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 2
+open_count: 3
 waived_count: 1
 fixed_count: 2
-total_count: 5
-last_updated: 2026-11-17T12:44:38.187Z
+total_count: 6
+last_updated: 2026-11-17T13:01:07.869Z
 ---
 
 # Broken Windows Ledger
@@ -20,6 +20,7 @@ last_updated: 2026-11-17T12:44:38.187Z
 | 3 | 05 | stub | internal/grpcapi/server.go |  | Watch/SnapshotCreate/SnapshotLoad intentionally Unimplemented (UnimplementedSupKVServer embed) until plans 05-04/05-05 | open |  | 2026-11-09T10:49:45.242Z |  |
 | 4 | 06 | unrun-verify | .planning/phases/06-hardening-failure-scenarios-observability-benchmarks/06-09-PLAN.md |  | D-16 pending main-session work: re-run /gsd-execute-phase for phases 1, 4 and 5 to regenerate VERIFICATION.md fingerprints staled by the 2026-11-14 buf zero-waiver refactor (7b55ad1) — plan 06-09 task 3 is a checkpoint:human-action, not subagent-executable | fixed | Resolved 2026-11-16 in the main session: all five stale phases regenerated with fresh fingerprints (1: 72497d7, 4: e47733c, 5: 9b87620, 2: 5e62bc7 toolchain staleness, 3: 8c548d8 phase-6 covered-input staleness), all passed; STATE.md 945f80f; confirmed by the phase-6 verifier | 2026-11-16T01:34:11.794Z | 2026-11-16T12:55:00.000Z |
 | 5 | 07 | deviation | .planning/phases/07-v1-0-docs-examples-and-release/07-01-SUMMARY.md |  | Option-b (maintainer 2026-11-17): DOCS-01/D-06 macos-15 leg is a named skip, not a real run — README quickstart ships a CI-verified Linux block plus a marked darwin variant block (probe loud-skips on darwin per the D-12 precedent); D-06/D-07 partially satisfied, must be adjudicated at phase verification (option-c rewording remains available there) | open |  | 2026-11-17T12:44:38.187Z |  |
+| 6 | 07 | deviation | cmd/sup-kv/readme_test.go | 53 | Option-b contract (07-02): TestReadmeQuickstart darwin leg is a deterministic named skip — the macOS quickstart variant block is documented but not CI-verified on macos-15 (sendto: no route to host, PR #32 verdict); same D-06/D-07 partial-satisfaction adjudication as WINDOWS id 5 | open |  | 2026-11-17T13:01:07.869Z |  |
 
 ````json
 [
@@ -85,6 +86,19 @@ last_updated: 2026-11-17T12:44:38.187Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-11-17T12:44:38.187Z",
+    "resolved_at": null,
+    "milestone": "v1.0"
+  },
+  {
+    "id": 6,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "cmd/sup-kv/readme_test.go",
+    "line": 53,
+    "description": "Option-b contract (07-02): TestReadmeQuickstart darwin leg is a deterministic named skip — the macOS quickstart variant block is documented but not CI-verified on macos-15 (sendto: no route to host, PR #32 verdict); same D-06/D-07 partial-satisfaction adjudication as WINDOWS id 5",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-17T13:01:07.869Z",
     "resolved_at": null,
     "milestone": "v1.0"
   }
