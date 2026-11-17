@@ -6,10 +6,10 @@ current_phase_name: v1.0 — Docs, Examples and Release
 current_plan: 5
 status: executing
 stopped_at: Completed 07-04-PLAN.md
-last_updated: "2026-11-17T13:51:52.461Z"
+last_updated: "2026-11-17T18:59:01.932Z"
 last_activity: 2026-11-17
 last_activity_desc: Phase 06 complete, transitioned to Phase 7
-state_head: ac14f92088141babae74e4a83504356190334497
+state_head: 07f24a36c9ad35e87e7a45c2dbc32e51855a4b0d
 progress:
   total_phases: 7
   completed_phases: 6
@@ -252,6 +252,8 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-04: release.header is a plain template string in goreleaser v2.20.2 — the from_file map form was removed; the CHANGELOG.md header pull is delivered as {{ mustReadFile "CHANGELOG.md" }} (verified against the pinned module source; plan's from_file literal superseded)
 - [Phase 07]: 07-04: {{ .Tag }} ldflags decision implemented as pinned — release binaries report sup-kv v1.0.0 <shortcommit> go1.27.4, byte-shape-identical to make build's git-describe stamping; snapshot binary recorded: sup-kv v0.0.0 1db9265 go1.27.4
 - [Phase 07]: 07-04: local snapshot proof run WITH syft (ad-hoc v1.57.2, GOBIN=/tmp one-off, not a repo dependency) instead of --skip=sbom — the SBOM half of the pipeline is proven locally too; optional gh workflow dispatch proof deferred to 07-05 (workflow_dispatch needs the file on the default branch)
+- [Phase 07]: 07-05: D-11 ruleset re-apply attempted at v1.0 close-out — POST verbatim and read-side verify both 403 'Upgrade to GitHub Pro or make this repository public to enable this feature.'; branch-protection.md marker re-verified 2026-11-17; enforcement probe deliberately not run on the 403 path (would land a direct master push); CI-03 protection sub-item stays plan-gated
+- [Phase 07]: 07-05: v1.0.0 shipped — annotated tag on master squash 0ead1e8 (five CI checks green pre-tag), release workflow run 44138907991 success, Release v1.0.0 carries 9 assets (4 archives + 4 SBOMs + checksums.txt) with CHANGELOG.md as header; release binary --version: sup-kv v1.0.0 0ead1e8 go1.27.4
 
 ### Pending Todos
 

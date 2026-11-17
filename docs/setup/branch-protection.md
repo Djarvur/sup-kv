@@ -13,13 +13,22 @@ audit trail (decision D-08): every command below is re-runnable verbatim.
 
 ## Status: DEFERRED (accepted override)
 
-> **The ruleset is NOT yet applied.** The GitHub rulesets API returns
+> **The ruleset is NOT yet applied — still plan-gated, re-verified 2026-11-17.**
+> The GitHub rulesets API returns
 > `403 Upgrade to GitHub Pro or make this repository public` for this private org
 > repository (research-verified live 2026-10-31; re-verified by read-side probe at
 > execution, same day). Rulesets on private repositories require a paid org plan
 > (Team tier or equivalent). Until the org plan changes (or the repo flips public —
 > itself a deferred decision), the payload below sits recorded and the protection
 > sub-item of CI-03 is **plan-gated** — explicitly flagged, not silently skipped.
+>
+> **Re-apply attempted 2026-11-17 at v1.0 close-out (D-11):** the Apply command
+> verbatim from below returned
+> `403 Upgrade to GitHub Pro or make this repository public to enable this feature.`
+> and the read-side verify returns the same 403 — the org plan has not changed.
+> The enforcement probe (trivial direct push) is deliberately NOT run on the 403
+> path: with no ruleset live it would actually land on `master` and violate the
+> PR-only contract it exists to prove.
 >
 > **Deferral decision 2026-10-31: `defer`** — keep everything else, do not upgrade the
 > org plan now; the moment the plan changes, run the Apply command above.
