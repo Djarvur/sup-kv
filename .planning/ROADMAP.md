@@ -183,10 +183,10 @@ Plans:
   1. The README quickstart works exactly as written on Linux and macOS: two nodes on one localhost broadcast socket, writes visible on both within an RTT, kill −9 one node, restart, state converges without operator action
   2. Ops docs state the trust model prominently (no auth/encryption in v1, HMAC is future work), the value-size envelope, local-read semantics (read-your-writes on the same node only), a "not a lock/election service" warning, and a clock-drift runbook
   3. API usage examples are provided and work against the shipped binary
-**Plans**: 5 plans
+**Plans**: 1/5 plans executed
 Plans:
 **Wave 1**
-- [ ] 07-01-PLAN.md — Tracer: reflection + pinned tools (goreleaser/grpcurl) + first verbatim EXAMPLES.md block + the macos-15 broadcast probe with its Option A/B/C decision checkpoint (DOCS-01, DOCS-03)
+- [x] 07-01-PLAN.md — Tracer: reflection + pinned tools (goreleaser/grpcurl) + first verbatim EXAMPLES.md block + the macos-15 broadcast probe with its Option A/B/C decision checkpoint (DOCS-01, DOCS-03)
 
 **Wave 2** *(blocked on 07-01: helpers, tool directives, probe verdict)*
 - [ ] 07-02-PLAN.md — README quickstart as the test input: RED failing TestReadmeQuickstart, GREEN verbatim-runnable quickstart incl. kill −9/restart/convergence (DOCS-01)
@@ -209,4 +209,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Replication and Deterministic Simulator | 6/6 | Complete    | 2026-11-07 |
 | 5. gRPC API and Binary | 6/6 | Complete    | 2026-11-09 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | 9/9 | Complete    | 2026-11-16 |
-| 7. v1.0 — Docs, Examples and Release | 0/5 | Not started | - |
+| 7. v1.0 — Docs, Examples and Release | 1/5 | In Progress | - |

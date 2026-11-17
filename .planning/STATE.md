@@ -3,17 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 7
 current_phase_name: v1.0 — Docs, Examples and Release
+current_plan: 2
 status: executing
-stopped_at: Phase 7 context gathered
-last_updated: "2026-11-17T06:18:34.269Z"
-last_activity: 2026-11-16
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-11-17T12:46:04.162Z"
+last_activity: 2026-11-17
 last_activity_desc: Phase 06 complete, transitioned to Phase 7
-state_head: 10554b6df1387c08062d19ba741d297b008c8c19
+state_head: 64a3cbb72b712816fbceced35dfb10dc8edd59b6
 progress:
   total_phases: 7
   completed_phases: 6
   total_plans: 38
-  completed_plans: 33
+  completed_plans: 34
 ---
 
 # Project State
@@ -27,10 +28,11 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 
 ## Current Position
 
-Phase: 7 (v1.0 — Docs, Examples and Release) — READY TO EXECUTE
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-11-16 — Phase 06 complete, transitioned to Phase 7
+Phase: 7 (v1.0 — Docs, Examples and Release) — EXECUTING
+Current Plan: 2
+Total Plans in Phase: 5
+Status: Executing — plan 07-01 complete
+Last activity: 2026-11-17 — Plan 07-01 complete (option-b broadcast verdict recorded)
 
 Progress: [██████████] 100%
 
@@ -94,6 +96,7 @@ Progress: [██████████] 100%
 | Phase 06 P05 | 35min | 3 tasks | 3 files |
 | Phase 06 P08 | 18min | 3 tasks | 8 files |
 | Phase 06 P09 | 12min | 3 tasks | 3 files |
+| Phase 07 P01 | 23min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -232,6 +235,9 @@ Recent decisions affecting current work:
 - [Phase 06]: [Phase 06]: 06-09: no darwin-only test file — no CI test can assert real power-loss behavior; both-arch cross-compile plus the unchanged linux race suite is the honest evidence (kill -9 durability unaffected on every platform)
 - [Phase 06]: [Phase 06]: 06-09: Task 2 phase gate is evidence-only (no commit): lint 7.6s + race suite 7.7s + bench smoke green, go mod tidy byte-identical, zero slog under internal/app, zero blank pprof/expvar imports, all 12 D-15 rows fixed — recorded in 06-09-SUMMARY
 - [Phase 06]: [Phase 06]: 06-09: D-16 fingerprint regeneration surfaced as pending-main-session work (checkpoint:human-action gate=blocking) — /gsd-execute-phase 1, 4, 5 before verify-work and milestone close; WINDOWS.md carries the open unrun-verify entry; no VERIFICATION.md hand-edited
+- [Phase 07]: [Phase 07]: Option-b selected by maintainer (2026-11-17, plan 07-01 Task 3): README quickstart ships a CI-verified Linux block plus a marked darwin variant block; the probe's darwin leg is a named skip carrying the recorded macos-15 verdict (PR #32 run 44083351667: sendto 255.255.255.255 no route to host). D-06/D-07 PARTIALLY satisfied — macos-15 leg is a named skip, not a real run; WINDOWS.md deviation entry open, surfaces at phase verification (plan 07-01)
+- [Phase 07]: [Phase 07]: Plan 07-01 requirements-completed empty — DOCS-01 (README quickstart) is 07-02's deliverable, DOCS-03 (full examples) is 07-03's; the tracer delivered prerequisites only (reflection, pinned tools, seed EXAMPLES.md, probe verdict). 01-05-SUMMARY precedent: declared-but-not-delivered requirements stay unchecked (plan 07-01)
+- [Phase 07]: [Phase 07]: The probe's darwin loud-skip fires before any probing — determinism of the macos-15 gate cell beats re-gathering evidence the verdict already recorded; send-error exhaustion on darwin is moot post-decision (plan 07-01)
 
 ### Pending Todos
 
@@ -267,6 +273,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-16T20:54:52.656Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-v1-0-docs-examples-and-release/07-CONTEXT.md
+Last session: 2026-11-17T12:46:03.318Z
+Stopped at: Completed 07-01-PLAN.md
+Resume file: None
