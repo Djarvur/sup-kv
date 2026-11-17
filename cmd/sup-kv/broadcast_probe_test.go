@@ -9,14 +9,16 @@ package main_test
 // broadcast (the `ipconfig getoption en0 broadcast` arm of the derive line)
 // or limited broadcast (255.255.255.255) fan out locally was never probed.
 // The derived row is the verdict: not reached is a failure carrying the
-// full probe table (on linux a loopback regression, on darwin the blocking
-// DOCS-01 decision made visible); reached is a pass that logs the working
-// address. The loopback and limited-broadcast rows are informational table
-// rows on every platform — they tell the Option A/B/C decision what else
-// works. This test intentionally does NOT skip on darwin: a green macos-15
-// cell after this plan is the Option-A evidence, a red one with the table
-// is the Option-B/C evidence (the 507228a loud-skip precedent follows the
-// human decision, not this probe).
+// full probe table (on linux a loopback regression), reached is a pass
+// that logs the working address. The loopback and limited-broadcast rows
+// are informational table rows on every platform. The macos-15 gate run
+// of PR #32 (2026-11-17) delivered the verdict — limited broadcast on
+// darwin dies at the sendto with no route to host — and the maintainer
+// chose option-b (07-01 Task 3): the README quickstart ships a
+// CI-verified Linux block plus a marked darwin variant block, and the
+// darwin leg of this probe is a named skip carrying that recorded
+// verdict (the phase-6 D-12/507228a loud-skip precedent). On Linux the
+// probe still asserts the derive line for real.
 
 import (
 	"fmt"
@@ -138,9 +140,23 @@ func (r probeRow) String() string {
 // quickstart and probes whether its address delivers to a local socket on
 // this platform, alongside the two informational forms (loopback and
 // limited broadcast). The DERIVED row is the verdict; the table always
-// names GOOS/GOARCH, the derived address and every form's result.
+// names GOOS/GOARCH, the derived address and every form's result. On
+// darwin the test loud-skips naming the recorded macos-15 verdict instead
+// of probing: option-b settled the topology, so the darwin leg is a named
+// skip, never a real assertion.
 func TestProbeQuickstartBroadcast(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "darwin" {
+		t.Skipf(
+			"option-b decision (maintainer 2026-11-17, plan 07-01 Task 3): the macos-15 gate cell of " +
+				"PR #32 (run 44083351667, job 134039317468, 2026-11-17) recorded the broadcast verdict — " +
+				"probe of 255.255.255.255 could not get a sound setup in 5 attempts: send to " +
+				"255.255.255.255:32617: write udp4 0.0.0.0:60971->255.255.255.255:32617: sendto: no route to host — " +
+				"so the README quickstart ships a CI-verified Linux block plus a marked darwin variant block, " +
+				"and this probe loud-skips on darwin naming that verdict (the phase-6 D-12/507228a precedent); " +
+				"on Linux the probe still asserts the derive line for real",
+		)
+	}
 	derived, deriveNote := deriveQuickstartBroadcast(t)
 
 	rows := make([]probeRow, 0, 3)
