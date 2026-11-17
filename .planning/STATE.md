@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 7
 current_phase_name: v1.0 — Docs, Examples and Release
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 07-02-PLAN.md
-last_updated: "2026-11-17T13:03:20.974Z"
+stopped_at: Completed 07-03-PLAN.md
+last_updated: "2026-11-17T13:33:43.687Z"
 last_activity: 2026-11-17
 last_activity_desc: Phase 06 complete, transitioned to Phase 7
-state_head: 0a0c25535a5e88df3a37ef5f64e5567d0f82d46b
+state_head: 19be25b6d8d78f6feda596880346807c735edfb1
 progress:
   total_phases: 7
   completed_phases: 6
   total_plans: 38
-  completed_plans: 35
+  completed_plans: 36
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 7 (v1.0 — Docs, Examples and Release) — EXECUTING
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 5
 Status: Executing — plan 07-01 complete
 Last activity: 2026-11-17 — Plan 07-01 complete (option-b broadcast verdict recorded)
@@ -98,6 +98,7 @@ Progress: [██████████] 100%
 | Phase 06 P09 | 12min | 3 tasks | 3 files |
 | Phase 07 P01 | 23min | 3 tasks | 8 files |
 | Phase 07 P02 | 12min | 2 tasks | 3 files |
+| Phase 07 P03 | 20min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -242,6 +243,11 @@ Recent decisions affecting current work:
 - [Phase 07]: Option-b README shape landed (plan 07-02): BOTH marked blocks (Linux literal 127.255.255.255 + darwin BCAST derive variant) carry the quickstart-verify marker so CI executes both on Linux — the variant runs via its || echo fallback arm there and cannot rot, while its macOS broadcast form stays documented-not-CI-verified
 - [Phase 07]: TestReadmeQuickstart darwin leg skips deterministically before any probing (quickstartBroadcastOption constant, the 64a3cbb precedent) — determinism of the macos-15 gate cell beats re-gathering evidence the 07-01 verdict recorded
 - [Phase 07]: Plan 07-02 requirements-completed empty: DOCS-01 stays unchecked because D-06/D-07 are partially satisfied (macos-15 leg is a named skip under option-b) — adjudication belongs to phase verification where option-c remains available (01-05/01-06/07-01 precedent)
+- [Phase 07]: TestExamplesDoc's contract became a title-keyed assertion table (07-03): every marked block must carry an asserted output and every table entry must have its block — the every-RPC completeness of EXAMPLES.md is machine-enforced by title in both directions
+- [Phase 07]: runBashVerbatim gained a blockSurvivors mode (07-03): the pair-start block keeps its two nodes alive across blocks (the 07-01 group reaper killed the shared pair), failed blocks still reap, and a PID-file t.Cleanup backstops mid-walk aborts; README test path unchanged
+- [Phase 07]: grpcurl outputs pretty-printed camelCase protojson ("acked": true, ackedCount, totalPeers) and omits zero-valued fields (07-03) — every asserted output substring in EXAMPLES.md is captured from a real run, never hand-written; the plan's snake_case prose literals were corrected from the captured bytes
+- [Phase 07]: OPERATIONS.md drift symptom names the metric supkv_clock_drift_warnings_total, not 'warnings in logs' (07-03) — the code has no dedicated drift log line; the doc states only what the binary does, and the runbook recommends fixing NTP/PTP only (no restart, no sup-kv-side repair)
+- [Phase 07]: DOCS-02/DOCS-03 marked complete (07-03): presence guard and CI-executed examples delivered; OPERATIONS.md content truth stays the phase's manual UAT (WINDOWS id 7) and the examples interruption residual is WINDOWS id 8 — both surface at phase verification
 
 ### Pending Todos
 
@@ -277,6 +283,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-17T13:03:20.251Z
-Stopped at: Completed 07-02-PLAN.md
+Last session: 2026-11-17T13:33:42.672Z
+Stopped at: Completed 07-03-PLAN.md
 Resume file: None
