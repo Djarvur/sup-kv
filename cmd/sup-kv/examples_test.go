@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -99,6 +100,23 @@ func extractMarkedBlocks(t *testing.T, path, marker string) []docBlock {
 	return blocks
 }
 
+// blockSurvivors says what happens to a block's background jobs once its
+// bash has exited.
+type blockSurvivors int
+
+const (
+	// reapSurvivors SIGKILLs the block's whole process group after bash
+	// exits — the default contract: a block cleans up after itself, and
+	// anything left behind is a leak.
+	reapSurvivors blockSurvivors = iota
+	// keepSurvivors leaves a SUCCESSFUL block's background jobs alive: the
+	// 07-03 walkthrough's pair-start block launches the two demo nodes that
+	// every later block (and the final stop block, by PID file) shares, so
+	// its survivors are state, not leaks. A failed block still reaps — its
+	// half-started leftovers are leaks nothing can use.
+	keepSurvivors
+)
+
 // runBashVerbatim executes one doc block with bash -e in dir: the block
 // arrives on stdin, combined stdout/stderr is captured and returned, and any
 // failure is fatal with the block and its output in the message — the doc's
@@ -111,7 +129,7 @@ func extractMarkedBlocks(t *testing.T, path, marker string) []docBlock {
 // group and the group is SIGKILLed once bash has exited, so a failed block
 // cannot leak its node into the next run either way; the file is read after
 // the kill, when no writer is left, so its content is stable.
-func runBashVerbatim(t *testing.T, dir string, env []string, block, what string) string {
+func runBashVerbatim(t *testing.T, dir string, env []string, block, what string, survivors blockSurvivors) string {
 	t.Helper()
 	outFile, err := os.CreateTemp(t.TempDir(), "doc-block-output-*")
 	if err != nil {
@@ -124,7 +142,7 @@ func runBashVerbatim(t *testing.T, dir string, env []string, block, what string)
 	cmd.Stdout, cmd.Stderr = outFile, outFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	runErr := cmd.Run()
-	if cmd.Process != nil {
+	if cmd.Process != nil && (survivors == reapSurvivors || runErr != nil) {
 		// CI hygiene: reap the whole group (bash is gone; this is its
 		// left-behind background jobs). The kill is best-effort — an
 		// already-empty group reports ESRCH, which is the success case.
@@ -252,7 +270,10 @@ var examplesAssertions = []struct {
 	{title: "Discover the API", expect: []string{"supkvapi.v1.SupKVService"}},
 	{title: "Read a missing key", expect: []string{"NotFound"}},
 	{title: "Write and read", expect: []string{"demo/hello", "c3VwLWt2"}},
-	{title: "Wait for replication", expect: []string{`"acked":true`, "acked_count", "total_peers"}},
+	// The wait entry's substrings are the REAL grpcurl bytes: pretty-printed
+	// JSON with camelCase protojson names ("acked": true, ackedCount,
+	// totalPeers) — captured from a run, not hand-written (Pitfall 3/5).
+	{title: "Wait for replication", expect: []string{`"acked": true`, "ackedCount", "totalPeers"}},
 	{title: "Delete and list", expect: []string{"demo/wait"}},
 	{title: "Watch a stream", expect: []string{"demo/live"}},
 	{title: "Check health", expect: []string{"SERVING"}},
@@ -305,13 +326,38 @@ func TestExamplesDoc(t *testing.T) {
 	// One shared directory for every block: the pair's dump paths and the
 	// blocks' scratch files are relative, so the doc-order state carries.
 	dir := t.TempDir()
+	// CI-hygiene backstop: the pair-start block deliberately leaves its two
+	// nodes alive for the later blocks, and the stop block reaps them by the
+	// PID files in the happy path. If any block fatals before the stop block
+	// runs, this cleanup kills the pair by those same PID files — best-effort
+	// (before the start block the files do not exist yet), never fatal.
+	t.Cleanup(func() {
+		for _, pidFile := range []string{"ex-a.pid", "ex-b.pid"} {
+			pidBytes, readErr := os.ReadFile(filepath.Join(dir, pidFile))
+			if readErr != nil {
+				continue
+			}
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+			if parseErr != nil || pid <= 0 {
+				continue
+			}
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
 	for _, block := range blocks {
 		expect, ok := expectByTitle[block.Title]
 		if !ok {
 			t.Fatalf("%s: marked block %q is not in the assertion table — every executed block must carry an asserted output",
 				examplesDocPath, block.Title)
 		}
-		out := runBashVerbatim(t, dir, env, block.Body, "EXAMPLES.md: "+block.Title)
+		// The pair-start block's survivors (the demo pair itself) are the
+		// walkthrough's shared state — every other block reaps its own
+		// background jobs, so only this one keeps them.
+		survivors := reapSurvivors
+		if block.Title == "Start the demo pair" {
+			survivors = keepSurvivors
+		}
+		out := runBashVerbatim(t, dir, env, block.Body, "EXAMPLES.md: "+block.Title, survivors)
 		for _, substr := range expect {
 			if !strings.Contains(out, substr) {
 				t.Fatalf("EXAMPLES.md block %q: combined output does not carry %q:\n%s", block.Title, substr, out)

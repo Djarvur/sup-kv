@@ -91,7 +91,7 @@ func TestReadmeQuickstart(t *testing.T) {
 		if name == "" {
 			name = fmt.Sprintf("block %d", i+1)
 		}
-		combined.WriteString(runBashVerbatim(t, dir, env, block.Body, "README.md: "+name))
+		combined.WriteString(runBashVerbatim(t, dir, env, block.Body, "README.md: "+name, reapSurvivors))
 	}
 	out := combined.String()
 	if !strings.Contains(out, "c3VwLWt2") {
