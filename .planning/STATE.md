@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 7
 current_phase_name: v1.0 — Docs, Examples and Release
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 07-03-PLAN.md
-last_updated: "2026-11-17T13:33:43.687Z"
+stopped_at: Completed 07-04-PLAN.md
+last_updated: "2026-11-17T13:51:52.461Z"
 last_activity: 2026-11-17
 last_activity_desc: Phase 06 complete, transitioned to Phase 7
-state_head: 19be25b6d8d78f6feda596880346807c735edfb1
+state_head: ac14f92088141babae74e4a83504356190334497
 progress:
   total_phases: 7
   completed_phases: 6
   total_plans: 38
-  completed_plans: 36
+  completed_plans: 37
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 ## Current Position
 
 Phase: 7 (v1.0 — Docs, Examples and Release) — EXECUTING
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 5
 Status: Executing — plan 07-01 complete
 Last activity: 2026-11-17 — Plan 07-01 complete (option-b broadcast verdict recorded)
@@ -99,6 +99,7 @@ Progress: [██████████] 100%
 | Phase 07 P01 | 23min | 3 tasks | 8 files |
 | Phase 07 P02 | 12min | 2 tasks | 3 files |
 | Phase 07 P03 | 20min | 2 tasks | 7 files |
+| Phase 07 P04 | 13min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -248,6 +249,9 @@ Recent decisions affecting current work:
 - [Phase 07]: grpcurl outputs pretty-printed camelCase protojson ("acked": true, ackedCount, totalPeers) and omits zero-valued fields (07-03) — every asserted output substring in EXAMPLES.md is captured from a real run, never hand-written; the plan's snake_case prose literals were corrected from the captured bytes
 - [Phase 07]: OPERATIONS.md drift symptom names the metric supkv_clock_drift_warnings_total, not 'warnings in logs' (07-03) — the code has no dedicated drift log line; the doc states only what the binary does, and the runbook recommends fixing NTP/PTP only (no restart, no sup-kv-side repair)
 - [Phase 07]: DOCS-02/DOCS-03 marked complete (07-03): presence guard and CI-executed examples delivered; OPERATIONS.md content truth stays the phase's manual UAT (WINDOWS id 7) and the examples interruption residual is WINDOWS id 8 — both surface at phase verification
+- [Phase 07]: 07-04: release.header is a plain template string in goreleaser v2.20.2 — the from_file map form was removed; the CHANGELOG.md header pull is delivered as {{ mustReadFile "CHANGELOG.md" }} (verified against the pinned module source; plan's from_file literal superseded)
+- [Phase 07]: 07-04: {{ .Tag }} ldflags decision implemented as pinned — release binaries report sup-kv v1.0.0 <shortcommit> go1.27.4, byte-shape-identical to make build's git-describe stamping; snapshot binary recorded: sup-kv v0.0.0 1db9265 go1.27.4
+- [Phase 07]: 07-04: local snapshot proof run WITH syft (ad-hoc v1.57.2, GOBIN=/tmp one-off, not a repo dependency) instead of --skip=sbom — the SBOM half of the pipeline is proven locally too; optional gh workflow dispatch proof deferred to 07-05 (workflow_dispatch needs the file on the default branch)
 
 ### Pending Todos
 
@@ -283,6 +287,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-17T13:33:42.672Z
-Stopped at: Completed 07-03-PLAN.md
+Last session: 2026-11-17T13:51:51.477Z
+Stopped at: Completed 07-04-PLAN.md
 Resume file: None
