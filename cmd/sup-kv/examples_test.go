@@ -1,27 +1,35 @@
 package main_test
 
-// The executable-doc tracer of Phase 7 (D-04/D-05): docs/EXAMPLES.md is the
-// test input — every fenced block marked with the examples-verify marker is
-// extracted and executed VERBATIM through bash -e against the real binary
+// The executable-doc contract of Phase 7 (D-04/D-05): docs/EXAMPLES.md is
+// the test input — every fenced block marked with the examples-verify marker
+// is extracted and executed VERBATIM through bash -e against the real binary
 // (the TestMain build-once harness), with a PATH under which `sup-kv`
 // resolves to a copy of the built binary and `grpcurl` resolves to a shim
 // exec'ing the pinned go.mod tool directive (v1.9.4 — never a PATH-resolved
-// stranger binary). The seed block proves the whole seam end to end: the
-// gRPC reflection registration (grpcurl list enumerates
-// supkvapi.v1.SupKVService with zero proto files) plus a Set/Get round-trip
-// whose captured output carries the base64 value. The doc cannot drift from
-// reality after release: a broken example fails CI. Marked blocks use the
-// fixed doc ports of the reserved [27900, 28100) band (scenarioPortLo sits
-// above it, so scenario port picks can never collide), start their node as a
-// background job, gate on a bounded startup retry and clean up after
-// themselves; the runner additionally reaps the block's whole process group
-// after the run, so a failing block never leaks a node into the next one.
+// stranger binary). The blocks run in doc order and share one working
+// directory, so the walkthrough's state carries across blocks exactly as a
+// stranger following the page top to bottom would see it: the pair starts in
+// the first block and stays up until the final cleanup block, the
+// Get-before-Set NotFound is documented behavior, and the Watch block's
+// stream file is written and read inside its own block. Every block carries
+// a ### title, the title keys the assertion table, and each block's captured
+// combined output MUST carry the table's substrings — the walkthrough is not
+// "full" until every RPC appears with an asserted output. Both directions
+// drift loudly: a table entry with no matching doc block fatals naming the
+// title, and a marked block the table does not know fatals naming the block.
+// Marked blocks use the fixed doc ports of the reserved [27900, 28100) band
+// (scenarioPortLo sits above it, so scenario port picks can never collide),
+// start their nodes as background jobs, gate on bounded retries whose final
+// command makes exhaustion fatal, and clean up after themselves; the runner
+// additionally reaps the block's whole process group after the run, so a
+// failing block never leaks a node into the next one.
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -202,31 +210,112 @@ func docRunEnv(t *testing.T, shimDir, binDir string) []string {
 	return append(env, "PATH="+augmented)
 }
 
-// TestExamplesDoc is the Phase 7 tracer for executable documentation: every
-// examples-verify block of docs/EXAMPLES.md runs verbatim through bash -e
-// against the built binary with the pinned grpcurl on PATH, and the combined
-// output must prove the seam the doc claims — the reflection listing names
-// supkvapi.v1.SupKVService, and the Set/Get round-trip returns the base64
-// value the doc writes. 07-03 grows the doc; this test grows with it.
+// examplesBroadcastOption encodes the recorded 07-01 broadcast verdict for
+// the examples pair (same contract as quickstartBroadcastOption in
+// readme_test.go): option-b — the walkthrough's two-node loopback-broadcast
+// topology is CI-verified on the Linux gate cells, and this test's darwin
+// leg is a deterministic named skip carrying the recorded macos-15 evidence.
+// Only a future probe proving loopback-broadcast fan-out on darwin (recorded
+// as option-a) would remove the skip; keep this constant in lockstep.
+const examplesBroadcastOption = "option-b"
+
+// examplesSkipDarwin is the option-b darwin leg: a deterministic loud skip
+// (it fires before any block runs — determinism of the macos-15 gate cell
+// beats re-gathering evidence the probe verdict already recorded) naming the
+// probe, the recorded verdict, and what still proves the behavior.
+func examplesSkipDarwin(t *testing.T) {
+	t.Helper()
+	t.Skipf(
+		"option-b decision (maintainer 2026-11-17, plan 07-01 Task 3, recorded in 07-01-SUMMARY.md " +
+			"'## Broadcast probe verdict'): the demo pair converges over loopback broadcast, and the macos-15 " +
+			"gate cell of PR #32 (run 44083351667, job 134039317468, 2026-11-17) recorded that limited " +
+			"broadcast dies at the sendto (no route to host) while phase 6 proved lo0 carries no BROADCAST " +
+			"flag, so docs/EXAMPLES.md ships as a CI-verified Linux walkthrough and this test's darwin leg " +
+			"is a named skip, never a real run. What still proves the behavior: every marked block runs " +
+			"verbatim on the Linux gate cells, and the phase-6 exec scenarios (plan 06-07) prove two-node " +
+			"replication on Linux for real",
+	)
+}
+
+// examplesAssertions is the title-keyed output contract of the walkthrough:
+// each entry names one marked block of docs/EXAMPLES.md (the ### heading
+// above the marker is the key) and the substrings that block's captured
+// combined output MUST carry when it runs verbatim. Together the titles are
+// the every-RPC set of supkvapi.v1.SupKVService plus discovery and health —
+// the walkthrough is not full while a title is missing, and an executed
+// block without a table entry has no asserted output and is refused.
+var examplesAssertions = []struct {
+	title  string
+	expect []string
+}{
+	{title: "Start the demo pair", expect: []string{"SERVING"}},
+	{title: "Discover the API", expect: []string{"supkvapi.v1.SupKVService"}},
+	{title: "Read a missing key", expect: []string{"NotFound"}},
+	{title: "Write and read", expect: []string{"demo/hello", "c3VwLWt2"}},
+	{title: "Wait for replication", expect: []string{`"acked":true`, "acked_count", "total_peers"}},
+	{title: "Delete and list", expect: []string{"demo/wait"}},
+	{title: "Watch a stream", expect: []string{"demo/live"}},
+	{title: "Check health", expect: []string{"SERVING"}},
+	{title: "Snapshot round-trip", expect: []string{"{}"}},
+	{title: "Stop the pair", expect: []string{"demo pair stopped"}},
+}
+
+// TestExamplesDoc is the DOCS-03 machine contract: every examples-verify
+// block of docs/EXAMPLES.md runs verbatim through bash -e against the built
+// binary with the pinned grpcurl on PATH, the blocks share one working
+// directory in doc order, and each block's captured output must carry its
+// assertion-table substrings — the wait_for_replication response acks true
+// with non-zero acked_count/total_peers, the cross-node read returns the
+// base64 value the doc writes, the missing-key Get surfaces the NotFound
+// error text, and the Watch stream carries the live event key. grpcurl
+// omits zero-valued fields, so every asserted field is non-zero in the
+// example flow (the zero-valued shapes are documented in the doc's prose).
 func TestExamplesDoc(t *testing.T) {
 	t.Parallel()
+	raw, err := os.ReadFile(examplesDocPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", examplesDocPath, err)
+	}
+	if !strings.Contains(string(raw), examplesMarker) {
+		t.Fatalf("docs/EXAMPLES.md carries no %s block — the DOCS-03 contract is gone", examplesMarker)
+	}
+	if runtime.GOOS == "darwin" && examplesBroadcastOption != "option-a" {
+		examplesSkipDarwin(t)
+	}
 	blocks := extractMarkedBlocks(t, examplesDocPath, examplesMarker)
+	byTitle := make(map[string]docBlock, len(blocks))
+	for _, block := range blocks {
+		if block.Title == "" {
+			t.Fatalf("%s: a marked block has no ### heading above it — titled blocks are the assertion-table keys", examplesDocPath)
+		}
+		byTitle[block.Title] = block
+	}
+	for _, a := range examplesAssertions {
+		if _, ok := byTitle[a.title]; !ok {
+			t.Fatalf("%s has no marked block titled %q — the walkthrough is missing the block (the assertion table keys the doc's ### titles exactly)",
+				examplesDocPath, a.title)
+		}
+	}
+	expectByTitle := make(map[string][]string, len(examplesAssertions))
+	for _, a := range examplesAssertions {
+		expectByTitle[a.title] = a.expect
+	}
 	binDir := supkvBinDir(t)
 	env := docRunEnv(t, grpcurlShim(t), binDir)
-
-	var combined strings.Builder
-	for i, block := range blocks {
-		name := block.Title
-		if name == "" {
-			name = fmt.Sprintf("block %d", i+1)
+	// One shared directory for every block: the pair's dump paths and the
+	// blocks' scratch files are relative, so the doc-order state carries.
+	dir := t.TempDir()
+	for _, block := range blocks {
+		expect, ok := expectByTitle[block.Title]
+		if !ok {
+			t.Fatalf("%s: marked block %q is not in the assertion table — every executed block must carry an asserted output",
+				examplesDocPath, block.Title)
 		}
-		combined.WriteString(runBashVerbatim(t, binDir, env, block.Body, "EXAMPLES.md: "+name))
-	}
-	out := combined.String()
-	if !strings.Contains(out, "supkvapi.v1.SupKVService") {
-		t.Fatalf("the combined output of the marked blocks does not name supkvapi.v1.SupKVService (reflection list):\n%s", out)
-	}
-	if !strings.Contains(out, "c3VwLWt2") {
-		t.Fatalf("the combined output of the marked blocks does not carry the base64 value c3VwLWt2 (the Set/Get round-trip):\n%s", out)
+		out := runBashVerbatim(t, dir, env, block.Body, "EXAMPLES.md: "+block.Title)
+		for _, substr := range expect {
+			if !strings.Contains(out, substr) {
+				t.Fatalf("EXAMPLES.md block %q: combined output does not carry %q:\n%s", block.Title, substr, out)
+			}
+		}
 	}
 }
