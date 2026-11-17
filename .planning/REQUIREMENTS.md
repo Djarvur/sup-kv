@@ -27,16 +27,16 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Replication
 
-- [ ] **REPL-01**: Nodes discover peers via broadcast Hello (`node_id` + `run_id`) with no configuration beyond `broadcast_addr`
-- [ ] **REPL-02**: Every local change is broadcast as DataReplication and tracked per-peer (key, version) until Ack or supersession; retransmission uses exponential backoff `ack_timeout` → `ack_timeout_max`, suspended while no peer is known
-- [ ] **REPL-03**: A receiver Acks each (key, version) after applying the record to memory (not waiting for the dump)
-- [ ] **REPL-04**: A node can request a missing/stale key via unicast DataRequest; no reply if the key is unknown
-- [ ] **REPL-05**: Every node sends chunked DataSync (sorted key→version listing, chunks self-sufficient, `sync_chunk_bytes`) on the `sync_interval` timer, at startup, and on neighbor restart; receivers answer with DataRequest (missing/stale) or unicast DataReplication (newer), rate-limited by `sync_response_rate`
-- [ ] **REPL-06**: The peer table handles N nodes from day one — a peer is known after its first Hello and considered gone after `peer_timeout`; ack tracking is per-peer
-- [ ] **REPL-07**: A Hello with a new `run_id` from a known node (restart) triggers full sync toward it
-- [ ] **REPL-08**: Datagrams with a duplicate `node_id` are dropped and logged as a configuration error
-- [ ] **REPL-09**: Own broadcast echo and datagrams with bad CRC or bad proto version are dropped, with each discard class distinguishable
-- [ ] **REPL-10**: Documented convergence bounds hold and are proven in simulation: normal operation one RTT; datagram loss ≤ `ack_timeout_max`; after a partition heals ≤ 2 × `sync_interval` + response time
+- [x] **REPL-01**: Nodes discover peers via broadcast Hello (`node_id` + `run_id`) with no configuration beyond `broadcast_addr`
+- [x] **REPL-02**: Every local change is broadcast as DataReplication and tracked per-peer (key, version) until Ack or supersession; retransmission uses exponential backoff `ack_timeout` → `ack_timeout_max`, suspended while no peer is known
+- [x] **REPL-03**: A receiver Acks each (key, version) after applying the record to memory (not waiting for the dump)
+- [x] **REPL-04**: A node can request a missing/stale key via unicast DataRequest; no reply if the key is unknown
+- [x] **REPL-05**: Every node sends chunked DataSync (sorted key→version listing, chunks self-sufficient, `sync_chunk_bytes`) on the `sync_interval` timer, at startup, and on neighbor restart; receivers answer with DataRequest (missing/stale) or unicast DataReplication (newer), rate-limited by `sync_response_rate`
+- [x] **REPL-06**: The peer table handles N nodes from day one — a peer is known after its first Hello and considered gone after `peer_timeout`; ack tracking is per-peer
+- [x] **REPL-07**: A Hello with a new `run_id` from a known node (restart) triggers full sync toward it
+- [x] **REPL-08**: Datagrams with a duplicate `node_id` are dropped and logged as a configuration error
+- [x] **REPL-09**: Own broadcast echo and datagrams with bad CRC or bad proto version are dropped, with each discard class distinguishable
+- [x] **REPL-10**: Documented convergence bounds hold and are proven in simulation: normal operation one RTT; datagram loss ≤ `ack_timeout_max`; after a partition heals ≤ 2 × `sync_interval` + response time
 
 ### Persistence
 
@@ -48,31 +48,31 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### API
 
-- [ ] **API-01**: gRPC service with protobuf definitions exposes Get/Set (incl. create-if-absent)/Delete with errors OK / NotFound / AlreadyExists / InvalidArgument / Unavailable
-- [ ] **API-02**: User can List keys under a prefix, returned in sorted order (prefix-range RPC)
-- [ ] **API-03**: User can Watch a stream of change notifications covering local and replicated changes alike (engine event taps designed in from the start)
-- [ ] **API-04**: Writes are rejected with Unavailable during the startup gate (until the first full sync round arrives or `startup_gate` elapses); reads are served immediately
-- [ ] **API-05**: User can request `wait_for_replication` on a write: the server waits for Acks from known peers within a timeout and reports whether they were received; it never changes the write outcome
-- [ ] **API-06**: The gRPC standard health checking endpoint is served and reflects startup-gate state (NOT_SERVING until gated open)
-- [ ] **API-07**: Snapshot create/load is exposed through the API
+- [x] **API-01**: gRPC service with protobuf definitions exposes Get/Set (incl. create-if-absent)/Delete with errors OK / NotFound / AlreadyExists / InvalidArgument / Unavailable
+- [x] **API-02**: User can List keys under a prefix, returned in sorted order (prefix-range RPC)
+- [x] **API-03**: User can Watch a stream of change notifications covering local and replicated changes alike (engine event taps designed in from the start)
+- [x] **API-04**: Writes are rejected with Unavailable during the startup gate (until the first full sync round arrives or `startup_gate` elapses); reads are served immediately
+- [x] **API-05**: User can request `wait_for_replication` on a write: the server waits for Acks from known peers within a timeout and reports whether they were received; it never changes the write outcome
+- [x] **API-06**: The gRPC standard health checking endpoint is served and reflects startup-gate state (NOT_SERVING until gated open)
+- [x] **API-07**: Snapshot create/load is exposed through the API
 
 ### Observability
 
-- [ ] **OBS-01**: A metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, and clock-drift warnings
-- [ ] **OBS-02**: Discarded datagrams are counted by class (bad CRC / own broadcast / bad proto version)
-- [ ] **OBS-03**: Logging is structured and every dropped-datagram class is distinguishable in logs
+- [x] **OBS-01**: A metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, and clock-drift warnings
+- [x] **OBS-02**: Discarded datagrams are counted by class (bad CRC / own broadcast / bad proto version)
+- [x] **OBS-03**: Logging is structured and every dropped-datagram class is distinguishable in logs
 
 ### Testing
 
 - [x] **TEST-01**: CRDT property tests prove merge is commutative, associative and idempotent
 - [x] **TEST-02**: HLC property tests prove monotonicity under adversarial clock input, post-receive ordering and version uniqueness; counter-reset and restart-from-dump-max cases included
-- [ ] **TEST-03**: A deterministic multi-node simulation runs 2..N nodes over a virtual network that loses, duplicates and reorders datagrams and simulates partitions, with seeded runs
-- [ ] **TEST-04**: Every documented failure scenario is an automated test demonstrating convergence within the documented bounds: datagram loss; Ack loss; duplicates/reordering/own-broadcast echo; partition for seconds and for days (both sides serving writes, deterministic winner, conflict-journal entries); one-way connectivity; node restart (RunID change triggers resync); empty-disk recovery at `sync_response_rate`; both-nodes-down restart; corrupted dump records; wall-clock jumps live and between restarts; a node's clock far ahead; ~1000 writes/s bursts; duplicate `node_id`; protocol version mismatch
-- [ ] **TEST-05**: Benchmarks cover dump at 10k keys and replication throughput (burst writes), with bounded confirmation latency under bursts
+- [x] **TEST-03**: A deterministic multi-node simulation runs 2..N nodes over a virtual network that loses, duplicates and reorders datagrams and simulates partitions, with seeded runs
+- [x] **TEST-04**: Every documented failure scenario is an automated test demonstrating convergence within the documented bounds: datagram loss; Ack loss; duplicates/reordering/own-broadcast echo; partition for seconds and for days (both sides serving writes, deterministic winner asserted + merge-conflicts counter — conflict journal cancelled per phase-6 D-10); one-way connectivity; node restart (RunID change triggers resync); empty-disk recovery at `sync_response_rate`; both-nodes-down restart; corrupted dump records; wall-clock jumps live and between restarts; a node's clock far ahead; ~1000 writes/s bursts; duplicate `node_id`; protocol version mismatch
+- [x] **TEST-05**: Benchmarks cover dump at 10k keys and replication throughput (burst writes), with bounded confirmation latency under bursts
 
 ### Tooling
 
-- [ ] **TOOL-01**: sup-kv ships as a single static binary with flags/env config, `--version`, and systemd-friendly behavior
+- [x] **TOOL-01**: sup-kv ships as a single static binary with flags/env config, `--version`, and systemd-friendly behavior
 
 ### Quality
 
@@ -87,7 +87,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Documentation
 
 - [ ] **DOCS-01**: README quickstart works as written: two nodes on one localhost broadcast socket, writes visible on both within an RTT, kill −9 one node, restart, state converges without operator action
-- [ ] **DOCS-02**: Ops docs state the trust model prominently (no auth/encryption in v1, HMAC is future work), the value-size envelope, local-read semantics (read-your-writes on the same node only), a "not a lock/election service" warning, and a clock-drift runbook
+- [x] **DOCS-02**: Ops docs state the trust model prominently (no auth/encryption in v1, HMAC is future work), the value-size envelope, local-read semantics (read-your-writes on the same node only), a "not a lock/election service" warning, and a clock-drift runbook
 - [ ] **DOCS-03**: API usage examples are provided
 
 ## v2 Requirements
@@ -159,32 +159,32 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERS-03 | Phase 3 | Complete |
 | PERS-04 | Phase 3 | Complete |
 | PERS-05 | Phase 3 | Complete |
-| REPL-01 | Phase 4 | Pending |
-| REPL-02 | Phase 4 | Pending |
-| REPL-03 | Phase 4 | Pending |
-| REPL-04 | Phase 4 | Pending |
-| REPL-05 | Phase 4 | Pending |
-| REPL-06 | Phase 4 | Pending |
-| REPL-07 | Phase 4 | Pending |
-| REPL-08 | Phase 4 | Pending |
-| REPL-09 | Phase 4 | Pending |
-| REPL-10 | Phase 4 | Pending |
-| TEST-03 | Phase 4 | Pending |
-| API-01 | Phase 5 | Pending |
-| API-02 | Phase 5 | Pending |
-| API-03 | Phase 5 | Pending |
-| API-04 | Phase 5 | Pending |
-| API-05 | Phase 5 | Pending |
-| API-06 | Phase 5 | Pending |
-| API-07 | Phase 5 | Pending |
-| TOOL-01 | Phase 5 | Pending |
-| OBS-01 | Phase 6 | Pending |
-| OBS-02 | Phase 6 | Pending |
-| OBS-03 | Phase 6 | Pending |
-| TEST-04 | Phase 6 | Pending |
-| TEST-05 | Phase 6 | Pending |
+| REPL-01 | Phase 4 | Complete |
+| REPL-02 | Phase 4 | Complete |
+| REPL-03 | Phase 4 | Complete |
+| REPL-04 | Phase 4 | Complete |
+| REPL-05 | Phase 4 | Complete |
+| REPL-06 | Phase 4 | Complete |
+| REPL-07 | Phase 4 | Complete |
+| REPL-08 | Phase 4 | Complete |
+| REPL-09 | Phase 4 | Complete |
+| REPL-10 | Phase 4 | Complete |
+| TEST-03 | Phase 4 | Complete |
+| API-01 | Phase 5 | Complete |
+| API-02 | Phase 5 | Complete |
+| API-03 | Phase 5 | Complete |
+| API-04 | Phase 5 | Complete |
+| API-05 | Phase 5 | Complete |
+| API-06 | Phase 5 | Complete |
+| API-07 | Phase 5 | Complete |
+| TOOL-01 | Phase 5 | Complete |
+| OBS-01 | Phase 6 | Complete |
+| OBS-02 | Phase 6 | Complete |
+| OBS-03 | Phase 6 | Complete |
+| TEST-04 | Phase 6 | Complete |
+| TEST-05 | Phase 6 | Complete |
 | DOCS-01 | Phase 7 | Pending |
-| DOCS-02 | Phase 7 | Pending |
+| DOCS-02 | Phase 7 | Complete |
 | DOCS-03 | Phase 7 | Pending |
 
 **Coverage:**

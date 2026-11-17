@@ -1,31 +1,33 @@
 ---
-phase: 02-engine-hlc-versioning-and-lww-store
-recorded: 2026-11-02T02:46:49Z
+phase: 02
+review: 02-REVIEW.md
+titles: json
+findings:
+  - id: IN-01
+    severity: info
+    disposition: fixed
+    title: "OnChange doc misstates the record a \"subsequent Get returns\" for tombstone installs"
+  - id: IN-02
+    severity: info
+    disposition: fixed
+    title: "OnChange contract does not state the re-entrancy deadlock boundary"
+  - id: IN-03
+    severity: info
+    disposition: fixed
+    title: "Duplicated subtest body between TestStore_endToEnd and TestStore_Set"
 open: 0
-fixed: 4
-skipped: 0
-deferred: 0
+total: 3
+recorded: 2026-11-14T18:56:15.670Z
 ---
 
-# Phase 02 — Code Review Disposition
+# Phase 02: Code Review Disposition
 
-> One row per review finding. Triaged = `fixed` / `skipped` / `deferred` (with reason).
-> Untriaged rows read `open`. Default recorded by the execute:post code-review gate; hand-edit to triage.
+| Finding | Severity | Disposition | Source |
+|---------|----------|-------------|--------|
+| IN-01 | info | fixed | fixed — OnChange doc names both surfaces: the record a subsequent Records() snapshot holds, and that a subsequent Get returns only when the record is live; a tombstone install fires the tap exactly like any other change (a delete IS a change) while Get answers ErrNotFound (plan 06-02, D-15) |
+| IN-02 | info | fixed | fixed — OnChange doc states the re-entrancy boundary: the tap is invoked synchronously from the write paths under the store's locking discipline, the write lock is held, Go's sync.RWMutex is not reentrant, and even a read-only Get self-deadlocks (plan 06-02, D-15) |
+| IN-03 | info | fixed | fixed — the TestStore_Set copy of "a second set replaces the value under a strictly greater version" removed (plus its now-unused cmpSame constant); the TestStore_endToEnd copy kept byte-identical as the layer-wiring probe; suite green under -race (plan 06-02, D-15) |
 
-| ID | Severity | Title | Disposition | Source |
-|----|----------|-------|-------------|--------|
-| WR-01 | warning | Restart seam seeds only `l` — post-restart writes can collide with or lose to pre-restart versions | fixed | 02-04 (commits a5a78a5, 68e4b62, b4b5397) |
-| IN-01 | info | Unused constant `varPayloadMask` | fixed | 02-REVIEW-FIX.md (329263e) |
-| IN-02 | info | No guard at the 48-bit `l` ceiling — counter overflow wraps the version stream to zero | fixed | 02-REVIEW-FIX.md (03e3f9c) |
-| IN-03 | info | `TestVersion_unpackTotal` range assertions are tautologies | fixed | 02-REVIEW-FIX.md (c00c618) |
-
-**open: 0 of 4** — all findings fixed. WR-01 fixed by gap-closure 02-04
-(verified in the 2026-11-02 incremental review pass: seed at
-`internal/app/clock.go:39-41`, propagation at
-`internal/app/store.go:31-32,75`, regressions at `clock_test.go:300-352`,
-`hlc_prop_test.go:236-272`, `store_test.go:577-698`); the incremental pass over
-the 02-04 delta found no new findings. IN-01..IN-03 fixed by the 2026-11-02
-review-fix pass (see 02-REVIEW-FIX.md); IN-02's saturating ceiling also closes
-WR-01's residual 48-bit-ceiling corner noted in the review.
-
-Legend: `open` (not yet decided) · `fixed` (fix applied — see 02-REVIEW-FIX.md) · `skipped` (not a real issue — reason required) · `deferred` (postponed — reason required). Set deferred by hand, with the reason in the Source column.
+Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
+Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
+Re-running the gate keeps every row it can. A row the current review no longer reports is kept and its Source cell flagged, so a finding does not leave this record silently. ONE exception: when a finding id is REUSED by a different finding, the earlier decision cannot keep a row — the id is taken — and it is dropped. A RECORDED decision (anything but `open`) is named on the console when that happens; a row still at `open` is replaced silently, because `open` records no decision to lose.

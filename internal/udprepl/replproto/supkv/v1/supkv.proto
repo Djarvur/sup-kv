@@ -1,0 +1,74 @@
+// sup-kv replication wire schema: one Envelope per UDP datagram carrying a
+// CRC32 over the marshaled Body, and one of the five protocol messages
+// inside the Body oneof (docs/IDEA.md §Replication protocol). All five
+// messages are defined here because the schema is one file; the Phase 4
+// wave-1 core consumes only Hello, DataReplication and Ack — DataRequest
+// and DataSync land with the later plans on the same schema.
+syntax = "proto3";
+
+package supkv.v1;
+
+option go_package = "github.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1;replproto";
+
+// Envelope is the outer frame of every replication datagram. run_id is 16
+// bytes; crc32 is the IEEE CRC32 over body — corruption detection only per
+// the accepted trust model, never tamper protection; body is the marshaled
+// Body, decoded by the receiver only after the CRC gate passes (D-02).
+message Envelope {
+  uint32 proto_version = 1;
+  uint32 node_id = 2;
+  bytes run_id = 3;
+  uint32 crc32 = 4;
+  bytes body = 5;
+}
+
+// Body wraps exactly one protocol message in its oneof; the adapter maps
+// every field onto the port structs (D-01).
+message Body {
+  oneof msg {
+    Hello hello = 1;
+    DataReplication data_replication = 2;
+    Ack ack = 3;
+    DataRequest data_request = 4;
+    DataSync data_sync = 5;
+  }
+}
+
+// Hello announces node_id + run_id (both envelope fields — the body is
+// empty): broadcast every hello_interval, and a new run_id from a known
+// node means it restarted (REPL-01, REPL-07).
+message Hello {}
+
+// DataReplication carries one full record: broadcast on every local change
+// and retransmit, unicast as a DataRequest reply (REPL-02, REPL-03).
+message DataReplication {
+  string key = 1;
+  bytes version = 2;
+  bytes data = 3;
+  bool deleted = 4;
+  uint32 checksum = 5;
+}
+
+// Ack confirms one (key, version) after the record is applied to memory,
+// never waiting for a dump (REPL-03).
+message Ack {
+  string key = 1;
+  bytes version = 2;
+}
+
+// DataRequest asks one peer to send the record for key (REPL-04).
+message DataRequest {
+  string key = 1;
+}
+
+// DataSync is one self-sufficient chunk of the sorted key→version listing
+// exchanged for full reconciliation (REPL-05).
+message DataSync {
+  repeated SyncEntry entries = 1;
+}
+
+// SyncEntry is one key→version pair inside a DataSync chunk.
+message SyncEntry {
+  string key = 1;
+  bytes version = 2;
+}

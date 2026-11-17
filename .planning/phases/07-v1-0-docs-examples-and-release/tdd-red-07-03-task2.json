@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -timeout 3m ./cmd/sup-kv/ -run '^TestOperationsDoc$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestOperationsDoc\n=== PAUSE TestOperationsDoc\n=== CONT  TestOperationsDoc\n    operations_test.go:86: read ../../docs/OPERATIONS.md: open ../../docs/OPERATIONS.md: no such file or directory\n--- FAIL: TestOperationsDoc (0.00s)\nFAIL\nsup-kv smoke: tests failed with code 1\nFAIL\tgithub.com/Djarvur/sup-kv/cmd/sup-kv\t1.984s\nFAIL\n",
+  "targetTest": "TestOperationsDoc",
+  "targetFile": "cmd/sup-kv/operations_test.go",
+  "expected": "The OPERATIONS.md presence guard (plan 07-03 Task 2 RED): before docs/OPERATIONS.md exists, TestOperationsDoc fails with the read error naming the file (plan 07-03 Task 2 feature behavior: 'TestOperationsDoc fails before docs/OPERATIONS.md exists (read error naming the file) or while any presence anchor is missing').",
+  "actual": "The target test ran and failed on its planned assertion (operations_test.go:86): 'read ../../docs/OPERATIONS.md: open ../../docs/OPERATIONS.md: no such file or directory'. The package compiled, the test was discovered and executed (--- FAIL: TestOperationsDoc, 0.00s after TestMain's binary build), and the failure is exactly the missing-file contract — not unexpected-green, not zero-tests, not a build/load/fixture fault.",
+  "semanticAssessment": "Target test TestOperationsDoc executed (=== RUN and --- FAIL: lines present) and failed for the intended reason: the guard reads ../../docs/OPERATIONS.md as its input, the file does not exist yet, and the os.ReadFile fatal names the path verbatim — the exact planned RED per the task's behavior line. Valid intentional RED."
+}

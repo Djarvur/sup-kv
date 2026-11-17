@@ -1,0 +1,12 @@
+# Buf codegen for the replication wire schema. The input is the proto tree
+# itself (see the Makefile proto target), so source-relative paths resolve
+# against internal/udprepl/replproto — out below pins the generated code
+# back inside the tree. The local plugins resolve protoc-gen-go and
+# protoc-gen-go-grpc through the go.mod tool directives — no global PATH
+# install, no BSR remote plugins (D-05; .claude/CLAUDE.md tool policy).
+version: v2
+
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: internal/udprepl/replproto
+    opt: paths=source_relative

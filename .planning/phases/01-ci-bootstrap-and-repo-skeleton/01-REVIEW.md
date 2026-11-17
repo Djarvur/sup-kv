@@ -1,155 +1,150 @@
 ---
 phase: 01-ci-bootstrap-and-repo-skeleton
-reviewed: 2026-11-02T16:03:17Z
+reviewed: 2026-11-14T22:03:58Z
 depth: standard
-files_reviewed: 13
+files_reviewed: 6
 files_reviewed_list:
-  - AGENTS.md
-  - internal/app/clock/clock.go
-  - internal/app/clock/clock_test.go
-  - internal/app/clock/hlc_prop_test.go
-  - internal/app/internal/testutil/gen.go
-  - internal/app/internal/testutil/rng.go
-  - internal/app/storage/doc.go
-  - internal/app/storage/errors.go
-  - internal/app/storage/merge_test.go
-  - internal/app/storage/store.go
-  - internal/app/storage/store_test.go
-  - internal/app/version/version.go
-  - internal/app/version/version_test.go
+  - .claude/CLAUDE.md
+  - .github/workflows/ci.yml
+  - Makefile
+  - buf.yaml
+  - buf.gen.repl.yaml
+  - buf.gen.api.yaml
 findings:
   critical: 0
-  warning: 2
-  info: 1
+  warning: 1
+  info: 2
   total: 3
+  necessity: 0
 status: issues_found
 ---
 
-# Phase 01: Code Review Report
+# Phase 01: Code Review Report (incremental — delta 7b55ad1)
 
-**Reviewed:** 2026-11-02T16:03:17Z
+**Reviewed:** 2026-11-14T22:03:58Z
 **Depth:** standard
-**Files Reviewed:** 13
+**Files Reviewed:** 6
 **Status:** issues_found
 
 ## Summary
 
-Reviewed the current on-disk state of the AGENTS.md conventions update and the
-split of `internal/app` into the `version`, `clock` and `storage` packages plus
-the shared `internal/app/internal/testutil` generators (the delta since
-diff_base 0ca46c9 that touched phase-01's covered files).
+Incremental review of the phase-1 owned files as changed by commit 7b55ad1
+("refactor(proto): satisfy buf STANDARD with zero waivers", diff base
+12e300f): the buf workspace restructured to one module per proto tree, the
+single `buf.gen.yaml` split into `buf.gen.repl.yaml` / `buf.gen.api.yaml`,
+and the D-08 breaking-guard path updated in Makefile and ci.yml.
 
-The core is well-built: the HLC Tick/Update state machines were traced through
-every Kulkarni branch including counter overflow, ceiling saturation and
-adversarial inputs (negative/over-domain remote readings, out-of-range
-counters) and are correct — every returned reading is strictly greater than
-the pre-state, and saturation pins at `(maxL, counterMax)` instead of wrapping.
-The RFC 9562 pack/unpack round-trip was verified against the layout vector,
-the 12/14-bit masking, and the truncation trick that drops the variant bits;
-byte-wise `Compare` order is sound. The LWW join laws, tombstone asymmetry and
-defensive copying in `storage` match the documented contract. Machine gates
-verified on this tree: `go test -race ./internal/...` passes,
-`go tool golangci-lint run ./internal/...` is clean, the depguard rules match
-AGENTS.md, the `# Origin:` header is in place, and all `//nolint` directives
-in scope name their linter and carry justifications per deviation #3.
+**Phase 01 contract verification (all hold):**
 
-Two warnings survive the adversarial pass, both in `clock.go` and both
-involving the 48-bit domain ceiling — the code carefully clamps every input
-into the domain (initialC, remoteC, ptMs, newL) except one, and the drift
-signal arithmetic overflows precisely in the saturated state it exists to
-report. Both were confirmed by execution, not just reading.
+- `ci.yml` — the delta is exactly ONE line (the guard path
+  `internal/udprepl/replproto/supkv.proto` → `.../supkv/v1/supkv.proto`);
+  check-run names ("lint", "gate (<cell>)") and the 4-cell matrix are
+  byte-unchanged, so the required-check contexts in the branch-protection
+  ruleset are untouched. `permissions: contents: read` and the concurrency
+  group intact. No new steps, no `continue-on-error`, no credentials.
+- Guard correctness re-probed live against this tree: `origin/master` sits
+  at 617951e (phase 3) — NEITHER the old nor the new proto path exists
+  there (`git cat-file -e` exits 128 for both), so the deferred branch is
+  the correct behavior today, and the guard now watches the path that will
+  actually land, self-activating on the first PR after the move merges.
+  Had the guard kept the old path it would defer forever — the update is
+  the load-bearing half of this edit and it is right.
+- `Makefile` — all eight targets intact (lint/test/generate/build/proto/
+  buf-lint/buf-format/buf-breaking), tab-indented, all `.PHONY`. The new
+  `proto` target's two per-tree passes were executed live: `make proto`
+  regenerates both trees byte-identically (working tree shows no source
+  diff afterwards) — the `out:` pins inside each template write back
+  inside the tree as documented.
+- Pinned-tool policy (D-05, `.claude/CLAUDE.md`): `go tool buf` plus
+  `local: ["go", "tool", "protoc-gen-go"]` / `...protoc-gen-go-grpc`
+  plugins in both new templates — everything resolves through go.mod tool
+  directives, no global PATH installs, no BSR remote plugins. Consistent.
+- `buf.yaml` — zero `ignore_only` waivers confirmed structurally, and the
+  dropped `.gomodcache` exclude is sound: the repo-root `.gomodcache`
+  (which really does contain stray `.proto` files — verified) now sits
+  outside both module roots (`internal/udprepl/replproto`,
+  `internal/grpcapi/apiproto`), and `go tool buf lint` passes with it
+  present. Gates re-run live during this review: `buf lint` exit 0, `buf
+  format --diff --exit-code` exit 0.
+- `.claude/CLAUDE.md` — the Buf CLI tool-table row accurately describes
+  the per-tree templates and the one-module-per-tree workspace.
+
+Two new Info findings (stale doc references to the deleted `buf.gen.yaml`
+and a now-false "one pass, both trees" comment in `buf.yaml`), plus the
+carried-open WR-01 (CI job timeouts) which this delta did not address and
+which is re-reported unchanged below. No structural-findings pre-pass and
+no external reviewer evidence were provided for this run; findings are all
+narrative (direct review). No Critical issues.
+
+## Narrative Findings (AI reviewer)
+
+All findings below originate from the direct adversarial review above.
+WR-01 is the still-open carry from the previous review of this file (same
+id, same finding — the disposition row is kept); IN-07/IN-08 are new in
+this delta.
 
 ## Warnings
 
-### WR-01: driftBetween overflows int64 at the domain ceiling, corrupting the drift signal exactly when the clock is pathological
+### WR-01: Neither CI job sets a timeout-minutes bound — a wedged job holds its runner for GitHub's 6-hour default
 
-**File:** `internal/app/clock/clock.go:144`
-**Issue:** `d := (l - ptMs) * int64(time.Millisecond)` overflows when
-`|l - ptMs|` exceeds ~9.22e12 ms (~292 years). That state is reachable
-through the public API without any contract violation: `remoteL = maxL`
-(2^48-1) is a valid in-domain RFC 9562 timestamp, so a single
-`Store.Merge` of a peer record carrying `l = maxL` (or a clock seam past
-year ~8921) ratchets `l` to `maxL` permanently via `Update`'s documented
-saturation. With `l = maxL` and a realistic wall clock (2024-11), the true
-divergence is 279,744,976,710,655,000,000 ns (~+8871 years), but the int64
-product wraps to 3,043,815,605,011,725,760 ns (~+96 years) — wrong
-magnitude, and for other (l, ptMs) pairs the wrapped value flips sign or
-lands inside tolerance. The drift signal (VERS-05) is the operator's
-mechanism for detecting a stuck/lying clock; after the wrap it reports
-garbage in precisely the state that needs flagging. Verified by running
-the arithmetic: true delta ~8871 years, wrapped int64 delta ~96 years.
-Monotonicity and stored versions are unaffected (drift never feeds back
-into clock state), which is why this is a Warning, not a Critical.
-**Fix:** Compare in milliseconds before scaling, and saturate instead of
-wrapping:
+**File:** `.github/workflows/ci.yml:19-20` (job `lint`), `.github/workflows/ci.yml:53-55` (job `gate`)
+**Issue:** (Carry-forward, unchanged by 7b55ad1 — re-verified against the
+current file.) Both jobs declare `runs-on:` but neither sets a job-level
+`timeout-minutes:`. A hung `golangci-lint` download, a wedged `-race` test
+suite, or a stuck `go tool buf` invocation holds the runner until GitHub's
+6-hour default. `fail-fast: false` keeps all four gate cells alive, so one
+wedged cell means up to five held runners per pushed commit — paid runner
+minutes under the branch-protection ruleset.
+**Fix:** Bound each job:
 
-```go
-func driftBetween(l, ptMs int64, warn time.Duration) time.Duration {
-	if warn <= 0 {
-		return 0
-	}
-	const maxDeltaMs = int64(math.MaxInt64 / int64(time.Millisecond)) // ±~292 years.
-	d := l - ptMs
-	if d > maxDeltaMs {
-		return time.Duration(maxDeltaMs) * time.Millisecond // saturate ahead, never wrap
-	}
-	if d < -maxDeltaMs {
-		return time.Duration(-maxDeltaMs) * time.Millisecond // saturate behind
-	}
-	scaled := d * int64(time.Millisecond)
-	if scaled > int64(warn) || scaled < -int64(warn) {
-		return time.Duration(scaled)
-	}
-	return 0
-}
-```
-
-### WR-02: NewClock never clamps initialL to the 48-bit domain — the one unclamped input silently defeats the documented wrap protection
-
-**File:** `internal/app/clock/clock.go:63-65`
-**Issue:** `NewClock` masks `initialC` (`& counterMask`), `Update` masks
-`remoteC`, clamps `newL` with `min(newL, maxL)`, and `Tick` clamps the wall
-reading with `min(ptMs, maxL)` — but `initialL` is stored raw with no clamp
-and, unlike `PackVersion`, its doc comment states no range constraint on the
-caller. For `initialL > maxL`: `Tick`'s saturation guard `c.l == maxL`
-(clock.go:85) never fires because `c.l > maxL`, `l` only grows, and every
-stamped version reaches `PackVersion` with `l` beyond the domain, where
-`l&tsMask` silently wraps it to the bottom — verified by execution:
-`initialL = maxL+5` ticks to `l = maxL+6`, and `PackVersion` packs `l = 6`.
-That is exactly the "silently wrap the timestamp" failure the package doc
-(clock.go:20-23) promises cannot happen ("readings saturate at the 48-bit
-timestamp ceiling instead of wrapping out of the version domain ... never a
-wrap to zero"): a node restarted with a corrupted out-of-range watermark
-would issue low versions that lose every future LWW merge against its own
-prior writes. Not reachable through the intended dump pipeline (`Unpack` is
-masking, so dump-derived watermarks are always ≤ maxL), hence Warning
-rather than Critical — but the package's stated totality philosophy makes
-this input the inconsistent one.
-**Fix:** Clamp in the constructor, matching the treatment of every other
-input:
-
-```go
-func NewClock(now func() time.Time, initialL int64, initialC uint16, driftWarn time.Duration) *Clock {
-	return &Clock{l: min(initialL, maxL), c: initialC & counterMask, now: now, driftWarn: driftWarn}
-}
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+  gate:
+    name: gate (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on || matrix.name }}
+    timeout-minutes: 20
 ```
 
 ## Info
 
-### IN-01: NewRNG doc comment overstates the printed-seed contract ("on every run")
+### IN-07: Three stale `buf.gen.yaml` references remain in .claude/CLAUDE.md after the file was deleted
 
-**File:** `internal/app/internal/testutil/rng.go:38-40`
-**Issue:** The comment says the seed "is printed with the exact
-`property seed:` prefix on every run", but it is emitted via `t.Logf`,
-which `go test` suppresses for passing tests unless `-v` is given. The
-D-04 replay contract still holds where it matters — the output appears on
-failure, and every failure message says "replay with the property seed
-above" — so this is a doc-accuracy nit, not a broken contract.
-**Fix:** Reword to "printed with the exact `property seed:` prefix on every
-failing run (or under `-v`)".
+**File:** `.claude/CLAUDE.md:117`, `.claude/CLAUDE.md:138`, `.claude/CLAUDE.md:147`
+**Issue:** 7b55ad1 updated the Buf CLI tool-table row to name the new
+per-tree templates, but three other mentions of the generate config still
+name `buf.gen.yaml`, a file the same commit deleted: the rejected-row "BSR
+remote plugins in `buf.gen.yaml`" (line 117), the version-compatibility
+row "buf.yaml/buf.gen.yaml `version: v2` configs" (line 138), and the
+sources entry "buf.gen.yaml v2 local-plugin syntax" (line 147). A reader
+following the doc to the config file finds nothing on disk.
+**Fix:** Reword to the plural/template names, e.g. "BSR remote plugins in
+the buf.gen.*.yaml templates", "buf.yaml / buf.gen.repl.yaml /
+buf.gen.api.yaml `version: v2` configs", "buf.gen v2 local-plugin
+syntax".
+
+### IN-08: buf.yaml comment claims a single workspace-wide generate pass that no longer exists
+
+**File:** `buf.yaml:14-15`
+**Issue:** The module comment ends "buf generate covers every module in
+the workspace — one pass, both trees." Since 7b55ad1 deleted the default
+`buf.gen.yaml`, a bare `go tool buf generate` now fails outright
+(probe-verified: "Failure: read buf.gen.yaml: file does not exist"), and
+the configured flow is the Makefile's TWO per-tree passes with explicit
+`--template` flags. The sentence describes the pre-delta world and
+contradicts both the Makefile comment and the actual targets one screen
+over in the same repo. The failure mode is self-revealing (a loud buf
+error, not silent wrong output), hence Info.
+**Fix:** Replace the trailing sentence with the current reality, e.g.
+"generate is driven per tree by the Makefile proto target (buf.gen.repl.yaml /
+buf.gen.api.yaml) — a bare workspace generate has no default template
+anymore."
 
 ---
 
-_Reviewed: 2026-11-02T16:03:17Z_
+_Reviewed: 2026-11-14T22:03:58Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+_Delta: 7b55ad1 (base 12e300f)_

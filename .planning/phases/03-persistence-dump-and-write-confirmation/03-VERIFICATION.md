@@ -1,167 +1,202 @@
 ---
 phase: 03-persistence-dump-and-write-confirmation
-verified: 2026-11-03T00:24:11Z
+verified: 2026-11-16T11:12:20Z
 status: passed
 score: 19/19 must-haves verified
-covered_files: [".planning/phases/03-persistence-dump-and-write-confirmation/03-01-PLAN.md", ".planning/phases/03-persistence-dump-and-write-confirmation/03-01-SUMMARY.md", ".planning/phases/03-persistence-dump-and-write-confirmation/03-02-PLAN.md", ".planning/phases/03-persistence-dump-and-write-confirmation/03-02-SUMMARY.md", "docs/IDEA.md", "internal/app/persist/codec.go", "internal/app/persist/codec_test.go", "internal/app/persist/doc.go", "internal/app/persist/engine.go", "internal/app/persist/engine_test.go", "internal/app/persist/errors.go", "internal/persistfile/dumpfile.go", "internal/persistfile/dumpfile_internal_test.go", "internal/persistfile/dumpfile_test.go", "internal/persistfile/snapshot.go", "internal/persistfile/snapshot_test.go", "internal/port/doc.go", "internal/port/dump.go"]
-covered_digest: "v4:sha256:5653650995a0db0a302fa50521665abb340d96dbd2d826122e5a817f73fc7ddf"
-behavior_unverified: 0 # Count of PRESENT_BEHAVIOR_UNVERIFIED truths; none — every behavior-dependent truth has a passing named test (see Behavioral Spot-Checks)
+covered_files: [".planning/phases/03-persistence-dump-and-write-confirmation/03-01-PLAN.md", ".planning/phases/03-persistence-dump-and-write-confirmation/03-01-SUMMARY.md", ".planning/phases/03-persistence-dump-and-write-confirmation/03-02-PLAN.md", ".planning/phases/03-persistence-dump-and-write-confirmation/03-02-SUMMARY.md", "docs/IDEA.md", "internal/app/persist/bench_test.go", "internal/app/persist/codec.go", "internal/app/persist/codec_test.go", "internal/app/persist/doc.go", "internal/app/persist/engine.go", "internal/app/persist/engine_internal_test.go", "internal/app/persist/engine_test.go", "internal/app/persist/errors.go", "internal/persistfile/dumpfile.go", "internal/persistfile/dumpfile_internal_test.go", "internal/persistfile/dumpfile_test.go", "internal/persistfile/fsync_darwin.go", "internal/persistfile/fsync_other.go", "internal/persistfile/snapshot.go", "internal/persistfile/snapshot_test.go", "internal/port/doc.go", "internal/port/dump.go"]
+covered_digest: "v4:sha256:a26510f1393ba250976b4f691c170828dbb873f9086dc99f0b429a573bc6e935"
+behavior_unverified: 0 # Every behavior-dependent truth has a passing named test — both scoped suites re-run fresh under -race -count=1 for this regeneration, plus a darwin cross-compile type-check of the platform-specific fsync path
 overrides_applied: 0
+re_verification:
+  previous_status: passed
+  previous_score: 19/19
+  gaps_closed: [] # No gaps were open; this run regenerates a stale fingerprint, not gap closure
+  gaps_remaining: []
+  regressions: [] # The covered-source delta since 2026-11-14 is three phase-6 commits (06-01 fix 0f5e03d, 06-03 DumpStats 3ff81db, 06-09 F_FULLFSYNC 4f75a3b) — each verified below to preserve every must-have
 ---
 
 # Phase 3: Persistence — Dump and Write Confirmation Verification Report
 
 **Phase Goal:** State survives restarts and a client-confirmed write is always on disk — the write-confirmation contract that makes every later phase strictly additive
-**Verified:** 2026-11-03T00:24:11Z
+**Verified:** 2026-11-16T11:12:20Z
 **Status:** passed
-**Re-verification:** No — initial verification
+**Re-verification:** Yes — regeneration after fingerprint staleness (covered inputs touched by phase-6 commits)
+
+## Regeneration Scope
+
+The 2026-11-14 report passed 19/19 with no gaps. It went stale because phase-6 work (this session) directly touched phase-3 covered inputs. `git log --since=2026-11-14T19:26:57Z -- internal/ docs/IDEA.md` shows exactly three covered-source commits:
+
+1. **0f5e03d (plan 06-01)** — the review-fix commit: conditional dirty in `ApplyRemote`, whole-snapshot Restore no-op, `confirmWaiters` invariant assertion, dead Open fallback removal (fixes this phase's WR-01/IN-01/IN-02, dispositions flipped in-fix in 03-REVIEW-DISPOSITION.md)
+2. **3ff81db (plan 06-03)** — additive `DumpStats` observability atomics in `runDump`
+3. **4f75a3b (plan 06-09)** — `File.Sync` replaced by an F_FULLFSYNC `fcntl` on darwin via `syncDurable` (`fsync_darwin.go`, `fsync_other.go`); resolves-with-code the open macOS F_FULLFSYNC planning decision from phase 3 (STATE.md Blockers/Concerns records it RESOLVED WITH CODE)
+
+This run re-verifies every must-have against the current tree (HEAD 5e62bc7, branch gsd/v1.0-milestone), with focused adversarial scrutiny on that delta. Cross-read governance artifacts: 03-SECURITY.md (retroactive, 7/7 threats closed, threats_open: 0, T-3-05 accepted risk — read, not re-derived) and 03-REVIEW.md / 03-REVIEW-DISPOSITION.md (CR-01 fixed with regression tests; WR-01/IN-01/IN-02 now fixed by 06-01; IN-03/IN-04 info-level open by triage — advisory).
 
 ## Goal Achievement
 
 ### Observable Truths
 
-Roadmap Success Criteria (the contract) are rows 1-4; plan frontmatter truths that add detail follow. Plan truths that purely restate a roadmap SC are folded into its row and noted.
+Roadmap Success Criteria are rows 1-4; plan frontmatter truths that add detail follow. Plan truths that purely restate a roadmap SC are folded into its row. The truth set is unchanged from the plan contract (ROADMAP and both PLANs untouched since 2026-11-03).
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | [SC1] The full map (tombstones included) round-trips through a human-readable JSON dump that is greppable with standard tools | ✓ VERIFIED | `TestEngine_endToEndRestart` (run, PASS under `-race`): reload deep-equals engine 1's `Records()` incl. the gamma tombstone; header line carries `format_version`; per-key lines carry base64 value + 32-char hex version; explicit no-JSON-number-array assertion (engine_test.go:146-164). `TestCodec_roundTripProperty` 500 seeded steps (run, PASS) incl. byte-identical re-encode |
-| 2 | [SC2] A write returns OK only after a dump containing it completed (version watermark); on dump failure it errors while staying in memory; kill-and-restart recovers via main → .prev → empty start, discarding bad-checksum records | ✓ VERIFIED | Cover discipline in `runDump` (engine.go:266-284: cover captured under mu before `Records()`); `TestEngine_dumpFailureFansOut` (run, PASS): all waiters `ErrDumpFailed`, records readable via Get, exactly 2 attempts, no retry loop; `TestFileStore_fallbackChain` (run, PASS): all 5 rows incl. oracle-rejecting; `TestEngine_restartDiscardsTornRecord` (run, PASS): torn record discarded, siblings byte-equal, no collapse to empty start. ErrDumpFailed is the documented Phase 5 Unavailable source (errors.go) |
-| 3 | [SC3] A sustained ~1000 writes/s burst still sees every write confirmed within bounded latency — debounced dumps coalesce but never starve | ✓ VERIFIED | `TestEngine_burstBoundedConfirmation` (run, PASS under `-race` in a synctest bubble): 1000 writes at 1 ms cadence, every return at-or-before oldest+1 s exact in virtual time, ≤3 save attempts, first save at-or-before the bound (engine_test.go:427-469). Deadline timer armed from clean-to-dirty `oldest`, never reset by later changes (engine.go:202-220) |
-| 4 | [SC4] Named snapshots can be created and loaded; restore replays the snapshot as ordinary writes/deletes with fresh versions so it replicates and wins by normal LWW | ✓ VERIFIED | `TestEngine_snapshotCreateLoadRestore` (run, PASS): snapshot byte-equals main dump; snapshot-live beats current tombstone (resurrect), snapshot tombstone beats current live (re-tomb), tombstone no-ops burn no version, absent key untouched, fresh versions Compare-return 1; fresh-engine recovery path; `TestEngine_snapshotFlushForcesDump` + `TestEngine_restoreMissingSnapshot` (run, PASS) |
-| 5 | [VERS-04 persistence half] The loader computes the FULL watermark — max l plus max counter at that l — and Open seeds clock.NewClock with it | ✓ VERIFIED | `Watermark` (codec.go:168-179) keeps the (l, c) pair; `Open` calls `clock.NewClock(now, initialL, initialC, driftWarn)` (engine.go:120-121); `TestWatermark_fullProperty` incl. WR-01 fixture and empty-map (0,0) + `TestWatermark_equalCounterDomain` (run, PASS); strict dominance asserted post-restart in the tracer test (engine_test.go:196-205) |
-| 6 | [01-T2] Dump is JSONL: header object then one record per line sorted by key, byte-stable across generations, tombstones included, lossless round-trip | ✓ VERIFIED | `Encode` uses `slices.Sorted(maps.Keys(...))`, `hex.EncodeToString`, `SetEscapeHTML(false)` (codec.go:62-85); `TestCodec_byteStability` + `TestCodec_roundTripProperty` green (suite run) |
-| 7 | [01-T3] Dump greppable: each key on its own line, base64 values, UUID-shaped 32-char hex versions | ✓ VERIFIED | Tracer file-shape assertions (engine_test.go:146-164); no crc32 import, no second checksum domain (`storage.RecordChecksum` verbatim, codec.go:142) |
-| 8 | [01-T4] Save atomic and crash-safe: temp in target dir, file fsync, rotate to .prev, rename, parent-dir fsync; Load serves .prev on missing/truncated/unparseable main; empty start only when neither reads | ✓ VERIFIED | `saveAtomically`/`syncedTemp`/`placeFile`/`syncDir` implement the exact sequence (dumpfile.go:97-174); `TestFileStore_atomicRotation` (main/.prev bytes, 0600 mode) + full fallback table (run, PASS) |
-| 9 | [01-T5] Bad-checksum record discarded and counted while siblings load; unknown format_version and structural faults make the generation unreadable | ✓ VERIFIED | `decodeRecord` per-record discard vs `errUnsupportedFormat` generation error (codec.go:104-151); `TestCodec_discardClasses` + `TestCodec_truncatedGenerationUnreadable` green (suite run); `Parse` accepts checksum-faulty generations (oracle contract) |
-| 10 | [01-T7] On dump failure every current waiter immediately receives ErrDumpFailed, record stays readable, no retry loop — next dump on next change or re-armed debounce | ✓ VERIFIED | `failWaiters` fans out, re-dirties from fresh epoch (engine.go:311-326); `TestEngine_dumpFailureFansOut` (run, PASS) |
-| 11 | [01-T8] Run's goroutine exits on context cancel and every stranded waiter resolves with ErrClosed — no leaked goroutine, no blocked writer | ✓ VERIFIED | `TestEngine_runExitClosesWaiters` (run, PASS; synctest quiescence deadlock-detects leaks); `sweepClosed` flips `closed` before taking waiters under one mutex hold (engine.go:230-250); post-close surface pinned by `TestEngine_closeSurface` (run, PASS) |
-| 12 | [02-T1] Snapshot(name) forces unconfirmed state to disk via a completed dump, then byte-copies the finished main dump under the validated name — byte-identical; dirty state forces a new dump before the copy | ✓ VERIFIED | `Snapshot` = flush then `CreateSnapshot` (engine.go:434-440); `flushDump` dirty-check with clean fast path (engine.go:187-195); `TestEngine_snapshotCreateLoadRestore` bytes.Equal + `TestEngine_snapshotFlushForcesDump` exact attempt count (run, PASS) |
-| 13 | [02-T2] Restore(name) decodes with the same codec, replays ONLY the snapshot's keys as ordinary writes/deletes with fresh versions, returns only after one final dump covering every replayed write | ✓ VERIFIED | `Restore` (engine.go:456-473): `ReadSnapshot` → `Decode` → sorted-key `replayRecord` via store.Set/store.Delete (no Merge) → `markDirty` + final `flush`; tracer test asserts replay semantics; batched-confirmation reading ratified (see Executor-Flagged Assumptions) |
-| 14 | [02-T3] Replayed records win by normal LWW (fresh versions dominate); restoring the same snapshot twice converges to the snapshot's values | ✓ VERIFIED | Both tombstone directions + fresh-version dominance directly tested (tracer, run PASS). Double-restore convergence is covered by composition: Phase 2 property-tested HLC monotonicity (VERS-02/VERS-03 Complete) + the tested per-restore dominance — the second restore's store.Set versions dominate the first's by construction. Not directly exercised as a double-restore test (see Notes) |
-| 15 | [02-T4] Names outside [A-Za-z0-9._-]{1,64}, or "." and "..", rejected with ErrInvalidSnapshotName before any filesystem touch | ✓ VERIFIED | `validateName` runs first in both operations (snapshot.go:38-42, 59-63; charset+length+dot-specials at 96-106); `TestFileStore_nameValidation` (run, PASS): 8 invalid shapes both operations, 64/65 boundary, directory scan proves nothing escaped .snapshots |
-| 16 | [02-T5] Overwriting an existing snapshot name is atomic in place (no .prev); a dump concurrent with the copy cannot tear it | ✓ VERIFIED | `saveAtomically(..., prevPath="")` for snapshots; `TestFileStore_snapshotOverwriteAtomic` (run, PASS); WR-01 fix serializes CreateSnapshot against Save's rotate window via the FileStore mutex (dumpfile.go:35-43, 62-66) — pinned by `TestFileStore_snapshotConcurrentWithSave` + `TestFileStore_snapshotWaitsOutSaveWindow` (run, PASS) |
-| 17 | [02-T6] Missing snapshot read returns error wrapping fs.ErrNotExist; snapshotting with no dump returns ErrNoDump | ✓ VERIFIED | `readMainDump` maps fs.ErrNotExist→ErrNoDump (snapshot.go:70-76); `TestFileStore_snapshotErrorClasses` + `TestEngine_restoreMissingSnapshot` (run, PASS) |
-| 18 | [01-T1 tracer] A local write flows end-to-end: Set commits, debounced dumper encodes, adapter writes atomically, Set returns nil only after the completed dump; Open reloads and a post-restart write strictly dominates every dumped version | ✓ VERIFIED | `TestEngine_endToEndRestart` against the real filesystem (run, PASS): dump file exists at Set-return time, restart reload with tombstones, Compare==1 dominance; `TestEngine_openEmptyStart` (run, PASS) covers the empty start |
-| 19 | [01-T6] Dumps debounce at 50 ms with the bounded max wait forcing a dump start no later than oldest unconfirmed write + 1 s — exact in virtual time | ✓ VERIFIED | Defaults `defaultDebounce`/`defaultMaxWait` (engine.go:18-21) + `Config.normalized`; `TestEngine_confirmDebounceTiming` green (suite run) + `TestEngine_burstBoundedConfirmation` boundary-exact (run, PASS); `dump_max_wait 1s` documented in docs/IDEA.md:148 between dump_debounce and drift_warn |
+| 1 | [SC1] The full map (tombstones included) round-trips through a human-readable JSON dump that is greppable with standard tools | ✓ VERIFIED | codec.go re-read (unchanged since 2026-11-03): `slices.Sorted(maps.Keys(...))`, `hex.EncodeToString` 32-char versions, base64 data, `SetEscapeHTML(false)` (codec.go:62-85). `TestEngine_endToEndRestart` + `TestCodec_roundTripProperty` in the fresh `-race -count=1` run: PASS |
+| 2 | [SC2] A write returns OK only after a dump containing it completed (version watermark); on dump failure it errors while staying in memory; kill-and-restart recovers via main → .prev → empty start, discarding bad-checksum records | ✓ VERIFIED | Cover discipline intact at engine.go:292-312 (`cover := e.lastLocal` captured under mu in the same hold as the waiter list, before `Records()` at 301; `confirmWaiters` resolves only covered waiters). The 06-03 DumpStats timing wraps only Encode+Save and never touches cover/waiters. `TestEngine_dumpFailureFansOut`, `TestFileStore_fallbackChain` (5-row table), `TestEngine_restartDiscardsTornRecord` — all in the fresh PASS run |
+| 3 | [SC3] A sustained ~1000 writes/s burst still sees every write confirmed within bounded latency — debounced dumps coalesce but never starve | ✓ VERIFIED | Deadline armed from clean-to-dirty `oldest`, never reset by later changes (engine.go:227-245). `TestEngine_burstBoundedConfirmation` (engine_test.go:432) asserts boundary-exact in virtual time: all 1000 returns at or before oldest+MaxWait, first save within the bound, at most 3 save attempts — PASS |
+| 4 | [SC4] Named snapshots can be created and loaded; restore replays the snapshot as ordinary writes/deletes with fresh versions so it replicates and wins by normal LWW | ✓ VERIFIED | `TestEngine_snapshotCreateLoadRestore` (engine_test.go:928, re-read: byte-equal copy, live-beats-tombstone, tombstone-beats-live, no-op tombstone burns no version, absent keys untouched, fresh-version dominance, fresh-engine restore) PASS. The 06-01 whole-snapshot no-op (engine.go:581) skips replay ONLY when the store already equals the snapshot on every key/version/data/tombstone — `TestEngine_redundantDirty` pins the no-op saves nothing while ANY difference still replays in full (the pinned dominance test) |
+| 5 | [VERS-04 persistence half] The loader computes the FULL watermark and Open seeds clock.NewClock with it | ✓ VERIFIED | `Watermark` keeps the (l, c) pair (codec.go:168-179); `Open` calls `clock.NewClock(now, initialL, initialC, driftWarn)` (engine.go:146); `TestWatermark_fullProperty` + `TestWatermark_equalCounterDomain` PASS |
+| 6 | [01-T2] Dump is JSONL: header object then one record per line sorted by key, byte-stable, tombstones included, lossless round-trip | ✓ VERIFIED | Codec re-read confirms; `TestCodec_byteStability` + `TestCodec_roundTripProperty` PASS |
+| 7 | [01-T3] Dump greppable: each key on its own line, base64 values, UUID-shaped 32-char hex versions | ✓ VERIFIED | Tracer file-shape assertions in `TestEngine_endToEndRestart`; `storage.RecordChecksum` verbatim at codec.go:142; zero crc32/hash imports anywhere in persist+persistfile (grep count 0) |
+| 8 | [01-T4] Save atomic and crash-safe: temp in target dir, file fsync, rotate to .prev, rename, parent-dir fsync; Load serves .prev on missing/truncated/unparseable main; empty start only when neither reads | ✓ VERIFIED | `saveAtomically`/`syncedTemp`/`placeFile`/`syncDir` sequence re-read (dumpfile.go:97-176). The 06-09 change routes `writeSynced` and `syncDir` through `syncDurable` — `File.Sync` unchanged on every non-darwin platform (`fsync_other.go` pass-through), `fcntl(F_FULLFSYNC)` strictly stronger on darwin; the fsync-before-rename and dir-fsync-after-rename steps both still execute on every platform — a durability strengthening, PERS-02 semantics intact. `TestFileStore_atomicRotation` + `TestFileStore_fallbackChain` PASS (linux); `GOOS=darwin go build ./...` + `go vet ./internal/persistfile/` type-check the fcntl path |
+| 9 | [01-T5] Bad-checksum record discarded and counted while siblings load; unknown format_version and structural faults make the generation unreadable | ✓ VERIFIED | `decodeRecord` per-record discard vs `errUnsupportedFormat` generation error (codec.go:104-151); `TestCodec_discardClasses` + `TestCodec_truncatedGenerationUnreadable` PASS |
+| 10 | [01-T7] On dump failure every current waiter immediately receives ErrDumpFailed, record stays readable, no retry loop | ✓ VERIFIED | `failWaiters` fans out and re-dirties from a fresh epoch (engine.go:374-389); `TestEngine_dumpFailureFansOut` asserts exactly 2 saves across recovery — PASS |
+| 11 | [01-T8] Run's goroutine exits on context cancel and every stranded waiter resolves with ErrClosed — no leaked goroutine, no blocked writer | ✓ VERIFIED | `sweepClosed` flips `closed` before taking waiters under one mutex hold, drains flushCh with buffered replies, closes `runDone` only after the sweep (engine.go:255-275); `TestEngine_runExitClosesWaiters` + `TestEngine_closeSurface` + both flush-race regressions (`TestEngine_flushRacesRunExit`, `TestEngine_flushRacesExitMidDump` — the fixed CR-01) PASS |
+| 12 | [02-T1] Snapshot(name) forces unconfirmed state to disk via a completed dump, then byte-copies the finished main dump; dirty state forces a new dump first | ✓ VERIFIED | `Snapshot` = flush then `CreateSnapshot` (engine.go:544-550); `flushDump` dirty-check fast path (engine.go:212-220); bytes.Equal assertion at engine_test.go:972 + `TestEngine_snapshotFlushForcesDump` exact attempt count PASS |
+| 13 | [02-T2] Restore(name) replays ONLY the snapshot's keys as ordinary writes/deletes with fresh versions, returns only after one final dump covering every replayed write | ✓ VERIFIED | `Restore` (engine.go:572-591): `ReadSnapshot` → `Decode` → sorted-key `replayRecord` via store.Set/store.Delete (no Merge) → `markDirty` + single `flush`. The 06-01 `restoreChanges` guard (engine.go:601-609) makes the equal-state case a no-op whose final flush replies nil with nothing replayed — vacuous confirmation (zero replayed writes, engine clean); any difference replays in full. Absent-keys-untouched asserted with version identity (engine_test.go:1047-1056) — PASS |
+| 14 | [02-T3] Replayed records win by normal LWW; restoring twice converges | ✓ VERIFIED | Both tombstone directions + fresh-version dominance over max pre-restore version directly tested (PASS). Double-restore convergence remains entailed by the directly-tested per-restore dominance plus Phase 2's property-tested HLC monotonicity — same composition observation as both prior reports, not a gap |
+| 15 | [02-T4] Names outside [A-Za-z0-9._-]{1,64}, or "." and "..", rejected with ErrInvalidSnapshotName before any filesystem touch | ✓ VERIFIED | `validateName` runs first in both operations (snapshot.go:38-42, 59-63; charset+length+dot-specials at 96-106); `TestFileStore_nameValidation` PASS |
+| 16 | [02-T5] Snapshot overwrite is atomic in place (no .prev); a concurrent dump cannot tear it | ✓ VERIFIED | `saveAtomically(..., prevPath="")` for snapshots (snapshot.go:54; empty-prevPath skip at dumpfile.go:150-155); FileStore mutex serializes CreateSnapshot against Save's rotate window (dumpfile.go:35-43, 62-66); `TestFileStore_snapshotOverwriteAtomic` + `TestFileStore_snapshotConcurrentWithSave` + `TestFileStore_snapshotWaitsOutSaveWindow` PASS |
+| 17 | [02-T6] Missing snapshot read wraps fs.ErrNotExist; snapshotting with no dump returns ErrNoDump | ✓ VERIFIED | `readMainDump` maps fs.ErrNotExist→ErrNoDump (snapshot.go:70-76); `TestFileStore_snapshotErrorClasses` + `TestEngine_restoreMissingSnapshot` PASS |
+| 18 | [01-T1 tracer] Local write flows end-to-end with on-disk confirmation at Set-return and post-restart dominance | ✓ VERIFIED | `TestEngine_endToEndRestart` against the real filesystem PASS (fresh run); `TestEngine_openEmptyStart` PASS |
+| 19 | [01-T6] Debounce 50 ms, max wait forces dump start no later than oldest+1 s, exact in virtual time | ✓ VERIFIED | `defaultDebounce`/`defaultMaxWait` + `Config.normalized` (engine.go:18-45); `TestEngine_confirmDebounceTiming` asserts the save lands at exactly start+50ms and Set returns at that same instant; burst boundary-exact test PASS; `dump_debounce 50ms` / `dump_max_wait 1s` at docs/IDEA.md:148 |
 
 **Score:** 19/19 truths verified (0 present, behavior-unverified)
 
+### Covered-Source Delta Scrutiny (Regeneration Focus)
+
+Since the verified 2026-11-14 tree, three commits touched covered inputs. Each adversarially checked against PERS-04's write-confirmation discipline:
+
+**1. 0f5e03d (plan 06-01) — engine.go 129 lines changed.** Four fixes, each read in the current tree and behaviorally pinned:
+
+- **ApplyRemote conditional dirty (engine.go:501-519).** The dirty decision is coded to Merge's Conflict contract: a Conflict with `Winner == rec.Version` is a displacement (dirty), one with `Winner == stored` a rejection; no-Conflict is either an equal-version redelivery (probe saw the key live → skip) or a first install (probe saw the key absent → dirty). Case analysis confirms no genuine store change can skip its dump: a changed record is either a displacement (conflict, winner=incoming → dirty) or a first install under an absent key (getErr != nil → dirty); equal versions imply the identical record (UUIDv7 uniqueness), so the no-op skip is sound. The probe cannot see a stored tombstone, so an equal tombstone redelivery arms one redundant dump — the safe direction only. `TestEngine_redundantDirty` pins all of this, including case (b): a greater remote version arms a dump on a clean engine AND the same covering dump resolves a concurrent local write's waiter (one save covers both — PERS-04 unchanged, the starvation case directly falsified). ApplyRemote still registers no waiter and never raises `lastLocal` (only `await` does, under mu) — REPL-03's memory-apply contract intact, also pinned by `TestEngine_applyRemoteTriggersDump`.
+- **Whole-snapshot Restore no-op (engine.go:581, 601-609).** `restoreChanges` compares only the snapshot's keys (version, data, tombstone flag) against current state; equal ⇒ no replay, no `markDirty`, clean-engine flush replies nil. Any difference replays in full with fresh versions. The D-09 dominance contract is preserved — it exists to make the restore beat a DIFFERENT pre-restore state, and an exactly-equal state has nothing to beat; the pinned `TestEngine_snapshotCreateLoadRestore` (all difference cases) passes unmodified, and `TestEngine_redundantDirty` pins the no-op case saving nothing.
+- **confirmWaiters invariant assertion (engine.go:347-368).** The above-cover belt is kept, now with a never-requeue guard for an already-resolved waiter (double-close prevention). Cover discipline untouched — the guard sits on the unreachable keep branch only. `TestConfirmWaiters_aboveCoverInvariant` (new engine_internal_test.go, white-box — the state is unreachable through the public API) pins kept/nil-resolved/ErrDumpFailed/never-re-queued.
+- **Open dead fallback removal (engine.go:132-141).** Decoding now rides Load's own oracle argument — the generation Load accepts is exactly the one whose Decode succeeded, so the post-Load guard was dead for every contract-honoring DumpStore. The persistfile adapter is such a store (Load applies the oracle per candidate, dumpfile.go:74-86). Fallback-chain and torn-record tests pass unmodified.
+
+**2. 3ff81db (plan 06-03) — DumpStats observability.** Purely additive: three atomics recorded around the Encode+Save pair in `runDump` (engine.go:300-305) after the mutex is released; `recordDump` never touches cover, waiters, or the dirty epoch. The cover capture under one mutex hold before `Records()` is byte-identical to the verified discipline. `TestDumpStats_records` pins success and injected-failure accounting.
+
+**3. 4f75a3b (plan 06-09) — darwin F_FULLFSYNC.** `writeSynced` and `syncDir` route through `syncDurable`: `fcntl(fd, F_FULLFSYNC, 0)` on darwin (strict superset of fsync per fcntl(2); Go's File.Sync binds libc_fsync only), plain `File.Sync` everywhere else — behavior byte-identical on all non-darwin platforms including this one. The canonical atomic-write sequence (temp in target dir, file sync, rotate, rename, dir sync) is intact; only the flush primitive strengthened on one platform. This resolves-with-code the open macOS F_FULLFSYNC planning decision from phase 3 (STATE.md records it RESOLVED WITH CODE, plan 06-09, commit 4f75a3b). Verified: linux race suites green, `GOOS=darwin GOARCH=arm64 go build ./...` and `go vet ./internal/persistfile/` green (the fcntl path never compiles on linux — the cross-compile is the honest local type-check; the 4-cell CI matrix covers the darwin cell). Kill-9 semantics unaffected on every platform: only power loss distinguishes the two flushes, and no CI test simulates power loss.
+
+Also in the delta window: `bench_test.go` (06-08, same package — new file, no production interaction). The 03-REVIEW-DISPOSITION.md was updated in-fix by 0f5e03d: WR-01/IN-01/IN-02 flipped to fixed; CR-01 already fixed; IN-03/IN-04 remain info-level open by triage.
+
+### Prohibitions
+
+All eight plan prohibitions hold as negative checks in the current tree:
+
+| Prohibition | Check | Status |
+|-------------|-------|--------|
+| No second checksum domain (D-07) | grep crc32/hash in persist+persistfile: 0 matches; `storage.RecordChecksum` verbatim at codec.go:142 | ✓ HELD |
+| No engine mutex across Encode/Save I/O | runDump releases mu at engine.go:298 before `Encode`(301)/`Save`(303) | ✓ HELD |
+| No two concurrent dumps | only Run's goroutine calls Save (runDump/flushDump); adapter mutex additionally serializes (dumpfile.go:62-66) | ✓ HELD |
+| No waiter resolved without on-disk containment | cover+waiters captured under one mutex hold before `Records()` (engine.go:293-298) | ✓ HELD |
+| No os/syscall/net/google.golang.org under internal/app/persist or internal/port (non-test) | grep: 0 matches; depguard machine-enforced — `make lint` exit 0. Note: fsync_darwin.go imports syscall but lives in internal/persistfile — the boundary's designated IO package | ✓ HELD |
+| No unvalidated name reaching filepath.Join | `validateName` first in CreateSnapshot (snapshot.go:39) and ReadSnapshot (snapshot.go:60) | ✓ HELD |
+| No full-map replace on restore (D-09) | replay is sorted-key store.Set/Delete only; absent keys asserted untouched with version identity; the 06-01 no-op guard skips only when nothing would change | ✓ HELD |
+| No unconfirmed/torn state copied into a snapshot (D-10) | Snapshot = flush-then-copy; `TestEngine_snapshotFlushErrorAborts` proves a failed flush aborts with nothing copied | ✓ HELD |
+
 ### Required Artifacts
 
-All artifacts exist, are substantive, and are wired. `verify.artifacts` reported Go method-style "Missing export" flags (`DumpStore.Save`, `Engine.Set`, `FileStore.Load`, `Engine.Snapshot`, ...) — these are false negatives of the generic grep against Go method syntax (`func (e *Engine) Set` vs `func Set`); every method was confirmed present by direct code reading. One `contains` miss (`TestEngine_restoreReplaysSnapshot`) is the plan's own frontmatter-vs-task naming conflict, resolved by the executor to the task blocks' name `TestEngine_snapshotCreateLoadRestore` (which the plan's `<verify>` command itself greps for) — documented in 03-02-SUMMARY; the test exists.
+All artifacts exist, are substantive, and are wired. `verify.artifacts` (03-01: 6/10, 03-02: 1/3) flags only Go method-style "Missing export" names (`DumpStore.Save`, `Engine.Set`, `Engine.Snapshot`, ...) — false negatives of the generic grep against Go method-receiver syntax (`func (e *Engine) Set` vs `func Set`); every flagged method confirmed present by direct code reading this run. The `TestEngine_restoreReplaysSnapshot` contains-miss is the plan's own frontmatter-vs-task naming conflict, resolved by the executor to `TestEngine_snapshotCreateLoadRestore` (exists at engine_test.go:928).
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `internal/port/dump.go` | DumpStore seam, 4 methods (min 35 lines) | ✓ VERIFIED | 40 lines; Save/Load/CreateSnapshot/ReadSnapshot declared; parse-oracle Load contract documented |
-| `internal/app/persist/codec.go` | Encode/Decode/Parse/Watermark (min 100) | ✓ VERIFIED | 179 lines; all four exports + per-record discard classes |
-| `internal/app/persist/engine.go` | Write-confirmation engine (min 200/240) | ✓ VERIFIED | 546 lines; Config/New/Open/Run/Set/SetIfAbsent/Delete/Get/Records/Snapshot/Restore |
-| `internal/app/persist/errors.go` | ErrDumpFailed, ErrClosed (min 12) | ✓ VERIFIED | 18 lines, both sentinels with Phase 5 mapping docs |
-| `internal/app/persist/doc.go` | Package contract | ✓ VERIFIED | 43 lines incl. Run lifecycle, D-04 timing, snapshot contracts |
-| `internal/persistfile/dumpfile.go` | Atomic save, .prev rotation, fallback Load (min 120) | ✓ VERIFIED | 174 lines; canonical sequence + WR-01 mutex |
-| `internal/persistfile/snapshot.go` | Snapshot adapter (min 60) | ✓ VERIFIED | 106 lines; validateName, ErrNoDump, ErrInvalidSnapshotName |
-| `internal/app/persist/engine_test.go` | Tracer + synctest suite | ✓ VERIFIED | 1284 lines, 19 test functions |
-| `internal/app/persist/codec_test.go` | Seeded property suite | ✓ VERIFIED | 385 lines; round-trip/byte-stability/discard/watermark laws |
-| `internal/persistfile/dumpfile_test.go` | Rotation, chain table, hygiene, smoke | ✓ VERIFIED | 298 lines |
-| `internal/persistfile/snapshot_test.go` | Name-validation security table (min: contains TestFileStore_nameValidation) | ✓ VERIFIED | 168 lines; 8 invalid shapes + boundary + directory scans |
-| `internal/persistfile/dumpfile_internal_test.go` | (beyond plan — WR-01 regression) | ✓ VERIFIED | 74 lines; internal-package test driving the rotate window; from review-fix commit e1cfb72 |
+| `internal/port/dump.go` | DumpStore seam, 4 methods | ✓ VERIFIED | 40 lines; Save/Load/CreateSnapshot/ReadSnapshot declared with full contracts |
+| `internal/app/persist/codec.go` | Encode/Decode/Parse/Watermark | ✓ VERIFIED | 179 lines; all exports + three per-record discard classes; RecordChecksum verbatim; unchanged since 2026-11-03 |
+| `internal/app/persist/engine.go` | Write-confirmation engine | ✓ VERIFIED | 698 lines; all exports incl. Snapshot/Restore, ApplyRemote, Flush, DumpStats; the 06-01/06-03 deltas verified above |
+| `internal/app/persist/errors.go` | ErrDumpFailed, ErrClosed | ✓ VERIFIED | Both sentinels with Phase 5 mapping docs |
+| `internal/app/persist/doc.go` | Package contract | ✓ VERIFIED | Documents Run lifecycle, D-04 timing, snapshot contracts |
+| `internal/persistfile/dumpfile.go` | Atomic save, .prev rotation, fallback Load | ✓ VERIFIED | 176 lines; canonical sequence routes flushes through syncDurable; WR-01 mutex; dirMode 0700 |
+| `internal/persistfile/snapshot.go` | Snapshot adapter | ✓ VERIFIED | 106 lines; validateName before fs touch, ErrNoDump, ErrInvalidSnapshotName |
+| `internal/app/persist/engine_test.go` | Tracer + synctest suite | ✓ VERIFIED | 23 test functions: 21 prior + TestEngine_redundantDirty (1489) + TestDumpStats_records (1586) |
+| `internal/app/persist/engine_internal_test.go` | White-box WR-01 invariant regression | ✓ VERIFIED | New (06-01): TestConfirmWaiters_aboveCoverInvariant pins the above-cover belt |
+| `internal/app/persist/codec_test.go` | Seeded property suite | ✓ VERIFIED | 6 test functions: round-trip/byte-stability/discard/watermark laws |
+| `internal/persistfile/dumpfile_test.go` | Rotation, chain table, hygiene, smoke | ✓ VERIFIED | 5 test functions |
+| `internal/persistfile/snapshot_test.go` | Name-validation security table | ✓ VERIFIED | TestFileStore_nameValidation + overwrite + error classes |
+| `internal/persistfile/dumpfile_internal_test.go` | WR-01 regression (beyond plan) | ✓ VERIFIED | Internal-package rotate-window driver |
+| `internal/persistfile/fsync_darwin.go` / `fsync_other.go` | Platform durability flush (06-09) | ✓ VERIFIED | Build-tagged pair; darwin fcntl F_FULLFSYNC / other File.Sync; both compile (darwin cross-build verified) |
 
 ### Key Link Verification
 
+`verify.key-links`: 03-01 4/4 verified; 03-02 1/2 — the single miss is the pattern `codec\.Decode`, a same-package call made without qualifier (`Decode(data)` at engine.go:577 in Restore, and Open's `decode` closure at 133); the link intent (one format, one discard discipline for Restore and dump loads) holds by direct reading.
+
 | From | To | Via | Status | Details |
 |------|----|----|--------|---------|
-| persist/engine.go | port/dump.go | `port.DumpStore` | ✓ WIRED | Engine field `dumps port.DumpStore`; Save in runDump, Load with Parse in Open |
-| persist/codec.go | storage/store.go | `storage.RecordChecksum` | ✓ WIRED | decodeRecord verifies via storage.RecordChecksum; no crc32 import (D-07 single checksum domain) |
-| persistfile/dumpfile.go | port/dump.go | `port.DumpStore` | ✓ WIRED | Compile-time assertion `var _ port.DumpStore = (*FileStore)(nil)` |
-| persist/engine.go | clock/clock.go | `clock.NewClock` | ✓ WIRED | Open seeds NewClock(now, initialL, initialC, driftWarn) — VERS-04 seam |
-| persist/engine.go | persistfile/snapshot.go | `CreateSnapshot\|ReadSnapshot` | ✓ WIRED | Snapshot → CreateSnapshot; Restore → ReadSnapshot |
-| persist/engine.go | persist/codec.go | `codec.Decode` | ✓ WIRED | Pattern missed only because engine.go is same-package (`Decode(data)` at engine.go:461/112 — the identical function the codec exports); link intent holds: one format, one discard discipline |
+| persist/engine.go | port/dump.go | `port.DumpStore` | ✓ WIRED | Engine field `dumps port.DumpStore`; Save in runDump, Load with decode oracle in Open |
+| persist/codec.go | storage/store.go | `storage.RecordChecksum` | ✓ WIRED | decodeRecord verifies via storage.RecordChecksum (codec.go:142); no crc32 import |
+| persistfile/dumpfile.go | port/dump.go | `port.DumpStore` | ✓ WIRED | Compile-time assertion `var _ port.DumpStore = (*FileStore)(nil)` (dumpfile.go:46) |
+| persist/engine.go | clock/clock.go | `clock.NewClock` | ✓ WIRED | Open seeds NewClock(now, initialL, initialC, driftWarn) (engine.go:146) |
+| persist/engine.go | persistfile/snapshot.go | `CreateSnapshot\|ReadSnapshot` | ✓ WIRED | Snapshot → CreateSnapshot (engine.go:549); Restore → ReadSnapshot (engine.go:573) |
+| persist/engine.go | persist/codec.go | `codec.Decode` | ✓ WIRED | Same-package unqualified `Decode(data)` at engine.go:134 (Open) and 577 (Restore); grep-pattern miss only |
 
 ### Data-Flow Trace (Level 4)
 
-Library (non-rendering) code — data-flow applies to the dump pipeline rather than UI:
+Library code — data-flow applies to the dump pipeline:
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 |----------|--------------|--------|--------------------|--------|
-| engine.runDump → codec.Encode → dumps.Save | `block` | `store.Records()` live snapshot | Yes — real store map, sorted, hex/base64 encoded | ✓ FLOWING |
-| Open → dumps.Load(Parse) → Decode → Watermark → NewClock | `records`/`initialL,initialC` | On-disk dump bytes (real fs in tracer) | Yes | ✓ FLOWING |
+| engine.runDump → codec.Encode → dumps.Save | `block` | `store.Records()` live snapshot | Yes — real store map, sorted, hex/base64 encoded, written through the real file adapter | ✓ FLOWING |
+| Open → dumps.Load(decode) → Decode → Watermark → NewClock | `records`/`initialL,initialC` | On-disk dump bytes (real fs in tracer test) | Yes | ✓ FLOWING |
 | Restore → ReadSnapshot → Decode → store.Set/Delete | `records` | Snapshot file bytes | Yes | ✓ FLOWING |
 
 ### Behavioral Spot-Checks
 
-All run under `-race` on branch feat/03-persistence-dump-and-write-confirmation (single named-test commands, never the full suite):
+Run on branch gsd/v1.0-milestone at HEAD 5e62bc7, cache bypassed (`-count=1`):
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Tracer restart (PERS-04/SC1/SC2) | `go test -race ./internal/app/persist/ -run '^TestEngine_endToEndRestart$' -v` | PASS (0.57s) | ✓ PASS |
-| 1000-write burst bound (PERS-03/SC3) | `-run '^TestEngine_burstBoundedConfirmation$'` | PASS (0.20s) | ✓ PASS |
-| Failure fan-out (D-05) | `-run '^TestEngine_dumpFailureFansOut$'` | PASS | ✓ PASS |
-| Snapshot/restore semantics (PERS-05/SC4) | `-run '^TestEngine_snapshotCreateLoadRestore$'` | PASS (1.12s) | ✓ PASS |
-| CR-01 regression (flush vs exit race) | `-run '^TestEngine_flushRacesRunExit$'` | PASS (0.10s) | ✓ PASS |
-| Codec round-trip property | `-run '^TestCodec_roundTripProperty$'` | PASS (1.14s, 500 steps) | ✓ PASS |
-| Watermark law + WR-01 fixture | `-run '^TestWatermark_fullProperty$'` | PASS (3 subtests) | ✓ PASS |
-| Torn-record restart | `-run '^TestEngine_restartDiscardsTornRecord$'` | PASS | ✓ PASS |
-| Exit sweep / write surface / empty start / flush-forces-dump / restore-missing / close surface | one 6-test `-run` command | all PASS | ✓ PASS |
-| persistfile suite (chain table, rotation, hygiene, name validation, overwrite, error classes, WR-01 concurrency) | `go test -race ./internal/persistfile/ -v` | all PASS (9 tests) | ✓ PASS |
-| Strict lint gate | `go tool golangci-lint run ./...` | exit 0 | ✓ PASS |
-| Dependency freeze | `git diff --quiet 05123bb HEAD -- go.mod go.sum` | unchanged | ✓ PASS |
-| Port boundary | `ls internal/port` = doc.go dump.go; no non-test `os` import under persist/port | clean | ✓ PASS |
+| Full persist suite under race (30 tests: tracer restart, burst bound, failure fan-out, snapshot/restore incl. whole-restore no-op, redundant-dirty regression, confirmWaiters invariant, flush races, close surface, ApplyRemote, DumpStats, config-shrunk limits, Flush shutdown seam) | `go test -race -count=1 ./internal/app/persist/...` | ok, 2.535s | ✓ PASS |
+| Full persistfile suite under race (9 tests: rotation, fallback chain, hygiene, snapshot smoke, concurrent save, name validation, overwrite, error classes, save-window) | `go test -race -count=1 ./internal/persistfile/...` | ok, 5.975s | ✓ PASS |
+| Strict lint gate incl. config verify + depguard boundary | `make lint` | exit 0 | ✓ PASS |
+| darwin fsync path type-check (never compiled on linux) | `GOOS=darwin GOARCH=arm64 go build ./... && go vet ./internal/persistfile/` | both OK | ✓ PASS |
+| Summary commit hashes resolvable | `verify.commits` on all 11 hashes found in both SUMMARYs | all_valid: true, 11/11 | ✓ PASS |
+| Port/app boundary (prohibition 5) | grep os/syscall/net/google.golang.org under internal/app/persist + internal/port (non-test) | 0 matches | ✓ PASS |
 
 ### Probe Execution
 
-No `scripts/*/tests/probe-*.sh` probes declared by the plans; the plans' probe clauses (PERS-01/02/03/05 concurrency, boundary, idempotency) were discharged as in-tree tests enumerated above (e.g. TestFileStore_snapshotConcurrentWithSave for the snapshot concurrency probe, boundary-exact synctest assertions for PERS-03). Not applicable as external probe scripts.
+No `scripts/*/tests/probe-*.sh` probes declared by the plans; the plans' probe clauses (PERS-01/02/03/05 concurrency, boundary, idempotency) are discharged as in-tree tests enumerated above (e.g. `TestFileStore_snapshotConcurrentWithSave`, boundary-exact synctest assertions, `TestEngine_applyRemoteTriggersDump`, `TestEngine_redundantDirty`). Not applicable as external probe scripts.
 
 ### Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
-|-------------|------------|---------------------|----------|
-| PERS-01 | 03-01 | Human-readable greppable JSON dump of full map | ✓ SATISFIED | Truths 1/6/7; codec + tracer + properties |
-| PERS-02 | 03-01 | Atomic dumps, .prev fallback chain, bad-checksum discard | ✓ SATISFIED | Truths 2/8/9; rotation + chain table + torn-record test |
+|-------------|------------|---------------------|--------|----------|
+| PERS-01 | 03-01 | Human-readable greppable JSON dump of full map | ✓ SATISFIED | Truths 1/6/7; codec + tracer + properties, fresh PASS run |
+| PERS-02 | 03-01 | Atomic dumps, .prev fallback chain, bad-checksum discard | ✓ SATISFIED | Truths 2/8/9; rotation + chain table + torn-record test; durability flush strengthened on darwin (06-09), byte-identical elsewhere |
 | PERS-03 | 03-01 | Debounced dumps with bounded max wait, no starvation | ✓ SATISFIED | Truths 3/19; burst test exact in virtual time |
-| PERS-04 | 03-01 | Write OK only after covering dump; failure stays in memory | ✓ SATISFIED | Truths 2/10/11/18; cover discipline + fan-out test |
-| PERS-05 | 03-02 | Named snapshots; restore replays as ordinary writes, wins by LWW | ✓ SATISFIED | Truths 4/12-17; snapshot/restore suite |
+| PERS-04 | 03-01 | Write OK only after covering dump; failure stays in memory | ✓ SATISFIED | Truths 2/10/11/18 + Delta Scrutiny (conditional dirty, whole-restore no-op, DumpStats and F_FULLFSYNC all preserve the discipline; the starvation case directly falsified by TestEngine_redundantDirty case b); ErrDumpFailed→Unavailable RPC mapping delivered in Phase 5 as documented |
+| PERS-05 | 03-02 | Named snapshots; restore replays as ordinary writes, wins by LWW | ✓ SATISFIED | Truths 4/12-17; snapshot/restore suite incl. the no-op refinement |
 | VERS-04 (persistence half) | 03-01 | Dump loader seeds full watermark via NewClock | ✓ SATISFIED | Truth 5; Watermark + Open wiring + dominance assertion |
 
-Orphaned requirements: none — REQUIREMENTS.md maps exactly PERS-01..PERS-05 to Phase 3 and the plans claim exactly those IDs (traceability rows already marked Complete for all five).
+Orphaned requirements: none — REQUIREMENTS.md maps exactly PERS-01..PERS-05 to Phase 3 (traceability rows all Complete; VERS-04 belongs to Phase 2 with its persistence half delivered by plan 02-04) and the plans claim exactly those IDs.
 
 ### Decision Coverage
 
-`check.decision-coverage-verify`: 10/10 trackable CONTEXT.md decisions (D-01..D-10) honored by shipped artifacts; none dropped during execution. Non-blocking gate, no status impact.
-
-### Test Quality Audit
-
-No disabled/skipped tests in the phase's test files (no `t.Skip` other than the documented root-privilege skip in TestFileStore_saveFailureHygiene, which skips only when os.Geteuid()==0 — an environment guard, not a disabled test). No circular expected-value generation: property oracles are independent (reference max-scan computed field-wise in the test; replay-seed parentheticals present). Assertion strength is value/behavioral throughout (bytes.Equal, exact virtual instants, Compare==1, errors.Is) — not existence-level. Seeds are printed for replay.
+All trackable CONTEXT.md decisions are honored by shipped artifacts: 10/10 (`check.decision-coverage-verify`, non-blocking gate). The phase-3-ratified assumptions carry forward unchanged: D-09 Restore semantics (replay-as-ordinary-writes, never full-map replace — the 06-01 no-op guard skips only when nothing would change, so the ratified semantics are untouched) and D-10 snapshot-overwrite assumptions (flush-then-copy, atomic in-place overwrite, no .prev for snapshots — intact in the current tree).
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
 | internal/port/dump.go | 15 | `//nolint:iface` with linter name + written reason | ℹ️ Info | AGENTS.md deviation 3 sanctioned; cross-package seam by design (D-01) |
-| internal/persistfile/dumpfile.go | 76,168 | `//nolint:gosec` G304 ×2 with reasons | ℹ️ Info | Variable-path reads are the adapter's purpose; paths derive from config, not caller input |
+| internal/persistfile/dumpfile.go | 76,170 | `//nolint:gosec` G304 ×2 with reasons | ℹ️ Info | Variable-path reads are the adapter's purpose; paths derive from config |
 | internal/persistfile/snapshot.go | 65,71 | `//nolint:gosec` G304 ×2 with reasons | ℹ️ Info | Validated names / configured paths only |
+| (prior pass) engine.go WR-01/IN-01/IN-02 | — | Previously-open advisories | ✓ FIXED | All three fixed by 06-01 this session (disposition flipped in-fix): above-cover guard now carries its invariant assertion + white-box regression; dead Open fallback removed; conditional dirty + whole-restore no-op — verified in Delta Scrutiny |
+| 03-REVIEW-DISPOSITION.md | IN-03, IN-04 | Out-of-range checksum collapses generation; .snapshots dir created before ErrNoDump | ℹ️ Info | Open by triage, info-severity, carried forward — no goal impact |
 
-No TBD/FIXME/XXX/TODO/HACK markers in any phase file. No stubs, no empty implementations, no console-log-only paths. The five suppressions are each AGENTS.md-compliant (specific linter + human-readable reason, machine-enforced by nolintlint); the vendored `.golangci.yml` is byte-unchanged since phase start. The plan's "zero suppressions" success-criterion wording is stricter than the project's actual binding policy (AGENTS.md deviation 3 permits documented suppressions); the executor followed the higher-authority project convention — judged acceptable, config untouched, all suppressions documented (see Notes).
+No TBD/FIXME/XXX/TODO/HACK markers and no case-insensitive placeholder/not-yet-implemented strings in any phase file (test or non-test). No stubs, no empty implementations. One `t.Skip` — the documented root-euid environment guard in `TestFileStore_saveFailureHygiene` (dumpfile_test.go:163), not a disabled test. Nolint inventory: exactly 5, each naming its linter with a written reason; the new fsync files added none.
+
+### Advisory (New Scope, Unevidenced)
+
+None — no new-scope findings arose on this pass; the only open review items (IN-03/IN-04) are carried-forward info-level dispositions recorded above.
 
 ### Human Verification Required
 
-None — infrastructure/foundation phase (library-level persistence; no user-facing UI/CLI output). All acceptance criteria are programmatically verified, and every behavior-dependent truth has a passing named behavioral test (14 distinct named tests run under `-race` during this verification, all PASS). Per the infrastructure-phase scoping rule, no artificial manual steps are invented.
-
-### Notes and Judged Deviations
-
-1. **Delete in Task 1 instead of Task 2** (03-01): forced by the plan's own tracer spec (which deletes a key); full confirmation path implemented; exercised by TestEngine_writeSurface. Accepted.
-2. **Engine.Records() added beyond the exports list** (03-01): required by the plan's own tracer assertion ("recordsEqual-style deep comparison against engine 1's Records()"). Same reads-never-gated contract as Get. Accepted.
-3. **Five nolint suppressions** vs the plan's "zero suppressions" criterion: each names its linter with a written reason per AGENTS.md deviation 3 (nolintlint-enforced); gosec G304 fires on the file adapter's core function and iface on a cross-package port seam — no code-direction fix exists. Vendored config untouched. Accepted as the project-sanctioned form.
-4. **Tombstone count 5→3** (03-02 tracer): correct per store Delete no-op semantics, which the plan's own Task 1 behavior spec states ("no version burned"); the Get(ErrNotFound) assertions still cover the tombstoned keys' absence. Accepted.
-5. **Executor-flagged planner assumptions — both ratified**: (a) batched restore confirmation (one final flush) preserves D-09's semantics-level reading ("replay as ordinary writes") and is the plan's own resolved Open Question 4, with a stronger per-operation guarantee than per-write blocking; the Restore-returns-only-after-covering-dump contract is tested. (b) Snapshot overwrite without .prev is research Open Question 2's resolved reading (snapshots are operator recovery points, not crash generations) and is test-pinned. File modes 0600/0700 (03-01 assumption 2) likewise documented in-code.
-6. **CR-01 fix honesty**: the regression tests (TestEngine_flushRacesRunExit, TestEngine_flushRacesExitMidDump) are probabilistic interleaving drivers — they would not deterministically fail on pre-fix code if the preemption window did not land. Confirmed fixed by explicit evidence instead: engine.go:509-533 implements exactly the reviewer's recommended pattern (send and receive both raced against runDone, inner non-blocking reply re-check), and Run's program order (sweepClosed drain → close(runDone), engine.go:161-165) makes a stranded flush structurally impossible — every park point in flush() has a runDone escape that is closed after the drain. Both tests pass under -race inside synctest bubbles whose deadlock detection would fail a hang. No human item required.
-7. **Double-restore idempotency (truth 14)**: no test restores the same snapshot twice on one engine. The clause is entailed by Phase 2's property-tested HLC monotonicity (VERS-02/VERS-03 Complete: every new local version strictly dominates prior ones) plus the directly-tested per-restore fresh-version dominance. Recorded as an observation, not a gap; a one-line double-restore assertion would make it direct if desired.
-8. **Open INFO findings (IN-01..IN-04)**: recorded open in 03-REVIEW-DISPOSITION.md as maintainer triage items (constant duplication drift risk, single-shot engine docs, out-of-range checksum class asymmetry, .snapshots dir created on ErrNoDump). None blocks the phase goal; all are quality polish within the accepted trust model.
-9. **Security gate routing**: `workflow.security_enforcement: true` but no `/gsd:secure-phase` run for this phase (no 03-SECURITY.md). The plans carry their own STRIDE threat models with mitigations verified above (T-3-01 parse-never-panic, T-3-02 atomic sequence, T-3-03 waiter lifecycle, T-3-04 name validation before filesystem touch). Surfaced as a next-step warning for the orchestrator — not a phase failure.
+None — infrastructure/foundation phase (library-level persistence; no user-facing UI). Every behavior-dependent truth has a passing named behavioral test; the full scoped suites were re-run fresh under `-race -count=1` for this regeneration and passed, including the 06-01 regression tests and the darwin cross-compile type-check of the 06-09 platform flush. No `<verify><human-check>` blocks are deferred in either plan.
 
 ### Gaps Summary
 
-None. All 19 must-have truths verified with passing behavioral evidence; all artifacts present, substantive, wired, and data-flowing; all six key links wired; all five PERS requirements plus the VERS-04 persistence half satisfied with no orphans; the strict lint gate, race suite, dependency freeze and depguard boundary all green on the verified tree (HEAD 8c16e57, branch feat/03-persistence-dump-and-write-confirmation).
+None. All 19 must-have truths re-verified against the current tree with fresh behavioral evidence; all artifacts present, substantive, wired, data-flowing; all six key links wired; all five PERS requirements plus the VERS-04 persistence half satisfied with no orphans; all eight prohibitions hold; lint gate (with config verify and the depguard boundary) green; darwin cross-compile green; decision coverage 10/10; security register closed (7/7, threats_open: 0). The three covered-source commits since the 2026-11-14 report each preserve the phase-3 contract: 06-01's fixes strengthen the discipline (conditional dirty falsified for starvation, no-op restore pinned, invariant asserted), 06-03's DumpStats is purely additive, and 06-09's F_FULLFSYNC strictly strengthens durability on darwin while leaving every other platform byte-identical — it also resolves-with-code the open macOS F_FULLFSYNC planning decision from phase 3. The remaining review findings (IN-03/IN-04) are info-level, open by triage, with no goal impact.
 
 ---
 
-_Verified: 2026-11-03T00:24:11Z_
+_Verified: 2026-11-16T11:12:20Z_
 _Verifier: Claude (gsd-verifier)_

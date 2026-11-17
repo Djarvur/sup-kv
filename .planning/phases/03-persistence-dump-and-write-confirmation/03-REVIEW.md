@@ -1,145 +1,112 @@
 ---
 phase: 03-persistence-dump-and-write-confirmation
-reviewed: 2026-11-02T23:52:02Z
+reviewed: 2026-11-14T19:19:18Z
 depth: standard
-files_reviewed: 13
+files_reviewed: 2
 files_reviewed_list:
-  - internal/app/persist/codec.go
-  - internal/app/persist/codec_test.go
-  - internal/app/persist/doc.go
   - internal/app/persist/engine.go
   - internal/app/persist/engine_test.go
-  - internal/app/persist/errors.go
-  - internal/persistfile/dumpfile.go
-  - internal/persistfile/dumpfile_test.go
-  - internal/persistfile/snapshot.go
-  - internal/persistfile/snapshot_test.go
-  - internal/port/doc.go
-  - internal/port/dump.go
-  - docs/IDEA.md
 findings:
-  critical: 1
+  critical: 0
   warning: 1
-  info: 4
-  total: 6
-  blocker: 1
+  info: 2
+  total: 3
+  necessity: 2
 status: issues_found
 ---
 
-# Phase 3: Code Review Report
+# Phase 3: Code Review Report (incremental re-review)
 
-**Reviewed:** 2026-11-02T23:52:02Z
+**Reviewed:** 2026-11-14T19:19:18Z
 **Depth:** standard
-**Files Reviewed:** 13
+**Files Reviewed:** 2
 **Status:** issues_found
 
 ## Summary
 
-The phase-03 persistence stack was reviewed at standard depth against the on-disk state (which includes an uncommitted `codec_test.go` addition of two tests; both were reviewed and pass). Cross-referenced dependencies (`internal/app/storage`, `internal/app/version`, `internal/app/clock`, `internal/app/internal/testutil`) were read to verify contracts at the seams. `go build`, `go vet` and `go test -race` over `internal/app/persist`, `internal/persistfile` and `internal/port` all pass; the five declared `//nolint` suppressions each name their linter with a written reason (AGENTS.md deviation 3 compliant); `go.mod` keeps zero direct runtime requires; the `dump_max_wait` 1s entry is present in `docs/IDEA.md:148` between `dump_debounce` and `drift_warn` as decided (D-04).
+Incremental re-review of the two phase-03 files that changed since the last
+review (base 617951e, 2026-11-03): the delta is `Engine.ApplyRemote` (Merge +
+markDirty + non-blocking `changed` nudge, no waiter), the `Engine.Flush`
+shutdown seam, and three new tests plus the explicit `synctest.Sleep` advance
+on the no-waiter dump paths (`TestFlush_remoteDirtiness`, `TestFlush_closed`,
+`TestFlush_clean`, `TestEngine_applyRemoteTriggersDump`). The CURRENT state of
+both files was re-audited against phase 03's contract; cross-references were
+read in `internal/app/storage/store.go`, `internal/app/version/version.go`,
+`internal/app/persist/codec.go`, `internal/port/dump.go`,
+`internal/persistfile/dumpfile.go` and `internal/persistfile/snapshot.go` to
+verify every seam claim. `go test -race -count=1 ./internal/app/persist/`
+passes.
 
-Overall quality is high: the codec's failure-class separation, the cover discipline (lastLocal updated under the engine mutex after the store write, so confirmation means on-disk containment), the timer pair's Go 1.23+ no-drain usage, the atomic-write sequence, and the snapshot-name security boundary (charset + dot-specials + length, validated before any filesystem touch) were each traced and hold. Two concurrency defects were found: one provable permanent-goroutine-hang race in `flush()` against `Run`'s exit sweep (BLOCKER), and one spurious `ErrNoDump` race between `CreateSnapshot` and a concurrent `Save`'s rotate window (WARNING). Four lower-severity items follow.
+Contract verification results (all hold):
 
-Note: `internal/app/persist/codec_test.go` carries uncommitted modifications in the working tree (two added tests, `TestWatermark_equalCounterDomain` and `TestCodec_truncatedGenerationUnreadable`); both are correct and green, but they must be committed with the phase.
+- **Write confirmation.** The cover discipline is sound: `await`
+  (engine.go:394-401) raises `lastLocal` to ≥ `ver` under the same mutex hold
+  that appends the waiter; `runDump` (engine.go:267-274) captures
+  `cover = lastLocal` and the waiter list under one hold, then takes
+  `Records()` after — so every captured waiter's record is provably inside the
+  dumped snapshot (program order writer: store write → await; `version.Compare`
+  is `bytes.Compare`, a total order). `ApplyRemote` and `Restore`'s replays
+  register no waiter and cannot perturb the cover.
+- **Retry cadence.** `failWaiters` re-dirties from a fresh epoch
+  (engine.go:311-326); `rearm` restarts the debounce timer one interval later.
+  The stale-epoch deadline timer surviving a failed dump (rearm never resets a
+  non-nil deadline) forces at most one extra back-to-back attempt per MaxWait
+  window — earlier, never later than the bound, never a tight loop.
+- **Flush semantics.** Clean engine replies nil with no save (flushDump,
+  engine.go:187-195); the exit sweep resolves stranded waiters and buffered
+  flush requests with `ErrClosed`, `close(runDone)` releases flush senders
+  parked on the full `flushCh` buffer and senders whose request landed after
+  the sweep's drain (engine.go:550-574) — the prior CR-01 fix holds, and the
+  two new exit-race tests exercise it. `Flush` inherits the identical
+  contract.
+- **Exactly-once resolution.** `sweepClosed`/`failWaiters`/`confirmWaiters`
+  take disjoint waiter lists under `mu`, write `err` before `close(done)`;
+  `w.err` reads happen-after the close. No path resolves a waiter twice.
+- **New-code integration.** `ApplyRemote` returns before the debounced dump
+  (no waiter — pinned by `TestEngine_applyRemoteTriggersDump`), passes
+  `ErrValueTooLarge` through without dirtying, and its `changed` nudge wakes an
+  idle dumper whose timers are all nil — the lost-nudge hazard is closed
+  because the nudge is sent after the state change and `rearm` re-reads state
+  under `mu` after consuming it (condition-variable discipline, correct).
+  Snapshot names forwarded by `Snapshot`/`Restore` are validated at the
+  adapter (charset + dot-specials + length, persistfile/snapshot.go:96-106) —
+  no traversal via the engine seam.
 
-## Narrative Findings (AI reviewer)
-
-## Critical Issues
-
-### CR-01: `flush()` can block forever when Run exits between the closed-check and the flushCh send — permanent goroutine hang on shutdown
-
-**File:** `internal/app/persist/engine.go:492-502` (with `sweepClosed` at `internal/app/persist/engine.go:223-243`)
-**Issue:** `flush()` reads `e.closed` under the mutex, unlocks, sends its reply channel into `flushCh`, then blocks on `<-reply`:
-
-```go
-e.mu.Lock()
-closed := e.closed
-e.mu.Unlock()
-if closed {
-    return ErrClosed
-}
-e.flushCh <- reply
-return <-reply
-```
-
-`Run`'s exit path (`sweepClosed`) sets `closed`, resolves stranded waiters, drains `flushCh` once with a non-blocking loop (lines 235-242), and returns — after which nothing ever reads `flushCh` again. The drain only answers requests that landed **before** it ran. Interleaving:
-
-1. A `Snapshot`/`Restore` goroutine calls `flush()` and observes `closed == false` (mutex released).
-2. The context is cancelled; `Run` executes `sweepClosed` to completion — the drain finds `flushCh` empty — and returns.
-3. `flush()` now performs `e.flushCh <- reply`. The channel is buffered (cap 1), so the send succeeds into the buffer with no receiver alive.
-4. `<-reply` blocks forever. The caller hangs permanently — no error, no timeout, no recovery.
-
-This is supported usage, not caller error: `doc.go` states both operations require a running Run goroutine, and context cancellation (SIGTERM in Phase 5) may arrive at any instant concurrent with an operator snapshot/restore RPC; the hung goroutine is an API handler leak on every shutdown that races it. `await()` does not have this bug because its closed-check and waiter registration are a single atomic mutex hold; `flush()` cannot use that pattern (the send must happen outside `mu`), and the check-then-send replacement leaves the window. Related, lower-severity edge: `flush()` likewise blocks forever if Run was never launched — documented as a requirement, but the `closed` early-return creates the impression `flush` always returns.
-**Fix:** Give Run an exit signal closed after the sweep, and race both the send and the receive against it, with a final non-blocking re-check that distinguishes "answered by the sweep" from "stranded after the sweep":
-
-```go
-// in Engine: runDone chan struct{} (created in New)
-// at the very end of Run, after sweepClosed(): close(e.runDone)
-
-func (e *Engine) flush() error {
-	reply := make(chan error, 1)
-	e.mu.Lock()
-	closed := e.closed
-	e.mu.Unlock()
-	if closed {
-		return ErrClosed
-	}
-	select {
-	case e.flushCh <- reply:
-	case <-e.runDone:
-		return ErrClosed
-	}
-	select {
-	case err := <-reply:
-		return err
-	case <-e.runDone:
-		select {
-		case err := <-reply: // the exit sweep answered us after all
-			return err
-		default:
-			return ErrClosed
-		}
-	}
-}
-```
-
-The inner non-blocking re-check is required because `runDone` closes only after the drain completes (program order in `Run`), so a reply present there is exactly one the sweep answered, and an absent one is exactly the stranded case.
+No Critical findings this run. One provable necessity finding (an
+impossible-state guard the code's own comment concedes is unreachable), one
+judgment-call necessity finding, and one quality item on no-op dirty-marking.
+The necessity rubric (`$HOME/.zcode/gsd-core/references/necessity-review.md`)
+was loaded and applied; the go-ultimate skill index was consulted (project
+AGENTS.md deviations — depguard boundary, vendored lint config, justified
+`//nolint` — are all respected by the diff: no new imports outside the module,
+no new suppressions).
 
 ## Warnings
 
-### WR-01: `CreateSnapshot` can spuriously fail with `ErrNoDump` during a concurrent `Save`'s rotate window; the engine's concurrency-safety claim is incorrect
+### WR-01: Impossible-state guard — confirmWaiters' above-cover keep branch cannot fire
 
-**File:** `internal/persistfile/dumpfile.go:133-141` (rotate window), `internal/persistfile/snapshot.go:45-49` and `snapshot.go:65-71` (`readMainDump` mapping `fs.ErrNotExist` to `ErrNoDump`); incorrect claim at `internal/app/persist/engine.go:423-425`
-**Issue:** `placeFile` rotates the old main generation first (`os.Rename(path, prevPath)`) and only then renames the temp onto the main path (`os.Rename(tmpName, path)`). Between the two renames the main path does not exist. `Engine.Snapshot` runs `flush()` and then calls `CreateSnapshot` **on the caller's goroutine**, while `Run` remains free to start the next dump at any moment (a concurrent `Set` re-dirties the engine; the debounce fires ~50 ms later). If `readMainDump`'s `os.ReadFile(f.path)` lands inside that rotate window it sees `fs.ErrNotExist` and `Snapshot` returns `ErrNoDump` even though fully confirmed data exists on disk. The engine doc comment claims "Safe against a dump running concurrently with the copy — the adapter's atomic rename means it always reads one complete generation" — atomic rename guarantees no *torn* read, not no *absent* read; the rotate-first order (correct for the crash chain, D-02) creates precisely an absence window. Result: an operator-visible spurious failure of the snapshot operation exactly during write activity — a flaky RPC in Phase 5.
-**Fix:** Serialize `CreateSnapshot` against `Save` inside `FileStore` — a `sync.Mutex` held across `Save`'s `placeFile` and across `CreateSnapshot`'s `readMainDump`+copy (Load/ReadSnapshot may stay lock-free since the adapter's rename keeps every observable generation complete). Alternatively, boundedly re-read on `ENOENT` (e.g. a short retry) before reporting `ErrNoDump`. Also correct the `Snapshot` doc comment at `engine.go:423-425` to state the real guarantee (no torn read; absence window handled by serialization).
+**File:** `internal/app/persist/engine.go:293-296`
+**Category:** necessity
+**Issue:** The `if w.ver.Compare(cover) > 0 { e.waiters = append(e.waiters, w); continue }` branch defends against a waiter above the captured cover, a state provably unreachable in this repo: (1) the only registration site is `await` (engine.go:394-401), which raises `e.lastLocal` to ≥ `ver` under the same `mu` hold that appends the waiter; (2) `lastLocal` is monotone — the sole write site only ever raises it, never resets (verified by grep: lines 394-396 are the only assignment); (3) `runDump` captures `cover = e.lastLocal` and the waiter list atomically under one `mu` hold (engine.go:267-272); (4) `version.Compare` is `bytes.Compare` over a fixed `[16]byte` — a total, transitive order (internal/app/version/version.go:63-65). Therefore every captured waiter satisfies `ver ≤ cover` and the branch never executes — the code's own comment concedes "unreachable in practice". It runs on every confirmation but defends against nothing in the current codebase.
+**Fix:** Removal is a scope decision, not a mechanical fix — if the invariant ever broke, removing the branch would turn the belt into a *false* nil confirmation (an above-cover waiter claimed on-disk when it is not), strictly worse than the current re-queue. Either remove the branch together with a written invariant assertion (comment or test asserting `ver.Compare(cover) <= 0` for all captured waiters), or keep it as-is: the existing "unreachable in practice, but stranded never" comment already documents the justification. Do not strip it silently (the `necessity` category marker exists so the fixer does not).
 
 ## Info
 
-### IN-01: `maxRecordBytes` literal duplicates the store's value limit — drift risk
+### IN-01: Already-defended-elsewhere — Open's Decode-error fallback is dead in the shipped stack
 
-**File:** `internal/app/persist/codec.go:25`
-**Issue:** `maxRecordBytes = 61440` independently duplicates `defaultValueMaxBytes = 61440` in `internal/app/storage/store.go:15`. The codec's decode bound and the store's write bound encode the same design envelope (docs/IDEA.md `value_max_bytes`); a future change to one silently diverges the other.
-**Fix:** Cross-reference in both constants' comments, or hoist a single shared constant (e.g. in `internal/port` or a shared app-level constants package).
+**File:** `internal/app/persist/engine.go:111-116`
+**Category:** necessity
+**Issue:** `Open` guards a `Decode(dump)` error after `dumps.Load(Parse)` returned ok, falling to the empty start. That state cannot occur with the shipped components: `Load` returns only generations whose bytes passed the caller-supplied oracle (port/dump.go:23-30; persistfile/dumpfile.go:74-86 skips any candidate with `parse(data) != nil`), and the oracle `Parse` is exactly `Decode`'s error channel (`func Parse(dump []byte) error { _, _, err := Decode(dump); return err }`, codec.go:158-161) — a pure function over the same bytes, so `Parse(dump) == nil` implies `Decode(dump)` returns a nil error. The guard is live only against a `port.DumpStore` implementation that violates its documented contract (e.g., a contract-breaking test fake). Rated Info rather than Warning because the bytes originate from files — a trust boundary — and the port is an explicit substitution seam, so the belt is defensible judgment, not a proven lapse.
+**Fix:** Acceptable to keep as seam insurance; alternatively tighten the comment to say the branch is unreachable for contract-honoring adapters rather than implying a real "generation-level decode error" path (the current doc comment at engine.go:98-101 presents it as a live case).
 
-### IN-02: Engine is silently single-shot — `closed` is never reset after one Run exit
+### IN-02: ApplyRemote dirties the engine on no-op merges — redundant dump on stale/equal redelivery
 
-**File:** `internal/app/persist/engine.go:225` (with `New` at 81-89)
-**Issue:** `sweepClosed` sets `e.closed = true` permanently; nothing resets it. Launching `Run` again on the same engine (e.g. a Phase 5 supervisor restarting the dumper) resolves every waiter and flush with `ErrClosed` while the store keeps serving reads — a subtle half-alive state. `doc.go` documents Run's lifecycle but not that the engine is one-shot.
-**Fix:** Document the single-shot contract on `Run`/`New`, or defensively panic/reset state if `Run` is entered on an already-closed engine.
-
-### IN-03: Out-of-range `checksum` field collapses the whole generation instead of discarding one record
-
-**File:** `internal/app/persist/codec.go:53` and `108-116`
-**Issue:** `recordLine.Checksum` is `uint32`. A record line whose `checksum` JSON number is out of range (hand-edited `-1` or `4294967296`) fails inside `json.Decoder`, so `Decode` returns a generation-level error and the entire generation is discarded (fallback to `.prev` / empty start) — whereas an in-range wrong checksum discards only that record (PERS-02's class separation). Disk bit flips in the ASCII digits stay in range, so the exposure is limited to hand edits and corrupt writers, but the class asymmetry is real.
-**Fix:** Decode `checksum` through `json.Number` (or `float64`) with an explicit range check in `decodeRecord`, returning the per-record discard class for out-of-range values.
-
-### IN-04: `CreateSnapshot` creates the `.snapshots` directory even when it then fails with `ErrNoDump`
-
-**File:** `internal/persistfile/snapshot.go:41-48`
-**Issue:** `MkdirAll(snapshotDir, dirMode)` runs before `readMainDump`; a snapshot attempt with no main dump on disk leaves an empty `.snapshots` directory behind as a side effect of a failed call.
-**Fix:** Move `readMainDump` before `MkdirAll` (the copy still creates the directory on the success path via `saveAtomically`).
+**File:** `internal/app/persist/engine.go:429`
+**Issue:** `ApplyRemote` calls `markDirty()` unconditionally whenever `Merge` returns a nil error, but `storage.Merge` also returns nil when nothing was installed: an equal-version redelivery (full no-op, store.go:239-240) and a losing LWW merge (conflict reported, nothing stored, store.go:237-238). A stale or duplicate replicated record therefore schedules a full dump of unchanged state, defeating the "clean engine does not re-dump" economy for redelivery-heavy streams. Correctness is unaffected — dumps are idempotent full snapshots and the debounce amortizes bursts — so this is a quality item, not a bug (performance as such is out of scope; flagged because it contradicts the clean-engine discipline the phase documents). The engine cannot distinguish apply from no-op today: `conflicts` is empty both for a fresh-key install and for an equal redelivery. `Restore`'s unconditional `markDirty` (engine.go:497) shares the class but is forced there (replay outcomes are indistinguishable), while `await` only dirties on real writes.
+**Fix:** If the redundant saves ever matter, extend the store seam in its owning phase to report whether a `Merge` installed (e.g., an `applied bool` return), and gate `markDirty` on it; otherwise record the behavior as accepted in the ApplyRemote doc comment so future readers do not assume dirty implies state change.
 
 ---
 
-_Reviewed: 2026-11-02T23:52:02Z_
+_Reviewed: 2026-11-14T19:19:18Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_

@@ -1,11 +1,13 @@
 package persist
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/clock"
@@ -74,6 +76,22 @@ type Engine struct {
 	flushCh   chan chan error
 	runDone   chan struct{}
 	closed    bool
+
+	// dumpNanos, dumpTotal and dumpErrors carry DumpStats lock-free for
+	// scrapers (OBS-01): runDump is the single writer — the serialized
+	// dumper — so atomic reads need no engine mutex.
+	dumpNanos  atomic.Int64
+	dumpTotal  atomic.Uint64
+	dumpErrors atomic.Uint64
+}
+
+// DumpStats is the dump-cycle gauge OBS-01 reads: the last dump's
+// Encode+Save span in seconds — recorded on success and failure alike —
+// the total dump attempts, and the failed ones.
+type DumpStats struct {
+	DurationSeconds float64
+	Total           uint64
+	Errors          uint64
 }
 
 // New returns an engine persisting store's state through dumps. store and
@@ -91,14 +109,18 @@ func New(store *storage.Store, dumps port.DumpStore, cfg Config) *Engine {
 }
 
 // Open is the one startup composition point: it loads the fallback chain
-// through dumps with Parse as the readability oracle, decodes the first
-// generation that reads (per-record checksum faults discard, never abort),
-// seeds a clock with the dump's FULL watermark (VERS-04), rebuilds the
-// store key by key via Merge, and wraps it all in an engine. The returned
-// count is the discarded-record tally, for observability. ok false — no
-// readable generation at all, or a generation-level decode error — is the
-// empty start, never an error: the chain already exhausted .prev, and an
-// empty node recovers from peers (PERS-02).
+// through dumps, decodes the first generation that decodes (per-record
+// checksum faults discard, never abort), seeds a clock with the dump's
+// FULL watermark (VERS-04), rebuilds the store key by key via Merge, and
+// wraps it all in an engine. The returned count is the discarded-record
+// tally, for observability. No decodable generation at all is the empty
+// start, never an error: the chain already exhausted .prev, and an empty
+// node recovers from peers (PERS-02). Decoding rides Load's own oracle
+// argument: the generation Load accepts is exactly the one whose Decode
+// succeeded, so Open holds no Decode-error fallback at all — the former
+// guard after Load was dead code for every contract-honoring DumpStore
+// (Parse is Decode's own error channel over the same bytes, codec.go) and
+// is gone (03 IN-01, D-15).
 func Open(
 	nodeID uint16,
 	now func() time.Time,
@@ -108,12 +130,15 @@ func Open(
 	engineCfg Config,
 ) (eng *Engine, discarded int) {
 	var records map[string]storage.Record
-	if dump, ok := dumps.Load(Parse); ok {
+	decode := func(dump []byte) error {
 		decoded, count, err := Decode(dump)
-		if err == nil {
-			records, discarded = decoded, count
+		if err != nil {
+			return err
 		}
+		records, discarded = decoded, count
+		return nil
 	}
+	dumps.Load(decode)
 	if records == nil {
 		records = make(map[string]storage.Record)
 	}
@@ -252,17 +277,18 @@ func (e *Engine) sweepClosed() {
 // runDump is the serialized dump cycle: under the mutex it captures the
 // cover version and the current waiter list and clears the dirty epoch,
 // then releases the mutex before any encode or I/O — write-path
-// dirty-marking must never block on adapter I/O. On success every captured
-// waiter resolves nil: the cover discipline is the PERS-04 invariant —
-// lastLocal is updated under the mutex by every write path after its store
-// write installed the record, so any waiter whose version is not greater
-// than the captured cover had its record installed before the capture,
-// hence inside the Records snapshot taken after, and confirmation always
-// means on-disk containment, never elapsed time. On failure every current
-// waiter resolves ErrDumpFailed while the state stays readable in memory,
-// dirty re-arms from a fresh epoch and the re-armed debounce timer starts
-// the next attempt one interval later — never a tight retry loop (D-05,
-// research A8).
+// dirty-marking must never block on adapter I/O. The Encode+Save span is
+// measured and recorded into the DumpStats atomics on success and failure
+// alike (OBS-01). On success every captured waiter resolves nil: the cover
+// discipline is the PERS-04 invariant — lastLocal is updated under the
+// mutex by every write path after its store write installed the record, so
+// any waiter whose version is not greater than the captured cover had its
+// record installed before the capture, hence inside the Records snapshot
+// taken after, and confirmation always means on-disk containment, never
+// elapsed time. On failure every current waiter resolves ErrDumpFailed
+// while the state stays readable in memory, dirty re-arms from a fresh
+// epoch and the re-armed debounce timer starts the next attempt one
+// interval later — never a tight retry loop (D-05, research A8).
 func (e *Engine) runDump() error {
 	e.mu.Lock()
 	cover := e.lastLocal
@@ -271,10 +297,12 @@ func (e *Engine) runDump() error {
 	e.dirty = false
 	e.mu.Unlock()
 
+	start := time.Now()
 	block, err := Encode(e.store.Records())
 	if err == nil {
 		err = e.dumps.Save(block)
 	}
+	e.recordDump(time.Since(start), err)
 	if err != nil {
 		e.failWaiters(captured)
 		return err
@@ -283,15 +311,50 @@ func (e *Engine) runDump() error {
 	return nil
 }
 
+// recordDump stores one dump cycle's observability (OBS-01): the span of
+// the Encode+Save pair, the attempt total and — when err is non-nil — the
+// error count, all through the lock-free atomics DumpStats reads.
+func (e *Engine) recordDump(span time.Duration, err error) {
+	e.dumpNanos.Store(int64(span))
+	e.dumpTotal.Add(1)
+	if err != nil {
+		e.dumpErrors.Add(1)
+	}
+}
+
+// DumpStats returns the dump-cycle counters (OBS-01) — a value copy over
+// the atomics, safe from any goroutine; runDump is the single writer.
+func (e *Engine) DumpStats() DumpStats {
+	return DumpStats{
+		DurationSeconds: float64(e.dumpNanos.Load()) / float64(time.Second),
+		Total:           e.dumpTotal.Load(),
+		Errors:          e.dumpErrors.Load(),
+	}
+}
+
 // confirmWaiters resolves the covered waiters of a completed dump with nil.
 // A captured waiter above the cover is kept for the next epoch — unreachable
 // in practice, since the cover dominates every version registered before
-// the capture, but stranded never.
+// the capture, but stranded never: the kept waiter returns to e.waiters, so
+// the next epoch's confirm/fail fan-out — or Run's exit sweep — provably
+// resolves it. Beside the guard sits its invariant assertion (03 WR-01,
+// D-15): a kept waiter must still be UNRESOLVED here, because resolution
+// closes done exactly once and takes the waiter out of the engine — a
+// resolved waiter reaching this branch is a double-resolution in the
+// making, so it is answered by never re-queueing it (the next fan-out
+// would double-close its done channel). The belt stays documented AND
+// asserted; TestConfirmWaiters_aboveCoverInvariant pins both branches.
 func (e *Engine) confirmWaiters(captured []*waiter, cover version.RecordVersion) {
 	e.mu.Lock()
 	var covered []*waiter
 	for _, w := range captured {
 		if w.ver.Compare(cover) > 0 {
+			select {
+			case <-w.done:
+				// Invariant violated: already resolved, never re-queue.
+				continue
+			default:
+			}
 			e.waiters = append(e.waiters, w)
 			continue
 		}
@@ -408,6 +471,53 @@ func (e *Engine) await(ver version.RecordVersion) error {
 	return w.err
 }
 
+// ApplyRemote joins one remotely replicated record into the store and,
+// only when the merge actually changed the stored record, marks the engine
+// dirty with NO waiter — REPL-03's memory-apply contract, the seam await's
+// doc reserved in Phase 3 ("only local writes register waiters, and Phase
+// 4's remote merges will reuse the dirty path without waiters"): the
+// replication core Acks a DataReplication as soon as the record is
+// applied to memory, and the dump that persists it is asynchronous to that
+// confirmation — the running Run picks the dirty flag up and dumps on the
+// debounce schedule, so the changed e.changed nudge (the same non-blocking
+// signal await sends) is what wakes an idle dumper to re-arm its timers.
+// The dirty decision is coded to storage.Store.Merge's documented return
+// contract (D-15, 03 IN-02 + 04 IN-02, threat T-6-01): a Conflict whose
+// Winner is the incoming version is a displacement (the record became the
+// stored record — changed), one whose Winner is the stored version a
+// rejection (a stale redelivery installed nothing — unchanged), and no
+// Conflict is either an equal-version redelivery over an existing record
+// (a full no-op) or the first record under the key (installed with
+// nothing displaced) — the live-read probe taken BEFORE the merge
+// separates the two, so an equal redelivery leaves a clean engine clean
+// with no redundant dump. The probe cannot see a stored tombstone, so an
+// equal-version redelivery of a tombstone arms one redundant dump — the
+// safe direction only: a genuinely changed record never skips its dump,
+// and PERS-04's confirmation semantics are untouched.
+// Store errors surface unchanged: an oversize record's ErrValueTooLarge
+// merges nothing, dirties nothing and never wedges the engine (T-04-04).
+// Not gated on Run's exit: the merge keeps the store converging even while
+// the dumper is gone, exactly like reads keep serving (Get).
+func (e *Engine) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
+	_, getErr := e.store.Get(key)
+	conflicts, drift, err := e.store.Merge(key, rec)
+	if err != nil {
+		return conflicts, drift, err
+	}
+	displaced := len(conflicts) > 0 && conflicts[0].Winner == rec.Version
+	if !displaced && getErr == nil {
+		// Rejected stale redelivery or equal-version redelivery over the
+		// live record the probe saw: the store did not change.
+		return conflicts, drift, nil
+	}
+	e.markDirty()
+	select {
+	case e.changed <- struct{}{}:
+	default:
+	}
+	return conflicts, drift, nil
+}
+
 // Get returns a copy of the live record for key — reads are never gated on
 // dumps, and a failed dump leaves every record readable in memory (D-05).
 func (e *Engine) Get(key string) (storage.Record, error) {
@@ -445,14 +555,20 @@ func (e *Engine) Snapshot(name string) error {
 // Delete that beats any current live value, and keys absent from the
 // snapshot keep their state untouched — the snapshot's own versions are
 // never re-installed (no Merge); fresh versions are what make the restore
-// replicate and win by normal LWW. The replay runs in deterministic
-// sorted-key order through the store's write path, and the call returns
-// only after one final flush whose dump covers every replayed write — the
-// same write-confirmation contract as Set, batched into one flush because
-// the per-key semantics are identical while sequential per-write blocking
-// would serialize N writes at one debounce each. Errors surface unchanged
-// — a missing snapshot, a generation-level decode fault, a store rejection
-// or a failed confirming dump — never a silent empty success.
+// replicate and win by normal LWW. A snapshot that already equals the
+// store's current state — every record, version and tombstone — replays
+// as a whole-restore no-op: the engine stays clean and the final flush
+// replies nil without a redundant dump (D-15, 03 IN-02 + 04 IN-02);
+// ANY difference replays in full, every snapshot record re-stamped fresh,
+// preserving the fresh-version dominance the restore replicates and wins
+// by. The replay runs in deterministic sorted-key order through the
+// store's write path, and the call returns only after one final flush
+// whose dump covers every replayed write — the same write-confirmation
+// contract as Set, batched into one flush because the per-key semantics
+// are identical while sequential per-write blocking would serialize N
+// writes at one debounce each. Errors surface unchanged — a missing
+// snapshot, a generation-level decode fault, a store rejection or a
+// failed confirming dump — never a silent empty success.
 func (e *Engine) Restore(name string) error {
 	data, err := e.dumps.ReadSnapshot(name)
 	if err != nil {
@@ -462,14 +578,34 @@ func (e *Engine) Restore(name string) error {
 	if err != nil {
 		return err
 	}
-	for _, key := range slices.Sorted(maps.Keys(records)) {
-		err = replayRecord(e.store, key, records[key])
-		if err != nil {
-			return err
+	if restoreChanges(e.store.Records(), records) {
+		for _, key := range slices.Sorted(maps.Keys(records)) {
+			err = replayRecord(e.store, key, records[key])
+			if err != nil {
+				return err
+			}
+		}
+		e.markDirty()
+	}
+	return e.flush()
+}
+
+// restoreChanges reports whether replaying the snapshot's records would
+// change the store's current state: the snapshot differs from the store
+// when any of its keys holds a different record — version, data or
+// tombstone flag — than the store does now. Keys the snapshot does not
+// carry never matter, exactly as the replay never touches them; a
+// snapshot equal to the store's current state is a whole-restore no-op
+// (D-15), while any difference replays in full with every snapshot record
+// re-stamped fresh (D-09's dominance contract).
+func restoreChanges(current, snap map[string]storage.Record) bool {
+	for key, rec := range snap {
+		stored, ok := current[key]
+		if !ok || stored.Version != rec.Version || stored.Deleted != rec.Deleted || !bytes.Equal(stored.Data, rec.Data) {
+			return true
 		}
 	}
-	e.markDirty()
-	return e.flush()
+	return false
 }
 
 // replayRecord installs one snapshot record through the store's ordinary
@@ -491,6 +627,21 @@ func replayRecord(store *storage.Store, key string, rec storage.Record) error {
 		return nil
 	}
 	return err
+}
+
+// Flush is the shutdown seam (D-19): the binary's signal path calls it
+// BEFORE cancelling the engine context, turning residual dirtiness — remote
+// merges applied via ApplyRemote that have no waiter — into one final
+// write-confirmed dump. It is the only such path: Run's exit sweep resolves
+// stranded waiters with ErrClosed without performing a final dump, so state
+// merged after the last scheduled dump would otherwise die with the
+// process. Delegates to flush with its exact contract: a dirty engine
+// completes one covering dump and returns its error, a clean engine replies
+// nil without a redundant save (the D-10 clean decision), and ErrClosed
+// once Run has exited. Requires a running Run goroutine like every blocking
+// engine call.
+func (e *Engine) Flush() error {
+	return e.flush()
 }
 
 // flush forces the dumper to complete one dump covering every unconfirmed

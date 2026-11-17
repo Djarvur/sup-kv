@@ -18,14 +18,35 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15 # P1-WR-01: a wedged job must not hold a runner for the 6h default
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # buf breaking resolves refs/remotes/origin/master from the local .git — a shallow checkout cannot
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       # `run` silently ignores unknown top-level config keys (T-01-01): schema-check
       # the vendored strict config with the same pinned binary before linting.
       - run: go tool golangci-lint config verify
+      # Buf schema gates: proto lint + format + guarded breaking vs origin/master,
+      # all via the go.mod-pinned `go tool buf` binary (same as the Makefile targets).
+      # The guard is required because buf v1.75 exits 1 on a proto-less against-ref
+      # (probe-verified) while supkv.proto is not yet on origin/master — it
+      # self-destructs the moment PR #31 merges and every later PR gets the full
+      # FILE-policy comparison; the .git-dir against-input avoids any private-repo
+      # token plumbing the remote-https form would need (D-08, whose permitted
+      # .git#branch fallback shape is refined here by the explicit remote-tracking
+      # refspec for determinism).
+      - name: Buf proto schema gates (lint, format, breaking vs origin/master)
+        run: |
+          go tool buf lint
+          go tool buf format --diff --exit-code
+          if git cat-file -e refs/remotes/origin/master:internal/udprepl/replproto/supkv/v1/supkv.proto; then
+            go tool buf breaking --against '.git#ref=refs/remotes/origin/master'
+          else
+            echo "buf breaking deferred: supkv.proto not on origin/master yet (D-08 guard)"
+          fi
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.15.0 # full patch pin == go.mod tool directive (local/CI parity)
@@ -33,6 +54,7 @@ jobs:
   gate:
     name: gate (${{ matrix.name }})
     runs-on: ${{ matrix.runs-on || matrix.name }}
+    timeout-minutes: 20 # P1-WR-01: race suite + tidy bound; a hung cell fails instead of hanging the runner
     strategy:
       fail-fast: false # a red cell must not cancel the remaining cells' evidence
       matrix:

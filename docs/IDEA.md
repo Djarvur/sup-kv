@@ -144,7 +144,7 @@ sync).
 `node_id`, `bind_addr`, `broadcast_addr`, `dump_path` (required);
 `value_max_bytes` 61440; `sync_chunk_bytes` 1400; `hello_interval` 1s;
 `peer_timeout` 5s; `ack_timeout` 200ms; `ack_timeout_max` 5s;
-`retransmit_interval` 100ms; `sync_interval` 30s; `sync_response_rate` 500/s;
+`retransmit_interval` 100ms; `sync_interval` 30s; `sync_response_rate` 500/s (sync responses spaced ⌊1s/rate⌋ — 2ms at the default, integer nanoseconds, first response immediate);
 `startup_gate` 1s; `dump_debounce` 50ms; `dump_max_wait` 1s; `drift_warn` 60s.
 
 ### Trust model (accepted limitation)

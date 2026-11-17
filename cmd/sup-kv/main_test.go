@@ -1,0 +1,1231 @@
+package main_test
+
+// The binary smoke test: the real sup-kv binary, built once by the go tool
+// into a temp dir, exec'd as a real process on real TCP and UDP ports, and
+// driven through its whole lifecycle — --version identity, the flag > env >
+// default precedence observed on the gRPC listener, and a write followed by
+// SIGTERM with a clean exit 0 and a dump file that greps for the committed
+// key. The discipline follows internal/udprepl/smoke_test.go (D-08's
+// conventions): free ports via throwaway :0 binds, poll-based waitFor with
+// margins kept ahead of the test's own hard deadline, and every capability
+// skip loud, naming exactly what was probed — a missing go tool is the only
+// skip path, and it is a loud failure on any machine that just built this
+// very test binary.
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+)
+
+// Smoke-test constants: the wait deadlines with their poll cadence, the
+// per-RPC bounds, the version byte width of the wire record, and the margin
+// kept ahead of the test's own hard deadline so a timeout fails with this
+// test's message rather than the runner's kill.
+const (
+	pollEvery          = 10 * time.Millisecond
+	servingDeadline    = 10 * time.Second
+	exitDeadline       = 15 * time.Second
+	checkTimeout       = 500 * time.Millisecond
+	rpcTimeout         = 5 * time.Second
+	dialTimeout        = 500 * time.Millisecond
+	versionBytes       = 16
+	hardDeadlineMargin = 250 * time.Millisecond
+
+	smokeKey   = "smoke/lifecycle-key"
+	smokeValue = "sup-kv-binary-smoke-value"
+)
+
+// The smoke binary's shared build result: TestMain builds once, the tests
+// skip loudly through smokeBinary when the toolchain probe failed.
+var (
+	smokeDir       string
+	smokeBin       string
+	errSmokeBinary error
+)
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "sup-kv-main-smoke-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sup-kv smoke: MkdirTemp: %v\n", err)
+		os.Exit(1)
+	}
+	smokeDir = dir
+	smokeBin, errSmokeBinary = buildSmokeBinary(context.Background(), filepath.Join(dir, "sup-kv"))
+	code := m.Run()
+	_ = os.RemoveAll(smokeDir)
+	if code != 0 {
+		fmt.Fprintf(os.Stderr, "sup-kv smoke: tests failed with code %d\n", code)
+	}
+}
+
+// buildSmokeBinary builds the production binary once for all smoke tests:
+// the probes are exec.LookPath("go") and `go build -o <bin> .` from this
+// package's directory. The returned error names the probe that failed —
+// smokeBinary turns it into a loud skip, never a silent pass.
+func buildSmokeBinary(ctx context.Context, bin string) (string, error) {
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		return "", fmt.Errorf("probe exec.LookPath(go): %w", err)
+	}
+	cmd := exec.CommandContext(ctx, goTool, "build", "-o", bin, ".")
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err = cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("probe go build -o %s: %w: %s", bin, err, strings.TrimSpace(out.String()))
+	}
+	return bin, nil
+}
+
+// smokeBinary returns the built binary or skips loudly naming the failed
+// probe: the smoke tests exec the real binary, so without it there is
+// nothing to observe — protocol and engine correctness stay proven by the
+// package suites.
+func smokeBinary(t *testing.T) string {
+	t.Helper()
+	if errSmokeBinary != nil {
+		t.Skipf(
+			"sup-kv binary smoke unavailable: %v — probed exec.LookPath(\"go\") and the go build of ./cmd/sup-kv into %s; protocol and engine correctness stay proven by the package suites",
+			errSmokeBinary,
+			smokeDir,
+		)
+	}
+	return smokeBin
+}
+
+// freeTCPPort picks one free TCP port: bind a throwaway listener to :0,
+// read its port, close it.
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind throwaway port-picking listener: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+// freeUDPPort picks one free UDP port: bind a throwaway wildcard socket to
+// :0, read its port, close it (the smoke_test.go picker).
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	var lc net.ListenConfig
+	conn, err := lc.ListenPacket(t.Context(), "udp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("bind throwaway port-picking socket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	return conn.LocalAddr().(*net.UDPAddr).Port
+}
+
+// waitFor polls cond every pollEvery until it holds or the deadline — the
+// earlier of timeout and the test's own hard deadline minus a margin — and
+// fails with what on expiry (the smoke_test.go helper).
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	if d, ok := t.Deadline(); ok {
+		if hard := d.Add(-hardDeadlineMargin); hard.Before(deadline) {
+			deadline = hard
+		}
+	}
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(pollEvery)
+	}
+	t.Fatalf("timed out after %v waiting for %s", timeout, what)
+}
+
+// smokeNode is one running binary under test with its captured output and
+// its single Wait result. stderr holds the plain post-exit buffer or the
+// structured-logging tests' lock-guarded live buffer (outputCapture).
+type smokeNode struct {
+	cmd    *exec.Cmd
+	stdout *bytes.Buffer
+	stderr outputCapture
+	exit   chan error
+	exited chan struct{}
+}
+
+// outputCapture is the stderr seam smokeNode holds: the plain bytes.Buffer
+// read only after exit and the logBuffer read while the process still runs
+// both satisfy it.
+type outputCapture interface {
+	Write(p []byte) (int, error)
+	String() string
+}
+
+// logBuffer is a mutex-guarded bytes.Buffer: the structured-logging tests
+// read the live process's stderr while the exec package's pump goroutine
+// still writes it — a bare bytes.Buffer is not safe for that concurrency.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+// Write buffers p under the lock.
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// String returns the buffered output under the lock.
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// startNode launches the binary with args (env appended to the inherited
+// environment) and registers a kill-and-reap cleanup: a test path that
+// never reaches its own SIGTERM still cannot leak the process.
+func startNode(t *testing.T, bin string, env []string, args ...string) *smokeNode {
+	t.Helper()
+	return launchNode(t, bin, &bytes.Buffer{}, env, args...)
+}
+
+// startLoggedNode is startNode with the lock-guarded live stderr buffer —
+// the shape the structured-logging tests poll while the node runs.
+func startLoggedNode(t *testing.T, bin string, env []string, args ...string) *smokeNode {
+	t.Helper()
+	return launchNode(t, bin, &logBuffer{}, env, args...)
+}
+
+// launchNode is the shared startNode body over one stderr capture.
+func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, args ...string) *smokeNode {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), bin, args...)
+	stdout := &bytes.Buffer{}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	err := cmd.Start()
+	if err != nil {
+		t.Fatalf("start %s %v: %v", bin, args, err)
+	}
+	node := &smokeNode{
+		cmd:    cmd,
+		stdout: stdout,
+		stderr: stderr,
+		exit:   make(chan error, 1),
+		exited: make(chan struct{}),
+	}
+	go func() {
+		node.exit <- cmd.Wait()
+		close(node.exited)
+	}()
+	t.Cleanup(node.reap)
+	return node
+}
+
+// reap kills the node when it outlived its test.
+func (n *smokeNode) reap() {
+	select {
+	case <-n.exited:
+		return
+	default:
+	}
+	_ = n.cmd.Process.Kill()
+	<-n.exited
+}
+
+// signalAndWaitExit SIGTERMs the node and waits for a clean exit 0 — the
+// D-19 contract every test path relies on for clean teardown.
+func signalAndWaitExit(t *testing.T, node *smokeNode) {
+	t.Helper()
+	err := node.cmd.Process.Signal(syscall.SIGTERM)
+	if err != nil {
+		t.Fatalf("SIGTERM %d: %v", node.cmd.Process.Pid, err)
+	}
+	var exitErr error
+	var exited bool
+	waitFor(t, exitDeadline, "process exit after SIGTERM", func() bool {
+		select {
+		case exitErr = <-node.exit:
+			exited = true
+			return true
+		default:
+			return false
+		}
+	})
+	if !exited {
+		t.Fatalf("process %d still running %v after SIGTERM", node.cmd.Process.Pid, exitDeadline)
+	}
+	assertExitCode(t, exitErr, 0)
+}
+
+// assertExitCode checks a completed Wait against the wanted exit code —
+// nil means 0; a signal kill reports -1 and fails a non-zero want loudly.
+func assertExitCode(t *testing.T, err error, want int) {
+	t.Helper()
+	if err == nil {
+		if want != 0 {
+			t.Fatalf("process exited 0, want %d", want)
+		}
+		return
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("process wait error = %v, want an ExitError", err)
+	}
+	if ee.ExitCode() != want {
+		t.Fatalf("process exit code = %d (%s), want %d", ee.ExitCode(), ee.String(), want)
+	}
+}
+
+// awaitServing polls the gRPC health Check over real TCP until it reports
+// SERVING — the startup gate opened. Each poll uses a fresh client so the
+// poll cadence never couples to one connection's reconnect backoff.
+func awaitServing(t *testing.T, addr string, timeout time.Duration) { //nolint:unparam // every caller passes servingDeadline; stable harness shape, extended not rebuilt (06-07).
+	t.Helper()
+	waitFor(t, timeout, "health SERVING on "+addr, func() bool {
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = conn.Close() }()
+		ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
+		defer cancel()
+		resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
+}
+
+// supKVConn opens one gRPC client connection for the SupKV service calls.
+func supKVConn(t *testing.T, addr string) *grpc.ClientConn {
+	t.Helper()
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient(%s): %v", addr, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// assertNoPanic fails when the node's combined output carries a Go panic or
+// runtime fatal error.
+func assertNoPanic(t *testing.T, node *smokeNode, what string) {
+	t.Helper()
+	output := node.stdout.String() + node.stderr.String()
+	if strings.Contains(output, "panic:") || strings.Contains(output, "fatal error:") {
+		t.Fatalf("%s left a panic in the process output:\n%s", what, output)
+	}
+}
+
+// TestMain_version pins the D-18 observable: --version exits 0 and prints
+// "sup-kv " followed by the non-empty version, commit and Go runtime
+// tokens. The smoke binary is built without ldflags, so the tokens are the
+// dev fallbacks — the same output an unstamped developer build must show.
+func TestMain_version(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(t.Context(), bin, "--version")
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if err != nil {
+		t.Fatalf("run --version: %v (stderr: %s)", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.HasPrefix(out, "sup-kv ") {
+		t.Fatalf("--version output %q does not start with %q", out, "sup-kv ")
+	}
+	fields := strings.Fields(strings.TrimPrefix(out, "sup-kv "))
+	if len(fields) < 3 || fields[0] == "" || fields[1] == "" || fields[2] == "" {
+		t.Fatalf("--version output %q lacks non-empty version/commit/runtime tokens", out)
+	}
+}
+
+// TestMain_precedence proves the D-16/D-17 precedence end-to-end on the
+// observable gRPC listener: with only SUPKV_GRPC_ADDR set, the health
+// endpoint answers on the env-chosen port (env over the 127.0.0.1:7901
+// default); with the same env plus an explicit --grpc-addr pointing at a
+// second port, it answers on the flag-chosen port and the env port stayed
+// unbound — an env var can never beat an explicit flag (T-05-11).
+func TestMain_precedence(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	envPort := freeTCPPort(t)
+	flagPort := freeTCPPort(t)
+	envAddr := fmt.Sprintf("127.0.0.1:%d", envPort)
+	flagAddr := fmt.Sprintf("127.0.0.1:%d", flagPort)
+
+	// Run 1 — env only: SUPKV_GRPC_ADDR moves the listener off the default.
+	udp1 := freeUDPPort(t)
+	dump1 := filepath.Join(t.TempDir(), "dump.json")
+	node1 := startNode(t, bin, []string{"SUPKV_GRPC_ADDR=" + envAddr},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udp1),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udp1),
+		"--dump-path="+dump1,
+		"--startup-gate=10ms",
+	)
+	awaitServing(t, envAddr, servingDeadline)
+	signalAndWaitExit(t, node1)
+
+	// Run 2 — the same env plus an explicit flag: the flag must win.
+	udp2 := freeUDPPort(t)
+	dump2 := filepath.Join(t.TempDir(), "dump.json")
+	node2 := startNode(t, bin, []string{"SUPKV_GRPC_ADDR=" + envAddr},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udp2),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udp2),
+		"--dump-path="+dump2,
+		"--grpc-addr="+flagAddr,
+		"--startup-gate=10ms",
+	)
+	awaitServing(t, flagAddr, servingDeadline)
+	signalAndWaitExit(t, node2)
+
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	conn, err := dialer.DialContext(t.Context(), "tcp", envAddr)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("run 2 also bound the env-chosen port %s — flag over env is broken", envAddr)
+	}
+}
+
+// TestMain_lifecycle drives the whole node lifecycle through the real
+// binary: the startup gate opens (SERVING over real TCP — the timeout path,
+// since a lone node receives no DataSync), a SupKV client Sets and Gets one
+// key, SIGTERM produces a clean exit 0 (D-19), the dump file exists and its
+// greppable JSON contains the committed key (PERS-01), and the process
+// output carries no panic.
+func TestMain_lifecycle(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+
+	node := startNode(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+	)
+	awaitServing(t, addr, servingDeadline)
+
+	client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	t.Cleanup(cancel)
+	setResp, err := client.Set(ctx, &apiproto.SetRequest{Key: smokeKey, Value: []byte(smokeValue)})
+	if err != nil {
+		t.Fatalf("Set(%q): %v", smokeKey, err)
+	}
+	if len(setResp.GetVersion()) != versionBytes {
+		t.Fatalf("Set(%q) version = %x, want %d bytes", smokeKey, setResp.GetVersion(), versionBytes)
+	}
+	getResp, err := client.Get(ctx, &apiproto.GetRequest{Key: smokeKey})
+	if err != nil {
+		t.Fatalf("Get(%q): %v", smokeKey, err)
+	}
+	if got := getResp.GetRecord(); got.GetKey() != smokeKey || got.GetDeleted() || string(got.GetValue()) != smokeValue {
+		t.Fatalf("Get(%q) = (key %q, deleted %t, value %q), want the written record", smokeKey, got.GetKey(), got.GetDeleted(), got.GetValue())
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the lifecycle run")
+
+	dump, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read dump %s: %v", dumpPath, err)
+	}
+	if !strings.Contains(string(dump), smokeKey) {
+		t.Fatalf("the final dump at %s does not contain the committed key %q:\n%s", dumpPath, smokeKey, dump)
+	}
+}
+
+// TestShutdown_secondSignal pins the P1-IN-01 contract end-to-end: signal
+// ownership stays armed across the whole D-19 shutdown, so a second SIGTERM
+// observed while the graceful drain is still in progress takes the force
+// path instead of killing the process — the final write-confirmed dump
+// still lands and the node still exits 0. The drain is held observably open
+// by a standard health Watch stream: unlike the SupKV Watch (ended by
+// apiCancel ahead of GracefulStop — the D-19 order), the health Watch is
+// not tied to the API context, so GracefulStop waits on it until the client
+// goes away or the server is forced. Against the pre-fix binary the same
+// second signal kills the process with the default disposition (exit 143)
+// and the final dump never happens.
+func TestShutdown_secondSignal(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+
+	node := startNode(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+	)
+
+	// The stream GracefulStop waits on. A reader goroutine drains the
+	// status updates (the flow-control window never fills), and the
+	// statuses observed on it prove where the server is in the D-19
+	// sequence — the initial SERVING doubles as the gate-open wait the
+	// other tests use awaitServing for.
+	wctx, wcancel := context.WithCancel(t.Context())
+	t.Cleanup(wcancel)
+	// WaitForReady: the stream may open before the node's gRPC listener is
+	// up — the call then waits for the connection instead of failing fast.
+	wstream, err := healthpb.NewHealthClient(supKVConn(t, addr)).Watch(wctx, &healthpb.HealthCheckRequest{}, grpc.WaitForReady(true))
+	if err != nil {
+		t.Fatalf("health Watch: %v", err)
+	}
+	statuses := make(chan healthpb.HealthCheckResponse_ServingStatus, 2)
+	go func() {
+		defer close(statuses)
+		for {
+			st, err := wstream.Recv()
+			if err != nil {
+				return
+			}
+			statuses <- st.GetStatus()
+		}
+	}()
+	waitForStatus := func(want healthpb.HealthCheckResponse_ServingStatus, what string) {
+		t.Helper()
+		waitFor(t, servingDeadline, what, func() bool {
+			select {
+			case st, ok := <-statuses:
+				return ok && st == want
+			default:
+				return false
+			}
+		})
+	}
+	waitForStatus(healthpb.HealthCheckResponse_SERVING, "the initial SERVING health status")
+
+	// The earlier write the final dump must still contain after the forced
+	// drain.
+	client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	t.Cleanup(cancel)
+	_, err = client.Set(ctx, &apiproto.SetRequest{Key: smokeKey, Value: []byte(smokeValue)})
+	if err != nil {
+		t.Fatalf("Set(%q): %v", smokeKey, err)
+	}
+
+	// SIGTERM #1: the D-19 sequence starts — its first statement flips the
+	// health status, which arrives on the stream while GracefulStop is (and
+	// stays) blocked on the still-open Watch.
+	err = node.cmd.Process.Signal(syscall.SIGTERM)
+	if err != nil {
+		t.Fatalf("first SIGTERM %d: %v", node.cmd.Process.Pid, err)
+	}
+	waitForStatus(healthpb.HealthCheckResponse_NOT_SERVING, "NOT_SERVING after the first SIGTERM (the graceful drain in progress)")
+
+	// SIGTERM #2 while the drain is blocked: the operator's hurry-up taking
+	// the force path.
+	err = node.cmd.Process.Signal(syscall.SIGTERM)
+	if err != nil {
+		t.Fatalf("second SIGTERM %d: %v", node.cmd.Process.Pid, err)
+	}
+
+	var exitErr error
+	waitFor(t, exitDeadline, "process exit after the second SIGTERM", func() bool {
+		select {
+		case exitErr = <-node.exit:
+			return true
+		default:
+			return false
+		}
+	})
+	assertExitCode(t, exitErr, 0)
+	assertNoPanic(t, node, "the second-signal shutdown run")
+
+	dump, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read dump %s: %v", dumpPath, err)
+	}
+	if !strings.Contains(string(dump), smokeKey) {
+		t.Fatalf("the final dump at %s does not contain the committed key %q:\n%s", dumpPath, smokeKey, dump)
+	}
+}
+
+// Structured-logging test constants (D-06/D-07/D-08): the broadcast
+// capability probe's wait, and main's configuration-error exit code
+// (exitUsage — the collected env-error path the malformed SUPKV_LOG_* values
+// must abort through, never a silent default).
+const (
+	logProbeWait  = 300 * time.Millisecond
+	exitUsageCode = 2
+)
+
+// logProbeSocket binds a wildcard udp4 socket with SO_REUSEADDR and
+// SO_BROADCAST set before bind — the adapter's exact socket recipe, so the
+// capability probe measures the production topology (the smoke_test.go and
+// wait_integration_test.go precedent).
+func logProbeSocket(bindAddr string) (*net.UDPConn, error) {
+	var opErr error
+	lc := net.ListenConfig{
+		Control: func(_, _ string, c syscall.RawConn) error {
+			err := c.Control(func(fd uintptr) {
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				if opErr != nil {
+					return
+				}
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+			})
+			if err != nil {
+				return fmt.Errorf("socket control: %w", err)
+			}
+			if opErr != nil {
+				return fmt.Errorf("socket options: %w", opErr)
+			}
+			return nil
+		},
+	}
+	packetConn, err := lc.ListenPacket(context.Background(), "udp4", bindAddr)
+	if err != nil {
+		return nil, fmt.Errorf("bind udp4 %s: %w", bindAddr, err)
+	}
+	return packetConn.(*net.UDPConn), nil
+}
+
+// probeLoopbackBroadcast pre-flights the one platform capability the
+// two-node log tests need — a datagram sent to the loopback broadcast
+// address reaches the socket bound to the destination port (loopback
+// broadcast fan-out is a Linux-only kernel behavior; macOS lo0 carries no
+// BROADCAST flag — the wait_integration_test.go probe, D-12) — and skips
+// loudly naming what was probed when it is missing. The env-validation half
+// of the logging contract stays proven on every platform.
+func probeLoopbackBroadcast(t *testing.T, port int) {
+	t.Helper()
+	rx, err := logProbeSocket(fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		t.Fatalf("probe rx bind: %v", err)
+	}
+	defer func() { _ = rx.Close() }()
+	tx, err := logProbeSocket("0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("probe tx bind: %v", err)
+	}
+	defer func() { _ = tx.Close() }()
+	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
+	_, err = tx.WriteToUDP([]byte("sup-kv log smoke probe"), dst)
+	if err != nil {
+		t.Fatalf("probe send to %s: %v", dst, err)
+	}
+	err = rx.SetReadDeadline(time.Now().Add(logProbeWait))
+	if err != nil {
+		t.Fatalf("probe read deadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	for {
+		n, _, readErr := rx.ReadFromUDP(buf)
+		if readErr != nil {
+			t.Skipf(
+				"loopback broadcast to %s did not reach the bound socket within %v — platform lacks the capability (the env-validation half of the logging contract stays proven by TestLog_envValidation)",
+				dst,
+				logProbeWait,
+			)
+		}
+		if n > 0 {
+			return
+		}
+	}
+}
+
+// startLogPair launches the two-node asymmetric pair (research Pattern 5)
+// with BOTH nodes claiming node-id 1: A binds portA and broadcasts to
+// portB, B binds portB and broadcasts to portA — cross-delivery without
+// self-echo — so every Hello crossing the pair is the DuplicateNodeID
+// configuration error (REPL-08), the driven log event. Node A's stderr is
+// the lock-guarded live buffer; envA is prepended to A's environment only.
+func startLogPair(t *testing.T, bin string, envA []string, portA, portB int) (nodeA, nodeB *smokeNode) {
+	t.Helper()
+	grpcA, grpcB := freeTCPPort(t), freeTCPPort(t)
+	nodeA = startLoggedNode(t, bin, envA,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(portA),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(portB),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcA),
+		"--startup-gate=10ms",
+	)
+	nodeB = startNode(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(portB),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(portA),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcB),
+		"--startup-gate=10ms",
+	)
+	return nodeA, nodeB
+}
+
+// TestLog_jsonDefault pins D-06/D-07's default contract on the real binary:
+// with SUPKV_LOG_FORMAT unset every stderr line the running node emits is
+// one JSON object carrying non-empty level and msg keys, and the driven
+// event — the DuplicateNodeID configuration error crossing the asymmetric
+// pair — rides as the detail attr under the static tap msg, never as the
+// msg itself (D-08, T-6-05: the attr surface carries metadata only).
+func TestLog_jsonDefault(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	portA, portB := freeUDPPort(t), freeUDPPort(t)
+	probeLoopbackBroadcast(t, portB)
+	nodeA, nodeB := startLogPair(t, bin, nil, portA, portB)
+
+	waitFor(t, servingDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
+		return strings.Contains(nodeA.stderr.String(), "configuration error")
+	})
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the JSON-format run")
+
+	sawDetailEvent := false
+	for line := range strings.SplitSeq(nodeA.stderr.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			Level  string `json:"level"`
+			Msg    string `json:"msg"`
+			Detail string `json:"detail"`
+		}
+		err := json.Unmarshal([]byte(line), &rec)
+		if err != nil {
+			t.Fatalf("stderr line %q is not one JSON object: %v", line, err)
+		}
+		if rec.Level == "" || rec.Msg == "" {
+			t.Fatalf("stderr line %q lacks a non-empty level or msg key: %+v", line, rec)
+		}
+		if rec.Msg == "Replication adapter" && strings.Contains(rec.Detail, "configuration error") {
+			sawDetailEvent = true
+			if !strings.Contains(rec.Detail, "node_id 1") {
+				t.Fatalf("the driven event's detail %q does not name node_id 1", rec.Detail)
+			}
+		}
+	}
+	if !sawDetailEvent {
+		t.Fatalf("no Replication adapter record carrying the configuration error appeared in:\n%s", nodeA.stderr.String())
+	}
+}
+
+// TestLog_formatText pins the SUPKV_LOG_FORMAT=text half of D-06: the same
+// driven event surfaces as key=value text — no JSON object on stderr — with
+// the prebuilt message still riding the detail attr under the static msg.
+func TestLog_formatText(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	portA, portB := freeUDPPort(t), freeUDPPort(t)
+	probeLoopbackBroadcast(t, portB)
+	nodeA, nodeB := startLogPair(t, bin, []string{"SUPKV_LOG_FORMAT=text"}, portA, portB)
+
+	waitFor(t, servingDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
+		return strings.Contains(nodeA.stderr.String(), "configuration error")
+	})
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the text-format run")
+
+	sawDetailEvent := false
+	for line := range strings.SplitSeq(nodeA.stderr.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "{") {
+			t.Fatalf("text-format stderr line %q is a JSON object, want key=value text", line)
+		}
+		if strings.Contains(line, `msg="Replication adapter"`) && strings.Contains(line, `detail="sup-kv: configuration error`) {
+			sawDetailEvent = true
+			if !strings.Contains(line, "node_id 1") {
+				t.Fatalf("the driven event's line %q does not name node_id 1", line)
+			}
+		}
+	}
+	if !sawDetailEvent {
+		t.Fatalf("no Replication adapter text record carrying the configuration error appeared in:\n%s", nodeA.stderr.String())
+	}
+}
+
+// TestLog_envValidation pins the D-07 fail-closed contract: a malformed
+// SUPKV_LOG_LEVEL or SUPKV_LOG_FORMAT value aborts startup through the
+// collected env-error path with exitUsage — never a silent default.
+func TestLog_envValidation(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+	for _, tc := range []struct{ name, env string }{
+		{name: "malformed level", env: "SUPKV_LOG_LEVEL=bogus"},
+		{name: "malformed format", env: "SUPKV_LOG_FORMAT=bogus"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			udpPort := freeUDPPort(t)
+			node := startNode(t, bin, []string{tc.env},
+				"--node-id=1",
+				"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+				"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+				"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			)
+			var exitErr error
+			waitFor(t, exitDeadline, "process exit for "+tc.env, func() bool {
+				select {
+				case exitErr = <-node.exit:
+					return true
+				default:
+					return false
+				}
+			})
+			assertExitCode(t, exitErr, exitUsageCode)
+		})
+	}
+}
+
+// httpGetBody GETs url and returns the status with the body — the metrics
+// tests' scrape helper (the noctx-clean request shape).
+func httpGetBody(t *testing.T, url string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext(%s): %v", url, err)
+	}
+	client := &http.Client{Timeout: rpcTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body of %s: %v", url, readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close body of %s: %v", url, closeErr)
+	}
+	return resp.StatusCode, string(body)
+}
+
+// TestMetrics_optIn pins D-01's set half end-to-end on the real binary: a
+// node started with --metrics-addr serves /metrics over plain HTTP — the
+// loopback/debug mode D-02 documents — and the scrape carries the full
+// supkv_ family surface over the 06-03 seams plus the runtime families.
+func TestMetrics_optIn(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+	metricsPort := freeTCPPort(t)
+	grpcAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+	metricsURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", metricsPort)
+
+	node := startNode(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--grpc-addr="+grpcAddr,
+		"--metrics-addr=127.0.0.1:"+strconv.Itoa(metricsPort),
+		"--startup-gate=10ms",
+	)
+	awaitServing(t, grpcAddr, servingDeadline)
+
+	status, body := httpGetBody(t, metricsURL)
+	if status != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want %d", metricsURL, status, http.StatusOK)
+	}
+	for _, name := range []string{
+		"supkv_replication_unacked_records",
+		"supkv_replication_unacked_oldest_age_seconds",
+		"supkv_replication_peers",
+		"supkv_replication_datagrams_sent_total",
+		"supkv_replication_datagrams_retransmitted_total",
+		"supkv_datagrams_discarded_total",
+		"supkv_merges_conflicts_total",
+		"supkv_clock_drift_warnings_total",
+		"supkv_dumps_duration_seconds",
+		"supkv_dumps_total",
+		"supkv_dumps_errors_total",
+		"go_goroutines",
+		"process_cpu_seconds_total",
+	} {
+		if !strings.Contains(body, name) {
+			t.Errorf("the scrape of %s lacks the family %q:\n%s", metricsURL, name, body)
+		}
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the opt-in metrics run")
+}
+
+// TestMetrics_noDefaultListener pins D-01's unset half discriminatingly. A
+// refused dial on an arbitrary unpassed port would prove nothing — any
+// implementation refuses there, including one with a default metrics
+// listener on a fixed port, the exact D-01 regression this test exists to
+// catch — so the assertion runs through a collision instead: two concurrent
+// nodes, neither given --metrics-addr nor SUPKV_METRICS_ADDR, mutually
+// isolated (distinct node ids, UDP bind/broadcast ports, dump dirs and
+// gRPC ports), both must reach SERVING and both must exit 0. Under the
+// regression — a default metrics address introduced the way defaultGRPCAddr
+// was, a non-empty defaults-block value flowing through wire() — the second
+// node's fixed-port metrics bind collides with the first node's, the fatal
+// bind aborts its startup and its awaitServing times out. The mechanism is
+// pure loopback TCP with per-node ports: portable to every matrix cell,
+// deliberately not /proc or socket enumeration.
+func TestMetrics_noDefaultListener(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	launch := func(nodeID int) (node *smokeNode, grpcAddr string) {
+		udpPort := freeUDPPort(t)
+		grpcPort := freeTCPPort(t)
+		return startNode(t, bin, nil,
+			"--node-id="+strconv.Itoa(nodeID),
+			"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcPort),
+			"--startup-gate=10ms",
+		), fmt.Sprintf("127.0.0.1:%d", grpcPort)
+	}
+	nodeA, addrA := launch(1)
+	nodeB, addrB := launch(2)
+
+	awaitServing(t, addrA, servingDeadline)
+	awaitServing(t, addrB, servingDeadline)
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+}
+
+// TestMetrics_incompleteCertSet pins D-02's fail-closed contract: one
+// certificate env set without the other two aborts startup through the
+// collected-error path with exitUsage — before any bind (Pitfall 8: no path
+// can reach the TLS builder with a half-loaded set) — and the message names
+// all three envs of the triple. The cert envs have no flags, so the usage
+// dump cannot mention them: only the error line can carry the names.
+func TestMetrics_incompleteCertSet(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	udpPort := freeUDPPort(t)
+	node := startNode(t, bin, []string{"SUPKV_METRICS_CERT=" + filepath.Join(t.TempDir(), "server-cert.pem")},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+	)
+	var exitErr error
+	waitFor(t, exitDeadline, "process exit for the incomplete cert set", func() bool {
+		select {
+		case exitErr = <-node.exit:
+			return true
+		default:
+			return false
+		}
+	})
+	assertExitCode(t, exitErr, exitUsageCode)
+	stderr := node.stderr.String()
+	for _, env := range []string{"SUPKV_METRICS_CERT", "SUPKV_METRICS_KEY", "SUPKV_METRICS_CLIENT_CA"} {
+		if !strings.Contains(stderr, env) {
+			t.Errorf("stderr of the incomplete-cert-set run lacks %q:\n%s", env, stderr)
+		}
+	}
+}
+
+// metricsCertSuite is the in-test PKI the mTLS tests drive: one self-signed
+// CA, a server leaf valid for the loopback IPs, and a client leaf — all
+// generated at test runtime with crypto/x509 + crypto/ecdsa, no committed
+// fixtures and no openssl (06-RESEARCH Pattern 3).
+type metricsCertSuite struct {
+	serverCertFile string
+	serverKeyFile  string
+	caFile         string
+	caPool         *x509.CertPool
+	clientCert     tls.Certificate
+}
+
+// generateMetricsCerts writes the suite's CA and server pair into dir and
+// keeps the client pair in memory. Validity spans an hour around now so a
+// slow cell never trips NotYetValid or Expired.
+func generateMetricsCerts(t *testing.T, dir string) metricsCertSuite {
+	t.Helper()
+	notBefore := time.Now().Add(-time.Hour)
+	notAfter := time.Now().Add(time.Hour)
+
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "sup-kv-metrics-test-ca"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA certificate: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA certificate: %v", err)
+	}
+	caPool := x509.NewCertPool()
+	caPool.AddCert(caCert)
+
+	newLeaf := func(serial int64, commonName string, usage []x509.ExtKeyUsage, ips []net.IP) ([]byte, *ecdsa.PrivateKey) {
+		key, keyErr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if keyErr != nil {
+			t.Fatalf("generate %s key: %v", commonName, keyErr)
+		}
+		template := &x509.Certificate{
+			SerialNumber: big.NewInt(serial),
+			Subject:      pkix.Name{CommonName: commonName},
+			NotBefore:    notBefore,
+			NotAfter:     notAfter,
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:  usage,
+			IPAddresses:  ips,
+		}
+		der, crtErr := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+		if crtErr != nil {
+			t.Fatalf("create %s certificate: %v", commonName, crtErr)
+		}
+		return der, key
+	}
+	serverDER, serverKey := newLeaf(2, "sup-kv-metrics-test-server",
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		[]net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
+	clientDER, clientKey := newLeaf(3, "sup-kv-metrics-test-client",
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+
+	serverKeyDER, err := x509.MarshalPKCS8PrivateKey(serverKey)
+	if err != nil {
+		t.Fatalf("marshal server key: %v", err)
+	}
+	write := func(name string, data []byte) string {
+		path := filepath.Join(dir, name)
+		wErr := os.WriteFile(path, data, 0o600)
+		if wErr != nil {
+			t.Fatalf("write %s: %v", path, wErr)
+		}
+		return path
+	}
+	certPEM := func(der []byte) []byte {
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	}
+	return metricsCertSuite{
+		serverCertFile: write("server-cert.pem", certPEM(serverDER)),
+		serverKeyFile: write("server-key.pem",
+			pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: serverKeyDER})),
+		caFile:     write("ca.pem", certPEM(caDER)),
+		caPool:     caPool,
+		clientCert: tls.Certificate{Certificate: [][]byte{clientDER}, PrivateKey: clientKey},
+	}
+}
+
+// startMTLSNode starts the real binary with the complete certificate triple
+// and --metrics-addr, waiting for the gRPC gate — the shared setup of the
+// mTLS enforcement and debug-surface tests.
+func startMTLSNode(t *testing.T, bin string, certs metricsCertSuite, metricsPort int) (node *smokeNode, metricsAddr string) {
+	t.Helper()
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+	grpcAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+	metricsAddr = fmt.Sprintf("127.0.0.1:%d", metricsPort)
+	node = startNode(t, bin, []string{
+		"SUPKV_METRICS_CERT=" + certs.serverCertFile,
+		"SUPKV_METRICS_KEY=" + certs.serverKeyFile,
+		"SUPKV_METRICS_CLIENT_CA=" + certs.caFile,
+	},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--grpc-addr="+grpcAddr,
+		"--metrics-addr="+metricsAddr,
+		"--startup-gate=10ms",
+	)
+	awaitServing(t, grpcAddr, servingDeadline)
+	return node, metricsAddr
+}
+
+// tlsGet fetches url over the suite's authorized client — the mTLS read
+// path of the enforcement and debug-surface tests.
+func tlsGet(t *testing.T, certs metricsCertSuite, url string) (status int, contentType, body string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext(%s): %v", url, err)
+	}
+	client := &http.Client{
+		Timeout: rpcTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:      certs.caPool,
+				Certificates: []tls.Certificate{certs.clientCert},
+			},
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("authorized GET %s: %v", url, err)
+	}
+	raw, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body of %s: %v", url, readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close body of %s: %v", url, closeErr)
+	}
+	return resp.StatusCode, resp.Header.Get("Content-Type"), string(raw)
+}
+
+// TestMetricsTLS_required pins D-02's enforcement half on the real binary:
+// with the full certificate triple the listener speaks TLS and requires a
+// verified client certificate — a plain HTTP GET fails against it and a TLS
+// client without a certificate fails the handshake — while the client pair
+// generated in-test scrapes both /metrics and /debug/vars (D-03's one
+// surface). The closing SIGTERM walk exercises the metrics Shutdown in its
+// D-19 position with TLS active.
+func TestMetricsTLS_required(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+	certs := generateMetricsCerts(t, t.TempDir())
+	node, metricsAddr := startMTLSNode(t, bin, certs, freeTCPPort(t))
+
+	plainReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+metricsAddr+"/metrics", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	plainClient := &http.Client{Timeout: rpcTimeout}
+	// A plain HTTP GET fails against the TLS listener. Go's stack answers
+	// plaintext-to-TLS with a 400 "Client sent an HTTP request to an HTTPS
+	// server" (net/http's record-header probe), so the failure surfaces as
+	// that rejection or as a transport error — never as a served body.
+	plainResp, plainErr := plainClient.Do(plainReq)
+	if plainErr == nil {
+		raw, readErr := io.ReadAll(plainResp.Body)
+		closeErr := plainResp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read the plain-HTTP body: %v", readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close the plain-HTTP body: %v", closeErr)
+		}
+		if plainResp.StatusCode == http.StatusOK || strings.Contains(string(raw), "supkv_") {
+			t.Fatalf("a plain HTTP GET against %s answered with the metrics surface (status %d) — the cert-triple listener is not speaking TLS:\n%s",
+				metricsAddr, plainResp.StatusCode, raw)
+		}
+	}
+
+	noCertReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+metricsAddr+"/metrics", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	noCertClient := &http.Client{
+		Timeout:   rpcTimeout,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: certs.caPool}},
+	}
+	_, handshakeErr := noCertClient.Do(noCertReq)
+	if handshakeErr == nil {
+		t.Fatalf("a TLS client without a certificate scraped %s — RequireAndVerifyClientCert is not enforced", metricsAddr)
+	}
+
+	status, _, body := tlsGet(t, certs, "https://"+metricsAddr+"/metrics")
+	if status != http.StatusOK {
+		t.Fatalf("authorized GET /metrics status = %d, want %d", status, http.StatusOK)
+	}
+	if !strings.Contains(body, "supkv_replication_unacked_records") {
+		t.Fatalf("the authorized /metrics scrape lacks the supkv_ family surface:\n%s", body)
+	}
+	status, _, body = tlsGet(t, certs, "https://"+metricsAddr+"/debug/vars")
+	if status != http.StatusOK {
+		t.Fatalf("authorized GET /debug/vars status = %d, want %d", status, http.StatusOK)
+	}
+	if !strings.Contains(body, `"cmdline"`) {
+		t.Fatalf("the authorized /debug/vars body lacks expvar's cmdline key:\n%s", body)
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the mTLS metrics run")
+}
+
+// TestDebugSurface pins D-03's debug half behind the same mTLS: the pprof
+// index page answers the authorized client, and a named profile route —
+// heap, mounted through pprof.Handler — returns profile content on the same
+// listener as /metrics.
+func TestDebugSurface(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+	certs := generateMetricsCerts(t, t.TempDir())
+	node, metricsAddr := startMTLSNode(t, bin, certs, freeTCPPort(t))
+
+	status, _, index := tlsGet(t, certs, "https://"+metricsAddr+"/debug/pprof/")
+	if status != http.StatusOK {
+		t.Fatalf("authorized GET /debug/pprof/ status = %d, want %d", status, http.StatusOK)
+	}
+	if !strings.Contains(index, "heap") {
+		t.Fatalf("the pprof index page does not list the heap profile:\n%s", index)
+	}
+
+	status, contentType, heap := tlsGet(t, certs, "https://"+metricsAddr+"/debug/pprof/heap")
+	if status != http.StatusOK {
+		t.Fatalf("authorized GET /debug/pprof/heap status = %d, want %d", status, http.StatusOK)
+	}
+	if heap == "" {
+		t.Fatalf("the heap profile at %s is empty", metricsAddr)
+	}
+	if !strings.HasPrefix(contentType, "application/octet-stream") {
+		t.Fatalf("heap profile Content-Type = %q, want application/octet-stream", contentType)
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the debug-surface run")
+}

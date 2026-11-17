@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -timeout 3m ./cmd/sup-kv/ -run '^TestReadmeQuickstart$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestReadmeQuickstart\n=== PAUSE TestReadmeQuickstart\n=== CONT  TestReadmeQuickstart\n    readme_test.go:78: README.md carries no <!-- quickstart-verify --> block — the DOCS-01 contract is gone\n--- FAIL: TestReadmeQuickstart (0.00s)\nFAIL\nsup-kv smoke: tests failed with code 1\nFAIL\tgithub.com/Djarvur/sup-kv/cmd/sup-kv\t1.958s\nFAIL\n",
+  "targetTest": "TestReadmeQuickstart",
+  "targetFile": "cmd/sup-kv/readme_test.go",
+  "expected": "The README quickstart machine contract (plan 07-02 Task 1 RED): against the unmodified design-phase README.md, TestReadmeQuickstart fails with the zero-block fatal naming the missing '<!-- quickstart-verify -->' marker — the DOCS-01 contract is gone (plan 07-02 feature behavior).",
+  "actual": "The target test ran and failed on its planned assertion (readme_test.go:78): 'README.md carries no <!-- quickstart-verify --> block — the DOCS-01 contract is gone'. The package compiled, the test was discovered and executed (--- FAIL: TestReadmeQuickstart, 0.00s after TestMain's binary build), and the failure is exactly the missing marker contract — not unexpected-green, not zero-tests, not a build/load/fixture fault.",
+  "semanticAssessment": "Target test TestReadmeQuickstart executed (=== RUN and --- FAIL: lines present) and failed for the intended reason: the planned behavior — a marked quickstart-verify block in README.md — does not exist yet (the README is still the design-phase text with no marker and no quickstart), so the pre-flight marker check fatals naming the DOCS-01 contract. The failure output carries the literal marker string, satisfying the plan's verify gate (test exits non-zero AND the log contains 'quickstart-verify'). Valid intentional RED."
+}

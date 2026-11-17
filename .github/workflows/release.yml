@@ -1,0 +1,40 @@
+# Release pipeline (D-09): builds via the go.mod-pinned goreleaser tool
+# directive, generates per-archive SBOMs via the version-pinned syft action
+# step, and attaches archives + checksums.txt + SBOMs to a GitHub Release
+# whose header pulls from CHANGELOG.md.
+# This workflow is tag/dispatch-triggered ONLY — never a PR check — so the
+# five ci.yml check-run contexts ("lint", "gate (<cell>)") recorded in the
+# branch-protection ruleset stay byte-identical (Pitfall 4). Zero ci.yml
+# edits accompany this file.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # the dispatch path runs the --snapshot form: the whole
+    # workflow (checkout, setup-go, syft, tool resolution) is provable
+    # before any tag exists.
+
+permissions:
+  contents: write # create the GitHub Release and upload its assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # P1-WR-01: a wedged job must not hold a runner for the 6h default
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # goreleaser reads tag history from the local .git
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: anchore/sbom-action/download-syft@v0.24.3 # the goreleaser sboms pipe shells out to syft (Pitfall 8)
+      - name: Release (tag push)
+        if: github.event_name == 'push'
+        run: go tool goreleaser release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Snapshot (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: go tool goreleaser release --snapshot --clean

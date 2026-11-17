@@ -19,11 +19,35 @@ const (
 
 // Config holds the store tuning parameters; it is immutable once handed to
 // NewStore. A zero or negative ValueMaxBytes is normalized to the design
-// default of 61440. Clock tuning — the drift tolerance and the restart
-// watermark (VERS-04) — is constructor state of the injected clock
-// (clock.NewClock), not store configuration.
+// default of 61440, and a nil OnChange to a no-op: the store is total over
+// any Config (the repl.Config.Log precedent). Clock tuning — the drift
+// tolerance and the restart watermark (VERS-04) — is constructor state of
+// the injected clock (clock.NewClock), not store configuration.
 type Config struct {
 	ValueMaxBytes int
+
+	// OnChange, when non-nil, is the change tap the Watch stream consumes
+	// (API-03): install fires it under the store write lock with the record
+	// that just became the stored record — the exact record a subsequent
+	// Records() snapshot holds, recomputed checksum included, and the record
+	// a subsequent Get returns only when it is live. A tombstone install
+	// fires the tap exactly like any other change (a delete IS a change),
+	// yet a subsequent Get returns ErrNotFound for it — the tombstone is
+	// visible only through Records(). Every change source
+	// converges on install (local Set/SetIfAbsent/Delete writes, remote
+	// merges, replicated tombstone deletes, snapshot-restore replay), so the
+	// tap observes commit order for all of them, and the strictly-greater
+	// join law keeps a merge loser and an equal-version redelivery from ever
+	// reaching it (D-06: events fire only on actual state changes). The
+	// callback is invoked synchronously from the write paths under the
+	// store's locking discipline and must not block — fan-out belongs behind
+	// a non-blocking channel send — and it must not call back into the same
+	// store: the tap runs with the write lock held, Go's sync.RWMutex is
+	// not reentrant, and even a read-only Get self-deadlocks, stalling every
+	// store operation. The handed record is the
+	// store's stored copy: records are replaced wholesale on the next
+	// install, never mutated in place, so retaining it is safe.
+	OnChange func(key string, rec Record)
 }
 
 // Record is one stored key's state. Data is defensively copied on the way
@@ -78,10 +102,13 @@ func NewStore(nodeID uint16, clk Clock, cfg Config) *Store {
 }
 
 // normalized returns cfg with a zero or negative ValueMaxBytes replaced by
-// the design default.
+// the design default and a nil OnChange replaced by a no-op.
 func (c Config) normalized() Config {
 	if c.ValueMaxBytes <= 0 {
 		c.ValueMaxBytes = defaultValueMaxBytes
+	}
+	if c.OnChange == nil {
+		c.OnChange = func(_ string, _ Record) {}
 	}
 	return c
 }
@@ -139,19 +166,16 @@ func (s *Store) Set(key string, data []byte) (version.RecordVersion, time.Durati
 	return ver, drift, nil
 }
 
-// write stamps a fresh version via the clock, defensively copies data and
-// stores the record; the caller must hold the write lock. It returns the new
-// version and the drift signal from the Tick.
+// write stamps a fresh version via the clock and installs the record
+// through install — the same convergence point a winning merge uses — so
+// the OnChange tap observes local writes exactly like remote ones; the
+// caller must hold the write lock. install clones the data defensively and
+// recomputes the checksum. It returns the new version and the drift signal
+// from the Tick.
 func (s *Store) write(key string, data []byte, deleted bool) (version.RecordVersion, time.Duration) {
 	l, counter, drift := s.clock.Tick()
 	ver := version.PackVersion(l, counter, s.nodeID)
-	stored := bytes.Clone(data)
-	s.records[key] = Record{
-		Version:  ver,
-		Data:     stored,
-		Deleted:  deleted,
-		Checksum: RecordChecksum(key, ver, stored, deleted),
-	}
+	s.install(key, Record{Version: ver, Data: data, Deleted: deleted})
 	return ver, drift
 }
 
@@ -226,15 +250,22 @@ func (s *Store) join(key string, rec Record) []Conflict {
 }
 
 // install defensively copies rec and stores it under key with a recomputed
-// checksum; the caller must hold the write lock.
+// checksum, then fires the Config.OnChange tap with the stored record.
+// install is the single convergence point of every change source — local
+// writes reach it through write, remote merges through the strictly-greater
+// join branch — so the tap fires exactly when a record became the stored
+// record (D-06) and observes commit order; the caller must hold the write
+// lock.
 func (s *Store) install(key string, rec Record) {
 	data := bytes.Clone(rec.Data)
-	s.records[key] = Record{
+	stored := Record{
 		Version:  rec.Version,
 		Data:     data,
 		Deleted:  rec.Deleted,
 		Checksum: RecordChecksum(key, rec.Version, data, rec.Deleted),
 	}
+	s.records[key] = stored
+	s.cfg.OnChange(key, stored)
 }
 
 // Records returns a full snapshot of the map, tombstones included, with Data

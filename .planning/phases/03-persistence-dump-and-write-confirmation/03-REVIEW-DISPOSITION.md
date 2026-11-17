@@ -3,22 +3,22 @@ phase: 03
 review: 03-REVIEW.md
 titles: json
 findings:
+  - id: WR-01
+    severity: warning
+    disposition: fixed
+    title: "Impossible-state guard — confirmWaiters' above-cover keep branch cannot fire"
+  - id: IN-01
+    severity: info
+    disposition: fixed
+    title: "Already-defended-elsewhere — Open's Decode-error fallback is dead in the shipped stack"
+  - id: IN-02
+    severity: info
+    disposition: fixed
+    title: "ApplyRemote dirties the engine on no-op merges — redundant dump on stale/equal redelivery"
   - id: CR-01
     severity: critical
     disposition: fixed
     title: "`flush()` can block forever when Run exits between the closed-check and the flushCh send — permanent goroutine hang on shutdown"
-  - id: WR-01
-    severity: warning
-    disposition: fixed
-    title: "`CreateSnapshot` can spuriously fail with `ErrNoDump` during a concurrent `Save`'s rotate window; the engine's concurrency-safety claim is incorrect"
-  - id: IN-01
-    severity: info
-    disposition: open
-    title: "`maxRecordBytes` literal duplicates the store's value limit — drift risk"
-  - id: IN-02
-    severity: info
-    disposition: open
-    title: "Engine is silently single-shot — `closed` is never reset after one Run exit"
   - id: IN-03
     severity: info
     disposition: open
@@ -27,21 +27,21 @@ findings:
     severity: info
     disposition: open
     title: "`CreateSnapshot` creates the `.snapshots` directory even when it then fails with `ErrNoDump`"
-open: 4
+open: 2
 total: 6
-recorded: 2026-11-03T00:17:40.050Z
+recorded: 2026-11-14T19:20:44.323Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | fixed | fix e9e3d7d: runDone closed after the exit sweep, flush selects against it with reply re-check; regression TestEngine_flushRacesRunExit + TestEngine_flushRacesExitMidDump |
-| WR-01 | warning | fixed | fix e1cfb72: FileStore mutex serializes CreateSnapshot against Save's rotate window; regression TestFileStore_snapshotWaitsOutSaveWindow + TestFileStore_snapshotConcurrentWithSave |
-| IN-01 | info | open | - |
-| IN-02 | info | open | - |
-| IN-03 | info | open | - |
-| IN-04 | info | open | - |
+| WR-01 | warning | fixed | fix: the above-cover guard is KEPT (D-15 shape — never silent removal) and now carries its invariant assertion beside it: a kept waiter must be unresolved, a resolved one is never re-queued (double-close guard); regression TestConfirmWaiters_aboveCoverInvariant pins kept/nil-resolved/ErrDumpFailed/never-requeued (not in the current review) |
+| IN-01 | info | fixed | fix: the dead Decode-error fallback is gone — Open decodes through Load's own oracle argument (the accepted generation is exactly the one whose Decode succeeded; Parse IS Decode's error channel), so no unreachable branch remains; the Open fallback-chain tests pass unmodified (not in the current review) |
+| IN-02 | info | fixed | fix: ApplyRemote marks dirty only on actual state change, coded to Merge's Conflict contract (Winner=incoming is displacement; live-probe separates new-key from equal-redelivery) plus Restore skips a whole-snapshot match; regression TestEngine_redundantDirty (also closes 04 IN-02) (not in the current review) |
+| CR-01 | critical | fixed | fix e9e3d7d: runDone closed after the exit sweep, flush selects against it with reply re-check; regression TestEngine_flushRacesRunExit + TestEngine_flushRacesExitMidDump (not in the current review) |
+| IN-03 | info | open | - (not in the current review) |
+| IN-04 | info | open | - (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.

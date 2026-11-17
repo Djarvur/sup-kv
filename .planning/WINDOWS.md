@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 0
+open_count: 6
 waived_count: 1
-fixed_count: 1
-total_count: 2
-last_updated: 2026-11-02T15:55:45.509Z
+fixed_count: 2
+total_count: 9
+last_updated: 2026-11-17T13:52:09.591Z
 ---
 
 # Broken Windows Ledger
@@ -17,6 +17,13 @@ last_updated: 2026-11-02T15:55:45.509Z
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
 | 1 | 01 | unmet-truth | .planning/phases/01-ci-bootstrap-and-repo-skeleton/01-03-SUMMARY.md |  | Backstop truth D5: Dependabot's first version-update PR not yet observed — weekly schedule window has not elapsed since dependabot.yml landed (2026-10-31) | fixed |  | 2026-10-31T15:45:51.348Z | 2026-11-02T15:55:45.509Z |
 | 2 | 01 | unmet-truth | docs/setup/branch-protection.md | 14 | CI-03 protection sub-item deferred (org plan 403, decision defer 2026-10-31): direct pushes to master are not server-side rejected until the ruleset is applied; PENDING marker records the one-command re-apply path | waived | Ratified accepted override 2026-10-31 (maintainer): org plan gates rulesets on this private repo (403); no plan upgrade, no public flip; payload + one-command re-apply kept in docs/setup/branch-protection.md | 2026-10-31T16:00:46.876Z | 2026-10-31T18:59:31.534Z |
+| 3 | 05 | stub | internal/grpcapi/server.go |  | Watch/SnapshotCreate/SnapshotLoad intentionally Unimplemented (UnimplementedSupKVServer embed) until plans 05-04/05-05 | open |  | 2026-11-09T10:49:45.242Z |  |
+| 4 | 06 | unrun-verify | .planning/phases/06-hardening-failure-scenarios-observability-benchmarks/06-09-PLAN.md |  | D-16 pending main-session work: re-run /gsd-execute-phase for phases 1, 4 and 5 to regenerate VERIFICATION.md fingerprints staled by the 2026-11-14 buf zero-waiver refactor (7b55ad1) — plan 06-09 task 3 is a checkpoint:human-action, not subagent-executable | fixed | Resolved 2026-11-16 in the main session: all five stale phases regenerated with fresh fingerprints (1: 72497d7, 4: e47733c, 5: 9b87620, 2: 5e62bc7 toolchain staleness, 3: 8c548d8 phase-6 covered-input staleness), all passed; STATE.md 945f80f; confirmed by the phase-6 verifier | 2026-11-16T01:34:11.794Z | 2026-11-16T12:55:00.000Z |
+| 5 | 07 | deviation | .planning/phases/07-v1-0-docs-examples-and-release/07-01-SUMMARY.md |  | Option-b (maintainer 2026-11-17): DOCS-01/D-06 macos-15 leg is a named skip, not a real run — README quickstart ships a CI-verified Linux block plus a marked darwin variant block (probe loud-skips on darwin per the D-12 precedent); D-06/D-07 partially satisfied, must be adjudicated at phase verification (option-c rewording remains available there) | open |  | 2026-11-17T12:44:38.187Z |  |
+| 6 | 07 | deviation | cmd/sup-kv/readme_test.go | 53 | Option-b contract (07-02): TestReadmeQuickstart darwin leg is a deterministic named skip — the macOS quickstart variant block is documented but not CI-verified on macos-15 (sendto: no route to host, PR #32 verdict); same D-06/D-07 partial-satisfaction adjudication as WINDOWS id 5 | open |  | 2026-11-17T13:01:07.869Z |  |
+| 7 | 7 | unmet-truth | docs/OPERATIONS.md |  | DOCS-02 truth gap (07-03 flagged assumption): TestOperationsDoc is a presence/anchor guard only — no automated check establishes that the five mandated statements are TRUE (trust model, envelope, read semantics, not-a-lock, drift runbook); content truth is 07-VALIDATION.md's manual UAT table and must be verified there | open |  | 2026-11-17T13:31:19.251Z |  |
+| 8 | 7 | deviation | cmd/sup-kv/examples_test.go |  | Examples concurrency/interruption residual (07-03 flagged assumption): marked blocks execute sequentially sharing one pair on the reserved 280xx doc band; a mid-walk test abort is backstopped by the PID-file t.Cleanup, but a hard runner cancel (SIGKILL to the go test process) between blocks skips cleanup and leaks the pair — surfaced for phase verification, not silently assumed safe | open |  | 2026-11-17T13:31:19.581Z |  |
+| 9 | 07 | unrun-verify | .github/workflows/release.yml |  | 07-04 optional pre-tag gh workflow dispatch proof not run — workflow_dispatch requires release.yml on the default branch and gsd/v1.0-milestone is unmerged; 07-05 observes the real tag run post-merge | open |  | 2026-11-17T13:52:09.591Z |  |
 
 ````json
 [
@@ -44,6 +51,97 @@ last_updated: 2026-11-02T15:55:45.509Z
     "reason": "Ratified accepted override 2026-10-31 (maintainer): org plan gates rulesets on this private repo (403); no plan upgrade, no public flip; payload + one-command re-apply kept in docs/setup/branch-protection.md",
     "recorded_at": "2026-10-31T16:00:46.876Z",
     "resolved_at": "2026-10-31T18:59:31.534Z",
+    "milestone": "v1.0"
+  },
+  {
+    "id": 3,
+    "kind": "stub",
+    "phase": "05",
+    "file": "internal/grpcapi/server.go",
+    "line": null,
+    "description": "Watch/SnapshotCreate/SnapshotLoad intentionally Unimplemented (UnimplementedSupKVServer embed) until plans 05-04/05-05",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-09T10:49:45.242Z",
+    "resolved_at": null,
+    "milestone": "v1.0"
+  },
+  {
+    "id": 4,
+    "kind": "unrun-verify",
+    "phase": "06",
+    "file": ".planning/phases/06-hardening-failure-scenarios-observability-benchmarks/06-09-PLAN.md",
+    "line": null,
+    "description": "D-16 pending main-session work: re-run /gsd-execute-phase for phases 1, 4 and 5 to regenerate VERIFICATION.md fingerprints staled by the 2026-11-14 buf zero-waiver refactor (7b55ad1) — plan 06-09 task 3 is a checkpoint:human-action, not subagent-executable",
+    "status": "fixed",
+    "reason": "Resolved 2026-11-16 in the main session: all five stale phases regenerated with fresh fingerprints (1: 72497d7, 4: e47733c, 5: 9b87620, 2: 5e62bc7 toolchain staleness, 3: 8c548d8 phase-6 covered-input staleness), all passed; STATE.md 945f80f; confirmed by the phase-6 verifier",
+    "recorded_at": "2026-11-16T01:34:11.794Z",
+    "resolved_at": "2026-11-16T12:55:00.000Z",
+    "milestone": "v1.0"
+  },
+  {
+    "id": 5,
+    "kind": "deviation",
+    "phase": "07",
+    "file": ".planning/phases/07-v1-0-docs-examples-and-release/07-01-SUMMARY.md",
+    "line": null,
+    "description": "Option-b (maintainer 2026-11-17): DOCS-01/D-06 macos-15 leg is a named skip, not a real run — README quickstart ships a CI-verified Linux block plus a marked darwin variant block (probe loud-skips on darwin per the D-12 precedent); D-06/D-07 partially satisfied, must be adjudicated at phase verification (option-c rewording remains available there)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-17T12:44:38.187Z",
+    "resolved_at": null,
+    "milestone": "v1.0"
+  },
+  {
+    "id": 6,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "cmd/sup-kv/readme_test.go",
+    "line": 53,
+    "description": "Option-b contract (07-02): TestReadmeQuickstart darwin leg is a deterministic named skip — the macOS quickstart variant block is documented but not CI-verified on macos-15 (sendto: no route to host, PR #32 verdict); same D-06/D-07 partial-satisfaction adjudication as WINDOWS id 5",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-17T13:01:07.869Z",
+    "resolved_at": null,
+    "milestone": "v1.0"
+  },
+  {
+    "id": 7,
+    "kind": "unmet-truth",
+    "phase": "7",
+    "file": "docs/OPERATIONS.md",
+    "line": null,
+    "description": "DOCS-02 truth gap (07-03 flagged assumption): TestOperationsDoc is a presence/anchor guard only — no automated check establishes that the five mandated statements are TRUE (trust model, envelope, read semantics, not-a-lock, drift runbook); content truth is 07-VALIDATION.md's manual UAT table and must be verified there",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-17T13:31:19.251Z",
+    "resolved_at": null,
+    "milestone": "v1.0"
+  },
+  {
+    "id": 8,
+    "kind": "deviation",
+    "phase": "7",
+    "file": "cmd/sup-kv/examples_test.go",
+    "line": null,
+    "description": "Examples concurrency/interruption residual (07-03 flagged assumption): marked blocks execute sequentially sharing one pair on the reserved 280xx doc band; a mid-walk test abort is backstopped by the PID-file t.Cleanup, but a hard runner cancel (SIGKILL to the go test process) between blocks skips cleanup and leaks the pair — surfaced for phase verification, not silently assumed safe",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-17T13:31:19.581Z",
+    "resolved_at": null,
+    "milestone": "v1.0"
+  },
+  {
+    "id": 9,
+    "kind": "unrun-verify",
+    "phase": "07",
+    "file": ".github/workflows/release.yml",
+    "line": null,
+    "description": "07-04 optional pre-tag gh workflow dispatch proof not run — workflow_dispatch requires release.yml on the default branch and gsd/v1.0-milestone is unmerged; 07-05 observes the real tag run post-merge",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-17T13:52:09.591Z",
+    "resolved_at": null,
     "milestone": "v1.0"
   }
 ]

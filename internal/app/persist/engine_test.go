@@ -37,6 +37,11 @@ const (
 	// installs: values over it stay codec-legal (envelope 61440) but the
 	// store rejects them.
 	shrunkValueLimit = 16
+
+	// applyRemoteOversize is one byte over the design-default value limit
+	// (docs/IDEA.md §Parameters): the wire-side oversize class whose
+	// ErrValueTooLarge must pass through ApplyRemote unchanged (T-04-04).
+	applyRemoteOversize = 61441
 )
 
 // runEngine launches eng's single dumper goroutine (Run's lifecycle is the
@@ -691,6 +696,103 @@ func TestEngine_flushRacesExitMidDump(t *testing.T) {
 	})
 }
 
+// TestFlush_remoteDirtiness pins Flush's shutdown contract (D-19): a remote
+// merge applied via ApplyRemote dirties the engine with NO waiter — only
+// the debounced Run schedule would persist it — so shutdown must call Flush
+// before cancelling the engine context. Run's exit sweep resolves stranded
+// waiters with ErrClosed without performing a final dump, making Flush the
+// only path that turns residual dirtiness into a confirmed dump: the saved
+// bytes must carry the merged record — the write-confirmed-after-dump
+// contract extended to the shutdown path.
+func TestFlush_remoteDirtiness(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		remote := storage.Record{
+			Version: version.PackVersion(1, 1, synctestNodeID+1),
+			Data:    []byte("remote-value"),
+		}
+		conflicts, _, err := eng.ApplyRemote("remote", remote)
+		if err != nil {
+			t.Fatalf("ApplyRemote() error = %v, want nil", err)
+		}
+		if len(conflicts) != 0 {
+			t.Fatalf("ApplyRemote() conflicts = %v, want none on a fresh key", conflicts)
+		}
+		// No synctest.Sleep: the debounce timer has not fired, so the flush
+		// request is the first event Run services — the dump Flush forces is
+		// the one covering the merge, exactly the shutdown-time dump D-19
+		// orders.
+		err = eng.Flush()
+		if err != nil {
+			t.Fatalf("Flush() error = %v, want nil", err)
+		}
+		if saves := dumps.saveCount(); saves != 1 {
+			t.Fatalf("completed saves = %d, want exactly the one covering dump", saves)
+		}
+		records, discarded, err := persist.Decode(dumps.save(0).dump)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		merged, ok := records["remote"]
+		if !ok || merged.Version != remote.Version || string(merged.Data) != "remote-value" {
+			t.Errorf("the Flush dump carries remote = (%t, %x, %q), want the merged record",
+				ok, merged.Version[:], merged.Data)
+		}
+	})
+}
+
+// TestFlush_closed pins the closed half of the shutdown contract: once Run
+// has returned — its exit sweep set the closed flag and closed runDone —
+// Flush returns ErrClosed instead of hanging or re-dumping, the same
+// post-close contract flush reports to its callers (Snapshot, Restore, and
+// now the binary's signal path).
+func TestFlush_closed(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, _ := newFakeEngine()
+		stop := startDumper(t, eng)
+		stop() // the exit sweep ran: closed is set, runDone is closed
+
+		err := eng.Flush()
+		if !errors.Is(err, persist.ErrClosed) {
+			t.Errorf("Flush() error = %v, want ErrClosed after Run exited", err)
+		}
+	})
+}
+
+// TestFlush_clean pins the Phase-3 clean-engine decision on the shutdown
+// path: every confirmed write is already on disk, so Flush on a clean
+// engine returns nil WITHOUT issuing a new save — the redundant-dump
+// prohibition the flushCh seam carries (D-10), extended to shutdown, so a
+// clean node's final dump costs nothing.
+func TestFlush_clean(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		// One confirmed write: its covering dump completed, the engine is
+		// clean — the realistic shutdown state with data on disk.
+		_, _, err := eng.Set("k", []byte("v"))
+		if err != nil {
+			t.Fatalf("Set(k) error = %v, want nil", err)
+		}
+		if saves := dumps.saveCount(); saves != 1 {
+			t.Fatalf("completed saves after the confirmed Set = %d, want exactly one", saves)
+		}
+		err = eng.Flush()
+		if err != nil {
+			t.Fatalf("Flush() error = %v, want nil on a clean engine", err)
+		}
+		if saves := dumps.saveCount(); saves != 1 {
+			t.Errorf("completed saves after Flush = %d, want the same one — a clean engine never re-dumps", saves)
+		}
+	})
+}
+
 // TestEngine_writeSurface proves the full write surface through the engine:
 // SetIfAbsent on a tombstoned key returns the store's ErrAlreadyExists and
 // Delete on a missing key the store's ErrNotFound — both unchanged, with no
@@ -1219,6 +1321,93 @@ func TestEngine_restoreCorruptSnapshot(t *testing.T) {
 	}
 }
 
+// TestEngine_applyRemoteTriggersDump proves the REPL-03 memory-apply contract
+// at the persist seam plan 04-06 lands (the seam await's doc reserved in
+// Phase 3: "only local writes register waiters, and Phase 4's remote merges
+// will reuse the dirty path without waiters"): ApplyRemote merges the remote
+// record into the store, marks the engine dirty with NO waiter — the call
+// returns at the apply instant, strictly before the debounced dump — and the
+// running Run completes exactly one save whose bytes decode to the merged
+// record. An oversize record's ErrValueTooLarge passes through unchanged and
+// the engine keeps serving (T-04-04).
+func TestEngine_applyRemoteTriggersDump(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		remote := storage.Record{
+			Version: version.PackVersion(1, 1, synctestNodeID+1),
+			Data:    []byte("remote-value"),
+		}
+		returned := make(chan time.Time, 1)
+		go func() {
+			conflicts, _, err := eng.ApplyRemote("remote", remote)
+			if err != nil {
+				t.Errorf("ApplyRemote() error = %v, want nil", err)
+			}
+			if len(conflicts) != 0 {
+				t.Errorf("ApplyRemote() conflicts = %v, want none on a fresh key", conflicts)
+			}
+			returned <- time.Now()
+		}()
+		returnedAt := <-returned
+		// Advance the fake clock past the debounce fire: unlike the waiter
+		// tests (where the blocked Set call itself holds the test goroutine
+		// until the dump resolves), this no-waiter path needs an explicit
+		// Sleep to move time to the timer (synctest.Wait alone does not
+		// advance the bubble clock).
+		synctest.Sleep(2 * synctestDebounce)
+
+		got, err := eng.Get("remote")
+		if err != nil || string(got.Data) != "remote-value" || got.Version != remote.Version {
+			t.Errorf("post-ApplyRemote Get() = (%q, %x, %v), want the merged record", got.Data, got.Version[:], err)
+		}
+		if saves := dumps.saveCount(); saves != 1 {
+			t.Fatalf("completed saves = %d, want exactly one dump for the remote merge", saves)
+		}
+		save := dumps.save(0)
+		if !returnedAt.Before(save.at) {
+			t.Errorf("ApplyRemote returned at %v, not before the dump at %v — it registered a waiter",
+				returnedAt, save.at)
+		}
+		records, discarded, err := persist.Decode(save.dump)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		if merged, ok := records["remote"]; !ok || merged.Version != remote.Version || string(merged.Data) != "remote-value" {
+			t.Errorf("the save carries remote = (%t, %x, %q), want the merged record", ok, merged.Version[:], merged.Data)
+		}
+
+		// Oversize passthrough (T-04-04): nothing merges, nothing dirties,
+		// the error surfaces unchanged and the next good merge still dumps.
+		huge := storage.Record{
+			Version: version.PackVersion(2, 1, synctestNodeID+1),
+			Data:    bytes.Repeat([]byte("x"), applyRemoteOversize),
+		}
+		_, _, err = eng.ApplyRemote("huge", huge)
+		if !errors.Is(err, storage.ErrValueTooLarge) {
+			t.Errorf("oversize ApplyRemote() error = %v, want ErrValueTooLarge unchanged", err)
+		}
+		_, err = eng.Get("huge")
+		if !errors.Is(err, storage.ErrNotFound) {
+			t.Errorf("oversize Get(huge) error = %v, want ErrNotFound", err)
+		}
+		good := storage.Record{
+			Version: version.PackVersion(3, 1, synctestNodeID+1),
+			Data:    []byte("still-serving"),
+		}
+		_, _, err = eng.ApplyRemote("second", good)
+		if err != nil {
+			t.Fatalf("post-error ApplyRemote() error = %v, want nil", err)
+		}
+		synctest.Sleep(2 * synctestDebounce)
+		if saves := dumps.saveCount(); saves != 2 {
+			t.Fatalf("completed saves after the oversize error = %d, want 2 (the engine kept serving)", saves)
+		}
+	})
+}
+
 // TestEngine_configShrunkValueLimits pins the config-shrink resilience
 // paths: Open skips a dumped record the shrunk store limit rejects instead
 // of aborting startup, Restore skips the same class instead of failing, and
@@ -1280,5 +1469,155 @@ func TestEngine_configShrunkValueLimits(t *testing.T) {
 	slimRec, slimErr = shrunk.Get("slim")
 	if slimErr != nil || string(slimRec.Data) != "slim" {
 		t.Errorf("post-restore Get(slim) = (%q, %v), want (slim, nil)", slimRec.Data, slimErr)
+	}
+}
+
+// redundantRemoteNode is the peer identity the redundant-dirty fixtures'
+// remote versions carry — distinct from synctestNodeID so the versions
+// never collide with locally stamped ones.
+const redundantRemoteNode = uint16(0x0303)
+
+// TestEngine_redundantDirty proves the conditional dirty (D-15, 03 IN-02 +
+// 04 IN-02, threat T-6-01): case (a) — after one establishing remote merge
+// has dumped, an equal-version redelivery of the same record, a stale
+// (rejected) redelivery, and a Restore whose snapshot content already
+// matches the store all leave the clean engine clean: no further dump
+// runs. Case (b) — a genuinely greater remote version on a clean engine
+// still arms the dump, and the one confirming dump covers a concurrent
+// local write's waiter too, so PERS-04's confirmation semantics are
+// unchanged.
+func TestEngine_redundantDirty(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		base := version.PackVersion(1730000000000, 0, redundantRemoteNode)
+		rec := storage.Record{Version: base, Data: []byte("remote value")}
+		_, _, err := eng.ApplyRemote("cfg/remote", rec)
+		if err != nil {
+			t.Fatalf("establishing ApplyRemote() error = %v, want nil", err)
+		}
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("the establishing remote merge ran %d saves, want 1", got)
+		}
+
+		// Equal-version redelivery over the live record: a full no-op.
+		_, _, err = eng.ApplyRemote("cfg/remote", rec)
+		if err != nil {
+			t.Fatalf("equal-redelivery ApplyRemote() error = %v, want nil", err)
+		}
+		// Stale redelivery: rejected with exactly one conflict naming the
+		// stored record as the winner, nothing installed.
+		stale := storage.Record{Version: version.PackVersion(1730000000000-1, 0, redundantRemoteNode), Data: []byte("stale value")}
+		conflicts, _, err := eng.ApplyRemote("cfg/remote", stale)
+		if err != nil {
+			t.Fatalf("stale ApplyRemote() error = %v, want nil", err)
+		}
+		if len(conflicts) != 1 || conflicts[0].Winner != base {
+			t.Fatalf("stale redelivery conflicts = %v, want exactly one with Winner = the stored version", conflicts)
+		}
+		// A snapshot of the current state replays entirely as skips: the
+		// restore marks nothing dirty and its final flush replies nil
+		// without a save.
+		err = dumps.CreateSnapshot("matching")
+		if err != nil {
+			t.Fatalf("CreateSnapshot(matching) error = %v, want nil", err)
+		}
+		err = eng.Restore("matching")
+		if err != nil {
+			t.Fatalf("Restore(matching) error = %v, want nil", err)
+		}
+
+		// Any wrongly armed dirty epoch would fire its save inside this
+		// window; a clean engine stays at exactly the one save.
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("no-op redelivery + matching restore ran %d extra dumps, want 0 — redundant dirty (D-15)", got-1)
+		}
+
+		// Case (b): the greater remote version alone arms a dump on a
+		// clean engine, and the same covering dump resolves the concurrent
+		// local write's waiter — one save covers both.
+		eng2, dumps2 := newFakeEngine()
+		defer startDumper(t, eng2)()
+		newer := version.PackVersion(1730000000001, 0, redundantRemoteNode)
+		_, _, err = eng2.ApplyRemote("cfg/remote", storage.Record{Version: newer, Data: []byte("newer value")})
+		if err != nil {
+			t.Fatalf("greater-version ApplyRemote() error = %v, want nil", err)
+		}
+		setDone := make(chan error, 1)
+		go func() {
+			_, _, err := eng2.Set("cfg/local", []byte("local value"))
+			setDone <- err
+		}()
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		err = <-setDone
+		if err != nil {
+			t.Fatalf("local Set() through the remote-armed epoch error = %v, want nil (PERS-04 unchanged)", err)
+		}
+		if got := dumps2.saveCount(); got != 1 {
+			t.Fatalf("the remote change plus the local waiter ran %d saves, want exactly 1 covering dump", got)
+		}
+		records, discarded, err := persist.Decode(dumps2.save(0).dump)
+		if err != nil || discarded != 0 {
+			t.Fatalf("Decode(covering dump) = (%d discarded, %v), want (0, nil)", discarded, err)
+		}
+		if r, ok := records["cfg/remote"]; !ok || r.Version != newer || string(r.Data) != "newer value" {
+			t.Fatalf("covering dump holds cfg/remote = (%v, %q), want (%v, %q)", r.Version, r.Data, newer, "newer value")
+		}
+		if r, ok := records["cfg/local"]; !ok || string(r.Data) != "local value" {
+			t.Fatalf("covering dump holds cfg/local = %q, want the confirmed local write", r.Data)
+		}
+	})
+}
+
+// TestDumpStats_records proves the dump-cycle gauge (OBS-01): one forced
+// successful dump records a strictly positive duration with total 1 and
+// errors 0, and one failed Save through the fake port's injected failure
+// records the error with total 2 — real time, not a synctest bubble,
+// because the assertion is on a real monotonic span. The engine stops
+// immediately after the failure, ahead of the re-armed debounce retry, so
+// the totals stay exact.
+func TestDumpStats_records(t *testing.T) {
+	t.Parallel()
+	eng, dumps := newFakeEngine()
+	stop := runEngine(t, eng)
+
+	mkRecord := func(data string) storage.Record {
+		return storage.Record{
+			Version: version.PackVersion(time.Now().UnixMilli(), 0, synctestNodeID),
+			Data:    []byte(data),
+		}
+	}
+
+	_, _, err := eng.ApplyRemote("dumpstats/one", mkRecord("one"))
+	if err != nil {
+		t.Fatalf("ApplyRemote(dumpstats/one): %v", err)
+	}
+	err = eng.Flush()
+	if err != nil {
+		t.Fatalf("Flush #1: %v", err)
+	}
+	if got := eng.DumpStats(); got.Total != 1 || got.Errors != 0 || got.DurationSeconds <= 0 {
+		t.Fatalf("after the successful dump DumpStats() = %+v, want Total 1, Errors 0, a positive duration", got)
+	}
+
+	dumps.failSaves = 1
+	_, _, err = eng.ApplyRemote("dumpstats/two", mkRecord("two"))
+	if err != nil {
+		t.Fatalf("ApplyRemote(dumpstats/two): %v", err)
+	}
+	err = eng.Flush()
+	if !errors.Is(err, errFakeSave) {
+		t.Fatalf("Flush #2 = %v, want the injected fake save failure", err)
+	}
+	stop()
+	if got := eng.DumpStats(); got.Total != 2 || got.Errors != 1 || got.DurationSeconds <= 0 {
+		t.Fatalf("after the failed dump DumpStats() = %+v, want Total 2, Errors 1, a positive duration", got)
 	}
 }

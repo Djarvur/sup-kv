@@ -15,9 +15,9 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: CI Bootstrap and Repo Skeleton** - Quality gates, 4-OS CI matrix, Dependabot/govulncheck and the machine-enforced architecture boundary, before any feature code (completed 2026-11-02)
 - [x] **Phase 2: Engine — HLC Versioning and LWW Store** - Pure in-memory decision core: UUIDv7-packed HLC versions, LWW-Element-Map with tombstones and conflict journal, proven by property tests (completed 2026-11-02)
 - [x] **Phase 3: Persistence — Dump and Write Confirmation** - Human-readable JSON dumps with atomic write, `.prev` fallback chain and snapshots; a confirmed write is always on disk (completed 2026-11-03)
-- [ ] **Phase 4: Replication and Deterministic Simulator** - UDP broadcast replication (Hello, DataReplication/Ack, DataSync) with N-peer tracking, plus the seeded-chaos simulator that proves the convergence bounds
-- [ ] **Phase 5: gRPC API and Binary** - The user-facing surface: Get/Set/Delete/List/Watch, startup gate, `wait_for_replication`, health endpoint, snapshots, single static binary
-- [ ] **Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks** - Every documented failure scenario as an automated test (simulator plus real sockets), metrics endpoint, structured logs, benchmarks
+- [x] **Phase 4: Replication and Deterministic Simulator** - UDP broadcast replication (Hello, DataReplication/Ack, DataSync) with N-peer tracking, plus the seeded-chaos simulator that proves the convergence bounds (completed 2026-11-07)
+- [x] **Phase 5: gRPC API and Binary** - The user-facing surface: Get/Set/Delete/List/Watch, startup gate, `wait_for_replication`, health endpoint, snapshots, single static binary (completed 2026-11-09)
+- [x] **Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks** - Every documented failure scenario as an automated test (simulator plus real sockets), metrics endpoint, structured logs, benchmarks (completed 2026-11-16)
 - [ ] **Phase 7: v1.0 — Docs, Examples and Release** - Verified quickstart, ops docs with trust model and drift runbook, API examples, release tag
 
 ## Phase Details
@@ -101,7 +101,23 @@ Plans:
   3. Full reconciliation works in both directions: chunked DataSync runs on the sync timer, at startup and on neighbor restart; receivers answer with DataRequest or unicast DataReplication rate-limited by `sync_response_rate`; a DataRequest for an unknown key gets no reply; a Hello with a new `run_id` triggers full sync toward the restarted node
   4. Malformed traffic is dropped with distinguishable classes: duplicate `node_id` logged as a configuration error, plus own broadcast echo, bad CRC and bad proto version each identifiable
   5. The deterministic simulator runs 2..N nodes over a seeded virtual network that loses, duplicates, reorders and partitions datagrams, and asserts convergence within the documented bounds — normal one RTT, datagram loss ≤ `ack_timeout_max`, partition heal ≤ 2 × `sync_interval` + response time — printing the seed on failure
-**Plans**: TBD
+**Plans**: 6/6 plans complete
+Plans:
+**Wave 1**
+- [x] 04-01-PLAN.md — Tracer: port seam + wire schema + minimal event-loop core + UDP adapter; one write replicated node-to-node end-to-end (REPL-03)
+
+**Wave 2** *(blocked on Wave 1)*
+- [x] 04-02-PLAN.md — Reliability layer: per-peer (key, version) ack tracking, exponential-backoff retransmission, suspension and flush-on-discovery, peer table lifecycle with peer_timeout eviction (REPL-02, REPL-06)
+
+**Wave 3** *(blocked on Wave 2)*
+- [x] 04-03-PLAN.md — Reconciliation: DataRequest replies (tombstones included), deterministic chunked DataSync listings at sync_chunk_bytes, startup/timer triggers, rate-limited egress queue (REPL-04, REPL-05)
+
+**Wave 4** *(blocked on Wave 3)*
+- [x] 04-04-PLAN.md — Restart semantics: new run_id from a known node triggers the targeted full listing; stale-run_id and in-flight-traffic edges pinned (REPL-07)
+
+**Wave 5** *(blocked on Wave 4)*
+- [x] 04-05-PLAN.md — Deterministic simulator: simnet discrete-event virtual network, the three named convergence bound tests, seeded chaos test with SUPKV_SIM_SEED replay; phase gate (TEST-03, REPL-10)
+- [x] 04-06-PLAN.md — Expansion sibling of the tracer (parallel with 04-05): full discard classification with adversarial totality, persist.Engine.ApplyRemote seam, real-socket two-node smoke (REPL-01, REPL-08, REPL-09)
 
 ### Phase 5: gRPC API and Binary
 **Goal**: sup-kv becomes a usable product — a single static binary exposing the typed gRPC surface with Watch, startup gate, `wait_for_replication` and standard health checking
@@ -113,18 +129,51 @@ Plans:
   3. Writes are rejected with Unavailable during the startup gate (until the first full sync round arrives or `startup_gate` elapses) while reads are served immediately, and the standard gRPC health endpoint reflects the gate state (NOT_SERVING until gated open)
   4. A write with `wait_for_replication` waits for peer Acks within a timeout, reports whether they arrived, and never changes the write outcome; snapshots can be created and loaded through the API
   5. The shipped artifact is a single static binary with flags/env config, `--version`, and systemd-friendly behavior
-**Plans**: TBD
+**Plans**: 6/6 plans complete
+Plans:
+**Wave 1**
+- [x] 05-01-PLAN.md — Tracer: proto contract, grpc-go v1.85.0 + codegen, bufconn harness, Get/Set incl. create-if-absent/Delete with full error mapping, List under prefix (API-01, API-02)
+- [x] 05-02-PLAN.md — Replication read seams: Core.SyncArrived (A1) + PendingInfo.Acked, mirrored cross-goroutine by udprepl atomics (API-04, API-05)
+
+**Wave 2** *(blocked on 05-01)*
+- [x] 05-03-PLAN.md — Watch vertical: storage OnChange tap at install, WatchHub snapshot-then-live exact cut, prefix filter, disconnect-on-full (API-03)
+
+**Wave 3** *(blocked on 05-03: server.go file overlap)*
+- [x] 05-04-PLAN.md — Startup gate + standard health endpoint NOT_SERVING→SERVING, write gating, SnapshotCreate/Load RPCs (API-04, API-06, API-07)
+
+**Wave 4** *(blocked on 05-02/05-04)*
+- [x] 05-05-PLAN.md — wait_for_replication: aggregate report (D-08..D-11), appearance/drain two-phase wait, honest eviction/supersession handling (API-05)
+
+**Wave 5** *(blocked on all: wires the complete surface)*
+- [x] 05-06-PLAN.md — Binary: Engine.Flush export, flags/env config (flag>env>default), --version ldflags, D-19 ordered SIGTERM shutdown, static build, real-process smoke (TOOL-01)
 
 ### Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks
 **Goal**: Every documented failure scenario is an automated passing test and the node is observable enough to operate — the evidence that the core value holds under chaos
 **Depends on**: Phase 5
 **Requirements**: OBS-01, OBS-02, OBS-03, TEST-04, TEST-05
 **Success Criteria** (what must be TRUE):
-  1. Every failure scenario from the design doc is an automated test demonstrating convergence within the documented bounds — datagram and Ack loss, duplicates/reordering/own-echo, partitions for seconds and for days (both sides serving writes, deterministic winner, conflict-journal entries), one-way connectivity, node restart via RunID change, empty-disk recovery at `sync_response_rate`, both-nodes-down restart, corrupted dump records, wall-clock jumps live and across restarts, a far-ahead clock, ~1000 writes/s bursts, duplicate `node_id`, protocol version mismatch — including real-socket two-process runs in CI, not only simulation
+  1. Every failure scenario from the design doc is an automated test demonstrating convergence within the documented bounds — datagram and Ack loss, duplicates/reordering/own-echo, partitions for seconds and for days (both sides serving writes, deterministic winner asserted + merge-conflicts counter; conflict journal cancelled per phase-6 D-10), one-way connectivity, node restart via RunID change, empty-disk recovery at `sync_response_rate`, both-nodes-down restart, corrupted dump records, wall-clock jumps live and across restarts, a far-ahead clock, ~1000 writes/s bursts, duplicate `node_id`, protocol version mismatch — including real-socket two-process runs in CI, not only simulation
   2. The metrics endpoint exposes unacked-records count and oldest age, dump duration and errors, merge conflicts, clock-drift warnings, and discarded datagrams by class
   3. Logging is structured and every dropped-datagram class (bad CRC / own broadcast / bad proto version) is distinguishable in logs
   4. Benchmarks cover dump at 10k keys and replication throughput under burst writes, with confirmation latency staying bounded under bursts
-**Plans**: TBD
+**Plans**: 9/9 plans complete
+Plans:
+**Wave 1**
+- [x] 06-01-PLAN.md — Hardening backlog I: replication/persistence review fixes with regression tests (D-15: P4-WR-01/02, P4-IN-01, P3-WR-01, P3-IN-01, P4-IN-02+P3-IN-02) (TEST-04)
+- [x] 06-02-PLAN.md — Hardening backlog II: second-signal shutdown fix, ci.yml timeout-minutes, storage doc/subtest fixes (D-15: P1-IN-01, P1-WR-01, P2-IN-01..03) (TEST-04)
+
+**Wave 2** *(blocked on Wave 1)*
+- [x] 06-03-PLAN.md — slog JSON pipeline (SUPKV_LOG_LEVEL/FORMAT, Log-tap bridge), OnDiscard seam, counter seams (MergeStats, DumpStats, unacked/sent mirrors) (OBS-01, OBS-03)
+- [x] 06-06-PLAN.md — Real-socket scenarios: asymmetric-topology convergence + bad-CRC/proto-mismatch/duplicate-node_id classification (TEST-04)
+- [x] 06-07-PLAN.md — Exec scenarios x4 on the existing harness: kill-9 restart, both-down (+ corrupted dump record), SIGTERM final dump, empty-disk recovery (D-11/D-12) (TEST-04)
+
+**Wave 3** *(blocked on 06-03/06-06)*
+- [x] 06-04-PLAN.md — Metrics/debug endpoint: in-repo Prometheus text exporter, opt-in listener, optional mTLS, /debug/vars + pprof, supkv_ families (D-01..D-05) (OBS-01, OBS-02)
+- [x] 06-05-PLAN.md — Simulator scenarios: partitions seconds/days, one-way, loss/duplicates/reordering, clock jumps/far-ahead, bursts, empty-disk bound, restart resync (TEST-04)
+- [x] 06-08-PLAN.md — Benchmarks: BenchmarkDump10kKeys, BenchmarkReplicationBurst, BenchmarkConfirmationLatency + make bench (D-13/D-14) (TEST-05)
+
+**Wave 4** *(blocked on Waves 2-3)*
+- [x] 06-09-PLAN.md — darwin F_FULLFSYNC sync, full phase gate, D-16 fingerprint regeneration checkpoint (TEST-04)
 
 ### Phase 7: v1.0 — Docs, Examples and Release
 **Goal**: A stranger can deploy and operate a two-node sup-kv cluster from the documentation alone, and v1.0 ships
@@ -134,7 +183,18 @@ Plans:
   1. The README quickstart works exactly as written on Linux and macOS: two nodes on one localhost broadcast socket, writes visible on both within an RTT, kill −9 one node, restart, state converges without operator action
   2. Ops docs state the trust model prominently (no auth/encryption in v1, HMAC is future work), the value-size envelope, local-read semantics (read-your-writes on the same node only), a "not a lock/election service" warning, and a clock-drift runbook
   3. API usage examples are provided and work against the shipped binary
-**Plans**: TBD
+**Plans**: 4/5 plans executed
+Plans:
+**Wave 1**
+- [x] 07-01-PLAN.md — Tracer: reflection + pinned tools (goreleaser/grpcurl) + first verbatim EXAMPLES.md block + the macos-15 broadcast probe with its Option A/B/C decision checkpoint (DOCS-01, DOCS-03)
+
+**Wave 2** *(blocked on 07-01: helpers, tool directives, probe verdict)*
+- [x] 07-02-PLAN.md — README quickstart as the test input: RED failing TestReadmeQuickstart, GREEN verbatim-runnable quickstart incl. kill −9/restart/convergence (DOCS-01)
+- [x] 07-03-PLAN.md — EXAMPLES.md full every-RPC grpcurl walkthrough (output-asserted) + OPERATIONS.md with the five mandated statements + presence guard (DOCS-02, DOCS-03)
+- [x] 07-04-PLAN.md — Release pipeline: Keep-a-Changelog CHANGELOG.md, goreleaser config + tag-triggered workflow + Makefile targets, snapshot proof (D-09/D-10)
+
+**Wave 3** *(blocked on all wave-2 merges)*
+- [ ] 07-05-PLAN.md — Ship: phase gate, tag v1.0.0, observe Release assets + --version identity, D-11 ruleset re-apply with honest marker (DOCS-03)
 
 ## Progress
 
@@ -146,7 +206,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 1. CI Bootstrap and Repo Skeleton | 6/6 | Complete    | 2026-11-02 |
 | 2. Engine — HLC Versioning and LWW Store | 4/4 | Complete    | 2026-11-02 |
 | 3. Persistence — Dump and Write Confirmation | 2/2 | Complete    | 2026-11-03 |
-| 4. Replication and Deterministic Simulator | 0/TBD | Not started | - |
-| 5. gRPC API and Binary | 0/TBD | Not started | - |
-| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 0/TBD | Not started | - |
-| 7. v1.0 — Docs, Examples and Release | 0/TBD | Not started | - |
+| 4. Replication and Deterministic Simulator | 6/6 | Complete    | 2026-11-07 |
+| 5. gRPC API and Binary | 6/6 | Complete    | 2026-11-09 |
+| 6. Hardening — Failure Scenarios, Observability, Benchmarks | 9/9 | Complete    | 2026-11-16 |
+| 7. v1.0 — Docs, Examples and Release | 4/5 | In Progress | - |

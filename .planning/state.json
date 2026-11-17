@@ -1,0 +1,48 @@
+{
+  "contract": "1.0.0",
+  "flavor": "core",
+  "milestone": "v1.0",
+  "phases": [
+    {
+      "number": "1",
+      "name": "CI Bootstrap and Repo Skeleton",
+      "status": "complete"
+    },
+    {
+      "number": "2",
+      "name": "Engine — HLC Versioning and LWW Store",
+      "status": "complete"
+    },
+    {
+      "number": "3",
+      "name": "Persistence — Dump and Write Confirmation",
+      "status": "complete"
+    },
+    {
+      "number": "4",
+      "name": "Replication and Deterministic Simulator",
+      "status": "complete"
+    },
+    {
+      "number": "5",
+      "name": "gRPC API and Binary",
+      "status": "complete"
+    },
+    {
+      "number": "6",
+      "name": "Hardening — Failure Scenarios, Observability, Benchmarks",
+      "status": "complete"
+    },
+    {
+      "number": "7",
+      "name": "v1.0 — Docs, Examples and Release",
+      "status": "in_progress"
+    }
+  ],
+  "next": {
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 7 of 7 · executing"
+  },
+  "updated_at": "2026-11-17T13:51:35.637Z"
+}
