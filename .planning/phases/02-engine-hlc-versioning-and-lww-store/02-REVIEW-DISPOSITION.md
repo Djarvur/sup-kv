@@ -5,28 +5,28 @@ titles: json
 findings:
   - id: IN-01
     severity: info
-    disposition: fixed
-    title: "OnChange doc misstates the record a \"subsequent Get returns\" for tombstone installs"
+    disposition: open
+    title: "CLAUDE.md stack tables drifted from the ratified dependency posture (rapid/uuid/x/sync promotion never happened)"
   - id: IN-02
     severity: info
     disposition: fixed
-    title: "OnChange contract does not state the re-entrancy deadlock boundary"
+    title: "No guard at the 48-bit `l` ceiling — counter overflow wraps the version stream to zero"
   - id: IN-03
     severity: info
     disposition: fixed
-    title: "Duplicated subtest body between TestStore_endToEnd and TestStore_Set"
-open: 0
+    title: "`TestVersion_unpackTotal` range assertions are tautologies"
+open: 1
 total: 3
-recorded: 2026-11-14T18:56:15.670Z
+recorded: 2026-11-17T20:26:43.749Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| IN-01 | info | fixed | fixed — OnChange doc names both surfaces: the record a subsequent Records() snapshot holds, and that a subsequent Get returns only when the record is live; a tombstone install fires the tap exactly like any other change (a delete IS a change) while Get answers ErrNotFound (plan 06-02, D-15) |
-| IN-02 | info | fixed | fixed — OnChange doc states the re-entrancy boundary: the tap is invoked synchronously from the write paths under the store's locking discipline, the write lock is held, Go's sync.RWMutex is not reentrant, and even a read-only Get self-deadlocks (plan 06-02, D-15) |
-| IN-03 | info | fixed | fixed — the TestStore_Set copy of "a second set replaces the value under a strictly greater version" removed (plus its now-unused cmpSame constant); the TestStore_endToEnd copy kept byte-identical as the layer-wiring probe; suite green under -race (plan 06-02, D-15) |
+| IN-01 | info | open | - |
+| IN-02 | info | fixed | 02-REVIEW-FIX.md (not in the current review) |
+| IN-03 | info | fixed | 02-REVIEW-FIX.md (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
