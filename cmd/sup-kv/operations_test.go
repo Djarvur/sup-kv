@@ -86,7 +86,7 @@ func TestOperationsDoc(t *testing.T) {
 		t.Fatalf("read %s: %v", operationsDocPath, err)
 	}
 	doc := string(raw)
-	for _, line := range strings.Split(doc, "\n") {
+	for line := range strings.SplitSeq(doc, "\n") {
 		if !strings.HasPrefix(line, "## ") {
 			continue
 		}
