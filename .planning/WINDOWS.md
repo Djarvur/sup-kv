@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 5
 waived_count: 1
-fixed_count: 2
+fixed_count: 3
 total_count: 9
-last_updated: 2026-11-17T13:52:09.591Z
+last_updated: 2026-11-17T18:59:46.444Z
 ---
 
 # Broken Windows Ledger
@@ -23,7 +23,7 @@ last_updated: 2026-11-17T13:52:09.591Z
 | 6 | 07 | deviation | cmd/sup-kv/readme_test.go | 53 | Option-b contract (07-02): TestReadmeQuickstart darwin leg is a deterministic named skip — the macOS quickstart variant block is documented but not CI-verified on macos-15 (sendto: no route to host, PR #32 verdict); same D-06/D-07 partial-satisfaction adjudication as WINDOWS id 5 | open |  | 2026-11-17T13:01:07.869Z |  |
 | 7 | 7 | unmet-truth | docs/OPERATIONS.md |  | DOCS-02 truth gap (07-03 flagged assumption): TestOperationsDoc is a presence/anchor guard only — no automated check establishes that the five mandated statements are TRUE (trust model, envelope, read semantics, not-a-lock, drift runbook); content truth is 07-VALIDATION.md's manual UAT table and must be verified there | open |  | 2026-11-17T13:31:19.251Z |  |
 | 8 | 7 | deviation | cmd/sup-kv/examples_test.go |  | Examples concurrency/interruption residual (07-03 flagged assumption): marked blocks execute sequentially sharing one pair on the reserved 280xx doc band; a mid-walk test abort is backstopped by the PID-file t.Cleanup, but a hard runner cancel (SIGKILL to the go test process) between blocks skips cleanup and leaks the pair — surfaced for phase verification, not silently assumed safe | open |  | 2026-11-17T13:31:19.581Z |  |
-| 9 | 07 | unrun-verify | .github/workflows/release.yml |  | 07-04 optional pre-tag gh workflow dispatch proof not run — workflow_dispatch requires release.yml on the default branch and gsd/v1.0-milestone is unmerged; 07-05 observes the real tag run post-merge | open |  | 2026-11-17T13:52:09.591Z |  |
+| 9 | 07 | unrun-verify | .github/workflows/release.yml |  | 07-04 optional pre-tag gh workflow dispatch proof not run — workflow_dispatch requires release.yml on the default branch and gsd/v1.0-milestone is unmerged; 07-05 observes the real tag run post-merge | fixed |  | 2026-11-17T13:52:09.591Z | 2026-11-17T18:59:46.444Z |
 
 ````json
 [
@@ -138,10 +138,10 @@ last_updated: 2026-11-17T13:52:09.591Z
     "file": ".github/workflows/release.yml",
     "line": null,
     "description": "07-04 optional pre-tag gh workflow dispatch proof not run — workflow_dispatch requires release.yml on the default branch and gsd/v1.0-milestone is unmerged; 07-05 observes the real tag run post-merge",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-11-17T13:52:09.591Z",
-    "resolved_at": null,
+    "resolved_at": "2026-11-17T18:59:46.444Z",
     "milestone": "v1.0"
   }
 ]
