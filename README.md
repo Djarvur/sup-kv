@@ -50,9 +50,9 @@ serves gRPC reflection, so no proto files are needed, and
 
 <!-- quickstart-verify -->
 ```bash
-sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr 127.255.255.255:27902 \
+./sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr 127.255.255.255:27902 \
   --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json & NODE_A=$!
-sup-kv --node-id 2 --bind-addr 0.0.0.0:27902 --broadcast-addr 127.255.255.255:27901 \
+./sup-kv --node-id 2 --bind-addr 0.0.0.0:27902 --broadcast-addr 127.255.255.255:27901 \
   --grpc-addr 127.0.0.1:27912 --dump-path supkv-b.json & NODE_B=$!
 # Node A accepts writes once health reports SERVING (the startup gate, 1s default).
 for i in $(seq 1 50); do
@@ -70,7 +70,7 @@ done
 grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:27912 supkvapi.v1.SupKVService/Get
 # Hard-kill node A and restart it with the identical arguments.
 kill -9 $NODE_A; wait $NODE_A 2>/dev/null || true
-sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr 127.255.255.255:27902 \
+./sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr 127.255.255.255:27902 \
   --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json & NODE_A=$!
 # The restarted node serves the state again with no operator action (bounded retry).
 for i in $(seq 1 50); do
@@ -81,21 +81,23 @@ grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:27911 supkvapi.v1.SupKVSe
 kill $NODE_A $NODE_B 2>/dev/null; wait 2>/dev/null || true
 ```
 
-Copy-paste the block into a bash shell. It starts two nodes on one broadcast segment,
-writes on node A, reads the value on node B, hard-kills node A with `kill -9`, restarts
-it with the identical arguments and reads the state back — no operator action. CI runs
-this exact block verbatim (`cmd/sup-kv/readme_test.go`), so it cannot drift from
-reality. Values are proto3 `bytes`, which JSON carries as base64: `c3VwLWt2` is
-`"sup-kv"`. The block cleans up after itself.
+Copy-paste the block into a bash shell at the repository root — the directory the
+build above placed the binary in; the block invokes it as `./sup-kv`. It starts two
+nodes on one broadcast segment, writes on node A, reads the value on node B,
+hard-kills node A with `kill -9`, restarts it with the identical arguments and reads
+the state back — no operator action. CI runs this exact block verbatim
+(`cmd/sup-kv/readme_test.go`), so it cannot drift from reality. Values are proto3
+`bytes`, which JSON carries as base64: `c3VwLWt2` is `"sup-kv"`. The block cleans up
+after itself.
 
 ### Quickstart on macOS
 
 <!-- quickstart-verify -->
 ```bash
 BCAST=$(ipconfig getoption en0 broadcast 2>/dev/null || echo 127.255.255.255)
-sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr $BCAST:27902 \
+./sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr $BCAST:27902 \
   --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json & NODE_A=$!
-sup-kv --node-id 2 --bind-addr 0.0.0.0:27902 --broadcast-addr $BCAST:27901 \
+./sup-kv --node-id 2 --bind-addr 0.0.0.0:27902 --broadcast-addr $BCAST:27901 \
   --grpc-addr 127.0.0.1:27912 --dump-path supkv-b.json & NODE_B=$!
 # Node A accepts writes once health reports SERVING (the startup gate, 1s default).
 for i in $(seq 1 50); do
@@ -113,7 +115,7 @@ done
 grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:27912 supkvapi.v1.SupKVService/Get
 # Hard-kill node A and restart it with the identical arguments.
 kill -9 $NODE_A; wait $NODE_A 2>/dev/null || true
-sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr $BCAST:27902 \
+./sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr $BCAST:27902 \
   --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json & NODE_A=$!
 # The restarted node serves the state again with no operator action (bounded retry).
 for i in $(seq 1 50); do

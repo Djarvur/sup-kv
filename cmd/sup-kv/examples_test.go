@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -163,21 +164,32 @@ func runBashVerbatim(t *testing.T, dir string, env []string, block, what string,
 	return out
 }
 
-// supkvBinDir copies the built binary into a fresh temp dir named `sup-kv`
-// and returns the dir: a doc block run with this dir on PATH resolves
-// `sup-kv` exactly the way a stranger with the release archive would.
-func supkvBinDir(t *testing.T) string {
+// writeSupkvBinary copies the built binary to dir/sup-kv, ready to exec: a
+// doc block whose cwd is dir then resolves `./sup-kv` exactly the way a
+// stranger who ran the README's `go build -o sup-kv ./cmd/sup-kv` in their
+// checkout would — the binary the doc's own build step produces, at the path
+// the doc's blocks invoke, with no PATH entry doing the resolving.
+func writeSupkvBinary(t *testing.T, dir string) {
 	t.Helper()
 	data, err := os.ReadFile(smokeBinary(t))
 	if err != nil {
 		t.Fatalf("read the built binary: %v", err)
 	}
-	dir := t.TempDir()
 	bin := filepath.Join(dir, "sup-kv")
 	err = os.WriteFile(bin, data, 0o755)
 	if err != nil {
 		t.Fatalf("write %s: %v", bin, err)
 	}
+}
+
+// supkvBinDir returns a fresh temp dir carrying the built binary named
+// `sup-kv`: a doc block run with this dir on PATH resolves `sup-kv` exactly
+// the way a stranger with the release archive would — the contract
+// docs/EXAMPLES.md declares ("two tools on your PATH").
+func supkvBinDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeSupkvBinary(t, dir)
 	return dir
 }
 
@@ -209,13 +221,17 @@ func grpcurlShim(t *testing.T) string {
 }
 
 // docRunEnv builds the child environment for a verbatim doc block: the
-// inherited environment with PATH replaced by shimDir, binDir and the
-// existing PATH in that order. PATH is replaced (not appended) — a duplicate
+// inherited environment with PATH replaced by the given dirs followed by the
+// existing PATH, in that order. PATH is replaced (not appended) — a duplicate
 // PATH entry would leave the FIRST (unshimmed) value winning in the child.
-func docRunEnv(t *testing.T, shimDir, binDir string) []string {
+// The README quickstart passes only the grpcurl shim dir: its blocks invoke
+// the binary as `./sup-kv` from the block cwd (writeSupkvBinary mirrors the
+// doc's build step), and a sup-kv dir on PATH would resolve a bare-name
+// regression the doc's stranger would hit as command-not-found — WR-01.
+func docRunEnv(t *testing.T, dirs ...string) []string {
 	t.Helper()
 	augmented := strings.Join(
-		[]string{shimDir, binDir, os.Getenv("PATH")},
+		slices.Concat(dirs, []string{os.Getenv("PATH")}),
 		string(os.PathListSeparator),
 	)
 	env := make([]string, 0, len(os.Environ())+1)
