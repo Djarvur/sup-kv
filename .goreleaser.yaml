@@ -1,0 +1,43 @@
+# Release pipeline (D-09): 4-target archives + checksums.txt + per-archive
+# SBOMs + a GitHub Release whose header pulls from CHANGELOG.md. Run by the
+# go.mod-pinned tool directive (goreleaser v2.20.2 via `go tool goreleaser`,
+# .github/workflows/release.yml) — never a downloaded action binary.
+#
+# Version identity (D-18, the conscious Pitfall 6 pick): ldflags stamp
+# {{ .Tag }} — WITH the v prefix — so a release binary's `--version` output
+# (sup-kv v1.0.0 <shortcommit> <goversion>) matches a `make build` at the
+# same commit, where git describe also yields the v-prefixed form.
+# {{ .Version }} (tag minus v) was rejected: two identities for one release.
+# The commit slot uses {{ .ShortCommit }}, same shape as the Makefile's
+# `git rev-parse --short HEAD` stamp.
+version: 2
+
+builds:
+  - id: sup-kv
+    main: ./cmd/sup-kv
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -X main.version={{ .Tag }} -X main.commit={{ .ShortCommit }}
+
+checksum:
+  name_template: "checksums.txt"
+
+# Per-archive SPDX SBOMs; the sboms pipe shells out to syft, installed by the
+# version-pinned anchore/sbom-action/download-syft@v0.24.3 workflow step.
+sboms:
+  - id: archive
+    artifacts: archive
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ title .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+
+release:
+  # The v2.20.2 schema: header is a plain template string — the historical
+  # `header.from_file` map form was removed in the v2 line (verified against
+  # the pinned module's config schema and tmpl func map). mustReadFile
+  # (a built-in template func) pulls the curated KaC entry as the Release
+  # header and fails loudly if CHANGELOG.md is missing.
+  header: '{{ mustReadFile "CHANGELOG.md" }}'

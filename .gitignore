@@ -1,7 +1,7 @@
 # Binaries
 /sup-kv
 /bin/
-dist/
+/dist/
 *.exe
 
 # Locally built dev tools (the make proto plugin binary).

@@ -1,4 +1,4 @@
-.PHONY: lint test bench generate build proto buf-lint buf-format buf-breaking
+.PHONY: lint test bench generate build proto buf-lint buf-format buf-breaking release release-snapshot
 
 # Version stamping for the build target (D-18): version from git describe,
 # commit from the short sha, "dev" when git is unavailable.
@@ -70,3 +70,18 @@ buf-breaking:
 	else \
 		echo "buf breaking deferred: supkv.proto not on origin/master yet (D-08 guard)"; \
 	fi
+
+## release: cut the release from the pushed v* tag via the go.mod-pinned
+## goreleaser tool directive (never a downloaded action binary): 4-target
+## archives + checksums.txt + per-archive SBOMs + a GitHub Release whose
+## header pulls from CHANGELOG.md (.goreleaser.yaml,
+## .github/workflows/release.yml is the tag-triggered counterpart).
+release:
+	go tool goreleaser release --clean
+
+## release-snapshot: prove the whole artifact pipeline locally with NO tag
+## and NO publishing — --snapshot builds all 4 targets plus checksums into
+## dist/. The mandatory pre-tag gate (D-09/Pitfall 8): run this and see it
+## green before any v* tag is pushed (07-05).
+release-snapshot:
+	go tool goreleaser release --snapshot --clean
