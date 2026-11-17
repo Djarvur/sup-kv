@@ -1,150 +1,181 @@
 ---
 phase: 01-ci-bootstrap-and-repo-skeleton
-reviewed: 2026-11-14T22:03:58Z
-depth: standard
+reviewed: 2026-11-17T20:12:43Z
+depth: deep
 files_reviewed: 6
 files_reviewed_list:
-  - .claude/CLAUDE.md
-  - .github/workflows/ci.yml
+  - .gitignore
   - Makefile
-  - buf.yaml
-  - buf.gen.repl.yaml
-  - buf.gen.api.yaml
+  - cmd/sup-kv/main.go
+  - docs/setup/branch-protection.md
+  - go.mod
+  - go.sum
 findings:
   critical: 0
   warning: 1
-  info: 2
-  total: 3
+  info: 1
+  total: 2
   necessity: 0
 status: issues_found
 ---
 
-# Phase 01: Code Review Report (incremental — delta 7b55ad1)
+# Phase 01: Code Review Report (incremental — delta since b68dbd4)
 
-**Reviewed:** 2026-11-14T22:03:58Z
-**Depth:** standard
+**Reviewed:** 2026-11-17T20:12:43Z
+**Depth:** deep
 **Files Reviewed:** 6
 **Status:** issues_found
 
 ## Summary
 
-Incremental review of the phase-1 owned files as changed by commit 7b55ad1
-("refactor(proto): satisfy buf STANDARD with zero waivers", diff base
-12e300f): the buf workspace restructured to one module per proto tree, the
-single `buf.gen.yaml` split into `buf.gen.repl.yaml` / `buf.gen.api.yaml`,
-and the D-08 breaking-guard path updated in Makefile and ci.yml.
+Incremental deep re-review of the phase-1 owned files as changed since
+b68dbd4 ("fix(security): bump toolchain to go1.27.4"). The six files
+carried the weight of phases 5–7 landing on top of the phase-1 skeleton:
+`cmd/sup-kv/main.go` grew the full service wiring (slog pipeline, metrics
+listener with mTLS, reflection, the P1-IN-01 signal-ownership fix),
+`go.mod`/`go.sum` absorbed the grpcurl + goreleaser tool directives (the
+goreleaser graph is why the indirect block roughly tripled), `Makefile`
+gained `bench`/`release`/`release-snapshot`, `.gitignore` anchored
+`/dist/` for goreleaser, and `branch-protection.md` recorded the 2026-11-17
+D-11 re-apply attempt.
 
-**Phase 01 contract verification (all hold):**
+**Deep verification performed (all hold):**
 
-- `ci.yml` — the delta is exactly ONE line (the guard path
-  `internal/udprepl/replproto/supkv.proto` → `.../supkv/v1/supkv.proto`);
-  check-run names ("lint", "gate (<cell>)") and the 4-cell matrix are
-  byte-unchanged, so the required-check contexts in the branch-protection
-  ruleset are untouched. `permissions: contents: read` and the concurrency
-  group intact. No new steps, no `continue-on-error`, no credentials.
-- Guard correctness re-probed live against this tree: `origin/master` sits
-  at 617951e (phase 3) — NEITHER the old nor the new proto path exists
-  there (`git cat-file -e` exits 128 for both), so the deferred branch is
-  the correct behavior today, and the guard now watches the path that will
-  actually land, self-activating on the first PR after the move merges.
-  Had the guard kept the old path it would defer forever — the update is
-  the load-bearing half of this edit and it is right.
-- `Makefile` — all eight targets intact (lint/test/generate/build/proto/
-  buf-lint/buf-format/buf-breaking), tab-indented, all `.PHONY`. The new
-  `proto` target's two per-tree passes were executed live: `make proto`
-  regenerates both trees byte-identically (working tree shows no source
-  diff afterwards) — the `out:` pins inside each template write back
-  inside the tree as documented.
-- Pinned-tool policy (D-05, `.claude/CLAUDE.md`): `go tool buf` plus
-  `local: ["go", "tool", "protoc-gen-go"]` / `...protoc-gen-go-grpc`
-  plugins in both new templates — everything resolves through go.mod tool
-  directives, no global PATH installs, no BSR remote plugins. Consistent.
-- `buf.yaml` — zero `ignore_only` waivers confirmed structurally, and the
-  dropped `.gomodcache` exclude is sound: the repo-root `.gomodcache`
-  (which really does contain stray `.proto` files — verified) now sits
-  outside both module roots (`internal/udprepl/replproto`,
-  `internal/grpcapi/apiproto`), and `go tool buf lint` passes with it
-  present. Gates re-run live during this review: `buf lint` exit 0, `buf
-  format --diff --exit-code` exit 0.
-- `.claude/CLAUDE.md` — the Buf CLI tool-table row accurately describes
-  the per-tree templates and the one-module-per-tree workspace.
+- **Build/module integrity, live-verified:** `go build ./...` exit 0,
+  `go vet ./...` (compiles every test file) exit 0, `go mod tidy -diff`
+  empty — go.mod/go.sum are tidy-consistent with the source tree, so the
+  CI tidy gate is not compensating for drift.
+- **go.mod policy compliance:** all seven tool directives are genuinely
+  consumed — buf (Makefile `proto`/`buf-*`), golangci-lint (`lint`),
+  goreleaser (`release`/`release-snapshot`), govulncheck
+  (vulncheck.yml:30), protoc-gen-go/-go-grpc (both buf.gen templates),
+  grpcurl (docs/EXAMPLES.md:22-24 "go tool grpcurl"). Direct requires
+  match the CLAUDE.md pins exactly (grpc v1.85.0, protobuf
+  v1.36.13-0.20261016172727-e9ee2a76ab8e). The `go 1.27.4` bump is the
+  GO-2026-6859 fix commit. The `pgregory.net/rapid v1.2.0` go.sum entry is
+  graph-required (tidy keeps it), and the "rapid" hits in
+  internal/app/repl/restart_test.go are English words, not imports.
+- **main.go cross-file traces (every callee contract checked):**
+  `persist.Open`'s 6-arg signature matches; `Engine.Run` returns `ctx.Err()`
+  exactly as shutdown's `errors.Is(runErr, context.Canceled)` check assumes;
+  `Engine.Flush` runs before `engineCancel` so the flushCh request is served
+  by the still-live Run loop; `metrics.Sources` field types match every
+  adapter method value in `metricsSources` one-for-one;
+  `metrics.NewTLSConfig` enforces `RequireAndVerifyClientCert` + TLS 1.2
+  floor (real mTLS, not optional client cert); the D-19 chain
+  `apiCancel → hub.Run defer shutdownSubscribers() → Watch handlers return
+  → GracefulStop drains` is real in watch.go:184-201, so the
+  "GracefulStop blocks forever while any stream is open" premise holds.
+- **Knob-range defense chain complete:** main passes int/duration knobs
+  through unvalidated, and every consumer normalizes out-of-domain values —
+  `repl.Config.normalized()` (repl/core.go:132+, incl. the
+  maxSyncResponseRate truncation bound), `persist.Config.normalized()`
+  (engine.go:37-43), `storage.Config` ValueMaxBytes<=0→61440
+  (store.go:22-24), `ServerOptions` StartupGate/WaitTimeout<=0→defaults
+  (gate.go:52,74). No division-by-zero or negative-timer path is reachable
+  from main's config surface.
+- **Error/exit paths:** `--version` works on a broken environment
+  (env error deferred past Parse, as documented); flag parse errors exit 2
+  via ExitOnError, matching `exitUsage`; `errors.Join` preserves
+  `errors.Is` matching for the sentinels; `checkMetricsCerts` closes the
+  half-set path before any bind; `listenMetrics` closes the inner listener
+  on TLS-config failure; `abortWire` compensates the listener on the
+  post-listenGRPC failure path.
+- **Makefile:** all 10 targets in `.PHONY`; the three `bench` packages and
+  all three named benchmarks exist (verified by grep);
+  `-run '^$$'` is the correct empty-anchor exclusion; `.goreleaser.yaml`
+  and `.github/workflows/release.yml` referenced by the release comments
+  both exist.
+- **.gitignore `/dist/` anchoring:** verified safe — the only nested `dist`
+  directory in the tree lives inside the separately-ignored `.gomodcache/`,
+  so nothing previously ignored becomes visible.
+- **branch-protection.md:** the five required-check contexts the doc names
+  are byte-identical to `docs/setup/ruleset.json` (lint, gate
+  (ubuntu-latest), gate (ubuntu-24.04-arm), gate (macos-15),
+  gate (darwin-amd64-cross)) and to ci.yml's matrix; ruleset name
+  "protect master" matches; the new D-11 block is internally consistent,
+  and its refusal to run the enforcement probe on the 403 path is correct
+  reasoning (it would land a real commit on master).
 
-Two new Info findings (stale doc references to the deleted `buf.gen.yaml`
-and a now-false "one pass, both trees" comment in `buf.yaml`), plus the
-carried-open WR-01 (CI job timeouts) which this delta did not address and
-which is re-reported unchanged below. No structural-findings pre-pass and
-no external reviewer evidence were provided for this run; findings are all
-narrative (direct review). No Critical issues.
+**Standing findings from the prior review — all three RESOLVED, verified
+against the current tree:** WR-01 (no CI job timeout-minutes) is fixed —
+ci.yml:21 (15m lint), ci.yml:57 (20m gate), release.yml:24 (20m), each
+tagged `P1-WR-01`; IN-07 (stale `buf.gen.yaml` references in
+.claude/CLAUDE.md) — grep returns zero hits; IN-08 (buf.yaml's false
+"one pass, both trees" comment) — the comment now states a bare
+`buf generate` fails and names the per-tree `make proto` flow.
+
+New findings: one Warning (a signal-handling window in main.go — the same
+class as the P1-IN-01 regression the file itself documents) and one Info
+(exit-code collision). No Critical issues. No necessity findings: every
+guard in the delta guards a reachable state (env/flag trust boundaries and
+cross-goroutine races), and main duplicates no validation its callees own.
+No structural-findings pre-pass and no external reviewer evidence were
+provided for this run; all findings are narrative (direct review).
 
 ## Narrative Findings (AI reviewer)
 
-All findings below originate from the direct adversarial review above.
-WR-01 is the still-open carry from the previous review of this file (same
-id, same finding — the disposition row is kept); IN-07/IN-08 are new in
-this delta.
-
 ## Warnings
 
-### WR-01: Neither CI job sets a timeout-minutes bound — a wedged job holds its runner for GitHub's 6-hour default
+### WR-02: SIGTERM between process start and armSignals() bypasses the graceful-shutdown path entirely
 
-**File:** `.github/workflows/ci.yml:19-20` (job `lint`), `.github/workflows/ci.yml:53-55` (job `gate`)
-**Issue:** (Carry-forward, unchanged by 7b55ad1 — re-verified against the
-current file.) Both jobs declare `runs-on:` but neither sets a job-level
-`timeout-minutes:`. A hung `golangci-lint` download, a wedged `-race` test
-suite, or a stuck `go tool buf` invocation holds the runner until GitHub's
-6-hour default. `fail-fast: false` keeps all four gate cells alive, so one
-wedged cell means up to five held runners per pushed commit — paid runner
-minutes under the branch-protection ruleset.
-**Fix:** Bound each job:
+**File:** `cmd/sup-kv/main.go:229-238`
+**Issue:** `armSignals()` (main.go:238) runs only after `wire(cfg)`
+(main.go:229) returns. During wire — dump-chain load (`persist.Open` reads
+the fallback `.prev` generations, potentially seconds on a large state),
+the UDP bind, and the adapter's `Run` goroutine already receiving peer
+merges — the process still holds the default SIGTERM/SIGINT disposition,
+so a signal in that window kills the process with no final dump and no
+shutdown sequence. The file's own comments establish this exact class as a
+real regression risk: the P1-IN-01 fix (69d1e47) closed the equivalent
+hole at the serve→shutdown boundary because "a second signal during the
+graceful drain … instead of killing the process with the default
+disposition and forfeiting the final dump" — yet the startup side of the
+same boundary is open. Impact is bounded (no client-confirmed writes can
+exist before `serve`, and peer-merged state is recoverable from peers by
+CRDT re-merge), but a supervisor doing fast stop/start loops — exactly the
+deployment the D-19 exit-code contract targets — deterministically hits
+the ungraceful path, and the fix is free: `signal.Notify` is
+level-triggered with a buffer, so arming before `wire()` costs nothing and
+`serve`'s select simply consumes the buffered signal later.
+**Fix:**
+```go
+setupLogging(cfg)
 
-```yaml
-jobs:
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-  gate:
-    name: gate (${{ matrix.name }})
-    runs-on: ${{ matrix.runs-on || matrix.name }}
-    timeout-minutes: 20
+sig := armSignals() // arm before wire: a startup-window SIGTERM must take the graceful path too
+node, listener, err := wire(cfg)
+if err != nil {
+	log.Fatalf("sup-kv: %v", err)
+}
+err = serve(node, listener, sig)
 ```
+(signal ownership then genuinely spans the process's whole life, matching
+the armSignals doc comment; extend that comment's "serving and the D-19
+shutdown alike" to include wiring.)
 
 ## Info
 
-### IN-07: Three stale `buf.gen.yaml` references remain in .claude/CLAUDE.md after the file was deleted
+### IN-09: log.Fatalf paths exit 1 — indistinguishable from exitDumpFailed in the documented exit-code contract
 
-**File:** `.claude/CLAUDE.md:117`, `.claude/CLAUDE.md:138`, `.claude/CLAUDE.md:147`
-**Issue:** 7b55ad1 updated the Buf CLI tool-table row to name the new
-per-tree templates, but three other mentions of the generate config still
-name `buf.gen.yaml`, a file the same commit deleted: the rejected-row "BSR
-remote plugins in `buf.gen.yaml`" (line 117), the version-compatibility
-row "buf.yaml/buf.gen.yaml `version: v2` configs" (line 138), and the
-sources entry "buf.gen.yaml v2 local-plugin syntax" (line 147). A reader
-following the doc to the config file finds nothing on disk.
-**Fix:** Reword to the plural/template names, e.g. "BSR remote plugins in
-the buf.gen.*.yaml templates", "buf.yaml / buf.gen.repl.yaml /
-buf.gen.api.yaml `version: v2` configs", "buf.gen v2 local-plugin
-syntax".
-
-### IN-08: buf.yaml comment claims a single workspace-wide generate pass that no longer exists
-
-**File:** `buf.yaml:14-15`
-**Issue:** The module comment ends "buf generate covers every module in
-the workspace — one pass, both trees." Since 7b55ad1 deleted the default
-`buf.gen.yaml`, a bare `go tool buf generate` now fails outright
-(probe-verified: "Failure: read buf.gen.yaml: file does not exist"), and
-the configured flow is the Makefile's TWO per-tree passes with explicit
-`--template` flags. The sentence describes the pre-delta world and
-contradicts both the Makefile comment and the actual targets one screen
-over in the same repo. The failure mode is self-revealing (a loud buf
-error, not silent wrong output), hence Info.
-**Fix:** Replace the trailing sentence with the current reality, e.g.
-"generate is driven per tree by the Makefile proto target (buf.gen.repl.yaml /
-buf.gen.api.yaml) — a bare workspace generate has no default template
-anymore."
+**File:** `cmd/sup-kv/main.go:66-73, 231, 241`
+**Issue:** The const block frames a three-way exit contract: 0 = clean
+shutdown with confirmed final dump, 1 (`exitDumpFailed`) = failed final
+dump, 2 (`exitUsage`) = configuration error. But the two `log.Fatalf`
+calls on the wire (main.go:231) and serve (main.go:241) failure paths also
+exit 1 via the log package's default. A supervisor reading the documented
+contract cannot distinguish "final dump failed — data at risk, investigate
+the dump file" from "node never came up (bind conflict)". The durability
+verdict the exit code exists to carry gets blurred exactly on the path
+where it matters most.
+**Fix:** Give fatal startup/serve failures their own code, e.g.
+`exitFatal = 3`, replacing the two `log.Fatalf` calls with
+`log.Printf` + `os.Exit(exitFatal)` (which also makes main's
+"main owns every exit" comment literally true), or amend the const-block
+doc to state that 1 covers every non-usage fatality.
 
 ---
 
-_Reviewed: 2026-11-14T22:03:58Z_
+_Reviewed: 2026-11-17T20:12:43Z_
 _Reviewer: Claude (gsd-code-reviewer)_
-_Depth: standard_
-_Delta: 7b55ad1 (base 12e300f)_
+_Depth: deep_
+_Delta: b68dbd4..HEAD (incremental re-review of phase-1 owned files)_
