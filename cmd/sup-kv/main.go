@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
 
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
@@ -573,8 +574,12 @@ func listenMetrics(cfg config, sources metrics.Sources) (*http.Server, error) {
 
 // listenGRPC opens the gRPC TCP listener — distinct from the UDP bind
 // address (the Open Q1 pin: localhost is the safe default on the trusted
-// segment) — and registers the SupKV service plus the standard health
-// server (bound 1:1 to the startup gate) on one grpc.Server.
+// segment) — and registers the SupKV service, the standard health server
+// (bound 1:1 to the startup gate) and the gRPC server reflection service on
+// one grpc.Server. Reflection lets grpcurl discover the whole API with zero
+// proto files — docs/EXAMPLES.md walks the service exactly that way; the
+// schema is public in the repo and the default bind is loopback on the
+// trusted segment, so always-on reflection adds no exposure worth a flag.
 func listenGRPC(grpcAddr string, srv *grpcapi.Server) (net.Listener, *grpc.Server, error) {
 	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", grpcAddr)
 	if err != nil {
@@ -583,6 +588,7 @@ func listenGRPC(grpcAddr string, srv *grpcapi.Server) (net.Listener, *grpc.Serve
 	gs := grpc.NewServer()
 	apiproto.RegisterSupKVServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, srv.Health())
+	reflection.Register(gs)
 	return listener, gs, nil
 }
 

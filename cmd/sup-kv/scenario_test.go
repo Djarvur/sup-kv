@@ -97,8 +97,12 @@ const (
 	// its nodes bind it, which removes structurally the pick-to-bind race
 	// every free-port picker in the shared ephemeral pool suffers under
 	// the parallel burst (Pitfall 6's observed flake: a probe or node
-	// losing its just-picked port to a rival's :0 assignment).
-	scenarioPortLo    = 21000
+	// losing its just-picked port to a rival's :0 assignment). The band
+	// [27900, 28100) below the window is RESERVED for the fixed documented
+	// ports of README.md (279xx) and docs/EXAMPLES.md (280xx): the doc
+	// blocks bind constants, so scenario picks must start above the band
+	// to stay collision-free against the verbatim doc tests.
+	scenarioPortLo    = 28100
 	scenarioPortHi    = 32678
 	scenarioPortTries = 32
 )

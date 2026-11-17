@@ -118,8 +118,9 @@ func runBashVerbatim(t *testing.T, dir string, env []string, block, what string)
 	runErr := cmd.Run()
 	if cmd.Process != nil {
 		// CI hygiene: reap the whole group (bash is gone; this is its
-		// left-behind background jobs).
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) //nolint:errcheck // best-effort reaping of an already-finished group.
+		// left-behind background jobs). The kill is best-effort — an
+		// already-empty group reports ESRCH, which is the success case.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	closeErr := outFile.Close()
 	if closeErr != nil {
