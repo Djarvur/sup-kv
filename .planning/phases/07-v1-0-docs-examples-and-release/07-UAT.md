@@ -3,7 +3,7 @@ status: testing
 phase: 07-v1.0 — Docs, Examples and Release
 source: [07-VERIFICATION.md]
 started: 2026-11-17T19:30:00Z
-updated: 2026-11-17T19:30:00Z
+updated: 2026-11-17T19:45:00Z
 ---
 
 ## Current Test
@@ -22,7 +22,7 @@ awaiting: user response
 
 ### 1. DOCS-01 macOS-leg adjudication (decision)
 expected: accept option-b (complete-with-recorded-partial) or option-c (reword DOCS-01/SC1 and close)
-result: [pending]
+result: passed — maintainer accepted option-b (2026-11-17): DOCS-01 complete with the recorded partial; macos-15 leg stays a named loud-skip; WINDOWS 5/6 remain tracked open entries
 
 ### 2. OPERATIONS.md content-truth UAT (WINDOWS 7)
 expected: the five mandated statements are TRUE of the binary — trust model (no auth/encryption in v1, HMAC future), value envelope, local-read semantics, not-a-lock warning, clock-drift runbook. Presence is machine-proven (41 anchors); constants (61440, 60s) already cross-checked against main.go. Human read-through sign-off.
@@ -40,14 +40,14 @@ expected: |
   postdates the tag; origin/master is still at 0ead1e8. Repo README self-heals on branch merge;
   the frozen archive copy does not. Maintainer consciously accepts fixed-forward (v1.0.1 later)
   or delete-and-re-tag v1.0.0.
-result: [pending]
+result: passed — maintainer accepted fixed-forward (2026-11-17): v1.0.0 stands as shipped; repo README self-heals on branch merge; the archive copy's quickstart defect is consciously accepted and will close with v1.0.1
 
 ## Summary
 
 total: 4
-passed: 0
+passed: 2
 issues: 0
-pending: 4
+pending: 2
 skipped: 0
 blocked: 0
 
