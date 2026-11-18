@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 4: Replication and Deterministic Simulator** - UDP broadcast replication (Hello, DataReplication/Ack, DataSync) with N-peer tracking, plus the seeded-chaos simulator that proves the convergence bounds (completed 2026-11-07)
 - [x] **Phase 5: gRPC API and Binary** - The user-facing surface: Get/Set/Delete/List/Watch, startup gate, `wait_for_replication`, health endpoint, snapshots, single static binary (completed 2026-11-09)
 - [x] **Phase 6: Hardening — Failure Scenarios, Observability, Benchmarks** - Every documented failure scenario as an automated test (simulator plus real sockets), metrics endpoint, structured logs, benchmarks (completed 2026-11-16)
-- [ ] **Phase 7: v1.0 — Docs, Examples and Release** - Verified quickstart, ops docs with trust model and drift runbook, API examples, release tag
+- [x] **Phase 7: v1.0 — Docs, Examples and Release** - Verified quickstart, ops docs with trust model and drift runbook, API examples, release tag (completed 2026-11-18)
 
 ## Phase Details
 
@@ -183,7 +183,7 @@ Plans:
   1. The README quickstart works exactly as written on Linux and macOS: two nodes on one localhost broadcast socket, writes visible on both within an RTT, kill −9 one node, restart, state converges without operator action
   2. Ops docs state the trust model prominently (no auth/encryption in v1, HMAC is future work), the value-size envelope, local-read semantics (read-your-writes on the same node only), a "not a lock/election service" warning, and a clock-drift runbook
   3. API usage examples are provided and work against the shipped binary
-**Plans**: 5/5 plans executed
+**Plans**: 5/5 plans complete
 Plans:
 **Wave 1**
 - [x] 07-01-PLAN.md — Tracer: reflection + pinned tools (goreleaser/grpcurl) + first verbatim EXAMPLES.md block + the macos-15 broadcast probe with its Option A/B/C decision checkpoint (DOCS-01, DOCS-03)
@@ -209,4 +209,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Replication and Deterministic Simulator | 6/6 | Complete    | 2026-11-07 |
 | 5. gRPC API and Binary | 6/6 | Complete    | 2026-11-09 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | 9/9 | Complete    | 2026-11-16 |
-| 7. v1.0 — Docs, Examples and Release | 5/5 | In Progress | - |
+| 7. v1.0 — Docs, Examples and Release | 5/5 | Complete    | 2026-11-18 |
