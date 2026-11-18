@@ -38,6 +38,9 @@ release:
   # The v2.20.2 schema: header is a plain template string — the historical
   # `header.from_file` map form was removed in the v2 line (verified against
   # the pinned module's config schema and tmpl func map). mustReadFile
-  # (a built-in template func) pulls the curated KaC entry as the Release
-  # header and fails loudly if CHANGELOG.md is missing.
+  # (a built-in template func) makes the WHOLE CHANGELOG.md the Release
+  # header — uncurated, acceptable while releases are few (v1.0.0 carries a
+  # single entry); from the second release on, slice the current-version
+  # section instead of shipping every prior entry plus the [Unreleased]
+  # skeleton. Fails loudly if CHANGELOG.md is missing.
   header: '{{ mustReadFile "CHANGELOG.md" }}'

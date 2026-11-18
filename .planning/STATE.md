@@ -1,20 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 7
-current_phase_name: v1.0 — Docs, Examples and Release
-current_plan: 5
-status: executing
-stopped_at: Completed 07-04-PLAN.md
-last_updated: "2026-11-17T13:51:52.461Z"
-last_activity: 2026-11-17
-last_activity_desc: Phase 06 complete, transitioned to Phase 7
-state_head: ac14f92088141babae74e4a83504356190334497
+status: Awaiting next milestone
+stopped_at: Phase 7 complete — all phases complete
+last_updated: "2026-11-18T16:37:57.342Z"
+last_activity: 2026-11-18
+last_activity_desc: Milestone v1.0 completed and archived
+state_head: 6f9608e3032c8661aebbc63d2c9b8678b9bed38c
 progress:
   total_phases: 7
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 38
-  completed_plans: 37
+  completed_plans: 38
+  percent: 100
+current_phase: 7
 ---
 
 # Project State
@@ -28,18 +27,15 @@ See: .planning/PROJECT.md (updated 2026-11-11)
 
 ## Current Position
 
-Phase: 7 (v1.0 — Docs, Examples and Release) — EXECUTING
-Current Plan: 5
-Total Plans in Phase: 5
-Status: Executing — plan 07-01 complete
-Last activity: 2026-11-17 — Plan 07-01 complete (option-b broadcast verdict recorded)
-
-Progress: [██████████] 100%
+Phase: Milestone v1.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-11-18 — Milestone v1.0 completed and archived
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 33
+- Total plans completed: 38
 - Average duration: 10min
 - Total execution time: ~1 hour (60 min of plan execution)
 
@@ -53,6 +49,7 @@ Progress: [██████████] 100%
 | 04 | 6 | - | - |
 | 05 | 6 | - | - |
 | 06 | 9 | - | - |
+| 7 | 5 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -100,6 +97,7 @@ Progress: [██████████] 100%
 | Phase 07 P02 | 12min | 2 tasks | 3 files |
 | Phase 07 P03 | 20min | 2 tasks | 7 files |
 | Phase 07 P04 | 13min | 2 tasks | 5 files |
+| Phase 07 P05 | 88min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -252,6 +250,8 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-04: release.header is a plain template string in goreleaser v2.20.2 — the from_file map form was removed; the CHANGELOG.md header pull is delivered as {{ mustReadFile "CHANGELOG.md" }} (verified against the pinned module source; plan's from_file literal superseded)
 - [Phase 07]: 07-04: {{ .Tag }} ldflags decision implemented as pinned — release binaries report sup-kv v1.0.0 <shortcommit> go1.27.4, byte-shape-identical to make build's git-describe stamping; snapshot binary recorded: sup-kv v0.0.0 1db9265 go1.27.4
 - [Phase 07]: 07-04: local snapshot proof run WITH syft (ad-hoc v1.57.2, GOBIN=/tmp one-off, not a repo dependency) instead of --skip=sbom — the SBOM half of the pipeline is proven locally too; optional gh workflow dispatch proof deferred to 07-05 (workflow_dispatch needs the file on the default branch)
+- [Phase 07]: 07-05: D-11 ruleset re-apply attempted at v1.0 close-out — POST verbatim and read-side verify both 403 'Upgrade to GitHub Pro or make this repository public to enable this feature.'; branch-protection.md marker re-verified 2026-11-17; enforcement probe deliberately not run on the 403 path (would land a direct master push); CI-03 protection sub-item stays plan-gated
+- [Phase 07]: 07-05: v1.0.0 shipped — annotated tag on master squash 0ead1e8 (five CI checks green pre-tag), release workflow run 44138907991 success, Release v1.0.0 carries 9 assets (4 archives + 4 SBOMs + checksums.txt) with CHANGELOG.md as header; release binary --version: sup-kv v1.0.0 0ead1e8 go1.27.4
 
 ### Pending Todos
 
@@ -287,6 +287,10 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-17T13:51:51.477Z
-Stopped at: Completed 07-04-PLAN.md
-Resume file: None
+Last session: 2026-11-17T20:01:47.514Z
+Stopped at: Phase 7 complete — all phases complete
+Resume file: .planning/phases/07-v1-0-docs-examples-and-release/07-UAT.md
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone

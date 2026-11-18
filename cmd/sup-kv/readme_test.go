@@ -4,9 +4,13 @@ package main_test
 // README.md itself is the test input — every fenced block marked with the
 // quickstart-verify marker is extracted and executed VERBATIM through bash -e
 // against the real binary (the 07-01 executable-doc harness:
-// extractMarkedBlocks, runBashVerbatim, supkvBinDir, grpcurlShim), with a PATH
-// under which `sup-kv` resolves to a copy of the built binary and `grpcurl`
-// resolves to a shim exec'ing the pinned go.mod tool directive. The marked
+// extractMarkedBlocks, runBashVerbatim, writeSupkvBinary, grpcurlShim). The
+// blocks run in a directory carrying the built binary as ./sup-kv — the
+// checkout state the README's own build step produces, invoked exactly the
+// way the blocks do — and `grpcurl` resolves to a shim exec'ing the pinned
+// go.mod tool directive. No sup-kv PATH entry is injected: a bare `sup-kv`
+// regression fails here as command-not-found, the same way it would for the
+// stranger the README is written for (WR-01). The marked
 // block proves the full DOCS-01 story in the README's own words: two nodes on
 // one broadcast segment, a write on node A visible on node B, kill -9 of one
 // node, restart with identical arguments, and convergence with no operator
@@ -81,9 +85,13 @@ func TestReadmeQuickstart(t *testing.T) {
 		readmeSkipDarwin(t)
 	}
 	blocks := extractMarkedBlocks(t, readmeDocPath, readmeMarker)
-	binDir := supkvBinDir(t)
-	env := docRunEnv(t, grpcurlShim(t), binDir)
+	// dir mirrors the stranger's post-build checkout: the binary sits at
+	// dir/sup-kv (writeSupkvBinary) and the blocks invoke it as `./sup-kv`,
+	// so docRunEnv gets no sup-kv dir — resolution happens through the cwd
+	// exactly as it would for someone who ran the README's build step.
 	dir := t.TempDir()
+	writeSupkvBinary(t, dir)
+	env := docRunEnv(t, grpcurlShim(t))
 
 	var combined strings.Builder
 	for i, block := range blocks {
