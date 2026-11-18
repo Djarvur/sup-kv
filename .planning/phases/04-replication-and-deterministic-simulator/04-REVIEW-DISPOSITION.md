@@ -3,10 +3,18 @@ phase: 04
 review: 04-REVIEW.md
 titles: json
 findings:
+  - id: WR-03
+    severity: warning
+    disposition: open
+    title: "`release-snapshot` — the \"mandatory pre-tag gate\" — fails on any machine without the external `syft` binary"
+  - id: WR-04
+    severity: warning
+    disposition: open
+    title: "go.mod tool-directive additions sit permanently outside the vulnerability gate's reach"
   - id: WR-01
     severity: warning
     disposition: fixed
-    title: "Drained-row retention can publish a duplicate node id in Acked"
+    title: "Adapter.NotifyLocalWrite blocks forever once Run has exited and the notify buffer fills"
   - id: IN-01
     severity: info
     disposition: fixed
@@ -23,16 +31,18 @@ findings:
     severity: critical
     disposition: fixed
     title: "applyRemote Acks — and supersedes pending tracking with — a record the store rejected"
-open: 0
-total: 5
-recorded: 2026-11-14T22:07:37.406Z
+open: 2
+total: 7
+recorded: 2026-11-18T10:42:09.510Z
 ---
 
 # Phase 04: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | fixed | fix: retainDrained's drained-row Acked union is sort-then-Compact — a peer both pre-Acked (the counting behavior) and discovery-flushed into WaitingOn is published exactly once; regression TestMirror_drainedAckedDedup (not in the current review) |
+| WR-03 | warning | open | - |
+| WR-04 | warning | open | - |
+| WR-01 | warning | fixed | 04-REVIEW-FIX.md (not in the current review) |
 | IN-01 | info | fixed | fix: NotifyLocalWrite is one select over notify+done with a re-check after a won send (the review's own suggested shape) — the pre-check/enqueue TOCTOU nil-return window is closed, the post-Run error is deterministic; regressions TestNotifyLocalWrite_afterDone + TestNotifyLocalWrite_afterRunReturns (not in the current review) |
 | WR-02 | warning | fixed | fix: normalized() clamps SyncResponseRate to the 500/s default outside the domain (0, 1e9] (maxSyncResponseRate cap) — the floor(1s/rate) spacing stays non-zero, the limiter never silently off; regression TestSync_responseRateClamp pins both boundary sides (not in the current review) |
 | IN-02 | info | fixed | fix (merged with 03 IN-02): a snapshot equal to the store's current state is a whole-restore no-op — no replay write, no dirty, the final flush replies nil without a dump; any difference replays in full with fresh-version dominance intact; regression TestEngine_redundantDirty (not in the current review) |
