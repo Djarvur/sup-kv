@@ -11,32 +11,19 @@ audit trail (decision D-08): every command below is re-runnable verbatim.
   workflow-only, and planning-only changes go through pull requests exactly like code
   (CI-03: the PR-only contract admits no side doors).
 
-## Status: DEFERRED (accepted override)
+## Status: ENFORCED
 
-> **The ruleset is NOT yet applied — still plan-gated, re-verified 2026-11-17.**
-> The GitHub rulesets API returns
-> `403 Upgrade to GitHub Pro or make this repository public` for this private org
-> repository (research-verified live 2026-10-31; re-verified by read-side probe at
-> execution, same day). Rulesets on private repositories require a paid org plan
-> (Team tier or equivalent). Until the org plan changes (or the repo flips public —
-> itself a deferred decision), the payload below sits recorded and the protection
-> sub-item of CI-03 is **plan-gated** — explicitly flagged, not silently skipped.
+> **The ruleset is applied and active — re-applied 2026-11-18.**
+> The repository flipped PUBLIC on 2026-11-18 (maintainer decision), removing the free-plan
+> gate that had blocked the rulesets API for the private repo (`403 Upgrade to GitHub Pro or
+> make this repository public`, research-verified 2026-10-31, re-verified at every close-out
+> through v1.0). The first Apply attempt on the public repo surfaced a latent payload bug —
+> GitHub requires `conditions.ref_name.exclude` to be present (empty array) — fixed in the
+> same change; the payload had never been executable before (403 masked it).
 >
-> **Re-apply attempted 2026-11-17 at v1.0 close-out (D-11):** the Apply command
-> verbatim from below returned
-> `403 Upgrade to GitHub Pro or make this repository public to enable this feature.`
-> and the read-side verify returns the same 403 — the org plan has not changed.
-> The enforcement probe (trivial direct push) is deliberately NOT run on the 403
-> path: with no ruleset live it would actually land on `master` and violate the
-> PR-only contract it exists to prove.
->
-> **Deferral decision 2026-10-31: `defer`** — keep everything else, do not upgrade the
-> org plan now; the moment the plan changes, run the Apply command above.
->
-> **Ratified 2026-10-31: accepted override.** The maintainer confirmed the deferral as a
-> deliberate, accepted limitation (org-plan gated; no plan upgrade, no public flip) —
-> recorded in 01-VERIFICATION.md overrides and REQUIREMENTS.md CI-03; the re-apply path
-> below stays current for whenever that decision changes.
+> CI-03's protection sub-item is no longer plan-gated: the override recorded at v1.0 close
+> (ratified 2026-10-31) is discharged by this application. The enforcement probe below was
+> run and passed: a direct push to `master` is rejected by GitHub.
 
 ## Apply
 
