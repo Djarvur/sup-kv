@@ -1,122 +1,172 @@
 ---
 phase: 04-replication-and-deterministic-simulator
-reviewed: 2026-11-14T22:03:58Z
-depth: standard
+reviewed: 2026-11-18T10:40:44Z
+depth: deep
 files_reviewed: 3
 files_reviewed_list:
-  - internal/udprepl/repl.go
-  - internal/udprepl/replproto/supkv/v1/supkv.proto
-  - internal/udprepl/replproto/supkv/v1/supkv.pb.go
+  - Makefile
+  - go.mod
+  - go.sum
 findings:
   critical: 0
-  warning: 1
-  info: 1
+  warning: 2
+  info: 0
   total: 2
   necessity: 0
 status: issues_found
 ---
 
-# Phase 4: Code Review Report (incremental — delta 7b55ad1)
+# Phase 4: Code Review Report (incremental — delta since d201a5b)
 
-**Reviewed:** 2026-11-14T22:03:58Z
-**Depth:** standard
-**Files Reviewed:** 3
+**Reviewed:** 2026-11-18T10:40:44Z
+**Depth:** deep
+**Files Reviewed:** 3 (Makefile, go.mod, go.sum)
 **Status:** issues_found
 
 ## Summary
 
-Incremental review of commit 7b55ad1's phase-4 slice (diff base 22dc340):
-the replication schema's move into its package-derived tree
-(`internal/udprepl/replproto/supkv/v1/`) and the adapter's import update.
-The delta-specific checks all pass:
+Incremental re-review of the three phase-04-covered files that changed since
+the last full review (base `d201a5b`): the Makefile gains `bench` (06-08) and
+`release`/`release-snapshot` (07-04), go.mod bumps the go directive
+1.27.1 → 1.27.4 (GO-2026-6859) and adds `grpcurl` + `goreleaser` tool
+directives, and go.sum carries the corresponding lock entries (go.mod 304 →
+559 lines, 285 → 538 indirect requires; go.sum 1154 → 1582 lines — almost
+entirely goreleaser's tree).
 
-- **repl.go is import-path-only** — `diff` of the whole file against
-  22dc340 shows exactly ONE changed line (the import
-  `internal/udprepl/replproto` → `internal/udprepl/replproto/supkv/v1`,
-  with an explicit `replproto` alias). No handler, mirror, codec, timer or
-  lifecycle logic touched; no behavior change in the replication adapter.
-- **The moved proto is byte-identical apart from go_package** — `diff`
-  against 22dc340's `internal/udprepl/replproto/supkv.proto` shows exactly
-  one changed line: the go_package import path gains `/supkv/v1`. Crucially
-  the `;replproto` Go package alias is preserved, so every
-  `replproto.Xxx` symbol reference in the adapter keeps compiling
-  unchanged — zero churn beyond the import line. Field names and numbers
-  untouched, so the UDP wire format is unchanged (the CRC/oneof schema is
-  identical bytes).
-- **The regenerated pb.go is a clean, complete mechanical rename** —
-  DO-NOT-EDIT header intact, same generator stamp (protoc-gen-go
-  v1.36.12-devel), `package replproto` preserved, `source:` now the
-  module-relative `supkv/v1/supkv.proto`, and the raw descriptor embeds
-  the moved path (`"\x14supkv/v1/supkv.proto\x12\bsupkv.v1"`). All 43
-  internal symbol renames (`file_internal_udprepl_replproto_supkv_proto*`
-  → `file_supkv_v1_supkv_proto*`, incl. the `File_...` descriptor var and
-  the init/registration block) were checked at head and tail of the diff —
-  consistent, no hand edits. `make proto` re-run during this review
-  reproduces the file byte-identically.
-- Live gates: `go build ./...` + `go vet ./...` clean; `go test -race` on
-  `internal/udprepl` (and the other touched packages) green; `buf lint` 0
-  with zero waivers for this tree.
+**Standing findings from the prior review: both are FIXED — not carried
+forward.** The 2026-11-14 review carried WR-01 (drained-row duplicate node
+id) and IN-01 (NotifyLocalWrite nil-return window), both in
+`internal/udprepl/repl.go`. At HEAD, `retainDrained` now does
+sort-then-`slices.Compact` (`repl.go:644-645`, comment cites WR-01) and
+`NotifyLocalWrite` is a single select over `notify`+`done` with a liveness
+re-check after a won send (`repl.go:358-383`) — the disposition ledger
+records all five findings `fixed` with `open: 0`, and the named regression
+tests all exist (`TestMirror_drainedAckedDedup`,
+`TestNotifyLocalWrite_afterDone/afterRunReturns`,
+`TestSync_responseRateClamp`, `TestEngine_redundantDirty`). New findings
+below are numbered WR-03/WR-04 so the recorded WR-01/WR-02/IN-01/IN-02
+disposition rows survive.
 
-No new findings in the delta itself. Two still-open findings from the
-previous review live in the in-scope file `repl.go` and are re-reported
-unchanged below (same ids, same findings — disposition rows preserved).
-WR-02 (SyncResponseRate, `internal/app/repl/core.go:122-124`) and IN-02
-(restore dirty marking, engine) remain open in the ledger but their files
-are outside this delta's scope. No structural-findings pre-pass and no
-external reviewer evidence were provided.
+**Verification performed (all green unless noted):**
 
-## Narrative Findings (AI reviewer)
+- `make test` (`go test -race -cover ./...`): full race suite passes,
+  including the deterministic-simulator packages (`internal/app/internal/
+  simnet`, `internal/app/repl`, `internal/udprepl`) — no regression to the
+  simulator build path from the toolchain or tool-directive changes.
+- `make bench`: all three TEST-05 benchmarks run
+  (`BenchmarkDump10kKeys` / `BenchmarkReplicationBurst` /
+  `BenchmarkConfirmationLatency`), `-run '^$$'` correctly excludes unit
+  tests, and each named benchmark exists in exactly the listed package.
+- `go build ./...`, `go tool golangci-lint config verify` (T-01-01 gate),
+  `go mod verify` (all modules verified), `go mod tidy -diff` (exact —
+  go.mod/go.sum are precisely tidy), `go tool govulncheck ./...` (no
+  vulnerabilities — the 1.27.4 bump is effective on the reachable graph).
+- go.sum (lock file, machine-generated): no per-line findings; correctness
+  established by verify + tidy + presence of the `h1:`/`go.mod` pairs for
+  the new tools (grpcurl v1.9.4, goreleaser v2.20.2).
+- `go tool grpcurl` resolves and is load-bearing: the README/examples tests
+  exec it through a pinned shim (`cmd/sup-kv/readme_test.go:10`).
+- `go tool goreleaser` executes the pipeline correctly up to the SBOM
+  stage — where the one empirical failure of this review occurs (WR-03).
+  Running the gate for this review cleaned and partially repopulated the
+  gitignored `dist/` with artifacts for the current commit; the previous
+  snapshot's artifacts are regenerable.
 
-All findings below are carry-forwards from the 2026-11-14 review,
-re-verified present in the current `repl.go` at the cited lines; the
-7b55ad1 delta did not touch the implicated logic (import-line-only
-change).
+Cross-file checks against the Makefile's claims: `release.yml` uses the
+same `go tool goreleaser` pinned binary (no downloaded action binary for
+goreleaser; syft is installed by the pinned `download-syft@v0.24.3` step),
+`.goreleaser.yaml` matches the "4 targets + checksums + per-archive SBOMs +
+CHANGELOG.md header" description, and `mustReadFile` exists in the pinned
+goreleaser v2.20.2 template func map (`internal/tmpl/tmpl.go:321`). All
+three workflows read the toolchain via `go-version-file: go.mod`.
 
 ## Warnings
 
-### WR-01: Drained-row retention can publish a duplicate node id in Acked
+### WR-03: `release-snapshot` — the "mandatory pre-tag gate" — fails on any machine without the external `syft` binary
 
-**File:** `internal/udprepl/repl.go:513-523`
-**Issue:** (Carry-forward, unchanged by 7b55ad1 — the `retainDrained`
-union is still `append(slices.Clone(prev.Acked), prev.WaitingOn...)` +
-`slices.Sort` with no dedup, re-verified at line 513.) Because
-`handleHello`'s discovery flush re-adds a peer to `entry.waitSet` without
-touching `entry.acked`, a peer can sit in BOTH sets when the drain fires,
-and the retained row publishes `Acked: [B, B]`, violating the documented
-"union is exactly the core's acked set at deletion" invariant — a
-`wait_for_replication` consumer counting `len(Acked)` over-reports by the
-duplicate. Full four-step production sequence in the original finding
-(previous 04-REVIEW.md, WR-01).
-**Fix:** Dedup the union — both inputs are sorted, so `slices.Compact`
-after the sort:
+**File:** `Makefile:82-87`
+**Issue:** The target's help text bills it as "prove the whole artifact
+pipeline locally … The mandatory pre-tag gate (D-09/Pitfall 8): run this
+and see it green before any v* tag is pushed (07-05)". Empirically
+reproduced during this review on this repository's own committing machine:
 
-```go
-acked := append(slices.Clone(prev.Acked), prev.WaitingOn...)
-slices.Sort(acked)
-acked = slices.Compact(acked)
+```
+• software bill of materials
+    • cataloging  cmd=syft sbom=sup-kv_0.0.0-SNAPSHOT-ab0c321_Darwin_arm64.tar.gz.sbom.json
+⨯ release failed after 5s  error=exec: "syft": executable file not found in $PATH
+make: *** [Makefile:87: release-snapshot] Error 1
 ```
 
-## Info
+Snapshot mode does NOT skip the SBOM stage (proven both by the failure and
+by the `.sbom.json` artifacts in `dist/`), and goreleaser v2.20.2's sboms
+pipe shells out to `syft` with no in-process fallback
+(`internal/pipe/sbom/sbom.go:64` sets `cfg.Cmd = "syft"`, line 204
+`exec.CommandContext`). The prerequisite is documented nowhere a Makefile
+user would look: no `syft` mention in `docs/`, README, or AGENTS.md — only
+a `.goreleaser.yaml:28-29` comment that attributes syft installation to the
+CI workflow's action step, i.e. exactly not the local run this target
+exists for. The help text is also materially incomplete: it says
+"--snapshot builds all 4 targets plus checksums into dist/" — the pipeline
+also builds SBOMs (the stage that actually fails), and on a syft-less
+machine it never reaches checksums at all. Net effect: the gate cannot go
+green as documented, and a developer who "sees it red" gets a puzzling
+tool-missing error instead of a pipeline verdict. (The tag-triggered CI
+release is unaffected — `release.yml:32` installs syft — so this is a
+robustness defect of the local gate, not of the shipped release path.)
+**Fix:** Make the prerequisite explicit and fail with a pointed message
+(or install it pinned). Minimal:
 
-### IN-01: NotifyLocalWrite pre-check leaves a narrow nil-return window during Run's exit
+```make
+## release-snapshot: prove the whole artifact pipeline locally with NO tag
+## and NO publishing — --snapshot builds all 4 targets, per-archive SBOMs
+## (needs `syft` on PATH — CI pins it via anchore/sbom-action v0.24.3;
+## locally install the same version) plus checksums into dist/.
+release-snapshot:
+	@command -v syft >/dev/null || { echo "release-snapshot: 'syft' not on PATH — the SBOM stage shells out to it (see .goreleaser.yaml)"; exit 1; }
+	go tool goreleaser release --snapshot --clean
+```
 
-**File:** `internal/udprepl/repl.go:314-339`
-**Issue:** (Carry-forward, unchanged by 7b55ad1 — the closed-loop
-`select`/`default` pre-check at lines 328-332 followed by the racing
-buffered send is exactly the code the original finding described.)
-Between the pre-check's `default:` (loop looks alive) and the second
-select's `a.notify <- lw` send, Run can return and close `a.done`; the
-buffered send then wins and NotifyLocalWrite reports nil for a
-notification nobody will drain. Bounded, informational window — see the
-original finding for the accepted-risk reasoning.
-**Fix:** As originally suggested — a single select over both channels, or
-an atomic/once-guarded loop-liveness flag checked after a successful send
-(to drain-and-report ErrRunLoopExited), if the window is ever judged worth
-closing.
+Better (keeps local/CI version parity inside the repo): point the sbom
+pipe's `cmd` at a checked-in wrapper that `go run`s a pinned
+`github.com/anchore/syft/cmd/syft@<version>` and drop the CI download step.
+
+### WR-04: go.mod tool-directive additions sit permanently outside the vulnerability gate's reach
+
+**File:** `go.mod:7` (grpcurl), `go.mod:9` (goreleaser) — cross-ref
+`.github/workflows/vulncheck.yml:36`
+**Issue:** This delta pins two new executable tools and, via goreleaser's
+graph, grows the module set by 253 indirect requires (285 → 538) — the
+largest supply-chain surface in the repo, including sigstore/cosign,
+AWS/Azure/GCP SDKs and their crypto stacks. None of it is visible to the
+project's vulnerability gate: `vulncheck.yml` runs
+`go tool govulncheck ./...` (symbol/source mode), which analyzes only the
+import graph of repository packages — empirically, `go list -deps ./...`
+contains zero goreleaser/grpcurl packages. The workflow even triggers on
+`go.mod`/`go.sum` PR paths, i.e. it is invoked precisely for Dependabot
+tool-dep bumps it cannot evaluate: a CVE in a goreleaser dependency
+bypasses the gate while the weekly scan and the dependency-PR scan both
+stay green. The shipped runtime graph (grpc/protobuf) remains fully
+covered — the gap is the tool code that executes during releases, proto
+codegen and linting with repo contents and, for goreleaser, GitHub
+credentials. Provable from the repo (workflow command + import-graph
+isolation), hence Warning.
+**Fix:** Add a tool-scan pass to the scheduled vulncheck workflow
+(binary mode needs no symbols and works on built tool binaries):
+
+```yaml
+- name: Vulnerability scan pinned dev tools (invisible to ./... source scan)
+  run: |
+    GOBIN=/tmp/toolbin go install github.com/goreleaser/goreleaser/v2@v2.20.2
+    GOBIN=/tmp/toolbin go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.4
+    go tool govulncheck -mode=binary /tmp/toolbin/goreleaser /tmp/toolbin/grpcurl
+```
+
+(or record the accepted trade-off in `.planning` with the rationale that
+tools are hash-pinned and run only in trusted contexts).
 
 ---
 
-_Reviewed: 2026-11-14T22:03:58Z_
+_Reviewed: 2026-11-18T10:40:44Z_
 _Reviewer: Claude (gsd-code-reviewer)_
-_Depth: standard_
-_Delta: 7b55ad1 (base 22dc340)_
+_Depth: deep_
+_Delta: base d201a5b (incremental re-review; files: Makefile, go.mod, go.sum)_
