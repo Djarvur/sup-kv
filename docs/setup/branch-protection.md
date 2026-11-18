@@ -23,7 +23,14 @@ audit trail (decision D-08): every command below is re-runnable verbatim.
 >
 > CI-03's protection sub-item is no longer plan-gated: the override recorded at v1.0 close
 > (ratified 2026-10-31) is discharged by this application. The enforcement probe below was
-> run and passed: a direct push to `master` is rejected by GitHub.
+> run and passed: a direct push to `master` is rejected by GitHub
+> (`push declined due to repository rule violations`).
+>
+> **Cleanup 2026-11-18:** a stale ruleset `master` (id 26349706, created 2026-11-02 —
+> GitHub auto-disabled it when the repository went private on the free plan) was deleted;
+> it carried only `deletion`+`non_fast_forward`. `protect master` (id 27576625,
+> all four rules, enforcement active) is the single live ruleset, per this document's
+> payload-as-source-of-truth contract.
 
 ## Apply
 
