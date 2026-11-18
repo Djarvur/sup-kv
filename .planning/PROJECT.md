@@ -76,7 +76,7 @@ Target workloads: service configuration (writes/hour, KiB values, hundreds of ke
 
 - **Tech stack**: Go; single static binary; minimal dependencies — gRPC + protobuf only; HLC, UUIDv7 packing, LWW map, UDP reliability layer all implemented in-repo (each is tens of lines against a known algorithm) — product principle: no invented consensus, correctness from proven components
 - **Quality**: strict golangci-lint configuration (all applicable linters enabled; no suppressions without written justification) and the `go-ultimate` skill conventions (github.com/Djarvur/go-ultimate) govern all implementation from the first feature commit; enforced in CI, red gate blocks merge
-- **Process**: PR-only development — branch protection on `master` (server-side ruleset deferred 2026-10-31 — ratified accepted override, org-plan gated; one-command re-apply in docs/setup/branch-protection.md), direct pushes forbidden, every change lands through a PR from a feature branch; CI on every push and PR
+- **Process**: PR-only development — branch protection on `master` (server-side ruleset ENFORCED since 2026-11-18, repo public; payload and audit trail in docs/setup/branch-protection.md), direct pushes forbidden, every change lands through a PR from a feature branch; CI on every push and PR
 - **Scale envelope**: whole state in RAM (thousands to tens of thousands of keys); values ≤ 60 KiB; one UDP broadcast segment; trusted LAN
 - **Correctness**: convergence never depends on wall-clock synchronization; determinism must be proven by simulation under a lossy/duplicating/reordering/partitioning virtual network
 - **Performance**: bursts up to ~1000 writes/s on hot keys; disk flush latency within the dump debounce window is acceptable
