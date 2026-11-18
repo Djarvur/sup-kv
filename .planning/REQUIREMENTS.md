@@ -183,7 +183,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OBS-03 | Phase 6 | Complete |
 | TEST-04 | Phase 6 | Complete |
 | TEST-05 | Phase 6 | Complete |
-| DOCS-01 | Phase 7 | Pending |
+| DOCS-01 | Phase 7 | Complete |
 | DOCS-02 | Phase 7 | Complete |
 | DOCS-03 | Phase 7 | Complete |
 
