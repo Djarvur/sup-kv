@@ -6,22 +6,30 @@ findings:
   - id: WR-01
     severity: warning
     disposition: open
-    title: "Ephemeral-port pick-to-bind race hard-fails the log-pair probe (observed flake during review)"
+    title: "Ephemeral-port pick-to-bind race hard-fails the log-pair probe (observed flake during review) — carried over, still valid"
   - id: WR-02
     severity: warning
     disposition: open
-    title: "Metrics discard-class labels re-stringify the canonical tokens — silent contract-drift hazard"
+    title: "Metrics discard-class labels re-stringify the canonical tokens — silent contract-drift hazard — carried over, still valid"
   - id: WR-03
     severity: warning
     disposition: open
-    title: "NewMux comment states a false mechanism — pprof/expvar DO register on DefaultServeMux on any import"
+    title: "NewMux comment states a false mechanism — pprof/expvar DO register on DefaultServeMux on any import — carried over, still valid"
   - id: IN-01
     severity: info
     disposition: open
-    title: "SentByType counts datagrams as sent before unicast resolution and before the socket write"
-open: 4
-total: 4
-recorded: 2026-11-16T11:33:23.263Z
+    title: "SentByType counts datagrams as sent before unicast resolution and before the socket write — carried over, still valid"
+  - id: IN-02
+    severity: info
+    disposition: open
+    title: "`release-snapshot` — the mandated local pre-tag gate — has an undeclared `syft` prerequisite its comment does not name"
+  - id: IN-03
+    severity: info
+    disposition: open
+    title: "Empty-disk recovery bound is enforced from `waitFor` start, not from node B's process start — the window can exceed the documented bound"
+open: 6
+total: 6
+recorded: 2026-11-18T11:14:50.208Z
 ---
 
 # Phase 06: Code Review Disposition
@@ -32,6 +40,8 @@ recorded: 2026-11-16T11:33:23.263Z
 | WR-02 | warning | open | - |
 | WR-03 | warning | open | - |
 | IN-01 | info | open | - |
+| IN-02 | info | open | - |
+| IN-03 | info | open | - |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
