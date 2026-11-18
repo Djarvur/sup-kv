@@ -1,5 +1,5 @@
 ---
-status: testing
+status: complete
 phase: 07-v1.0 — Docs, Examples and Release
 source: [07-VERIFICATION.md]
 started: 2026-11-17T19:30:00Z
@@ -8,15 +8,7 @@ updated: 2026-11-17T19:45:00Z
 
 ## Current Test
 
-number: 1
-name: DOCS-01 macOS-leg adjudication — accept option-b (complete-with-recorded-partial) or option-c (reword the requirement)
-expected: |
-  The maintainer decides how the macOS quickstart claim stands: option-b keeps DOCS-01 as complete
-  with the recorded partial (macos-15 leg is a named loud-skip, WINDOWS 5/6 carry the open entries),
-  or option-c rewords DOCS-01/ROADMAP SC1 so the requirement claims only what is proven.
-  Linux leg is machine-proven; the macOS broadcast probe died at the limited-broadcast row before
-  the derived form was ever probed — option-c is a wording choice, not evidence-forced.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -26,11 +18,11 @@ result: passed — maintainer accepted option-b (2026-11-17): DOCS-01 complete w
 
 ### 2. OPERATIONS.md content-truth UAT (WINDOWS 7)
 expected: the five mandated statements are TRUE of the binary — trust model (no auth/encryption in v1, HMAC future), value envelope, local-read semantics, not-a-lock warning, clock-drift runbook. Presence is machine-proven (41 anchors); constants (61440, 60s) already cross-checked against main.go. Human read-through sign-off.
-result: [pending]
+result: pass — maintainer read-through 2026-11-18: all five statements truthful and clear
 
 ### 3. Stranger cold-read test (the phase goal itself)
 expected: a stranger can deploy and operate a two-node sup-kv cluster from the documentation alone — follow README quickstart + docs/OPERATIONS.md + docs/EXAMPLES.md cold, without repo knowledge, and reach a working two-node cluster.
-result: [pending]
+result: pass — maintainer confirmed 2026-11-18, then agent-assisted cold run executed 2026-11-18: fresh clone of gsd/v1.0-milestone to /tmp/supkv-cold, README quickstart block executed VERBATIM (grpcurl on PATH per the EXAMPLES-declared prerequisite, built from the repo's pinned tool directive) — build OK, Set on A visible on B, kill -9 + restart + Get on A recovers the value, human-readable dumps, block exit 0, no leftover processes
 
 ### 4. Shipped-artifact README staleness (decision)
 expected: |
@@ -45,9 +37,9 @@ result: passed — maintainer accepted fixed-forward (2026-11-17): v1.0.0 stands
 ## Summary
 
 total: 4
-passed: 2
+passed: 4
 issues: 0
-pending: 2
+pending: 0
 skipped: 0
 blocked: 0
 
