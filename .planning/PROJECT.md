@@ -26,6 +26,7 @@ Every node stays writable at all times with no coordination, and a write confirm
 - ✓ **Tooling** — Phase 5 (single static binary, 19 flags with SUPKV_ env twins, `--version`, D-19 ordered graceful shutdown; systemd unit lands in Phase 7)
 - ✓ **Observability** — Phase 6 (opt-in mTLS metrics/debug endpoint with in-repo Prometheus text exporter at `/metrics` + expvar/pprof `/debug`; slog JSON default with SUPKV_LOG_LEVEL/FORMAT; OnDiscard seam with distinguishable discard classes and per-class counters; counter seams across repl/persist/udprepl)
 - ✓ **Testing (remaining)** — Phase 6 (TEST-04 failure-scenario suite: 9 deterministic simulator scenarios, real-socket two-node scenarios, 4 two-process exec scenarios on the real binary; TEST-05 benchmarks behind `make bench`: dump-10k, replication burst ~975 w/s, confirmation latency ~10ms under 1000 w/s load)
+- ✓ **Docs, examples, release** — Phase 7 (README quickstart executed VERBATIM by CI incl. kill −9/restart convergence — Linux cell green, macOS leg a named loud-skip per ratified option-b; docs/OPERATIONS.md five trust-model statements machine-anchored + human-verified; docs/EXAMPLES.md 10 CI-executed grpcurl blocks over every RPC; CHANGELOG 1.0.0; goreleaser tool-directive pipeline — tag v1.0.0 → GitHub Release with 4 archives + SBOMs + checksums, shipped binary verified `sup-kv v1.0.0`)
 
 ### Active
 
@@ -96,6 +97,9 @@ Target workloads: service configuration (writes/hour, KiB values, hundreds of ke
 | In-repo Prometheus text exporter; opt-in mTLS metrics/debug endpoint | Counters/gauges only — client_golang would add 3+ modules against the "gRPC + protobuf only" bar; opt-in + mTLS keeps the pprof/expvar surface closed by default (T-6-07..10) | ✓ Validated (Phase 6) |
 | slog JSON at the binary, OnDiscard seam in the core | Structured logs as the inspectability floor; `internal/app` stays free of slog — the adapter bridges the tap at its own edge (D-08/D-09) | ✓ Validated (Phase 6) |
 | darwin F_FULLFSYNC durability flush in persistfile | Strict superset of File.Sync on darwin (fcntl(2)); closes the phase-3 open planning decision resolved-with-code; other platforms byte-identical | ✓ Validated (Phase 6) |
+| Documentation as machine-verified contract (doc-is-test-input) | CI extracts fenced blocks from README/EXAMPLES/OPERATIONS and executes them verbatim against the built binary — docs cannot rot silently | ✓ Validated (Phase 7) |
+| goreleaser + grpcurl as go.mod tool directives; tag-triggered release workflow | Same-version guarantee as all dev tools; release tooling never a runtime dep; ci.yml (ruleset contract) untouched | ✓ Validated (Phase 7 — v1.0.0 shipped) |
+| macOS quickstart = option-b (Linux CI-verified + marked darwin variant, loud-skip) | macos-15 has no usable broadcast form (255.255.255.255 no-route, probe verdict recorded); D-06 satisfied partially by maintainer decision, honestly recorded | ⚠️ Revisit at v1.0.1+/ruleset window |
 
 ## Evolution
 
@@ -115,4 +119,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-16 after Phase 6 (observability + failure-scenario suite + benchmarks delivered — Active requirements empty; v1.0 feature scope complete, Phase 7 docs/release remains)*
+*Last updated: 2026-11-18 after v1.0 milestone (all 7 phases verified, v1.0.0 shipped and audited — milestone audit passed 7/7; Active empty; next milestone via /gsd-new-milestone)*
