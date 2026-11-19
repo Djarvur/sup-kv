@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Phase 2 context gathered (--auto)
-last_updated: "2026-11-19T19:04:49.053Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-11-19T19:27:52.465Z"
 last_activity: 2026-11-19
-last_activity_desc: Phase 1 complete, transitioned to Phase 2
-state_head: 8209aa99dac9e00fbffbc014098aac4b8346b9bd
+last_activity_desc: Phase 2 execution started
+state_head: ba6c5c8632e651e6e06b78b925d0c4d4ed671040
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-19)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 1 — Spec Reference and Decisions
+**Current focus:** Phase 2 — Stand and Simulator as Tests
 
 ## Current Position
 
-Phase: 2 (Stand and Simulator as Tests) — READY TO EXECUTE
-Plan: 4
+Phase: 2 (Stand and Simulator as Tests) — EXECUTING
+Plan: 2 of 17
 Status: Ready to execute
-Last activity: 2026-11-19 — Phase 1 complete, transitioned to Phase 2
+Last activity: 2026-11-19 — Phase 2 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 787s | 3 tasks | 1 files |
 | Phase 01 P03 | 524s | 3 tasks | 11 files |
 | Phase 01 P04 | 299 | 2 tasks | 0 files |
+| Phase 02 P01 | 520s | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,9 @@ Recent decisions affecting current work:
 - [Phase 01]: ADR set authored slim-MADR with rule-level detail for 14.5 (six numbered sub-rules) so Phase 4 can address accepted-by-default rule (6) individually; honest gaps kept (0002 informs [], 0011 loss-share has no dedicated v1.1 REQ) instead of invented mappings
 - [Phase 01]: Phase gate closed with zero task commits: every gate passed on the committed tree as plans 02/03 left it; fixups were gated on gate failure and none failed — Plan 01-04's <output> creates no new files and commits fixups only when a gate fails; committing a no-op would fabricate history - the green gate record lives in 01-04-SUMMARY.md
 - [Phase 01]: Scoped-prefix publication guard (docs/reviews/2026-11-19-v1.0/internal/) is the standing phase-gate assertion, never any-path-containing-internal substring matching — 22 legitimate evidence/repro/**/internal/** repro-test module paths are committed D-01 payload; literal substring matching contradicts the 46-tracked-evidence-files acceptance (wave-1 Rule 1 scoping, re-affirmed at the gate)
+- [Phase 02]: R-03 red test's SyncArrived fake bakes v1.0 mirror semantics (any-chunk->true) with closed-side assertions parked behind a release channel (TestGate_opensOnTimeout pattern) — the Phase 4 flip needs zero test edits, only the expectation-table row
+- [Phase 02]: red-runner errors on unexpected failing tests (names not in the expectation table; subtests count as their parent's) — T-2-01 'unknown names are errors' applied to the event stream
+- [Phase 02]: red-runner package list hardcoded with an extend comment (./internal/grpcapi/ first) — the TSV carries no package column
 
 ### Pending Todos
 
@@ -97,7 +101,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-19T16:33:53.410Z
-Stopped at: Phase 2 context gathered (--auto)
+Last session: 2026-11-19T19:27:25.397Z
+Stopped at: Completed 02-01-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`

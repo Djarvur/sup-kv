@@ -1,12 +1,93 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.1",
-  "phases": [],
+  "milestone": "v1.1 — Spec Compliance and Resilience",
+  "phases": [
+    {
+      "number": "1",
+      "name": "CI Bootstrap and Repo Skeleton",
+      "status": "complete"
+    },
+    {
+      "number": "2",
+      "name": "Engine — HLC Versioning and LWW Store",
+      "status": "complete"
+    },
+    {
+      "number": "3",
+      "name": "Persistence — Dump and Write Confirmation",
+      "status": "complete"
+    },
+    {
+      "number": "4",
+      "name": "Replication and Deterministic Simulator",
+      "status": "complete"
+    },
+    {
+      "number": "5",
+      "name": "gRPC API and Binary",
+      "status": "complete"
+    },
+    {
+      "number": "6",
+      "name": "Hardening — Failure Scenarios, Observability, Benchmarks",
+      "status": "complete"
+    },
+    {
+      "number": "7",
+      "name": "v1.0 — Docs, Examples and Release",
+      "status": "complete"
+    },
+    {
+      "number": "1",
+      "name": "Spec Reference and Decisions",
+      "status": "pending"
+    },
+    {
+      "number": "2",
+      "name": "Stand and Simulator as Tests",
+      "status": "pending"
+    },
+    {
+      "number": "3",
+      "name": "Transport",
+      "status": "pending"
+    },
+    {
+      "number": "4",
+      "name": "Protocol",
+      "status": "pending"
+    },
+    {
+      "number": "5",
+      "name": "Persistence",
+      "status": "pending"
+    },
+    {
+      "number": "6",
+      "name": "API and Semantics",
+      "status": "pending"
+    },
+    {
+      "number": "7",
+      "name": "Observability and Configuration",
+      "status": "pending"
+    },
+    {
+      "number": "8",
+      "name": "Performance",
+      "status": "pending"
+    },
+    {
+      "number": "9",
+      "name": "Documentation and Release",
+      "status": "pending"
+    }
+  ],
   "next": {
-    "command": "/gsd-discuss-phase",
-    "label": "Discuss the first phase",
-    "reason": "Project initialized — plan your first phase"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 2 of 9 · executing"
   },
-  "updated_at": "2026-11-19T11:01:10.248Z"
+  "updated_at": "2026-11-19T19:27:23.929Z"
 }
