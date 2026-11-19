@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 1
 current_phase_name: Spec Reference and Decisions
 status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-11-19T14:32:48.920Z"
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-11-19T14:48:43.479Z"
 last_activity: 2026-11-19
-last_activity_desc: "v1.1 roadmap created: 9 phases, 83/83 requirements mapped, phase numbers reset (`--reset-phase-numbers`)"
-state_head: e1c69aa64c577736db27dbcf4cc02ec2710ee6be
+last_activity_desc: Phase 1 execution started
+state_head: 3b9569dd9e7f7d37f5df850961a7a9f2877dcf24
 progress:
   total_phases: 9
   completed_phases: 0
   total_plans: 4
-  completed_plans: 0
+  completed_plans: 1
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-19)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 1 — Spec Reference and Decisions (v1.1)
+**Current focus:** Phase 1 — Spec Reference and Decisions
 
 ## Current Position
 
-Phase: 1 (Spec Reference and Decisions) — READY TO EXECUTE
-Plan: — (not yet planned)
+Phase: 1 (Spec Reference and Decisions) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-11-19 — v1.1 roadmap created: 9 phases, 83/83 requirements mapped, phase numbers reset (`--reset-phase-numbers`)
+Last activity: 2026-11-19 — Phase 1 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -48,6 +48,11 @@ Progress: [░░░░░░░░░░] 0%
 | v1.1-1 | 0 | - | - |
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 349s | 3 tasks | 51 files |
 
 ## Accumulated Context
 
@@ -60,6 +65,7 @@ Recent decisions affecting current work:
 - Roadmap: phase numbers reset to 1 for v1.1 (`--reset-phase-numbers`); v1.0 phases 1-7 are archived history under milestones/v1.0-phases/
 - Roadmap: owner decisions 14.1-14.11 are settled (2026-11-19) and are not re-litigated; 14.5(6) and 14.7 accepted by default and recorded in SPEC-02
 - Roadmap: Phase 2's Critical-scenario tests (R-01, R-02, R-03, P-01) are expected RED against v1.0 code by design — planning must choose the gating mechanism so red tests can merge without breaking CI (they turn green in Phases 3-5)
+- [Phase 01]: Publication-guard verify gates scoped to the non-public prefix docs/reviews/2026-11-19-v1.0/internal/; evidence/repro/**/internal/** repro paths are legitimate D-01 payload (Rule 1 fix during 01-01 Task 1)
 
 ### Pending Todos
 
@@ -80,7 +86,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-19T13:10:03.019Z
-Stopped at: Phase 1 context gathered
+Last session: 2026-11-19T14:48:43.420Z
+Stopped at: Completed 01-01-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
