@@ -20,8 +20,10 @@ package simnet
 import (
 	"container/heap"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"time"
 
@@ -318,7 +320,8 @@ func (n *Network) TraceDigest() string { return n.trace.String() }
 
 // LoggedWrite is one captured cluster write — the model input the caller's
 // pointwise-supremum store merges over (merge order is irrelevant,
-// CORE-06).
+// CORE-06); a Cluster.Delete captures its tombstone here with Rec.Deleted
+// true, no separate flag needed.
 type LoggedWrite struct {
 	Key string
 	Rec storage.Record
@@ -367,7 +370,7 @@ type clusterNode struct {
 // author sequence (D-05). Each node's store clock reads the scheduler's
 // virtual time plus the node's mutable offset slot (SetClockOffset — the
 // wall-clock seam), and the remembered cfg rebuilds nodes for the restart
-// seams (ReplaceNode, AddNode).
+// seams (ReplaceNode, ReplaceNodeWithState, AddNode).
 type Cluster struct {
 	sched   *Scheduler
 	net     *Network
@@ -465,6 +468,49 @@ func (c *Cluster) ReplaceNode(i int, runID [16]byte, offset time.Duration) {
 		c.deliver(i, in)
 	}) {
 		panic(fmt.Sprintf("simnet: Cluster.ReplaceNode: handle %q of node %d is not registered", replacement.handle, replacement.id))
+	}
+	c.sched.Schedule(c.sched.Now(), func() { c.drive(i, c.sched.Now()) })
+}
+
+// ReplaceNodeWithState restarts node i onto preserved state: the node keeps
+// its id and handle but boots a new store seeded with records and a new core
+// announcing runID, with its clock offset set to offset — the
+// restart-with-preserved-state shape (TEST-06: F14's replaced node carrying
+// the dump's records, seeding its create-if-absent defaults). The records
+// merge into the fresh store through the production load path's join
+// (store.Merge, the persist.Open mergeRecords shape) in sorted-key order —
+// the fixed order is the map-iteration guard the determinism contract needs,
+// and the merges ride the clock's receive rule, so the replacement's HLC
+// watermark dominates every seeded version before its first local write (the
+// VERS-04 restart property through the merge path). Tombstones seed exactly
+// like live records. A seed record over the store's design-default value
+// limit is a driving test's mistake and panics (the checkIndex/Reregister
+// convention). The wiring is ReplaceNode's verbatim: the in-place node swap,
+// the network registration replaced through Reregister (datagrams already in
+// flight from the old run still carry the old run id), the timer-generation
+// supersession, and the startup drive pump scheduled at the current virtual
+// time — the new run's Hello and DataSync fire on the next RunUntil.
+//
+// Determinism contract: plain harness state — the seeded merges consume no
+// rng draws and schedule no events beyond the drive tick, so the event
+// stream stays a pure function of the seed.
+func (c *Cluster) ReplaceNodeWithState(i int, runID [16]byte, offset time.Duration, records map[string]storage.Record) {
+	c.checkIndex(i, "ReplaceNodeWithState")
+	gen := c.nodes[i].timerGen + 1
+	c.offsets[i] = offset
+	replacement := c.newClusterNode(i, c.nodes[i].id, runID)
+	for _, key := range slices.Sorted(maps.Keys(records)) {
+		_, _, err := replacement.store.Merge(key, records[key])
+		if err != nil {
+			panic(fmt.Sprintf("simnet: Cluster.ReplaceNodeWithState: seeding %q on node %d: %v", key, replacement.id, err))
+		}
+	}
+	replacement.timerGen = gen
+	c.nodes[i] = replacement
+	if !c.net.Reregister(replacement.id, runID, replacement.handle, func(in port.InboundDatagram) {
+		c.deliver(i, in)
+	}) {
+		panic(fmt.Sprintf("simnet: Cluster.ReplaceNodeWithState: handle %q of node %d is not registered", replacement.handle, replacement.id))
 	}
 	c.sched.Schedule(c.sched.Now(), func() { c.drive(i, c.sched.Now()) })
 }
@@ -576,6 +622,36 @@ func (c *Cluster) Write(i int, key string, data []byte) storage.Record {
 	c.drive(i, now)
 	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
 	return rec
+}
+
+// Delete performs the production author sequence for a deletion on node i at
+// the scheduler's current virtual time (D-05): the store Delete writes a
+// fresh-version tombstone that merges like any write, the core
+// NotifyLocalWrite carries the tombstone record through the same
+// pending/wait-set path a write takes (Deleted=true crosses the wire per
+// message), and the (key, tombstone) pair joins the write log — Rec.Deleted
+// true, the pointwise-supremum model needs no separate flag. A missing or
+// already-tombstoned key is storage.ErrNotFound and changes nothing: a
+// no-op delete writes nothing and burns no version (the store.Delete
+// contract). Call RunUntil first to place the delete in virtual time.
+//
+// Determinism contract: as Write — the delete runs at the current virtual
+// time and every emission routes through the network's seeded rng; the seam
+// adds no randomness source, so the event stream stays a pure function of
+// the seed.
+func (c *Cluster) Delete(i int, key string) (storage.Record, error) {
+	now := c.sched.Now()
+	_, _, err := c.nodes[i].store.Delete(key)
+	if err != nil {
+		return storage.Record{}, err
+	}
+	rec := c.nodes[i].store.Records()[key]
+	var out port.Outbox
+	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
+	c.route(i, out.Drain())
+	c.drive(i, now)
+	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
+	return rec, nil
 }
 
 // Nodes returns the cluster size.
