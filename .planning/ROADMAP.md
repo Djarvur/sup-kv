@@ -72,25 +72,29 @@ Plans:
   3. The simulator's blind spots are closed: per-node incoming-datagram budgets, size checks by the real encoder, record announcement after a virtual dump delay, restart with state, and deletions; `TestChaos_convergence` is stable across 10 000 seeds (fixed corpus plus fresh seeds), and convergence bounds hold under combined failures and partitions longer than `peer_timeout`
   4. The seams are pinned by tests, not conventions: a filesystem seam under `persistfile` with recording and failing fakes asserting write → fsync → rotate → rename → dir-fsync and a failure at each step; `persist.Open` clock seeding proven on the real composition path; a corrupted-datagram table plus `FuzzDecode`/`FuzzDumpDecode` with an in-repo corpus; deletion replication proven at codec, simulator, two-process and dump level; Watch cut/backpressure branches, metrics-by-observed-effect, per-decision tests referencing 14.x by name, and property shrinking over a small `(l, c, node)` space
   5. The heavy machinery runs on a schedule: a scheduled CI workflow (1000 seeds, `-shuffle=on -count=3`, `-bench . -benchtime=1x`), a nightly real-socket run at 10 000 keys × 1 KiB with the review's section-15 scenarios; benchmarks report p50/p99 without self-pacing on the real `persistfile`; `go test -race -count=20` over `cmd/sup-kv`, `udprepl` and affected packages green three times in a row (flakiness classes that require Phase 3-5 fixes carry their red test forward)
-**Plans**: 13 plans
+**Plans**: 17 plans
 
 Plans:
 **Wave 1**
 - [ ] 02-01-PLAN.md — Tracer: red-gating mechanism end to end — first env-gated R-03 red test + scripts/red-runner expectation table + evidence capture (D-01, TEST-04)
-- [ ] 02-02-PLAN.md — internal/stand package: harness move, four migrated scenarios, F2c pin, loud darwin report, no-silent-skip policy (D-03, TEST-05, TEST-03 process half)
-- [ ] 02-03-PLAN.md — simnet additive extensions: Delete, restart-with-state, receive budget, SizeOf by real encoder, dump-delay; determinism replay gate (D-05, TEST-06, TEST-02 sim level)
-- [ ] 02-04-PLAN.md — fsops seam under persistfile (five ops: write/fsync/rotate/rename/dir-fsync) + blocking-Save proof + persist.Open clock seeding on the real composition path (D-07, TEST-03 seam half, TEST-07)
+- [ ] 02-02-PLAN.md — internal/stand package: harness move, four migrated scenarios, F2c pin, no-silent-skip policy (D-03, TEST-05 Linux branch, TEST-03 process half)
+- [ ] 02-03-PLAN.md — simnet additive extensions: Delete, restart-with-state, receive budget, SizeOf by real encoder, dump-delay (D-05, TEST-06, TEST-02 sim level API)
+- [ ] 02-04-PLAN.md — fsops seam under persistfile (five ops: write/fsync/rotate/rename/dir-fsync) + blocking-Save proof (D-07, TEST-03 seam half)
+- [ ] 02-14-PLAN.md — Loud non-Linux darwin report test in internal/stand (D-03, TEST-05 darwin branch; moved from 02-02)
 
 **Wave 2** *(blocked on Wave 1)*
 - [ ] 02-05-PLAN.md — Stand-level red tests R-01/R-02/R-03-F14 with documented bounds and nightly-scale selection (D-01, TEST-04)
 - [ ] 02-06-PLAN.md — Chaos stabilization: fixed seed corpus + drift-checked generator, poll-to-model semantics, corpus iteration with SUPKV_SIM_FRESH_SEEDS, deletions in mix (D-06, TEST-01)
-- [ ] 02-07-PLAN.md — Deletion replication at four levels + corrupted-datagram negative table + FuzzDecode/FuzzDumpDecode with in-repo corpora (D-08, TEST-02, TEST-08)
+- [ ] 02-07-PLAN.md — Deletion replication at four levels + corrupted-datagram negative table (D-08, TEST-02, TEST-08)
 - [ ] 02-08-PLAN.md — Watch Send-error branch + metrics-by-effect exact values + per-parameter effect tests (D-08, TEST-14, TEST-12)
 - [ ] 02-10-PLAN.md — Benchmarks report p50/p99, no self-pacing, smoke target; flake-class audit + parameterized race-soak target (TEST-10, TEST-11)
+- [ ] 02-15-PLAN.md — simnet extension tests incl. same-seed determinism replay gate (D-05, TEST-06, TEST-02 sim level pin; moved from 02-03)
+- [ ] 02-16-PLAN.md — persist.Open clock seeding on the real composition path (D-07, TEST-07; moved from 02-04)
 
 **Wave 3** *(blocked on Wave 2)*
 - [ ] 02-09-PLAN.md — Per-decision 14.1-14.11 name citations + coverage meta-test; property shrinking over small (l, c, node) space + executable replay command (D-08, TEST-13, TEST-15)
 - [ ] 02-12-PLAN.md — P-01 value-limit red tests (process + engine), complete 7-row expectation table, full red-run evidence (D-01, TEST-04)
+- [ ] 02-17-PLAN.md — FuzzDecode/FuzzDumpDecode with committed in-repo corpora (D-08, TEST-08; moved from 02-07)
 
 **Wave 4** *(blocked on Wave 3)*
 - [ ] 02-13-PLAN.md — TEST-09 combined/long-partition scenario tests + red-runner overlay mutant stage (D-02, TEST-01, TEST-09)
