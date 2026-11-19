@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+#
+# red-runner — the D-01 expected-red gate for the phase-02 red tests.
+#
+# The phase's Critical-scenario red tests (R-01, R-02, R-03, P-01) live in
+# the normal test packages but skip unless SUPKV_RED_TESTS=1 (D-01), so the
+# ordinary `make test` gates stay green while the defects they pin are
+# unfixed. This script is the other half of the mechanism: it opens the
+# gate itself, runs the packages under `go test -race -count=1 -json`, and
+# asserts every row of the in-repo expectation table
+# (scripts/red-expectations.tsv) against the parsed events:
+#
+#   - a `red` row MUST have a fail event; a skip event (env gate failed to
+#     open) is an ERROR; no events at all (test missing/renamed) is an ERROR;
+#   - a `green` row MUST NOT have a fail event — this is the one-line flip
+#     Phases 3-5 make when a fix lands (expectation-table row only);
+#   - an unexpected failing test whose name is not an expected-red row is
+#     an ERROR, so a broken normal test can never hide behind the expected
+#     reds;
+#   - malformed table rows are an ERROR.
+#
+# Every run records evidence — the raw `go test -json` stream and a parsed
+# one-page summary (name -> action) — under
+# .planning/phases/02-stand-and-simulator-as-tests/red-evidence/<UTC ts>/.
+# Never overwrites an existing evidence directory.
+#
+# Security contract (T-2-01): the script parses only the JSON events of the
+# exact `go test` command it spawned, uses python3 stdlib json (no eval, no
+# shell interpolation of test output), treats unknown/missing names as
+# errors rather than silent passes, and never evaluates test output beyond
+# the Action/Test/Package fields. Plain-text greps over human output are
+# forbidden (review Pitfall 6: a grep would match `=== RUN` lines and
+# subtest output, letting a skipped or panicked test look "found").
+#
+# Usage: bash scripts/red-runner   (also `make red-run`)
+
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || { cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd; })"
+TABLE="$ROOT/scripts/red-expectations.tsv"
+EVIDENCE_ROOT="$ROOT/.planning/phases/02-stand-and-simulator-as-tests/red-evidence"
+
+# Packages that contain red tests. Extend as later plans land more red
+# tests (02-02 adds ./internal/stand/ with R-01/R-02; the P-01 red tests
+# add ./internal/persistfile/ and ./internal/app/persist/).
+PACKAGES=(
+	./internal/grpcapi/
+	# ./internal/stand/
+	# ./internal/persistfile/
+	# ./internal/app/persist/
+)
+
+if [ ! -f "$TABLE" ]; then
+	echo "red-runner: expectation table not found: $TABLE" >&2
+	exit 1
+fi
+
+# D-01: the runner ALWAYS opens the red gate itself. A red test that skips
+# is an error downstream (the parser treats a skip for an expected-red name
+# as an error), so a lost export can never masquerade as a green run.
+export SUPKV_RED_TESTS=1
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+JSON_OUT="$TMP/go-test.json"
+GO_TEST_ERR="$TMP/go-test.stderr"
+SUMMARY_OUT="$TMP/summary.txt"
+
+echo "red-runner: SUPKV_RED_TESTS=1 go test -race -count=1 -json ${PACKAGES[*]}"
+# The red run's own exit code is NOT trusted (D-01): red tests are expected
+# to fail, so nonzero is normal. The expectation check below decides.
+go test -race -count=1 -json "${PACKAGES[@]}" >"$JSON_OUT" 2>"$GO_TEST_ERR" || true
+if [ -s "$GO_TEST_ERR" ]; then
+	echo "red-runner: go test stderr (diagnostic):" >&2
+	cat "$GO_TEST_ERR" >&2
+fi
+
+# Evidence directory: one UTC-stamped directory per run, never overwritten.
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+EVIDENCE_DIR="$EVIDENCE_ROOT/$STAMP"
+SUFFIX=2
+while [ -e "$EVIDENCE_DIR" ]; do
+	EVIDENCE_DIR="$EVIDENCE_ROOT/$STAMP-$SUFFIX"
+	SUFFIX=$((SUFFIX + 1))
+done
+mkdir -p "$EVIDENCE_ROOT"
+mkdir "$EVIDENCE_DIR"
+
+set +e
+python3 - "$JSON_OUT" "$TABLE" "$SUMMARY_OUT" <<'PY'
+import json
+import sys
+
+json_path, table_path, summary_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# Actions seen per test name, from the events of exactly one
+# `go test -json` run. Only Action/Test/Package are consumed.
+actions = {}
+packages = {}
+with open(json_path, encoding="utf-8") as stream:
+    for line in stream:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        name = event.get("Test")
+        action = event.get("Action")
+        if not name or action not in ("run", "pass", "fail", "skip"):
+            continue
+        actions.setdefault(name, set()).add(action)
+        if event.get("Package"):
+            packages.setdefault(name, set()).add(event["Package"])
+
+errors = []
+rows = []
+table_names = set()
+with open(table_path, encoding="utf-8") as table:
+    for number, raw in enumerate(table, 1):
+        row = raw.rstrip("\n")
+        if not row or row.startswith("#"):
+            continue
+        parts = row.split("\t")
+        if len(parts) != 2 or parts[1] not in ("red", "green") or not parts[0]:
+            errors.append(f"malformed expectation row at line {number}: {row!r}")
+            continue
+        rows.append((parts[0], parts[1]))
+        table_names.add(parts[0])
+
+summary = ["test\texpected\tobserved\tpackage\tverdict"]
+for name, want in rows:
+    observed = actions.get(name)
+    pkg = ",".join(sorted(packages.get(name, {"(unknown)"})))
+    if observed is None:
+        errors.append(
+            f"{name}: expected {want}, but no test event was found at all "
+            f"(test missing or renamed?) [{pkg}]"
+        )
+        summary.append(f"{name}\t{want}\tabsent\t{pkg}\tERROR")
+        continue
+    observed_str = ",".join(sorted(observed))
+    if want == "red":
+        if "skip" in observed:
+            errors.append(
+                f"{name}: expected red, got skip — the SUPKV_RED_TESTS env "
+                f"gate failed to open [{pkg}]"
+            )
+            verdict = "ERROR"
+        elif "fail" not in observed:
+            errors.append(
+                f"{name}: expected red, no fail event among observed "
+                f"actions ({observed_str}) [{pkg}]"
+            )
+            verdict = "ERROR"
+        else:
+            verdict = "OK"
+    else:  # green
+        if "fail" in observed:
+            errors.append(f"{name}: expected green, got fail [{pkg}]")
+            verdict = "ERROR"
+        else:
+            verdict = "OK"
+    summary.append(f"{name}\t{want}\t{observed_str}\t{pkg}\t{verdict}")
+
+# Unexpected red: a failing test whose name is not an expected-red row
+# (subtests of a table row count as its own, so a failing subtest of a
+# known red test does not double-report).
+for name, observed in sorted(actions.items()):
+    if "fail" not in observed:
+        continue
+    known = name in table_names or any(
+        name.startswith(known_name + "/") for known_name in table_names
+    )
+    if known:
+        continue
+    pkg = ",".join(sorted(packages.get(name, {"(unknown)"})))
+    errors.append(
+        f"{name}: unexpected failing test — not in the expectation table [{pkg}]"
+    )
+    summary.append(f"{name}\t(not in table)\t{','.join(sorted(observed))}\t{pkg}\tERROR")
+
+with open(summary_path, "w", encoding="utf-8") as out:
+    out.write("\n".join(summary) + "\n")
+
+for err in errors:
+    print(f"red-runner: {err}", file=sys.stderr)
+print(f"red-runner: {len(rows)} expectation row(s) checked, {len(errors)} error(s)")
+sys.exit(1 if errors else 0)
+PY
+RC=$?
+set -e
+
+mv "$JSON_OUT" "$EVIDENCE_DIR/go-test.json"
+cp "$SUMMARY_OUT" "$EVIDENCE_DIR/summary.txt"
+echo "red-runner: evidence written to $EVIDENCE_DIR (go-test.json, summary.txt)"
+if [ "$RC" -ne 0 ]; then
+	echo "red-runner: expectation check FAILED — offending rows are above" >&2
+	exit 1
+fi
