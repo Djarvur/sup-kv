@@ -1,48 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.0",
-  "phases": [
-    {
-      "number": "1",
-      "name": "CI Bootstrap and Repo Skeleton",
-      "status": "complete"
-    },
-    {
-      "number": "2",
-      "name": "Engine — HLC Versioning and LWW Store",
-      "status": "complete"
-    },
-    {
-      "number": "3",
-      "name": "Persistence — Dump and Write Confirmation",
-      "status": "complete"
-    },
-    {
-      "number": "4",
-      "name": "Replication and Deterministic Simulator",
-      "status": "complete"
-    },
-    {
-      "number": "5",
-      "name": "gRPC API and Binary",
-      "status": "complete"
-    },
-    {
-      "number": "6",
-      "name": "Hardening — Failure Scenarios, Observability, Benchmarks",
-      "status": "complete"
-    },
-    {
-      "number": "7",
-      "name": "v1.0 — Docs, Examples and Release",
-      "status": "complete"
-    }
-  ],
+  "milestone": "v1.1",
+  "phases": [],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-discuss-phase",
+    "label": "Discuss the first phase",
+    "reason": "Project initialized — plan your first phase"
   },
-  "updated_at": "2026-11-18T16:37:57.355Z"
+  "updated_at": "2026-11-19T11:01:10.248Z"
 }
