@@ -1,0 +1,446 @@
+//go:build linux
+
+// The stand scenarios: the two-process half of the failure-scenario suite
+// (TEST-04's exec scenarios) moved wholesale from cmd/sup-kv's
+// scenario_test.go (D-03: moved/extended, never duplicated) and renamed to
+// the stand namespace — kill -9 one node then restart with convergence
+// and no operator action, both-nodes-down restart with state preserved
+// through a corrupted dump record, SIGTERM's final confirmed dump
+// provably covering replicated writes, an empty-disk node recovering from
+// a live peer bounded by the sync response rate, and the NEW F2c
+// oversize-key pin. These are the only scenarios that prove the artifact
+// itself — process lifecycle, real signal delivery, real dump files on
+// disk — so they extend the stand harness (stand.go: build-once, launch/
+// reap, signalAndWaitExit/assertExitCode, awaitServing/supKVConn), never
+// rebuild it.
+//
+// Every scenario rides the ASYMMETRIC-PORT topology (the empirically
+// load-bearing finding): node A binds P1 and broadcasts to
+// 127.255.255.255:P2, node B binds P2 and broadcasts to 127.255.255.255:P1
+// — every broadcast and every unicast (the Ack and DataRequest answers
+// the shared-port smoke topology cannot carry) crosses to exactly the
+// peer, so convergence assertions are deterministic. The one platform
+// capability that buys — loopback broadcast fan-out — is probed up front
+// and, per TEST-05's Linux branch, a probe miss is a FATAL naming the
+// probe, never a skip (stand.go's probe contract; the darwin report is
+// the same-wave plan 02-14 named test).
+
+package stand //nolint:testpackage // the plan mandates internal tests so the scenarios share the harness's unexported helpers (D-03); testpackage's external-package rule cannot express that pairing.
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// standNightly is the scale-selection hook: SUPKV_STAND_NIGHTLY=1 selects
+// the full documented scale for the nightly run (plan 11 wires the
+// selection); the default scale keeps every scenario CI-viable (the
+// shrunken-timer pattern below) exactly as the source suite ran.
+var standNightly = os.Getenv("SUPKV_STAND_NIGHTLY") == "1"
+
+// TestMain wires the build-once binary eagerly: a failed build is
+// surfaced here and by every scenario through standBinary's loud fatal —
+// never a silent pass (TEST-05). It announces the nightly scale mode for
+// the run log and removes the build temp dir after the suite.
+func TestMain(m *testing.M) {
+	if standNightly {
+		fmt.Fprintln(os.Stderr, "sup-kv stand: nightly scale selected (SUPKV_STAND_NIGHTLY=1)")
+	}
+	_, buildErr := buildStandBinary(context.Background())
+	if buildErr != nil {
+		fmt.Fprintf(os.Stderr, "sup-kv stand: build failed: %v\n", buildErr)
+	}
+	code := m.Run()
+	cleanupStandBinary()
+	if code != 0 {
+		fmt.Fprintf(os.Stderr, "sup-kv stand: tests failed with code %d\n", code)
+	}
+}
+
+// Scenario constants: the timer-derived convergence bound, the per-
+// scenario keys, and the empty-disk scale — the source suite's scenario
+// constants moved verbatim under the stand namespace.
+const (
+	// standConvergeDeadline bounds one write-to-visible cycle on either
+	// endpoint, derived from the shrunken timers rather than wall-clock
+	// precision: one hello round for discovery, a few sync rounds for the
+	// listing/request/replay ladder, and real-process scheduling slack on
+	// a loaded runner — twenty of each interval keeps every contribution
+	// covered with the harness's generous-deadline discipline (a healthy
+	// pair converges in well under one second).
+	standConvergeDeadline = 20*standHelloInterval + 20*standSyncInterval
+
+	standKeyKillA = "stand/kill9/key-on-a"
+	standKeyKillB = "stand/kill9/key-on-b"
+
+	standKeyBothA = "stand/bothdown/key-on-a"
+	standKeyBothB = "stand/bothdown/key-on-b"
+
+	standKeySigterm = "stand/sigterm/key-on-b"
+
+	// standDiscardLine is the startup line main prints when the loader
+	// discarded undecodable records (startEngine's discarded-count log) —
+	// the proof a corrupted record took the per-record discard path, not
+	// the whole-generation .prev fallback.
+	standDiscardLine = "discarded 1 undecodable dumped records at startup"
+
+	// The empty-disk scenario's scale: N keys on the seeded node and the
+	// shrunken sync response rate both nodes run with — the documented
+	// recovery bound is N/Rate seconds of paced egress (floor(1s/Rate)
+	// per datagram, the repl core's limiter arithmetic), small enough
+	// that the whole scenario stays far inside CI deadlines.
+	emptyDiskKeys = 20
+	emptyDiskRate = 50
+
+	// standEmptyKeyFmt derives the seeded keys; standKeyFromB is the
+	// recovered node's own post-recovery write.
+	standEmptyKeyFmt = "stand/emptydisk/key-%02d"
+	standKeyFromB    = "stand/emptydisk/from-b"
+)
+
+// The F2c scenario's constants: the review's 70 000-character key — over
+// the UDP datagram ceiling once enveloped, so the kernel rejects every
+// send with EMSGSIZE — and the stable OS error text the adapter logs on
+// each rejected send (udprepl's Adapter.write logs "send to %s: %v",
+// carrying the kernel's sendto message).
+const (
+	standOversizeKeyLen = 70000
+	standSendFailLine   = "sendto: message too long"
+)
+
+// TestStand_killNineRestart is the flagship TEST-04 scenario on the real
+// binary: two nodes converge a write each way, node A dies to a kill -9
+// (the SIGKILL exit shape, never SIGTERM's), node B keeps serving both
+// keys through the peer's death, and A restarted with the SAME dump path
+// and ports — a fresh process and run id — converges back to both keys
+// with no operator action beyond restarting the process: the dump
+// restored what it held and the REPL-07 resync healed the rest from the
+// peer.
+func TestStand_killNineRestart(t *testing.T) {
+	t.Parallel()
+	p, nodeA, nodeB := startStandPair(t)
+	awaitServing(t, p.grpcA, servingDeadline)
+	awaitServing(t, p.grpcB, servingDeadline)
+
+	clientA := standClient(t, p.grpcA)
+	clientB := standClient(t, p.grpcB)
+
+	// Baseline convergence: one write on each node, both keys visible on
+	// both endpoints through real gRPC.
+	standSet(t, clientA, standKeyKillA)
+	standSet(t, clientB, standKeyKillB)
+	waitFor(t, standConvergeDeadline, "the baseline pair converged (both keys on both endpoints)", func() bool {
+		return standServing(t, clientA, standKeyKillA) && standServing(t, clientA, standKeyKillB) &&
+			standServing(t, clientB, standKeyKillA) && standServing(t, clientB, standKeyKillB)
+	})
+
+	// kill -9 node A: the hard death — no dump, no goodbye.
+	killAndReap(t, nodeA)
+
+	// Node B stays available through the peer's death: both keys readable,
+	// its own endpoint unaffected.
+	for _, key := range []string{standKeyKillA, standKeyKillB} {
+		if value, found := standGet(t, clientB, key); !found || value != standValue(key) {
+			t.Fatalf("node B after the peer's kill -9: Get(%q) = (%q, %t), want the pre-kill value", key, value, found)
+		}
+	}
+
+	// Restart node A: same dump path, same ports — a fresh process with a
+	// fresh run id (the REPL-07 path).
+	nodeARestart := startStandNode(t, p, standNodeAID)
+	awaitServing(t, p.grpcA, servingDeadline)
+
+	// Convergence with no operator action: both pre-kill keys readable via
+	// A's own endpoint — whatever the dump restored plus whatever the
+	// resync healed from B, the union is the pre-kill state.
+	waitFor(t, standConvergeDeadline, "the restarted node A serving both pre-kill keys", func() bool {
+		return standServing(t, clientA, standKeyKillA) && standServing(t, clientA, standKeyKillB)
+	})
+
+	// Clean teardown of the survivors proves the restarted node is a full
+	// participant, and no process left a panic behind.
+	signalAndWaitExit(t, nodeARestart)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the kill -9 node A")
+	assertNoPanic(t, nodeARestart, "the restarted node A")
+	assertNoPanic(t, nodeB, "node B through the peer's death and restart")
+}
+
+// TestStand_bothNodesDown is the corrupted-dump-records scenario inside a
+// both-nodes-down restart: both nodes exit cleanly through the D-19
+// SIGTERM contract, ONE record of node A's dump is corrupted on disk
+// while both are down, and the restart proves the two halves separately —
+// A restarted alone serves every uncorrupted record from its own disk but
+// NOT the corrupted one (the loader discarded it, and with no peer
+// nothing can heal it), then B's restart heals the discarded record back
+// onto A through replication alone. No operator action beyond restarting
+// the processes.
+func TestStand_bothNodesDown(t *testing.T) {
+	t.Parallel()
+	p, nodeA, nodeB := startStandPair(t)
+	awaitServing(t, p.grpcA, servingDeadline)
+	awaitServing(t, p.grpcB, servingDeadline)
+
+	clientA := standClient(t, p.grpcA)
+	clientB := standClient(t, p.grpcB)
+
+	// Baseline: one local write per node, converged both ways.
+	standSet(t, clientA, standKeyBothA)
+	standSet(t, clientB, standKeyBothB)
+	waitFor(t, standConvergeDeadline, "the baseline pair converged (both keys on both endpoints)", func() bool {
+		return standServing(t, clientA, standKeyBothA) && standServing(t, clientA, standKeyBothB) &&
+			standServing(t, clientB, standKeyBothA) && standServing(t, clientB, standKeyBothB)
+	})
+
+	// Both nodes down, cleanly: the D-19 exit on each (assertExitCode 0 is
+	// signalAndWaitExit's contract).
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+
+	// While both are down, corrupt A's own local write in A's dump: one
+	// checksum bit of one record, file otherwise valid.
+	corruptDumpRecord(t, p.dumpA, standKeyBothA)
+
+	// Restart A ALONE first: with B still down, nothing can heal the
+	// discarded record, so A's own endpoint proves the load's two halves —
+	// the corrupted record gone, every other record served from disk.
+	nodeARestart := startStandLoggedNode(t, p, standNodeAID)
+	awaitServing(t, p.grpcA, servingDeadline)
+	waitFor(t, servingDeadline, "the discard line in restarted A's stderr", func() bool {
+		return strings.Contains(nodeARestart.stderr.String(), standDiscardLine)
+	})
+	if _, found := standGet(t, clientA, standKeyBothA); found {
+		t.Fatalf("the corrupted record %q survived the load — the discard path did not run", standKeyBothA)
+	}
+	if value, found := standGet(t, clientA, standKeyBothB); !found || value != standValue(standKeyBothB) {
+		t.Fatalf("the uncorrupted record %q did not survive on disk: (%q, %t)", standKeyBothB, value, found)
+	}
+
+	// Bring B back: B's own dump kept the replicated copy of the discarded
+	// record, and replication heals A — no operator action beyond the
+	// restarts.
+	nodeBRestart := startStandNode(t, p, standNodeBID)
+	awaitServing(t, p.grpcB, servingDeadline)
+	waitFor(t, standConvergeDeadline, "the corrupted record healed back from node B", func() bool {
+		return standServing(t, clientA, standKeyBothA) && standServing(t, clientA, standKeyBothB) &&
+			standServing(t, clientB, standKeyBothA) && standServing(t, clientB, standKeyBothB)
+	})
+
+	signalAndWaitExit(t, nodeARestart)
+	signalAndWaitExit(t, nodeBRestart)
+	assertNoPanic(t, nodeA, "the first-run node A")
+	assertNoPanic(t, nodeB, "the first-run node B")
+	assertNoPanic(t, nodeARestart, "the restarted node A through the corrupted dump")
+	assertNoPanic(t, nodeBRestart, "the restarted node B")
+}
+
+// TestStand_sigtermFinalDump pins the D-19 final-dump contract's
+// replicated half end to end: a write made on node B and replicated to
+// node A is in A's FINAL confirmed dump after SIGTERM (the final Flush
+// covers remote-merged dirtiness, not just local writes), the exit is 0
+// (a clean exit is reserved for a confirmed dump), and a LONE restart of
+// A — B stopped before the restart, so no peer interaction can supply
+// the record — serves the replicated key purely from the final dump on
+// disk. The exit-code negatives are already pinned by the cmd/sup-kv
+// suites and are not duplicated here.
+func TestStand_sigtermFinalDump(t *testing.T) {
+	t.Parallel()
+	p, nodeA, nodeB := startStandPair(t)
+	awaitServing(t, p.grpcA, servingDeadline)
+	awaitServing(t, p.grpcB, servingDeadline)
+
+	clientA := standClient(t, p.grpcA)
+	clientB := standClient(t, p.grpcB)
+
+	// A replicated write on A: written on B, converged across.
+	standSet(t, clientB, standKeySigterm)
+	waitFor(t, standConvergeDeadline, "the replicated write visible on node A", func() bool {
+		return standServing(t, clientA, standKeySigterm)
+	})
+
+	// SIGTERM node A: exit 0 only after the final confirmed dump.
+	signalAndWaitExit(t, nodeA)
+
+	// The final dump on disk contains the REPLICATED record — the
+	// dump-grep precedent.
+	dump := readFinalDump(t, p.dumpA)
+	if !strings.Contains(dump, standKeySigterm) {
+		t.Fatalf("the final dump at %s does not contain the replicated key %q:\n%s", p.dumpA, standKeySigterm, dump)
+	}
+
+	// Stop B before the restart: with the peer gone, the only possible
+	// source for the record on a restarted A is the final dump itself.
+	killAndReap(t, nodeB)
+
+	nodeARestart := startStandNode(t, p, standNodeAID)
+	awaitServing(t, p.grpcA, servingDeadline)
+	if value, found := standGet(t, clientA, standKeySigterm); !found || value != standValue(standKeySigterm) {
+		t.Fatalf("the lone restarted node A does not serve the replicated record from its final dump: (%q, %t)",
+			value, found)
+	}
+
+	signalAndWaitExit(t, nodeARestart)
+	assertNoPanic(t, nodeA, "the SIGTERM node A")
+	assertNoPanic(t, nodeB, "the stopped node B")
+	assertNoPanic(t, nodeARestart, "the lone restarted node A")
+}
+
+// TestStand_emptyDiskRecovery is the empty-disk scenario on the real
+// binary: a live node A seeded with N keys, then node B started against
+// it with a genuinely empty dump directory — B's whole state can only
+// come from the live peer. Recovery — from B's process start to B serving
+// all N keys through its own gRPC endpoint — must complete within the
+// documented bound, derived in-test from the flags (never a magic
+// constant): N records at worst ride N limiter-paced datagrams at
+// floor(1s/rate) each, plus a margin for everything else the path spends.
+// After recovery, B's own write replicates to A: the recovered node is a
+// full participant, not a read-only mirror.
+func TestStand_emptyDiskRecovery(t *testing.T) {
+	t.Parallel()
+	p := newStandPair(t)
+
+	// Node A first, alone: the seeded node.
+	nodeA := startStandNode(t, p, standNodeAID)
+	awaitServing(t, p.grpcA, servingDeadline)
+	clientA := standClient(t, p.grpcA)
+
+	keys := make([]string, emptyDiskKeys)
+	for i := range keys {
+		keys[i] = fmt.Sprintf(standEmptyKeyFmt, i)
+		standSet(t, clientA, keys[i])
+	}
+
+	// The recovery bound, derived from the flags the nodes run with: the
+	// paced egress term is N * floor(1s/rate) — the limiter's own spacing
+	// arithmetic (core.go's time.Second / SyncResponseRate) times the
+	// record count. The margin covers, generously rather than precisely
+	// (the documented bound is asserted, never wall-clock precision): B's
+	// startup gate window (the gate opens on the peer's sync arrival or
+	// the standStartupGate timeout, and B serves nothing before it
+	// opens), discovery plus one listing/request/reply ladder round at
+	// each timer (B's own requests ride B's limiter too), and
+	// real-process scheduling slack on a loaded CI runner.
+	paced := time.Duration(emptyDiskKeys) * (time.Second / time.Duration(emptyDiskRate))
+	margin := standStartupGate + 2*standHelloInterval + 2*standSyncInterval + 2*time.Second
+	deadline := paced + margin
+
+	// Node B against the live peer, empty disk: its dump directory is its
+	// own fresh temp dir — nothing to load, every key must arrive over
+	// the wire.
+	start := time.Now()
+	nodeB := startStandNode(t, p, standNodeBID, "--sync-response-rate="+strconv.Itoa(emptyDiskRate))
+	awaitServing(t, p.grpcB, servingDeadline)
+	clientB := standClient(t, p.grpcB)
+
+	waitFor(t, deadline, "the empty-disk node B serving every key within the paced bound", func() bool {
+		for _, key := range keys {
+			if !standServing(t, clientB, key) {
+				return false
+			}
+		}
+		return true
+	})
+	t.Logf("empty-disk recovery: %d keys in %v (paced bound %v, margin %v)", emptyDiskKeys, time.Since(start), paced, margin)
+
+	// The recovered node participates in replication immediately: its own
+	// write crosses to the seeded peer.
+	standSet(t, clientB, standKeyFromB)
+	waitFor(t, standConvergeDeadline, "the recovered node's write visible on node A", func() bool {
+		return standServing(t, clientA, standKeyFromB)
+	})
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the seeded node A")
+	assertNoPanic(t, nodeB, "the empty-disk recovered node B")
+}
+
+// TestStand_oversizeKeyF2c pins the review's F2c CURRENT behavior as a
+// green pin (XPORT-03 fixes it in Phase 3): node A Sets a
+// 70 000-character key — Set returns OK (the local store write and the
+// confirmed dump both succeed) — and every replication datagram carrying
+// the record is rejected by the kernel with EMSGSIZE, which the adapter
+// logs on A's stderr. The key never reaches node B: over the derived
+// window (the review's checked 2×sync_interval plus the discovery, gate
+// and slack margin) B's endpoint serves nothing under the key, and B's
+// final confirmed dump after a clean stop carries no record for it. The
+// write is real on A: its own endpoint serves the key throughout.
+func TestStand_oversizeKeyF2c(t *testing.T) {
+	t.Parallel()
+	p := newStandPair(t)
+	// Node A's stderr is the lock-guarded live buffer: this scenario polls
+	// the send failures while A still runs (the sendto assertion's shape).
+	nodeA := startStandLoggedNode(t, p, standNodeAID)
+	nodeB := startStandNode(t, p, standNodeBID)
+	awaitServing(t, p.grpcA, servingDeadline)
+	awaitServing(t, p.grpcB, servingDeadline)
+
+	clientA := standClient(t, p.grpcA)
+	clientB := standClient(t, p.grpcB)
+
+	// The F2c key: standOversizeKeyLen characters of a repeating marker,
+	// so the dump-grep and log assertions stay readable.
+	oversizeKey := strings.Repeat("f2c-", standOversizeKeyLen/len("f2c-"))
+
+	// Set returns OK: the F2c finding's first half — the local write and
+	// the confirmed dump succeed; only the replication egress fails. The
+	// value is the review's 1-byte shape: the value fits the store's limit
+	// so the write is accepted, while the enveloped record overflows the
+	// datagram ceiling.
+	standSetWith(t, clientA, oversizeKey, "f")
+
+	// The rejected sends surface on A's stderr: poll the live log buffer
+	// for the kernel's EMSGSIZE message the adapter logs on every failed
+	// send.
+	waitFor(t, standConvergeDeadline, "the sendto message-too-long failures in node A's stderr", func() bool {
+		return strings.Contains(nodeA.stderr.String(), standSendFailLine)
+	})
+
+	// The never-replicated half: the key must stay absent from node B for
+	// the full window — the review's checked 2×sync_interval plus the
+	// discovery, gate and slack margin, derived from the flags the nodes
+	// run with. waitFor cannot express "the absence holds for the whole
+	// window", so the poll's condition is the elapsed window AND
+	// continued absence — an early appearance fails the same waitFor
+	// loudly at its deadline instead of passing silently.
+	window := 2*standSyncInterval + standStartupGate + 2*standHelloInterval + 2*time.Second
+	start := time.Now()
+	waitFor(t, window+checkTimeout, "the oversize key to stay absent from node B for the full window", func() bool {
+		return time.Since(start) >= window && standAbsent(t, clientB, oversizeKey)
+	})
+	t.Logf("oversize key stayed unreplicated for the full %v window (2x sync_interval + margin)", window)
+
+	// The disk-level truth: stop B cleanly (the D-19 final dump) and
+	// assert its dump carries no record for the key. An empty store may
+	// never have produced a dump file at all — B applied nothing, so there
+	// was nothing to persist — so the dump half of the never-replicated
+	// assertion applies only when the final dump exists; either way the
+	// key is not in it.
+	signalAndWaitExit(t, nodeB)
+	dumpB, dumpErr := os.ReadFile(p.dumpB)
+	switch {
+	case dumpErr == nil:
+		if strings.Contains(string(dumpB), oversizeKey) {
+			t.Fatalf("node B's final dump at %s carries the oversize key — it replicated, contradicting F2c:\n%s",
+				p.dumpB, dumpB)
+		}
+	case os.IsNotExist(dumpErr):
+		// No dump file: consistent with B never having applied anything.
+	default:
+		t.Fatalf("read node B's final dump %s: %v", p.dumpB, dumpErr)
+	}
+
+	// The write is real on A: its own endpoint serves the key.
+	if value, found := standGet(t, clientA, oversizeKey); !found || value != "f" {
+		t.Fatalf("node A does not serve the oversize key it Set: (%q, %t)", value, found)
+	}
+
+	signalAndWaitExit(t, nodeA)
+	assertNoPanic(t, nodeA, "the oversize-key node A")
+	assertNoPanic(t, nodeB, "the never-replicated node B")
+}
