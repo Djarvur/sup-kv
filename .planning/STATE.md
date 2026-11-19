@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-11-19T19:27:52.465Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-11-19T20:10:36.790Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: ba6c5c8632e651e6e06b78b925d0c4d4ed671040
+state_head: 1866785bea1d7829d930fd473c7788dcf45038ce
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 2 of 17
+Plan: 3 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P03 | 524s | 3 tasks | 11 files |
 | Phase 01 P04 | 299 | 2 tasks | 0 files |
 | Phase 02 P01 | 520s | 3 tasks | 8 files |
+| Phase 02 P02 | 2040s | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,10 @@ Recent decisions affecting current work:
 - [Phase 02]: R-03 red test's SyncArrived fake bakes v1.0 mirror semantics (any-chunk->true) with closed-side assertions parked behind a release channel (TestGate_opensOnTimeout pattern) — the Phase 4 flip needs zero test edits, only the expectation-table row
 - [Phase 02]: red-runner errors on unexpected failing tests (names not in the expectation table; subtests count as their parent's) — T-2-01 'unknown names are errors' applied to the event stream
 - [Phase 02]: red-runner package list hardcoded with an extend comment (./internal/grpcapi/ first) — the TSV carries no package column
+- [Phase 02]: internal/stand harness + scenarios landed as one commit (91765fd): the strict lint gate's transitive unused analysis cannot reach the t-coupled harness helpers without their callers — stand.go alone is un-committable; the plan's Task 1/2 file split survives in content, only the commit boundary moved
+- [Phase 02]: internal/stand keeps the plan's file names AND internal tests via justified //nolint:testpackage (stand_test.go package clause) and //nolint:depguard (testing import in stand.go) — both with written reasons per AGENTS.md; the package doc states the test-infrastructure status the path-based rules cannot see; sibling plans 02-05/02-14 follow the same pattern
+- [Phase 02]: The cmd/sup-kv port registry was NOT dead after the scenario move — broadcast_probe_test.go (Phase 7 DOCS-01 probe) still uses scenarioUDPPort, so it moved to its remaining consumer and main_test.go needed zero removals
+- [Phase 02]: F2c pin rides standAbsent (NotFound-based absence) + standSetWith (review's 1-byte value): a value-mismatched record must fail the never-replicated window, and the derived 70KB scenario value would trip the store's value limit before the datagram ceiling matters
 
 ### Pending Todos
 
@@ -101,7 +106,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-19T19:27:25.397Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-11-19T20:10:36.528Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
