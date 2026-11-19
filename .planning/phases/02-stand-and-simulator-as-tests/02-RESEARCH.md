@@ -514,24 +514,28 @@ In-repo corpus files land at `testdata/fuzz/FuzzDecode/<entry>` with the two-lin
 | A5 | GitHub Actions cron granularity supports nightly schedules reliably (standard behavior; vulncheck.yml proves the mechanism exists but its own schedule cadence is weekly) | Pattern 8 | Low — nightly cron is a first-class Actions feature |
 | A6 | `cmd/sup-kv`'s remaining tests after the harness move can still build the binary independently (or the stand's builder is reused via a small shared helper) — the exact split is the discretion area | Runtime State, Pattern 7 | Low — worst case the builder helper is duplicated then deduplicated in review |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **How is the 10 000-seed TEST-01 acceptance proven, given D-09 schedules 1000 seeds nightly?**
    - What we know: D-06 fixes a corpus + fresh seeds per run; D-09 schedules 1000 seeds `-shuffle=on -count=3`; TEST-01's acceptance says 0 failures on 10 000 seeds; a full run costs hours (A4).
    - What's unclear: whether the 10k proof is a one-off phase-gate run (local or a scheduled workflow's manual dispatch with a bigger seed count), or an accumulating nightly statistic.
    - Recommendation: planner should plan a one-off phase-verification run (dispatchable job with a seed-count parameter, default 1000 nightly / 10 000 on demand) — the workflow parameterization is trivial.
+   - **RESOLVED (planning):** per the recommendation — plan 02-11 wires the `workflow_dispatch` `seeds` input (default 1000 nightly; one-off 10 000-seed proof via `gh workflow run scheduled.yml -f seeds=10000` with a generous job timeout, A4).
 2. **Where do the simnet size measurements come from — test-layer injection (a `SizeOf` func) vs simnet importing replproto?**
    - What we know: simnet's non-test file imports only stdlib + internal/app + internal/port today; D-05 says "size checks by the real encoder (`replproto` encode → length)".
    - What's unclear: whether the lint gate (depguard, strict config) tolerates a harness file importing the adapter's proto package.
    - Recommendation: prefer the injected-func shape (Pitfall 7b); a quick `go tool golangci-lint run` probe during planning settles it definitively.
+   - **RESOLVED (planning):** per the recommendation — plan 02-03 locks the injected `Policy.SizeOf` shape, wired from the test layer to the real replproto encoder; simnet's non-test imports stay stdlib+app+port (depguard-clean by construction).
 3. **Which cmd/sup-kv tests move to internal/stand vs stay?**
    - What we know: D-03 says moved/extended rather than duplicated; the four `TestExec_*` scenarios are the natural move candidates; `TestExec_emptyDiskRecovery` is the seed of the F9 stand test; discretion is explicitly Claude's.
    - What's unclear: whether `cmd/sup-kv` keeps any socket tests (its doc tests and lifecycle tests are not socket tests and stay by construction).
    - Recommendation: move all four `TestExec_*` scenarios; keep main_test.go's single-process lifecycle/log/metrics tests in place (they test one process, not replication).
+   - **RESOLVED (planning):** per the recommendation — plan 02-02 moves all four `TestExec_*` scenarios into `internal/stand` (renamed `TestStand_*`), deletes `cmd/sup-kv/scenario_test.go`, and keeps main_test.go's single-process tests.
 4. **What exactly must the R-03 red tests assert to be genuinely red TODAY (and not accidentally green)?**
    - What we know: gate opens on any first DataSync chunk or 1 s backstop; F14's acceptance has five enumerable assertions (value on A unchanged; `Unavailable` both directions pre-list; `AlreadyExists` post-list for peer-known keys; three-part list keeps closed; next local write after the max-version part gets a greater version).
    - What's unclear: how many of the five the current code fails instantly (all five presumably fail; the runner's assert-red only needs the test to fail, but the test should assert the full acceptance so it becomes the Phase 4 acceptance test on flip).
    - Recommendation: write the red tests as the FULL PROTO-01 acceptance assertions (the flip-to-green in Phase 4 then requires zero test edits beyond the expectation table) — consistent with D-01's reversibility contract.
+   - **RESOLVED (planning):** per the recommendation — plan 02-01 (gate level) and 02-05 (stand level) assert the full observable PROTO-01 acceptance; the Phase 4 flip is the expectation-table row only.
 
 ## Environment Availability
 
