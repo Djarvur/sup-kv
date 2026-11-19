@@ -432,15 +432,21 @@ Nothing in this phase depends on fast-moving external state — no deprecations 
 | A3 | Status choices for the ~10 rows flagged as decision points resolve by the priority rule (§14 > §7 > trace note, amend-check first) | Transform rules, Open Questions 1–3 | Low — worst case a row's status differs but stays inside the enum and honest |
 | A4 | `deferred-v2(SNAP-01)` (not `consumer-zone`) chosen for S-IMP-04 since REQUIREMENTS tracks SNAP-01 as a v2 requirement | Transform rules | Cosmetic — both statuses are true of it; enum membership holds either way |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All four resolved during planning; each RESOLVED line below states the adopted decision, which the executable plans carry verbatim (01-02 Task 2(d) for Q1–Q3, gated in its done criteria; 01-01 Task 2 "Do NOT touch" list for Q4). No open question remains.
 
 1. **Status for the three stand-downgraded rows (S-FAIL-09, S-ALG-RC-10, S-FAIL-15).**
    - What we know: trace marks them `Implemented`/`Implemented-with-deviation` per code; the stand proved the stated bounds fail at 10 000 keys (§13:373 names exactly these three: S-FAIL-09 and S-ALG-RC-10 fail at 10k keys per R-01/R-02; S-FAIL-15 holds only on hot keys per R-02/PERF-02).
    - What's unclear: `implemented` (statement as written, caveats in summary) vs `fixed-in-v1.1(XPORT-01/02, PERF-02)`.
    - Recommendation: `fixed-in-v1.1(<corresponding REQ>)` with an own-words summary noting it holds for small N — honest and consistent with how every other live gap is closed.
+   - RESOLVED: S-FAIL-09 → `fixed-in-v1.1(XPORT-01)`, S-ALG-RC-10 → `fixed-in-v1.1(XPORT-02)`, S-FAIL-15 → `fixed-in-v1.1(PERF-02)` — each summary noting the stated bound holds on the v1.0 stand only for small key counts (adopted in 01-02 Task 2(d), gated in its done criteria).
 2. **S-SEM-07 closure flavor.** In both the amendment-removed list (§13) and the Missing five. Recommendation: `superseded-by-amendment` with ADR 0004 in links (the conflict-journal requirement was removed from the Spec by decision 14.4); `accepted-deviation(ADR 0004)` is the defensible alternative — pick one primary status for enum cleanliness.
+   - RESOLVED: `superseded-by-amendment` with ADR 0004 in Links — one primary status, no dual flavor, since decision 14.4 removed the conflict-journal requirement from the Spec (adopted in 01-02 Task 2(d)).
 3. **S-HLC-07 (version filler zero vs Spec's "random").** Not in the 12 removed rows; no v1.1 requirement randomizes it; M-25 (IDEA.md wording) is a Phase 9 doc fix. Recommendation: `accepted-deviation` with summary "documented zero filler; uniqueness/order unaffected" and links to M-25/Phase 9 — but amend-check SPEC-amended.md first in case the amendment touched the wording.
+   - RESOLVED: `accepted-deviation` with the documented-zero-filler summary noting uniqueness and ordering unaffected — amend-check SPEC-amended.md first, as recommended (adopted in 01-02 Task 2(d)).
 4. **Whether to touch `.planning/phases/01-…/01-CONTEXT.md`'s stale canonical-ref paths.** Recommendation: leave untouched (decision record); PLAN.md restates post-move paths; Runtime State Inventory documents the mapping.
+   - RESOLVED: leave `.planning/phases/01-spec-reference-and-decisions/01-CONTEXT.md` untouched — it is the decision record; the plan and this document carry the post-move paths (adopted in 01-01 Task 2's "Do NOT touch" list).
 
 ## Environment Availability
 
