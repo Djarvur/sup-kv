@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-11-19T20:46:43.629Z"
+stopped_at: Completed 02-14-PLAN.md
+last_updated: "2026-11-19T20:53:00.625Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 26e935ee1e9b8eed36ec64bce20c34f22c03eb6f
+state_head: 51d7c92446aec9e69f40f5ba5eb79ae986e12fbe
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 5 of 17
+Plan: 6 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P02 | 2040s | 2 tasks | 4 files |
 | Phase 02 P03 | 441 | 2 tasks | 1 files |
 | Phase 02 P04 | 1191s | 2 tasks | 5 files |
+| Phase 02 P14 | 178s | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,7 @@ Recent decisions affecting current work:
 - [Phase 02]: fsops fakes ride the embedded real fileFSOps: the order assertion (write→fsync→rotate→rename→dir-fsync) is taken over the production Save path's actual operations and the rotation chain over real files; the failing fake short-circuits before the real op and performs the step's own hygiene via the production helpers
 - [Phase 02]: fsops internal-test placement: justified //nolint:testpackage keeps the plan's artifact name fsops_test.go with package persistfile (the internal/stand precedent) so the fakes reach the unexported FileStore.ops injection point; exported constructors unchanged, nothing added to internal/port
 - [Phase 02]: D-07 blocking proof rides a synctest bubble with an in-memory blockingDumpPort (startDumper pattern): deterministic not-returned window, no real-time flake surface for the nightly -race -count=20 soak
+- [Phase 02]: internal/stand nondarwin half: the darwin-untested leak assertion is a real runtime check — go/build MatchFile against an explicit darwin context over every sibling .go file (constraint-form-agnostic), so a leaked scenario file fails the darwin cell with a named error; the loud statement is a wrapped const keeping the plan's grep gate at exactly one phrase line
 
 ### Pending Todos
 
@@ -116,7 +118,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-19T20:46:30.400Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-11-19T20:53:00.554Z
+Stopped at: Completed 02-14-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`

@@ -24,7 +24,7 @@
   - Acceptance: filesystem seam under `persistfile` with recording and failing fakes asserting the order "write → fsync → rotate → rename → dir fsync" and a failure at each step; blocking `Save` fake — while it stands, `Set` does not return; processes: single node `Set` → OK, SIGKILL, start, `Get` succeeds
 - [ ] **TEST-04**: Startup gate is tested as a property, not a boolean flag (T-04)
   - Acceptance: the R-03 acceptance tests (see PROTO-01) fail on the current code
-- [ ] **TEST-05**: Real-socket tests are never silently skipped (T-05)
+- [x] **TEST-05**: Real-socket tests are never silently skipped (T-05)
   - Acceptance: in Linux CI a skipped socket test is an error; the macOS cell either runs at least one two-node test or the docs state darwin replication is untested; the test binary is built with `-race`
 - [ ] **TEST-06**: Simulator blind spots are closed (T-06)
   - Acceptance: simulator gains per-node incoming-datagram budget, size checks by the real encoder, record announcement after a virtual dump delay, restart with state, deletions; nightly real-socket run at 10 000 keys × 1 KiB scale with the review's section-15 scenarios
@@ -214,7 +214,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-02 | Phase 2 | Pending |
 | TEST-03 | Phase 2 | Complete |
 | TEST-04 | Phase 2 | Pending |
-| TEST-05 | Phase 2 | Pending |
+| TEST-05 | Phase 2 | Complete |
 | TEST-06 | Phase 2 | Pending |
 | TEST-07 | Phase 2 | Pending |
 | TEST-08 | Phase 2 | Pending |
