@@ -11,7 +11,7 @@
     {
       "number": "2",
       "name": "Engine — HLC Versioning and LWW Store",
-      "status": "complete"
+      "status": "in_progress"
     },
     {
       "number": "3",
@@ -89,5 +89,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 2 of 9 · executing"
   },
-  "updated_at": "2026-11-19T19:27:23.929Z"
+  "updated_at": "2026-11-19T20:10:24.122Z"
 }
