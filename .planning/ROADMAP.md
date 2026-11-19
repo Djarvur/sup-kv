@@ -28,7 +28,7 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
 
 **🚧 v1.1 Spec Compliance and Resilience** — close every v1.0-review finding by code fix or recorded deviation; scenarios pass their stated bounds on real sockets.
 
-- [ ] **Phase 1: Spec Reference and Decisions** - Deviation registry mapping every Spec statement to a decision and link; 11 ADRs for owner decisions 14.1-14.11; docs/IDEA.md marked historical
+- [x] **Phase 1: Spec Reference and Decisions** - Deviation registry mapping every Spec statement to a decision and link; 11 ADRs for owner decisions 14.1-14.11; docs/IDEA.md marked historical (completed 2026-11-19)
 - [ ] **Phase 2: Stand and Simulator as Tests** - F9/F9b/F14/burst/F2c automated on real sockets; simulator blind spots closed; chaos stabilized; red tests for the four Criticals (R-01, R-02, R-03, P-01)
 - [ ] **Phase 3: Transport** - Paced sync/retransmit sending, socket buffer setup and reporting, datagram validation, bounded queues; key→version view and Outbox seams
 - [ ] **Phase 4: Protocol** - Interface closed until the full key list arrives, `startup_gate_empty`, DataSync headers, stale-record answer, immediate sync for new/returning peers, 3+-node tests
@@ -49,7 +49,7 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
   2. Each review section-7 deviation (S-01, S-02, S-06, S-07, S-08, S-12) has a registry row closed one of two ways: by code (with a forward reference to the v1.1 requirement that fixes it) or by an accepted-deviation entry — no row is empty or TBD
   3. Eleven ADRs record owner decisions 14.1-14.11, including the two accepted-by-default confirmations of 2026-11-19 — 14.5(6) read of a listed-but-not-yet-arrived key returns `Unavailable`, and 14.7 last-read-value file lives outside sup-kv
   4. docs/IDEA.md is marked historical (or replaced by an as-built pointer), so no reader mistakes the Spec for a description of current behavior
-**Plans**: 4/4 plans executed
+**Plans**: 4/4 plans complete
 
 Plans:
 **Wave 1**
@@ -164,7 +164,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | In Progress |  |
+| 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
 | 2. Engine — HLC Versioning and LWW Store | v1.0 | 4/4 | Complete | 2026-11-02 |
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 2/2 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 6/6 | Complete | 2026-11-07 |
