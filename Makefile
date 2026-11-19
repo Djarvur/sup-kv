@@ -1,4 +1,4 @@
-.PHONY: lint test bench generate build proto buf-lint buf-format buf-breaking release release-snapshot
+.PHONY: lint test bench red-run generate build proto buf-lint buf-format buf-breaking release release-snapshot
 
 # Version stamping for the build target (D-18): version from git describe,
 # commit from the short sha, "dev" when git is unavailable.
@@ -25,6 +25,17 @@ test:
 ## stay excluded (-run anchored empty); compare two runs by hand.
 bench:
 	go test -run '^$$' -bench . ./internal/app/persist/ ./internal/udprepl/ ./internal/grpcapi/
+
+## red-run: the D-01 expected-red gate. Runs scripts/red-runner: the
+## env-gated red tests with SUPKV_RED_TESTS=1 (the script exports it), every
+## scripts/red-expectations.tsv row asserted from go test -json events — a
+## red row must FAIL, a skip or an absence is an error — with the run's
+## evidence recorded under .planning/phases/02-.../red-evidence/. Normal
+## gates stay green by construction: red tests skip without the env var, so
+## `make test` never runs their bodies. The Phase 3-5 flip-to-green changes
+## only the expectation-table row (red -> green), never this Makefile.
+red-run:
+	bash scripts/red-runner
 
 ## generate: run go:generate directives.
 generate:
