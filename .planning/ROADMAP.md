@@ -49,7 +49,13 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
   2. Each review section-7 deviation (S-01, S-02, S-06, S-07, S-08, S-12) has a registry row closed one of two ways: by code (with a forward reference to the v1.1 requirement that fixes it) or by an accepted-deviation entry — no row is empty or TBD
   3. Eleven ADRs record owner decisions 14.1-14.11, including the two accepted-by-default confirmations of 2026-11-19 — 14.5(6) read of a listed-but-not-yet-arrived key returns `Unavailable`, and 14.7 last-read-value file lives outside sup-kv
   4. docs/IDEA.md is marked historical (or replaced by an as-built pointer), so no reader mistakes the Spec for a description of current behavior
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Relocate review artifacts to docs/reviews/2026-11-19-v1.0/ with the .gitignore publication guard, sweep stale refs, mark IDEA.md historical (D-01..D-04, D-12/D-13)
+- [ ] 01-02-PLAN.md — Seed docs/SPEC-DEVIATIONS.md: all 167 statement IDs, D-08 statuses, section-7 closures (D-05..D-08)
+- [ ] 01-03-PLAN.md — Author 11 slim-MADR ADRs for decisions 14.1-14.11 with the D-11 reopenable lines (D-09..D-11)
+- [ ] 01-04-PLAN.md — Phase gate: registry↔ADR cross-audit, publication guard re-assertion, make lint/test
 
 ### Phase 2: Stand and Simulator as Tests
 **Goal**: The review's verdict is reproducible by machine — every claimed miss (recovery, burst) and every Critical finding is pinned by an automated test on real sockets or a hardened simulator, RED where the code is wrong. The tests are expected to fail against v1.0 code; that is the point — Critical findings get failing tests before fixes, and Phases 3-5 turn them green.
