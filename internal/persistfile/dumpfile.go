@@ -34,20 +34,28 @@ const (
 // .prev generation and the .snapshots directory from it (D-08).
 type FileStore struct {
 	path string
+	// ops is the durability seam Save and CreateSnapshot drive (D-07,
+	// TEST-03): the default fileFSOps performs the real file operations;
+	// tests substitute recording/failing fakes through this unexported
+	// field. Its per-save state is safe in one shared value because mu
+	// serializes every save below.
+	ops fsops
 	// mu serializes Save against CreateSnapshot (and concurrent Saves):
-	// between placeFile's two renames the main path is briefly absent, and
-	// a snapshot copy racing that window would report ErrNoDump despite
-	// confirmed data on disk. Load and ReadSnapshot need no lock — each
-	// rename leaves every observable generation complete.
+	// between rotate's and rename's renames the main path is briefly
+	// absent, and a snapshot copy racing that window would report ErrNoDump
+	// despite confirmed data on disk. Load and ReadSnapshot need no lock —
+	// each rename leaves every observable generation complete.
 	mu sync.Mutex
 }
 
 // FileStore implements the whole-dump persistence seam.
 var _ port.DumpStore = (*FileStore)(nil)
 
-// New returns a FileStore persisting to dumpPath.
+// New returns a FileStore persisting to dumpPath. The exported constructor
+// signature is unchanged by the fsops seam (D-07): the store builds its own
+// default fileFSOps; tests inject fakes through the unexported ops field.
 func New(dumpPath string) *FileStore {
-	return &FileStore{path: dumpPath}
+	return &FileStore{path: dumpPath, ops: &fileFSOps{}}
 }
 
 // Save durably writes dump as the new main generation, rotating the old
@@ -62,7 +70,7 @@ func New(dumpPath string) *FileStore {
 func (f *FileStore) Save(dump []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return saveAtomically(f.path, f.path+prevSuffix, dump)
+	return saveAtomically(f.ops, f.path, f.path+prevSuffix, dump)
 }
 
 // Load resolves the fallback chain main then .prev and returns the first
@@ -86,91 +94,35 @@ func (f *FileStore) Load(parse func([]byte) error) (dump []byte, ok bool) {
 }
 
 // saveAtomically implements the canonical atomic-write sequence (PERS-02,
-// research Pattern 3): MkdirAll the parent so a fresh deployment's first
-// dump creates its directory, a synced temp file in that directory,
-// optionally rotate an existing target to prevPath, rename the temp over
-// the target, then fsync the parent directory. An empty prevPath skips the
+// research Pattern 3) through the fsops seam (D-07, TEST-03): MkdirAll the
+// parent so a fresh deployment's first dump creates its directory — setup,
+// not one of the five seam steps — then the five ordered operations, one
+// fsops method per step, in the exact order the TEST-03 order test asserts:
+// write → fsync → rotate → rename → dir-fsync. An empty prevPath skips the
 // rotation — the snapshot policy, which overwrites in place with no .prev
 // of its own (research Open Question 2). The temp file is removed on every
-// failure path — [os.CreateTemp] is caller-managed and must not litter
-// (Pitfall 5).
-func saveAtomically(path, prevPath string, data []byte) error {
+// failure path — the seam steps' own hygiene, close + remove (Pitfall 5).
+func saveAtomically(ops fsops, path, prevPath string, data []byte) error {
 	dir := filepath.Dir(path)
 	err := os.MkdirAll(dir, dirMode)
 	if err != nil {
 		return err
 	}
-	tmpName, err := syncedTemp(dir, data)
+	err = ops.write(dir, data) // TEST-03 step 1: create temp + write payload
 	if err != nil {
 		return err
 	}
-	err = placeFile(path, prevPath, tmpName)
-	if err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return syncDir(dir)
-}
-
-// syncedTemp creates a temp file in dir, writes data into it and fsyncs
-// and closes it: the data is durable before any rename can be. The temp
-// file is removed on every failure path.
-func syncedTemp(dir string, data []byte) (tmpName string, err error) {
-	tmp, err := os.CreateTemp(dir, tempPattern)
-	if err != nil {
-		return "", err
-	}
-	tmpName = tmp.Name()
-	err = writeSynced(tmp, data)
-	if err == nil {
-		err = tmp.Close()
-	}
-	if err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return "", err
-	}
-	return tmpName, nil
-}
-
-// writeSynced writes data into tmp and durably syncs it through
-// syncDurable — F_FULLFSYNC on darwin, File.Sync everywhere else.
-func writeSynced(tmp *os.File, data []byte) error {
-	_, err := tmp.Write(data)
+	err = ops.fsync() // TEST-03 step 2: fsync the temp, close it
 	if err != nil {
 		return err
 	}
-	return syncDurable(tmp)
-}
-
-// placeFile rotates an existing target to prevPath — only when prevPath is
-// non-empty, the dump policy — then renames tmpName onto the target: the
-// atomic replace on Unix.
-func placeFile(path, prevPath, tmpName string) error {
-	if prevPath != "" && targetExists(path) {
-		err := os.Rename(path, prevPath)
-		if err != nil {
-			return err
-		}
-	}
-	return os.Rename(tmpName, path)
-}
-
-// targetExists reports whether path is statable — the guard deciding
-// whether a previous generation exists to rotate.
-func targetExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// syncDir durably syncs the directory entry — through syncDurable, the
-// same platform flush as the file data — so a completed rename under it
-// becomes durable too; the file's own data was synced before the rename.
-func syncDir(dir string) error {
-	d, err := os.Open(dir) //nolint:gosec // G304: dir derives from the configured dump path, never caller input
+	err = ops.rotate(path, prevPath) // TEST-03 step 3: rotate main → .prev
 	if err != nil {
 		return err
 	}
-	defer func() { _ = d.Close() }()
-	return syncDurable(d)
+	err = ops.rename(path) // TEST-03 step 4: rename temp → main
+	if err != nil {
+		return err
+	}
+	return ops.syncDir(dir) // TEST-03 step 5: fsync the directory
 }

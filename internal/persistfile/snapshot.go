@@ -51,7 +51,7 @@ func (f *FileStore) CreateSnapshot(name string) error {
 	if err != nil {
 		return err
 	}
-	return saveAtomically(filepath.Join(snapshotDir, name), "", data)
+	return saveAtomically(f.ops, filepath.Join(snapshotDir, name), "", data)
 }
 
 // ReadSnapshot returns the named snapshot's bytes for codec decoding; a
