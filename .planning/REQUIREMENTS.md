@@ -9,9 +9,9 @@
 
 ### Spec Traceability
 
-- [ ] **SPEC-01**: Repository carries a spec deviation registry mapping every Spec statement ID to a decision and a code/ADR link, and every section-7 deviation of the review is closed by code or by registry entry (S-12)
+- [x] **SPEC-01**: Repository carries a spec deviation registry mapping every Spec statement ID to a decision and a code/ADR link, and every section-7 deviation of the review is closed by code or by registry entry (S-12)
   - Acceptance: registry exists; each review section-7 deviation (S-01, S-02, S-06, S-07, S-08, S-12) closed one of the two ways; `docs/IDEA.md` marked historical or replaced by an as-built description
-- [ ] **SPEC-02**: Each owner decision 14.1–14.11 is recorded as an ADR, including the two confirmations the review left with the owner
+- [x] **SPEC-02**: Each owner decision 14.1–14.11 is recorded as an ADR, including the two confirmations the review left with the owner
   - Acceptance: 11 ADRs exist; 14.5(6) read-before-value-arrives → `Unavailable` and 14.7 last-read-value-file outside sup-kv are recorded as accepted (owner may reopen at Phase 4/6 discussion before implementation)
 
 ### Test Harness
@@ -208,8 +208,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SPEC-01 | Phase 1 | Pending |
-| SPEC-02 | Phase 1 | Pending |
+| SPEC-01 | Phase 1 | Complete |
+| SPEC-02 | Phase 1 | Complete |
 | TEST-01 | Phase 2 | Pending |
 | TEST-02 | Phase 2 | Pending |
 | TEST-03 | Phase 2 | Pending |

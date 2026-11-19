@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 1
 current_phase_name: Spec Reference and Decisions
-status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-11-19T15:34:53.547Z"
+status: verifying
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-11-19T15:48:58.439Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 1 execution started
-state_head: 9f56500c41b8fd005654d6f344aaf762e07aa054
+state_head: fd2528f1cbe6434f45873a170bfadd4abd5e57ad
 progress:
   total_phases: 9
   completed_phases: 0
   total_plans: 4
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 
 Phase: 1 (Spec Reference and Decisions) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-19 — Phase 1 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 349s | 3 tasks | 51 files |
 | Phase 01 P02 | 787s | 3 tasks | 1 files |
 | Phase 01 P03 | 524s | 3 tasks | 11 files |
+| Phase 01 P04 | 299 | 2 tasks | 0 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,8 @@ Recent decisions affecting current work:
 - [Phase 01]: S-HLC-07 accepted-deviation references recorded v1.0 research assumption 02-RESEARCH A2 — no ADR/14.x covers the zero filler; amend-check confirmed the amendment left the random-filler requirement standing
 - [Phase 01]: Unnamed rows resolved by the priority rule with REQ IDs verified in REQUIREMENTS.md: S-PROTO-02/03 to XPORT-03, S-PAR-05 to PERSIST-01, S-ALG-RC-09 to XPORT-07, S-PAR-16 to OBSV-05, S-FAIL-17 to OBSV-06, S-FAIL-03 to PROTO-03, S-HLC-10 to PROTO-01, S-IMP-08 accepted-deviation(ADR 0008)
 - [Phase 01]: ADR set authored slim-MADR with rule-level detail for 14.5 (six numbered sub-rules) so Phase 4 can address accepted-by-default rule (6) individually; honest gaps kept (0002 informs [], 0011 loss-share has no dedicated v1.1 REQ) instead of invented mappings
+- [Phase 01]: Phase gate closed with zero task commits: every gate passed on the committed tree as plans 02/03 left it; fixups were gated on gate failure and none failed — Plan 01-04's <output> creates no new files and commits fixups only when a gate fails; committing a no-op would fabricate history - the green gate record lives in 01-04-SUMMARY.md
+- [Phase 01]: Scoped-prefix publication guard (docs/reviews/2026-11-19-v1.0/internal/) is the standing phase-gate assertion, never any-path-containing-internal substring matching — 22 legitimate evidence/repro/**/internal/** repro-test module paths are committed D-01 payload; literal substring matching contradicts the 46-tracked-evidence-files acceptance (wave-1 Rule 1 scoping, re-affirmed at the gate)
 
 ### Pending Todos
 
@@ -93,7 +96,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-19T15:34:53.454Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-11-19T15:48:58.384Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
