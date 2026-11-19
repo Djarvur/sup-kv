@@ -1,0 +1,36 @@
+# Review stand for sup-kv: two nodes + a client on one bridge segment.
+# Binaries are cross-compiled on the host into ./bin (static, linux/arm64).
+name: supkv-lab
+networks:
+  seg:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.77.0/24
+volumes:
+  data-a: {}
+  data-b: {}
+x-node: &node
+  image: alpine:3.20
+  cap_add: [NET_ADMIN]
+  stop_grace_period: 10s
+services:
+  node-a:
+    <<: *node
+    hostname: node-a
+    volumes: ["./bin:/opt/bin:ro", "data-a:/data"]
+    networks: { seg: { ipv4_address: 172.31.77.11 } }
+    command: ["/opt/bin/sup-kv", "--node-id", "1", "--bind-addr", "0.0.0.0:7900", "--broadcast-addr", "172.31.77.255:7900", "--grpc-addr", "0.0.0.0:7901", "--metrics-addr", "0.0.0.0:7902", "--dump-path", "/data/dump.json"]
+  node-b:
+    <<: *node
+    hostname: node-b
+    environment: { SUPKV_STARTUP_GATE: "${B_GATE:-1s}" }
+    volumes: ["./bin:/opt/bin:ro", "data-b:/data"]
+    networks: { seg: { ipv4_address: 172.31.77.12 } }
+    command: ["/opt/bin/sup-kv", "--node-id", "2", "--bind-addr", "0.0.0.0:7900", "--broadcast-addr", "172.31.77.255:7900", "--grpc-addr", "0.0.0.0:7901", "--metrics-addr", "0.0.0.0:7902", "--dump-path", "/data/dump.json"]
+  client:
+    image: alpine:3.20
+    hostname: client
+    volumes: ["./bin:/opt/bin:ro"]
+    networks: { seg: { ipv4_address: 172.31.77.20 } }
+    command: ["sleep", "infinity"]

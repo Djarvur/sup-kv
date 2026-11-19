@@ -30,3 +30,6 @@ Thumbs.db
 
 # Local environment
 .env
+
+# Non-public review material (upstream Spec; never committed)
+docs/reviews/2026-11-19-v1.0/internal/

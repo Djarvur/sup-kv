@@ -1,0 +1,62 @@
+"""Second mutation batch for the sup-kv test audit."""
+
+CORE = 'internal/app/repl/core.go'
+UDP = 'internal/udprepl/repl.go'
+ENGINE = 'internal/app/persist/engine.go'
+METRICS = 'internal/metrics/metrics.go'
+WATCH = 'internal/grpcapi/watch.go'
+MAIN = 'cmd/sup-kv/main.go'
+
+MUTATIONS = [
+    dict(id='M71', file=CORE, desc='no Ack for a stale (lower-version) DataReplication (the upstream spec behaviour: "Ack is not sent")',
+         diff='applyRemote: return before the Ack when the store rejected the record as older',
+         old='\tout.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})\n',
+         new='\tif len(conflicts) > 0 && conflicts[0].Winner != msg.Record.Version {\n\t\treturn\n\t}\n\tout.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})\n'),
+    dict(id='M72', file=CORE, desc='local write not broadcast immediately (first DataReplication only at ack_timeout)',
+         diff='NotifyLocalWrite: drop out.Broadcast(DataReplication)',
+         old='\tout.Broadcast(port.DataReplication{Key: key, Record: own})\n}\n', new='\t_ = out\n}\n'),
+    dict(id='M73', file=CORE, desc='periodic DataSync never re-fires after the startup listing',
+         diff='syncListing: nextSync pushed 1e6 hours ahead',
+         old='\tc.nextSync = now.Add(c.cfg.SyncInterval)\n', new='\tc.nextSync = now.Add(1000000 * time.Hour)\n'),
+    dict(id='M74', file=METRICS, desc='supkv_merges_conflicts_total exports the drift-warning counter',
+         diff='replicationFamilies: merged.Conflicts -> merged.DriftWarnings',
+         old='\t\t\t\t{Value: float64(merged.Conflicts)},\n', new='\t\t\t\t{Value: float64(merged.DriftWarnings)},\n'),
+    dict(id='M75', file=METRICS, desc='discard class bad_crc exports the undecodable counter',
+         diff='trafficFamilies: disc.BadCRC -> disc.Undecodable',
+         old='Value: float64(disc.BadCRC)}', new='Value: float64(disc.Undecodable)}'),
+    dict(id='M76', file=METRICS, desc='supkv_replication_unacked_records frozen at 0',
+         diff='replicationFamilies: float64(un.Count) -> 0',
+         old='\t\t\t\t{Value: float64(un.Count)},\n', new='\t\t\t\t{Value: 0 * float64(un.Count)},\n'),
+    dict(id='M77', file=CORE, desc='drift warnings never counted by the replication core',
+         diff='applyRemote: drop DriftWarnings++',
+         old='\tif drift != 0 {\n\t\tc.mergeStats.DriftWarnings++\n\t}\n', new='\t_ = drift\n'),
+    dict(id='M78', file=CORE, desc='merge conflicts (LWW losers) never counted by the replication core',
+         diff='applyRemote: drop Conflicts += len(conflicts)',
+         old='\tc.mergeStats.Conflicts += uint64(len(conflicts))\n', new='\t_ = conflicts\n'),
+    dict(id='M79', file=UDP, desc='adapter does not mirror the conflict / drift counters (metrics stay 0 in the real node)',
+         diff='mirrorStats: drop mergeConflicts/mergeDriftWarning Store',
+         old='\ta.mergeConflicts.Store(m.Conflicts)\n\ta.mergeDriftWarning.Store(m.DriftWarnings)\n', new='\t_ = m\n'),
+    dict(id='M80', file=UDP, desc='adapter does not mirror the retransmission counter',
+         diff='mirrorStats: drop retransmitted Store',
+         old='\ta.retransmitted.Store(a.core.Retransmissions())\n', new=''),
+    dict(id='M81', file=UDP, desc='unicast replies (Ack, DataRequest, sync responses) sent to the broadcast address',
+         diff='flush: a.write(datagram, addr) -> a.write(datagram, a.broadcastAddr)',
+         old='\t\ta.write(datagram, addr)\n', new='\t\t_ = addr\n\t\ta.write(datagram, a.broadcastAddr)\n'),
+    dict(id='M82', file=WATCH, desc='Watch: a slow subscriber silently loses events instead of being disconnected',
+         diff='dispatch: default branch drops the event (no disconnect)',
+         old='\t\tdefault:\n\t\t\th.disconnect(sub)\n', new='\t\tdefault:\n'),
+    dict(id='M83', file=MAIN, desc='startup log of discarded dump records removed',
+         diff='startEngine: if discarded > 0 disabled',
+         old='\tif discarded > 0 {', new='\tif false && discarded > 0 {'),
+    dict(id='M84', file=ENGINE, desc='dump debounce ignored (one dump per change, no coalescing)',
+         diff='rearm: debounce timer armed with 0',
+         old='\tif debounce == nil {\n\t\tdebounce = time.NewTimer(e.cfg.Debounce)\n\t} else {\n\t\tdebounce.Reset(e.cfg.Debounce)\n\t}\n',
+         new='\tif debounce == nil {\n\t\tdebounce = time.NewTimer(0)\n\t} else {\n\t\tdebounce.Reset(0)\n\t}\n'),
+    dict(id='M85', file=MAIN, desc='final dump failure at shutdown still exits 0',
+         diff='main: os.Exit(exitDumpFailed) -> os.Exit(0)',
+         old='\t\tos.Exit(exitDumpFailed)\n', new='\t\tos.Exit(0)\n'),
+    dict(id='M86', file=CORE, desc='Hello from an already-known peer does not refresh liveness (peer evicted after peer_timeout although alive)',
+         diff='handleHello: keep the remembered lastHello for a known peer with the same run_id',
+         old='\tc.peers[in.NodeID] = peer{handle: in.Source, runID: in.RunID, lastHello: now}\n',
+         new='\tif known, ok := c.peers[in.NodeID]; ok && known.runID == in.RunID {\n\t\treturn\n\t}\n\tc.peers[in.NodeID] = peer{handle: in.Source, runID: in.RunID, lastHello: now}\n'),
+]
