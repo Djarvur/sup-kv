@@ -72,14 +72,14 @@ Plans:
   3. The simulator's blind spots are closed: per-node incoming-datagram budgets, size checks by the real encoder, record announcement after a virtual dump delay, restart with state, and deletions; `TestChaos_convergence` is stable across 10 000 seeds (fixed corpus plus fresh seeds), and convergence bounds hold under combined failures and partitions longer than `peer_timeout`
   4. The seams are pinned by tests, not conventions: a filesystem seam under `persistfile` with recording and failing fakes asserting write → fsync → rotate → rename → dir-fsync and a failure at each step; `persist.Open` clock seeding proven on the real composition path; a corrupted-datagram table plus `FuzzDecode`/`FuzzDumpDecode` with an in-repo corpus; deletion replication proven at codec, simulator, two-process and dump level; Watch cut/backpressure branches, metrics-by-observed-effect, per-decision tests referencing 14.x by name, and property shrinking over a small `(l, c, node)` space
   5. The heavy machinery runs on a schedule: a scheduled CI workflow (1000 seeds, `-shuffle=on -count=3`, `-bench . -benchtime=1x`), a nightly real-socket run at 10 000 keys × 1 KiB with the review's section-15 scenarios; benchmarks report p50/p99 without self-pacing on the real `persistfile`; `go test -race -count=20` over `cmd/sup-kv`, `udprepl` and affected packages green three times in a row (flakiness classes that require Phase 3-5 fixes carry their red test forward)
-**Plans**: 3/17 plans executed
+**Plans**: 4/17 plans executed
 
 Plans:
 **Wave 1**
 - [x] 02-01-PLAN.md — Tracer: red-gating mechanism end to end — first env-gated R-03 red test + scripts/red-runner expectation table + evidence capture (D-01, TEST-04)
 - [x] 02-02-PLAN.md — internal/stand package: harness move, four migrated scenarios, F2c pin, no-silent-skip policy (D-03, TEST-05 Linux branch, TEST-03 process half)
 - [x] 02-03-PLAN.md — simnet additive extensions: Delete, restart-with-state, receive budget, SizeOf by real encoder, dump-delay (D-05, TEST-06, TEST-02 sim level API)
-- [ ] 02-04-PLAN.md — fsops seam under persistfile (five ops: write/fsync/rotate/rename/dir-fsync) + blocking-Save proof (D-07, TEST-03 seam half)
+- [x] 02-04-PLAN.md — fsops seam under persistfile (five ops: write/fsync/rotate/rename/dir-fsync) + blocking-Save proof (D-07, TEST-03 seam half)
 - [ ] 02-14-PLAN.md — Loud non-Linux darwin report test in internal/stand (D-03, TEST-05 darwin branch; moved from 02-02)
 
 **Wave 2** *(blocked on Wave 1)*
@@ -193,7 +193,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
-| 2. Engine — HLC Versioning and LWW Store | v1.0 | 3/17 | In Progress |  |
+| 2. Engine — HLC Versioning and LWW Store | v1.0 | 4/17 | In Progress |  |
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 2/2 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 6/6 | Complete | 2026-11-07 |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |
