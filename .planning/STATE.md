@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 1
 current_phase_name: Spec Reference and Decisions
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-11-19T14:48:43.479Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-11-19T15:19:43.471Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 1 execution started
-state_head: 3b9569dd9e7f7d37f5df850961a7a9f2877dcf24
+state_head: ffbe162301c2737b93213ffa90c171e9253635df
 progress:
   total_phases: 9
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 1 (Spec Reference and Decisions) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 1 execution started
 
@@ -53,6 +53,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 349s | 3 tasks | 51 files |
+| Phase 01 P02 | 787s | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -66,6 +67,10 @@ Recent decisions affecting current work:
 - Roadmap: owner decisions 14.1-14.11 are settled (2026-11-19) and are not re-litigated; 14.5(6) and 14.7 accepted by default and recorded in SPEC-02
 - Roadmap: Phase 2's Critical-scenario tests (R-01, R-02, R-03, P-01) are expected RED against v1.0 code by design — planning must choose the gating mechanism so red tests can merge without breaking CI (they turn green in Phases 3-5)
 - [Phase 01]: Publication-guard verify gates scoped to the non-public prefix docs/reviews/2026-11-19-v1.0/internal/; evidence/repro/**/internal/** repro paths are legitimate D-01 payload (Rule 1 fix during 01-01 Task 1)
+- [Phase 01]: Registry Links cells expand the trace's shorthand code refs to full repo paths per the trace's own file legend, so public readers resolve links without the local-only legend
+- [Phase 01]: S-PROTO-08 closed as implemented with recorded-intent nuance in the summary cell (04-CONTEXT D-02); accepted-deviation(14.x) would have been an invented reference
+- [Phase 01]: S-HLC-07 accepted-deviation references recorded v1.0 research assumption 02-RESEARCH A2 — no ADR/14.x covers the zero filler; amend-check confirmed the amendment left the random-filler requirement standing
+- [Phase 01]: Unnamed rows resolved by the priority rule with REQ IDs verified in REQUIREMENTS.md: S-PROTO-02/03 to XPORT-03, S-PAR-05 to PERSIST-01, S-ALG-RC-09 to XPORT-07, S-PAR-16 to OBSV-05, S-FAIL-17 to OBSV-06, S-FAIL-03 to PROTO-03, S-HLC-10 to PROTO-01, S-IMP-08 accepted-deviation(ADR 0008)
 
 ### Pending Todos
 
@@ -86,7 +91,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-19T14:48:43.420Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-11-19T15:19:43.427Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
