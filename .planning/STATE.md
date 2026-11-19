@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-11-19T20:10:36.790Z"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-11-19T20:23:01.233Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 1866785bea1d7829d930fd473c7788dcf45038ce
+state_head: e92242bb527737a8d17163cd0830311dbd1e0580
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 6
+  completed_plans: 7
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 3 of 17
+Plan: 4 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P04 | 299 | 2 tasks | 0 files |
 | Phase 02 P01 | 520s | 3 tasks | 8 files |
 | Phase 02 P02 | 2040s | 2 tasks | 4 files |
+| Phase 02 P03 | 441 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,10 @@ Recent decisions affecting current work:
 - [Phase 02]: internal/stand keeps the plan's file names AND internal tests via justified //nolint:testpackage (stand_test.go package clause) and //nolint:depguard (testing import in stand.go) — both with written reasons per AGENTS.md; the package doc states the test-infrastructure status the path-based rules cannot see; sibling plans 02-05/02-14 follow the same pattern
 - [Phase 02]: The cmd/sup-kv port registry was NOT dead after the scenario move — broadcast_probe_test.go (Phase 7 DOCS-01 probe) still uses scenarioUDPPort, so it moved to its remaining consumer and main_test.go needed zero removals
 - [Phase 02]: F2c pin rides standAbsent (NotFound-based absence) + standSetWith (review's 1-byte value): a value-mismatched record must fail the never-replicated window, and the derived 70KB scenario value would trip the store's value limit before the datagram ceiling matters
+- [Phase 02]: Cluster.Delete returns (storage.Record, error): the plan's must_haves ErrNotFound propagation beats the prose's bare-Record signature
+- [Phase 02]: ReplaceNodeWithState seeds via store.Merge in sorted-key order: map iteration would randomize the HLC watermark the merges leave behind and break same-seed replay; the VERS-04 property rides the merge path, no Watermark pre-seed
+- [Phase 02]: simnet size gate refuses at schedule time (before booking — PendingDeliveries stays truthful); receive budget consults at fire time against the live map, keyed by handle so it survives ReplaceNode
+- [Phase 02]: AnnounceDelay rides port.DataReplication only (write broadcasts + sync answers); over-limit seed records panic per the checkIndex/Reregister harness convention
 
 ### Pending Todos
 
@@ -106,7 +111,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-19T20:10:36.528Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-11-19T20:23:01.130Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
