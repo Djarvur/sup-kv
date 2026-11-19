@@ -63,7 +63,7 @@ All Active requirements are hypotheses until shipped and validated.
 
 ## Context
 
-**The design is decided.** It comes from a reviewed architecture proposal (`docs/IDEA.md` — the authoritative, self-contained design document). Do not re-litigate it during planning; only implementation-level questions are open.
+**The design is decided.** It comes from a reviewed architecture proposal (`docs/IDEA.md` — the historical intent-at-start document; see the loud banner at its top and the as-built trio README, docs/OPERATIONS.md, docs/EXAMPLES.md). Do not re-litigate it during planning; only implementation-level questions are open.
 
 Decided design, in brief (full detail and parameter defaults in `docs/IDEA.md`):
 
