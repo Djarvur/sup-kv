@@ -12,7 +12,7 @@ Every node stays writable at all times with no coordination, and a write confirm
 
 ## Current Milestone: v1.1 Spec Compliance and Resilience
 
-**Goal:** Close the findings of the 2026-11-19 v1.0 review (`docs/2026-11-19-v1.0-review/`) — recovery and burst scenarios meet the stated bounds on real sockets, and every deviation from the Spec is either fixed in code or recorded in a deviation registry.
+**Goal:** Close the findings of the 2026-11-19 v1.0 review (`docs/reviews/2026-11-19-v1.0/`) — recovery and burst scenarios meet the stated bounds on real sockets, and every deviation from the Spec is either fixed in code or recorded in a deviation registry.
 
 **Target features:**
 - Spec deviation registry + owner decisions 14.1–14.11 as ADRs (S-12)
@@ -134,4 +134,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-19 — milestone v1.1 started (input: v1.0 review at `docs/2026-11-19-v1.0-review/`, owner decisions 14.1–14.11 accepted 2026-11-19)*
+*Last updated: 2026-11-19 — milestone v1.1 started (input: v1.0 review at `docs/reviews/2026-11-19-v1.0/`, owner decisions 14.1–14.11 accepted 2026-11-19)*

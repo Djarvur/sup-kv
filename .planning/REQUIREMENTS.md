@@ -3,7 +3,7 @@
 **Defined:** 2026-11-19
 **Core Value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
 
-**Source:** v1.0 review of 2026-11-19 (`docs/2026-11-19-v1.0-review/`). Review IDs (R-xx, P-xx, S-xx, A-xx, O-xx, T-xx, D-xx, PERF-xx, Q-xx) are kept in parentheses for traceability; acceptance criteria are carried from the review verbatim or near-verbatim. Owner decisions 14.1–14.11 of the review are settled (2026-11-19) and are not re-litigated here.
+**Source:** v1.0 review of 2026-11-19 (`docs/reviews/2026-11-19-v1.0/`). Review IDs (R-xx, P-xx, S-xx, A-xx, O-xx, T-xx, D-xx, PERF-xx, Q-xx) are kept in parentheses for traceability; acceptance criteria are carried from the review verbatim or near-verbatim. Owner decisions 14.1–14.11 of the review are settled (2026-11-19) and are not re-litigated here.
 
 ## v1.1 Requirements
 
