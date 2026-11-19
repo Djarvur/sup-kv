@@ -208,13 +208,97 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| *(filled by roadmap)* | | |
+| SPEC-01 | Phase 1 | Pending |
+| SPEC-02 | Phase 1 | Pending |
+| TEST-01 | Phase 2 | Pending |
+| TEST-02 | Phase 2 | Pending |
+| TEST-03 | Phase 2 | Pending |
+| TEST-04 | Phase 2 | Pending |
+| TEST-05 | Phase 2 | Pending |
+| TEST-06 | Phase 2 | Pending |
+| TEST-07 | Phase 2 | Pending |
+| TEST-08 | Phase 2 | Pending |
+| TEST-09 | Phase 2 | Pending |
+| TEST-10 | Phase 2 | Pending |
+| TEST-11 | Phase 2 | Pending |
+| TEST-12 | Phase 2 | Pending |
+| TEST-13 | Phase 2 | Pending |
+| TEST-14 | Phase 2 | Pending |
+| TEST-15 | Phase 2 | Pending |
+| TEST-16 | Phase 2 | Pending |
+| XPORT-01 | Phase 3 | Pending |
+| XPORT-02 | Phase 3 | Pending |
+| XPORT-03 | Phase 3 | Pending |
+| XPORT-04 | Phase 3 | Pending |
+| XPORT-05 | Phase 3 | Pending |
+| XPORT-06 | Phase 3 | Pending |
+| XPORT-07 | Phase 3 | Pending |
+| XPORT-08 | Phase 3 | Pending |
+| XPORT-09 | Phase 3 | Pending |
+| XPORT-10 | Phase 3 | Pending |
+| XPORT-11 | Phase 3 | Pending |
+| XPORT-12 | Phase 3 | Pending |
+| XPORT-13 | Phase 3 | Pending |
+| PROTO-01 | Phase 4 | Pending |
+| PROTO-02 | Phase 4 | Pending |
+| PROTO-03 | Phase 4 | Pending |
+| PROTO-04 | Phase 4 | Pending |
+| PROTO-05 | Phase 4 | Pending |
+| PROTO-06 | Phase 4 | Pending |
+| PROTO-07 | Phase 4 | Pending |
+| PROTO-08 | Phase 4 | Pending |
+| PROTO-09 | Phase 4 | Pending |
+| PERSIST-01 | Phase 5 | Pending |
+| PERSIST-02 | Phase 5 | Pending |
+| PERSIST-03 | Phase 5 | Pending |
+| PERSIST-04 | Phase 5 | Pending |
+| PERSIST-05 | Phase 5 | Pending |
+| PERSIST-06 | Phase 5 | Pending |
+| PERSIST-07 | Phase 5 | Pending |
+| PERSIST-08 | Phase 5 | Pending |
+| PERSIST-09 | Phase 5 | Pending |
+| PERSIST-10 | Phase 5 | Pending |
+| PERSIST-11 | Phase 5 | Pending |
+| PERSIST-12 | Phase 5 | Pending |
+| APIS-01 | Phase 6 | Pending |
+| APIS-02 | Phase 6 | Pending |
+| APIS-03 | Phase 6 | Pending |
+| APIS-04 | Phase 6 | Pending |
+| APIS-05 | Phase 6 | Pending |
+| APIS-06 | Phase 6 | Pending |
+| APIS-07 | Phase 6 | Pending |
+| OBSV-01 | Phase 7 | Pending |
+| OBSV-02 | Phase 7 | Pending |
+| OBSV-03 | Phase 7 | Pending |
+| OBSV-04 | Phase 7 | Pending |
+| OBSV-05 | Phase 7 | Pending |
+| OBSV-06 | Phase 7 | Pending |
+| OBSV-07 | Phase 7 | Pending |
+| OBSV-08 | Phase 7 | Pending |
+| PERF-01 | Phase 8 | Pending |
+| PERF-02 | Phase 8 | Pending |
+| PERF-03 | Phase 8 | Pending |
+| PERF-04 | Phase 8 | Pending |
+| PERF-05 | Phase 8 | Pending |
+| PERF-06 | Phase 8 | Pending |
+| DOCS-01 | Phase 9 | Pending |
+| DOCS-02 | Phase 9 | Pending |
+| DOCS-03 | Phase 9 | Pending |
+| DOCS-04 | Phase 9 | Pending |
+| DOCS-05 | Phase 9 | Pending |
+| DOCS-06 | Phase 9 | Pending |
+| DOCS-07 | Phase 9 | Pending |
+| DOCS-08 | Phase 9 | Pending |
+| DOCS-09 | Phase 9 | Pending |
+| DOCS-10 | Phase 9 | Pending | |
 
 **Coverage:**
 - v1.1 requirements: 83 total
-- Mapped to phases: 0
-- Unmapped: 83 ⚠️
+- Mapped to phases: 83 (100%)
+- Unmapped: 0
+
+**Phase map:** SPEC→1, TEST→2, XPORT→3, PROTO→4, PERSIST→5, APIS→6, OBSV→7, PERF→8, DOCS→9
 
 ---
 *Requirements defined: 2026-11-19*
-*Last updated: 2026-11-19 after initial definition (source: v1.0 review)*
+*Last updated: 2026-11-19 — traceability filled by v1.1 roadmap creation (9 phases)*
