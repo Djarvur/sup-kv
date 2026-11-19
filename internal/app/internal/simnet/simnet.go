@@ -123,18 +123,48 @@ func (s *Scheduler) RunUntil(t time.Time) {
 func (s *Scheduler) Now() time.Time { return s.now }
 
 // Policy is the fault-injection profile, pure data injected by each test:
-// drop and duplicate probabilities, the one-way delay draw and the partition
-// predicate. A nil Delay means zero delay and a nil Partition means nothing
-// is ever blocked (the fixed-delay profile of the bound tests and the
-// loss-free default). simnet draws randomness only through the injected rng,
-// at send time, in a fixed draw order — drop, then duplicate, then each
+// drop and duplicate probabilities, the one-way delay draw, the partition
+// predicate, the optional datagram size gate (SizeOf over MaxDatagramBytes)
+// and the optional record-announcement latency (AnnounceDelay). A nil Delay
+// means zero delay and a nil Partition means nothing is ever blocked (the
+// fixed-delay profile of the bound tests and the loss-free default); a nil
+// SizeOf, a non-positive MaxDatagramBytes and a nil AnnounceDelay disable
+// their extensions — the zero Policy reproduces the pre-extension behavior
+// bit for bit. simnet draws randomness only through the injected rng, at
+// send time, in a fixed draw order — drop, then duplicate, then each
 // delivery's delay — so the same seed reproduces every fate decision
-// (D-06/D-07).
+// (D-06/D-07); the size gate and the announcement latency are pure
+// functions of the message (no rng, no wall clock) and the receive budget is
+// plain state consulted at delivery time (SetRecvBudget).
 type Policy struct {
 	DropProb  float64
 	DupProb   float64
 	Delay     func(rng *rand.Rand) time.Duration
 	Partition func(from, to string, now time.Time) bool
+
+	// SizeOf, when non-nil, measures a message's simulated datagram size in
+	// bytes — the test layer injects the real encoder's length here (the Q2
+	// resolution: the replproto encode stays test-side, so this file's
+	// import block remains stdlib + internal/app + internal/port). With a
+	// positive MaxDatagramBytes it gates scheduleDelivery: a message
+	// measuring over the ceiling is refused before it is ever scheduled —
+	// counted in FaultStats.OversizeRefused and dropped, never delivered
+	// (the message-too-long refusal of a real UDP path, F2c).
+	SizeOf func(msg port.Message) int
+
+	// MaxDatagramBytes is the size gate's ceiling in bytes; only a positive
+	// value arms the gate (see SizeOf), so the zero disables it.
+	MaxDatagramBytes int
+
+	// AnnounceDelay, when non-nil, returns the extra virtual latency a
+	// record announcement — a port.DataReplication, the write-path
+	// broadcast and the DataRequest/sync answers alike — waits beyond the
+	// drawn one-way delay, mirroring production's dump-then-broadcast order
+	// (the DataReplication is broadcast after the dump is confirmed,
+	// RESULTS.md §4). simnet consults it only for DataReplication messages
+	// and adds the returned latency to the delivery delay. Pure function of
+	// the message — no rng, no wall clock.
+	AnnounceDelay func(msg port.Message) time.Duration
 }
 
 // delay draws one one-way delay (nil policy Delay: zero).
@@ -153,13 +183,24 @@ func (p Policy) blocked(from, to string, now time.Time) bool {
 // FaultStats counts the fault injector's observed classes (the coverage
 // teeth the chaos test asserts on): sends dropped at send time, sends
 // duplicated into two deliveries, deliveries arriving after a later-sent
-// sibling of the same directed pair, and sends blocked by the partition
-// predicate.
+// sibling of the same directed pair, sends blocked by the partition
+// predicate, deliveries refused past the recipient's receive budget
+// (SetRecvBudget), and messages refused by the size gate before scheduling
+// (Policy.SizeOf over Policy.MaxDatagramBytes).
 type FaultStats struct {
 	Dropped     uint64
 	Duplicated  uint64
 	Reordered   uint64
 	Partitioned uint64
+
+	// RecvBudgetRefused counts deliveries dropped at their delivery time
+	// because the recipient's receive budget (SetRecvBudget) was exhausted
+	// — the receive-side drop behavior of a real socket.
+	RecvBudgetRefused uint64
+
+	// OversizeRefused counts messages the size gate refused before they
+	// were ever scheduled (Policy.SizeOf over Policy.MaxDatagramBytes).
+	OversizeRefused uint64
 }
 
 // netNode is one registered cluster member: the envelope identity (node id,
@@ -186,7 +227,10 @@ type pairKey struct{ from, to string }
 // INCLUDING the sender (own echo is real; plan 01's OwnEcho class fires in
 // simulation too), one independent fate draw per recipient, in registration
 // order. Registered nodes iterate a slice, never a map, so fan-out order —
-// and therefore rng draw order — is deterministic.
+// and therefore rng draw order — is deterministic. A per-recipient receive
+// budget (SetRecvBudget) models a real socket's receive-side drop behavior:
+// a delivery due past its recipient's budget is refused at fire time and
+// counted, never delivered.
 type Network struct {
 	sched      *Scheduler
 	rng        *rand.Rand
@@ -195,6 +239,7 @@ type Network struct {
 	byHandle   map[string]int
 	sendSeq    map[pairKey]uint64
 	lastByPair map[pairKey]uint64
+	recvBudget map[string]int
 	faults     FaultStats
 	pending    int
 	trace      strings.Builder
@@ -210,6 +255,7 @@ func NewNetwork(sched *Scheduler, rng *rand.Rand, policy Policy) *Network {
 		byHandle:   make(map[string]int),
 		sendSeq:    make(map[pairKey]uint64),
 		lastByPair: make(map[pairKey]uint64),
+		recvBudget: make(map[string]int),
 	}
 }
 
@@ -233,6 +279,32 @@ func (n *Network) Reregister(nodeID uint16, runID [16]byte, handle string, deliv
 	}
 	n.nodes[i] = netNode{id: nodeID, runID: runID, handle: handle, deliver: deliver}
 	return true
+}
+
+// SetRecvBudget caps the datagrams nodeID may accept: every delivered
+// datagram decrements the remaining budget at its delivery time, and a
+// delivery due once the budget is exhausted is refused — counted in
+// FaultStats.RecvBudgetRefused and dropped, never delivered (the
+// receive-side drop behavior of a real socket whose buffer or rate budget
+// is exhausted, TEST-06). A zero or negative maxDeliveries refuses
+// everything. The cap keys the node's handle, so it survives a ReplaceNode
+// restart (the socket address the budget models outlives the process behind
+// it) and is read live at each fire time — a budget set between the
+// scheduling and the fire of a delivery still governs that delivery.
+// Setting the budget is test-facing plain state; an unregistered node id is
+// a driving test's mistake and panics.
+//
+// Determinism contract: as SetClockOffset — plain harness state, consumes
+// no rng draws and schedules no events, so for any fixed sequence of calls
+// the event stream stays a pure function of the seed.
+func (n *Network) SetRecvBudget(nodeID uint16, maxDeliveries int) {
+	for i := range n.nodes {
+		if n.nodes[i].id == nodeID {
+			n.recvBudget[n.nodes[i].handle] = maxDeliveries
+			return
+		}
+	}
+	panic(fmt.Sprintf("simnet: Network.SetRecvBudget: node id %d is not registered", nodeID))
 }
 
 // Send injects one datagram from fromHandle toward toHandle (D-06/D-07): a
@@ -283,12 +355,39 @@ func (n *Network) Broadcast(fromHandle string, msg port.Message) {
 // pair's reorder observation updates (a delivery whose send sequence is older
 // than the pair's highest delivered sequence arrives after a later-sent
 // sibling — Pitfall 1's measurable), the tuple joins the ordered trace, and
-// the recipient's delivery function receives the decoded datagram.
+// the recipient's delivery function receives the decoded datagram. Three
+// policy extensions join the path additively, each off in the zero Policy:
+// the size gate (SizeOf over MaxDatagramBytes) refuses an oversize message
+// before it is ever scheduled — counted in FaultStats.OversizeRefused,
+// dropped, never booked (the message-too-long refusal of a real UDP path);
+// the announcement latency (AnnounceDelay on a port.DataReplication) joins
+// the drawn one-way delay, mirroring production's dump-then-broadcast order;
+// and at fire time the recipient's receive budget is consulted first — past
+// it the delivery is refused (FaultStats.RecvBudgetRefused, the message
+// dropped, never delivered) and a delivered one decrements the budget (the
+// receive-side drop behavior of a real socket, SetRecvBudget).
 func (n *Network) scheduleDelivery(from, to netNode, msg port.Message, seq uint64, delay time.Duration) {
+	if n.policy.SizeOf != nil && n.policy.MaxDatagramBytes > 0 && n.policy.SizeOf(msg) > n.policy.MaxDatagramBytes {
+		n.faults.OversizeRefused++
+		return
+	}
 	pair := pairKey{from: from.handle, to: to.handle}
+	total := delay
+	if n.policy.AnnounceDelay != nil {
+		if ann, ok := msg.(port.DataReplication); ok {
+			total += n.policy.AnnounceDelay(ann)
+		}
+	}
 	n.pending++
-	n.sched.Schedule(n.sched.Now().Add(delay), func() {
+	n.sched.Schedule(n.sched.Now().Add(total), func() {
 		n.pending--
+		if budget, ok := n.recvBudget[to.handle]; ok {
+			if budget <= 0 {
+				n.faults.RecvBudgetRefused++
+				return
+			}
+			n.recvBudget[to.handle] = budget - 1
+		}
 		if seq < n.lastByPair[pair] {
 			n.faults.Reordered++
 		} else {
