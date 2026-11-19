@@ -10,6 +10,21 @@ For service builders on small HA clusters (e.g. two management boards in one app
 
 Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
 
+## Current Milestone: v1.1 Spec Compliance and Resilience
+
+**Goal:** Close the findings of the 2026-11-19 v1.0 review (`docs/2026-11-19-v1.0-review/`) — recovery and burst scenarios meet the stated bounds on real sockets, and every deviation from the Spec is either fixed in code or recorded in a deviation registry.
+
+**Target features:**
+- Spec deviation registry + owner decisions 14.1–14.11 as ADRs (S-12)
+- Stand & simulator as tests: F9/F9b/F14/burst/F2c automated on real Linux sockets; simulator gains datagram budgets, in-loop codec, dump delay, gate, restart-with-state, deletions; chaos test stabilized (T-01…T-16)
+- Transport: paced sync/retransmit sending, socket buffer setup, event-loop cost bounded, cheap key→version reads, key/value size bounds, received-version validation (R-01, R-02, R-06–R-09, R-11, R-14–R-16, Q-01, Q-02)
+- Protocol: interface closed until the full key list arrives, `startup_gate_empty` for empty disk, `DataSync` header (SyncID/ChunkIndex/ChunkCount), third Replication outcome, immediate sync for a newly seen peer, 3+-node behavior and tests (R-03–R-05, R-10, R-12, R-13, S-02, S-08)
+- Persistence: single source for the value limit, dump-load diagnostics, generation integrity, dirty-after-fallback, decaying dump retries, streaming encode (P-01–P-10, Q-03, Q-04, Q-06)
+- API & semantics: honest `wait_for_replication`, snapshot load as full rollback, error codes, `List` pagination, public proto package + Go client example in CI (A-01–A-06, S-01)
+- Observability & configuration: event logging, config validation, honest metric definitions incl. the conflict counter, exit codes (O-01–O-05, S-06, S-07)
+- Performance: benchmarks at defaults and at the fast-response profile with thresholds (PERF-01–PERF-06)
+- Documentation & release: D-01–D-10; darwin demoted to development-only (14.10)
+
 ## Requirements
 
 ### Validated
@@ -32,7 +47,7 @@ Every node stays writable at all times with no coordination, and a write confirm
 
 All Active requirements are hypotheses until shipped and validated.
 
-*(none — the v1.0 feature scope is fully delivered through Phase 6; Phase 7 is documentation, examples and release)*
+*(v1.1 requirements are defined in REQUIREMENTS.md — derived from the 2026-11-19 v1.0 review with its acceptance criteria carried verbatim; owner decisions 14.1–14.11 of the review are settled and not re-litigated)*
 
 ### Out of Scope
 
@@ -119,4 +134,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-18 after v1.0 milestone (all 7 phases verified, v1.0.0 shipped and audited — milestone audit passed 7/7; Active empty; next milestone via /gsd-new-milestone)*
+*Last updated: 2026-11-19 — milestone v1.1 started (input: v1.0 review at `docs/2026-11-19-v1.0-review/`, owner decisions 14.1–14.11 accepted 2026-11-19)*
