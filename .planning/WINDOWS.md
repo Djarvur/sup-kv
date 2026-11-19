@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 5
+open_count: 6
 waived_count: 1
 fixed_count: 4
-total_count: 10
-last_updated: 2026-11-19T14:46:56.007Z
+total_count: 11
+last_updated: 2026-11-19T15:49:20.556Z
 ---
 
 # Broken Windows Ledger
@@ -25,6 +25,7 @@ last_updated: 2026-11-19T14:46:56.007Z
 | 8 | 7 | deviation | cmd/sup-kv/examples_test.go |  | Examples concurrency/interruption residual (07-03 flagged assumption): marked blocks execute sequentially sharing one pair on the reserved 280xx doc band; a mid-walk test abort is backstopped by the PID-file t.Cleanup, but a hard runner cancel (SIGKILL to the go test process) between blocks skips cleanup and leaks the pair — surfaced for phase verification, not silently assumed safe | open |  | 2026-11-17T13:31:19.581Z |  |
 | 9 | 07 | unrun-verify | .github/workflows/release.yml |  | 07-04 optional pre-tag gh workflow dispatch proof not run — workflow_dispatch requires release.yml on the default branch and gsd/v1.0-milestone is unmerged; 07-05 observes the real tag run post-merge | fixed |  | 2026-11-17T13:52:09.591Z | 2026-11-17T18:59:46.444Z |
 | 10 | 01 | deviation | .planning/phases/01-spec-reference-and-decisions/01-01-PLAN.md |  | Task 1 negative-verify awk /internal/ patterns false-positive on evidence/repro/**/internal/** payload; executor scoped gates to the non-public prefix docs/reviews/2026-11-19-v1.0/internal/ (Rule 1 fix, publication asserts all clean) | open |  | 2026-11-19T14:46:56.007Z |  |
+| 11 | 01 | deviation | .planning/phases/01-spec-reference-and-decisions/01-04-SUMMARY.md |  | Task 2 literal /internal/ tracked-path guard false-positives on 22 legitimate evidence/repro module paths; gate evaluated with the plan's own scoped prefix (docs/reviews/2026-11-19-v1.0/internal/) - wave-1 Rule 1 scoping re-affirmed at the phase gate (01-04-SUMMARY deviation 1) | open |  | 2026-11-19T15:49:20.556Z |  |
 
 ````json
 [
@@ -155,6 +156,19 @@ last_updated: 2026-11-19T14:46:56.007Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-11-19T14:46:56.007Z",
+    "resolved_at": null,
+    "milestone": "v1.1"
+  },
+  {
+    "id": 11,
+    "kind": "deviation",
+    "phase": "01",
+    "file": ".planning/phases/01-spec-reference-and-decisions/01-04-SUMMARY.md",
+    "line": null,
+    "description": "Task 2 literal /internal/ tracked-path guard false-positives on 22 legitimate evidence/repro module paths; gate evaluated with the plan's own scoped prefix (docs/reviews/2026-11-19-v1.0/internal/) - wave-1 Rule 1 scoping re-affirmed at the phase gate (01-04-SUMMARY deviation 1)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-19T15:49:20.556Z",
     "resolved_at": null,
     "milestone": "v1.1"
   }
