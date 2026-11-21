@@ -33,8 +33,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 // standNightly is the scale-selection hook: SUPKV_STAND_NIGHTLY=1 selects
@@ -89,18 +92,46 @@ const (
 	// the whole-generation .prev fallback.
 	standDiscardLine = "discarded 1 undecodable dumped records at startup"
 
-	// The empty-disk scenario's scale: N keys on the seeded node and the
-	// shrunken sync response rate both nodes run with — the documented
-	// recovery bound is N/Rate seconds of paced egress (floor(1s/Rate)
-	// per datagram, the repl core's limiter arithmetic), small enough
-	// that the whole scenario stays far inside CI deadlines.
+	// The empty-disk scenario's default scale: N keys on the seeded node
+	// and the shrunken sync response rate both nodes run with — the
+	// documented recovery bound is N/Rate seconds of paced egress
+	// (floor(1s/Rate) per datagram, the repl core's limiter arithmetic),
+	// small enough that the whole scenario stays far inside CI deadlines.
 	emptyDiskKeys = 20
 	emptyDiskRate = 50
 
-	// standEmptyKeyFmt derives the seeded keys; standKeyFromB is the
-	// recovered node's own post-recovery write.
-	standEmptyKeyFmt = "stand/emptydisk/key-%02d"
-	standKeyFromB    = "stand/emptydisk/from-b"
+	// The documented nightly scale (plan 11's SUPKV_STAND_NIGHTLY=1
+	// selection): the review's F9 row — "Empty-disk B, A holds 10k × 1 KiB
+	// written while B was down"
+	// (docs/reviews/2026-11-19-v1.0/evidence/stand/RESULTS.md, F9) — run
+	// with the documented default flags the reviewer ran: hello 1 s, sync
+	// 30 s, sync_response_rate 500 (cmd/sup-kv main.go's defaults; the
+	// startup gate's default 1 s is the harness's own standStartupGate).
+	// The bound stays the derived-from-flags expression below, scaling
+	// with N.
+	emptyDiskKeysNightly  = 10000
+	emptyDiskRateNightly  = 500
+	emptyDiskValueBytes   = 1024
+	emptyDiskHelloNightly = time.Second
+	emptyDiskSyncNightly  = 30 * time.Second
+
+	// The nightly seeding pool mirrors the review's preload profile — 64
+	// workers round-robin over 8 connections (RESULTS.md §2: ~700 writes/s
+	// at the 10 000-key state with dump confirmation); a sequential loop
+	// would spend a quarter-hour on the seeding alone.
+	// emptyDiskPollEvery throttles the nightly full-listing poll: waitFor's
+	// 10 ms cadence is far too hot for a 10 000-key List.
+	emptyDiskSeedWorkers    = 64
+	emptyDiskSeedConns      = 8
+	emptyDiskSeedRPCTimeout = 30 * time.Second
+	emptyDiskPollEvery      = 500 * time.Millisecond
+
+	// standEmptyKeyFmt derives the seeded keys; standEmptyKeyPrefix scopes
+	// the nightly listing poll; standKeyFromB is the recovered node's own
+	// post-recovery write.
+	standEmptyKeyFmt    = "stand/emptydisk/key-%02d"
+	standEmptyKeyPrefix = "stand/emptydisk/"
+	standKeyFromB       = "stand/emptydisk/from-b"
 )
 
 // The F2c scenario's constants: the review's 70 000-character key — over
@@ -300,20 +331,47 @@ func TestStand_sigtermFinalDump(t *testing.T) {
 // floor(1s/rate) each, plus a margin for everything else the path spends.
 // After recovery, B's own write replicates to A: the recovered node is a
 // full participant, not a read-only mirror.
+//
+// Scale selection (plan 11): SUPKV_STAND_NIGHTLY=1 runs the review's
+// documented F9 shape — 10 000 keys × 1 KiB with the reviewer's default
+// flags (RESULTS.md's F9 row) — while the default keeps the
+// shrunken-timer 20-key scale the PR gate runs, unchanged.
 func TestStand_emptyDiskRecovery(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
 
+	keys := emptyDiskKeys
+	rate := emptyDiskRate
+	hello, syncInterval := standHelloInterval, standSyncInterval
+	var nodeExtras, nodeBExtras []string
+	if standNightly {
+		keys = emptyDiskKeysNightly
+		rate = emptyDiskRateNightly
+		hello, syncInterval = emptyDiskHelloNightly, emptyDiskSyncNightly
+		// The documented default flags override the harness's shrunken
+		// timer defaults on BOTH nodes (later flags win in main.go's
+		// flag parsing), reproducing the reviewer's stand configuration.
+		documented := []string{
+			"--hello-interval=" + hello.String(),
+			"--sync-interval=" + syncInterval.String(),
+			"--sync-response-rate=" + strconv.Itoa(rate),
+		}
+		nodeExtras = documented
+		nodeBExtras = documented
+	} else {
+		nodeBExtras = []string{"--sync-response-rate=" + strconv.Itoa(rate)}
+	}
+
 	// Node A first, alone: the seeded node.
-	nodeA := startStandNode(t, p, standNodeAID)
+	nodeA := startStandNode(t, p, standNodeAID, nodeExtras...)
 	awaitServing(t, p.grpcA, servingDeadline)
 	clientA := standClient(t, p.grpcA)
 
-	keys := make([]string, emptyDiskKeys)
-	for i := range keys {
-		keys[i] = fmt.Sprintf(standEmptyKeyFmt, i)
-		standSet(t, clientA, keys[i])
+	keyList := make([]string, keys)
+	for i := range keyList {
+		keyList[i] = fmt.Sprintf(standEmptyKeyFmt, i)
 	}
+	seedEmptyDiskKeys(t, p.grpcA, keyList)
 
 	// The recovery bound, derived from the flags the nodes run with: the
 	// paced egress term is N * floor(1s/rate) — the limiter's own spacing
@@ -325,32 +383,47 @@ func TestStand_emptyDiskRecovery(t *testing.T) {
 	// opens), discovery plus one listing/request/reply ladder round at
 	// each timer (B's own requests ride B's limiter too), and
 	// real-process scheduling slack on a loaded CI runner.
-	paced := time.Duration(emptyDiskKeys) * (time.Second / time.Duration(emptyDiskRate))
-	margin := standStartupGate + 2*standHelloInterval + 2*standSyncInterval + 2*time.Second
+	paced := time.Duration(keys) * (time.Second / time.Duration(rate))
+	margin := standStartupGate + 2*hello + 2*syncInterval + 2*time.Second
 	deadline := paced + margin
 
 	// Node B against the live peer, empty disk: its dump directory is its
 	// own fresh temp dir — nothing to load, every key must arrive over
 	// the wire.
 	start := time.Now()
-	nodeB := startStandNode(t, p, standNodeBID, "--sync-response-rate="+strconv.Itoa(emptyDiskRate))
+	nodeB := startStandNode(t, p, standNodeBID, nodeBExtras...)
 	awaitServing(t, p.grpcB, servingDeadline)
 	clientB := standClient(t, p.grpcB)
 
-	waitFor(t, deadline, "the empty-disk node B serving every key within the paced bound", func() bool {
-		for _, key := range keys {
-			if !standServing(t, clientB, key) {
-				return false
+	waitFor(t, deadline, fmt.Sprintf("the empty-disk node B serving every one of the %d keys within the paced bound (%v + margin %v)", keys, paced, margin),
+		emptyDiskRecovered(t, clientB, keyList))
+	t.Logf("empty-disk recovery: %d keys in %v (paced bound %v, margin %v)", keys, time.Since(start), paced, margin)
+
+	// The documented scale's values are the review's 1 KiB records: once
+	// the listing proves presence, verify every record's value once (the
+	// nightly List probe checks presence only, so a stale or truncated
+	// record cannot hide).
+	if standNightly {
+		for _, key := range keyList {
+			value, found := standGet(t, clientB, key)
+			if !found || value != emptyDiskValue(key) {
+				t.Fatalf("the recovered node B serves %q with a wrong record: found=%t value-bytes=%d want=%d",
+					key, found, len(value), emptyDiskValueBytes)
 			}
 		}
-		return true
-	})
-	t.Logf("empty-disk recovery: %d keys in %v (paced bound %v, margin %v)", emptyDiskKeys, time.Since(start), paced, margin)
+	}
 
 	// The recovered node participates in replication immediately: its own
-	// write crosses to the seeded peer.
+	// write crosses to the seeded peer. The wait is derived from the flags
+	// the nodes run with — the documented 30 s sync cadence at the nightly
+	// scale (a new write is announced on the periodic round), the
+	// shrunken-timer expression otherwise.
+	converge := standConvergeDeadline
+	if standNightly {
+		converge = 2*syncInterval + 2*hello + 3*time.Second
+	}
 	standSet(t, clientB, standKeyFromB)
-	waitFor(t, standConvergeDeadline, "the recovered node's write visible on node A", func() bool {
+	waitFor(t, converge, "the recovered node's write visible on node A", func() bool {
 		return standServing(t, clientA, standKeyFromB)
 	})
 
@@ -358,6 +431,109 @@ func TestStand_emptyDiskRecovery(t *testing.T) {
 	signalAndWaitExit(t, nodeB)
 	assertNoPanic(t, nodeA, "the seeded node A")
 	assertNoPanic(t, nodeB, "the empty-disk recovered node B")
+}
+
+// emptyDiskValue is the scenario value for one key: the harness's derived
+// value at the default scale and a deterministic 1 KiB value at the
+// documented nightly scale (the review's F9 shape — every record carries
+// a 1 KiB value). It stays a pure function of the key, so the nightly
+// value pass can assert exact bytes rather than mere presence.
+func emptyDiskValue(key string) string {
+	if !standNightly {
+		return standValue(key)
+	}
+	if len(key) >= emptyDiskValueBytes {
+		return key[:emptyDiskValueBytes]
+	}
+	return key + strings.Repeat(".", emptyDiskValueBytes-len(key))
+}
+
+// seedEmptyDiskKeys writes the scenario keys through the real gRPC
+// endpoint. The default scale keeps the direct sequential writes it
+// always used; the nightly 10 000-key scale uses the review's preload
+// profile — 64 workers round-robin over 8 connections (RESULTS.md §2's
+// measured ~700 writes/s at the 10 000-key state) — because
+// dump-confirmed sequential writes cost tens of milliseconds each at that
+// scale. Every write must succeed: a failed seed invalidates the
+// scenario, so the first error fails the test.
+func seedEmptyDiskKeys(t *testing.T, addr string, keys []string) {
+	t.Helper()
+	if !standNightly {
+		client := standClient(t, addr)
+		for _, key := range keys {
+			standSetWith(t, client, key, emptyDiskValue(key))
+		}
+		return
+	}
+	clients := make([]apiproto.SupKVServiceClient, emptyDiskSeedConns)
+	for i := range clients {
+		clients[i] = standClient(t, addr)
+	}
+	next := make(chan string, len(keys))
+	for _, key := range keys {
+		next <- key
+	}
+	close(next)
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+	for w := range emptyDiskSeedWorkers {
+		client := clients[w%len(clients)]
+		wg.Go(func() {
+			for key := range next {
+				ctx, cancel := context.WithTimeout(t.Context(), emptyDiskSeedRPCTimeout)
+				_, err := client.Set(ctx, &apiproto.SetRequest{Key: key, Value: []byte(emptyDiskValue(key))})
+				cancel()
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("seed Set(%q): %w", key, err)
+					}
+					errMu.Unlock()
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatalf("seeding %d keys: %v", len(keys), firstErr)
+	}
+}
+
+// emptyDiskRecovered returns the recovery poll's condition. At the
+// default scale every key is polled through its serving value (the
+// harness's standServing shape). At the nightly 10 000-key scale a single
+// prefix List is the presence probe — 10 000 individual Gets per poll
+// would drown the recovering node — throttled to emptyDiskPollEvery; the
+// values are then verified once after the bound.
+func emptyDiskRecovered(t *testing.T, client apiproto.SupKVServiceClient, keys []string) func() bool {
+	t.Helper()
+	if !standNightly {
+		return func() bool {
+			for _, key := range keys {
+				if !standServing(t, client, key) {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	var last time.Time
+	return func() bool {
+		if now := time.Now(); now.Sub(last) < emptyDiskPollEvery {
+			return false
+		}
+		last = time.Now()
+		ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+		defer cancel()
+		resp, err := client.List(ctx, &apiproto.ListRequest{Prefix: standEmptyKeyPrefix})
+		if err != nil {
+			return false
+		}
+		return len(resp.GetKeys()) == len(keys)
+	}
 }
 
 // TestStand_oversizeKeyF2c pins the review's F2c CURRENT behavior as a
