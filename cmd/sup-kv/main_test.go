@@ -420,6 +420,90 @@ func TestMain_precedence(t *testing.T) {
 	}
 }
 
+// TestMain_maxClockLead proves the XPORT-04 knob's flag/env twin at the
+// configuration seam: --help lists the flag with its env twin named and the
+// documented 60 s default; the env twin is read into the flag's default (the
+// help output shows the env-chosen value); a malformed env value aborts
+// through the collected env-error path with exitUsage; and an explicit flag
+// value is the parsed source even when a valid env twin is set (a malformed
+// flag still fails the run — the env never shadows it). The bound's runtime
+// behavior is the core's proof (TestDiscard_beforeClock and
+// TestDiscard_validationClasses); this test owns the launch wiring.
+func TestMain_maxClockLead(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	t.Run("help lists the flag, its env twin and the 60s default", func(t *testing.T) {
+		t.Parallel()
+		out, err := runToCompletion(t, bin, nil, "--help")
+		if err != nil {
+			t.Fatalf("--help exited with %v, want the flag package's clean help exit 0", err)
+		}
+		for _, want := range []string{"-max-clock-lead", "env SUPKV_MAX_CLOCK_LEAD", "(default 1m0s)"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("--help does not contain %q — the flag, its env twin or its documented default is missing:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("the env twin sets the flag default", func(t *testing.T) {
+		t.Parallel()
+		out, err := runToCompletion(t, bin, []string{"SUPKV_MAX_CLOCK_LEAD=90s"}, "--help")
+		if err != nil {
+			t.Fatalf("--help with the env twin exited with %v, want exit 0", err)
+		}
+		if !strings.Contains(out, "(default 1m30s)") {
+			t.Fatalf("--help with SUPKV_MAX_CLOCK_LEAD=90s does not show the env-derived default \"(default 1m30s)\":\n%s", out)
+		}
+	})
+
+	t.Run("a malformed env value aborts with exitUsage", func(t *testing.T) {
+		t.Parallel()
+		// The configuration error fires before any bind, so no real port is
+		// needed — and picking a free one here would only add another
+		// parallel port-race window to the smoke harness.
+		_, err := runToCompletion(t, bin, []string{"SUPKV_MAX_CLOCK_LEAD=not-a-duration"},
+			"--node-id=1",
+			"--bind-addr=127.0.0.1:9",
+			"--broadcast-addr=127.255.255.255:9",
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		)
+		assertExitCode(t, err, exitUsageCode)
+	})
+
+	t.Run("an explicit flag is parsed over a valid env twin", func(t *testing.T) {
+		t.Parallel()
+		// The env twin carries a perfectly valid duration; the malformed
+		// explicit flag must still fail the run, which it can only do if the
+		// command-line flag is the parsed source. No bind happens, so the
+		// addresses are placeholders.
+		_, err := runToCompletion(t, bin, []string{"SUPKV_MAX_CLOCK_LEAD=90s"},
+			"--node-id=1",
+			"--bind-addr=127.0.0.1:9",
+			"--broadcast-addr=127.255.255.255:9",
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			"--max-clock-lead=not-a-duration",
+		)
+		assertExitCode(t, err, exitUsageCode)
+	})
+}
+
+// runToCompletion runs the binary with env appended to the inherited
+// environment and returns its combined output with the Wait result — the
+// shape for --help probes and startup-error rows, which terminate on their
+// own.
+func runToCompletion(t *testing.T, bin string, env []string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), bin, args...)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	err := cmd.Run()
+	return out.String(), err
+}
+
 // TestMain_lifecycle drives the whole node lifecycle through the real
 // binary: the startup gate opens (SERVING over real TCP — the timeout path,
 // since a lone node receives no DataSync), a SupKV client Sets and Gets one

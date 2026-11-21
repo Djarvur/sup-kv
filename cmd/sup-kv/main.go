@@ -107,6 +107,7 @@ const (
 	envRetransmitInterval = "SUPKV_RETRANSMIT_INTERVAL"
 	envSyncInterval       = "SUPKV_SYNC_INTERVAL"
 	envSyncResponseRate   = "SUPKV_SYNC_RESPONSE_RATE"
+	envMaxClockLead       = "SUPKV_MAX_CLOCK_LEAD"
 	envDumpDebounce       = "SUPKV_DUMP_DEBOUNCE"
 	envDumpMaxWait        = "SUPKV_DUMP_MAX_WAIT"
 	envDriftWarn          = "SUPKV_DRIFT_WARN"
@@ -141,9 +142,14 @@ const (
 	defaultRetransmit     = 100 * time.Millisecond
 	defaultSyncInterval   = 30 * time.Second
 	defaultSyncRespRate   = 500
-	defaultDumpDebounce   = 50 * time.Millisecond
-	defaultDumpMaxWait    = time.Second
-	defaultDriftWarn      = 60 * time.Second
+	// defaultMaxClockLead is the inbound version bound's launch default
+	// (XPORT-04): 60 s, the documented drift tolerance. The core normalizes
+	// a zero or negative value to the same bound; the flag default only
+	// makes the documented value visible in --help.
+	defaultMaxClockLead = time.Minute
+	defaultDumpDebounce = 50 * time.Millisecond
+	defaultDumpMaxWait  = time.Second
+	defaultDriftWarn    = 60 * time.Second
 
 	// The structured-logging defaults (D-06/D-07): JSON records on stderr,
 	// info level.
@@ -175,6 +181,7 @@ type config struct {
 	retransmitInterval time.Duration
 	syncInterval       time.Duration
 	syncResponseRate   int
+	maxClockLead       time.Duration
 	dumpDebounce       time.Duration
 	dumpMaxWait        time.Duration
 	driftWarn          time.Duration
@@ -340,6 +347,8 @@ func registerDurationFlags(cfg *config, envDur func(env string, def time.Duratio
 		"retransmit scan period (env SUPKV_RETRANSMIT_INTERVAL)")
 	flag.DurationVar(&cfg.syncInterval, "sync-interval", envDur(envSyncInterval, defaultSyncInterval),
 		"proactive sync listing period (env SUPKV_SYNC_INTERVAL)")
+	flag.DurationVar(&cfg.maxClockLead, "max-clock-lead", envDur(envMaxClockLead, defaultMaxClockLead),
+		"reject received versions beyond now + this bound (env SUPKV_MAX_CLOCK_LEAD)")
 	flag.DurationVar(&cfg.dumpDebounce, "dump-debounce", envDur(envDumpDebounce, defaultDumpDebounce),
 		"dump quiet window (env SUPKV_DUMP_DEBOUNCE)")
 	flag.DurationVar(&cfg.dumpMaxWait, "dump-max-wait", envDur(envDumpMaxWait, defaultDumpMaxWait),
@@ -519,6 +528,7 @@ func newReplicationAdapter(cfg config, engine *persist.Engine) (*udprepl.Adapter
 		SyncInterval:       cfg.syncInterval,
 		SyncChunkBytes:     cfg.syncChunkBytes,
 		SyncResponseRate:   cfg.syncResponseRate,
+		MaxClockLead:       cfg.maxClockLead,
 		// The core's prebuilt metadata strings (REPL-08 configuration
 		// errors, apply failures) ride as the detail attr under a static
 		// capitalized msg — the sloglint static-msg discipline (D-08); a
