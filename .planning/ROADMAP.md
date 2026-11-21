@@ -29,7 +29,7 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
 **🚧 v1.1 Spec Compliance and Resilience** — close every v1.0-review finding by code fix or recorded deviation; scenarios pass their stated bounds on real sockets.
 
 - [x] **Phase 1: Spec Reference and Decisions** - Deviation registry mapping every Spec statement to a decision and link; 11 ADRs for owner decisions 14.1-14.11; docs/IDEA.md marked historical (completed 2026-11-19)
-- [ ] **Phase 2: Stand and Simulator as Tests** - F9/F9b/F14/burst/F2c automated on real sockets; simulator blind spots closed; chaos stabilized; red tests for the four Criticals (R-01, R-02, R-03, P-01)
+- [x] **Phase 2: Stand and Simulator as Tests** - F9/F9b/F14/burst/F2c automated on real sockets; simulator blind spots closed; chaos stabilized; red tests for the four Criticals (R-01, R-02, R-03, P-01) (completed 2026-11-21)
 - [ ] **Phase 3: Transport** - Paced sync/retransmit sending, socket buffer setup and reporting, datagram validation, bounded queues; key→version view and Outbox seams
 - [ ] **Phase 4: Protocol** - Interface closed until the full key list arrives, `startup_gate_empty`, DataSync headers, stale-record answer, immediate sync for new/returning peers, 3+-node tests
 - [ ] **Phase 5: Persistence** - Single value limit, visible dump-load outcomes, generation integrity, decaying retries, streaming encode, blocking deadlines, engine split
@@ -72,7 +72,7 @@ Plans:
   3. The simulator's blind spots are closed: per-node incoming-datagram budgets, size checks by the real encoder, record announcement after a virtual dump delay, restart with state, and deletions; `TestChaos_convergence` is stable across 10 000 seeds (fixed corpus plus fresh seeds), and convergence bounds hold under combined failures and partitions longer than `peer_timeout`
   4. The seams are pinned by tests, not conventions: a filesystem seam under `persistfile` with recording and failing fakes asserting write → fsync → rotate → rename → dir-fsync and a failure at each step; `persist.Open` clock seeding proven on the real composition path; a corrupted-datagram table plus `FuzzDecode`/`FuzzDumpDecode` with an in-repo corpus; deletion replication proven at codec, simulator, two-process and dump level; Watch cut/backpressure branches, metrics-by-observed-effect, per-decision tests referencing 14.x by name, and property shrinking over a small `(l, c, node)` space
   5. The heavy machinery runs on a schedule: a scheduled CI workflow (1000 seeds, `-shuffle=on -count=3`, `-bench . -benchtime=1x`), a nightly real-socket run at 10 000 keys × 1 KiB with the review's section-15 scenarios; benchmarks report p50/p99 without self-pacing on the real `persistfile`; `go test -race -count=20` over `cmd/sup-kv`, `udprepl` and affected packages green three times in a row (flakiness classes that require Phase 3-5 fixes carry their red test forward)
-**Plans**: 17/17 plans executed
+**Plans**: 17/17 plans complete
 
 Plans:
 **Wave 1**
@@ -193,7 +193,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
-| 2. Engine — HLC Versioning and LWW Store | v1.0 | 17/17 | In Progress |  |
+| 2. Engine — HLC Versioning and LWW Store | v1.0 | 17/17 | Complete    | 2026-11-21 |
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 2/2 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 6/6 | Complete | 2026-11-07 |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |
