@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-08-PLAN.md
-last_updated: "2026-11-21T21:01:04.000Z"
-last_activity: 2026-11-21
-last_activity_desc: Phase 3 execution started
-state_head: d3ffc2674d12748476b528875d504ff1e9db396c
+stopped_at: Completed 03-09-PLAN.md
+last_updated: "2026-11-21T21:17:00.000Z"
+last_activity: 2026-11-22
+last_activity_desc: Phase 3 plan 9 complete — XPORT-03 ceilings enforced
+state_head: 34e9a8fe031b679eb0d7d6874d619f26d9c3f44a
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 29
+  completed_plans: 30
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 9 of 13
+Plan: 10 of 13
 Status: Ready to execute
-Last activity: 2026-11-21 — Phase 3 execution started
+Last activity: 2026-11-22 — Completed 03-09 (key and datagram ceilings)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -83,6 +83,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P06 | 1252s | 3 tasks | 17 files |
 | Phase 03 P07 | 20min | 3 tasks | 11 files |
 | Phase 03 P08 | 21min | 3 tasks | 11 files |
+| Phase 03 P09 | 602s | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -197,6 +198,11 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08: Every hand-built inbound record fixture must carry the production checksum (replFrom recomputes it); a zero-checksum fixture would otherwise be rejected and a test could pass for the wrong reason.
 - [Phase 03]: 03-08: The metrics label vocabulary stays at five classes; 03-12 owns the five new class samples, so this plan stops at the adapter's Discards() mirror.
 - [Phase 03]: 03-08: Task 1's commit carried the test-model, fixture and negative-table adaptations because the Task 1 verify runs the whole TestDiscard_ filter and the table pins pre-fix behavior; Task 2's commit added the three proof tests.
+- [Phase 03]: 03-09: The datagram oracle marshals the real schema and sets the tombstone flag only for the empty-value shape — a valued record is never a tombstone (receive-side discard class) — so 1 024 + 64 408 measures exactly 65 507 instead of an overcounted 65 509.
+- [Phase 03]: 03-09: The startup probe width is clamped to the 65 507-byte ceiling before allocation, so a misconfigured multi-gigabyte value exits 2 instead of OOMing during measurement; that clamped case reports the size as a lower bound.
+- [Phase 03]: 03-09: API key enforcement is write-side only (Set/SetIfAbsent/Delete before the engine); Get/List stay permissive for pre-upgrade long keys per RESEARCH OQ2, with Phase 5 owning load-time accounting.
+- [Phase 03]: 03-09: The startup comparison is `>` and both sides are pinned executably: --value-max-bytes=64 408 (exactly 65 507 bytes) starts, 64 409 exits 2, and 64 000 remains the P-01 executable guard distinct from the rows-unchanged TSV grep.
+- [Phase 03]: 03-09: F2c keeps its name but now pins the fix — the 70 000-character key is rejected locally and never replicates, while a 1 024-byte key with a 61 440-byte value replicates and lands in node B's final dump.
 
 ### Pending Todos
 
@@ -217,7 +223,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T21:01:04.000Z
-Stopped at: Completed 03-08-PLAN.md
+Last session: 2026-11-21T21:17:00.000Z
+Stopped at: Completed 03-09-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
