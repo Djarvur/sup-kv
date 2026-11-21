@@ -70,6 +70,12 @@ const (
 	// at every configuration, and the limiter is never silently off.
 	maxSyncResponseRate = 1e9
 
+	// maxEgressEntries bounds the reactive-unicast egress queue (XPORT-07,
+	// RESEARCH Pattern 9): twice the documented 20 000-key scale plus
+	// headroom. An overflow drops the OLDEST queued answer together with its
+	// dedupe identity (T-3-21), and the drop is counted in EgressDropped.
+	maxEgressEntries = 32768
+
 	// broadcastDst is the listing queue's destination key for the periodic
 	// broadcast round; every other key is a peer's opaque address handle.
 	broadcastDst = ""
@@ -277,17 +283,37 @@ type peer struct {
 	rotation  uint64
 }
 
+// egressKind separates the two reactive unicast message kinds that share the
+// egress queue: a DataRequest and a DataReplication answer.
+type egressKind uint8
+
+const (
+	egressDataRequest egressKind = iota
+	egressDataReplication
+)
+
+// egressKey is the egress queue's dedupe identity — (handle, kind, key),
+// exactly the RESEARCH RPL-11 wording (T-3-20/T-3-21). The record version is
+// deliberately excluded: a DataRequest carries none, and a DataReplication
+// answer re-reads the stored record at drain time, so the queue never pins
+// Data and an updated record simply ships as its current version.
+type egressKey struct {
+	handle string
+	kind   egressKind
+	key    string
+}
+
 // queuedUnicast is one reactive unicast response waiting in the egress queue
-// (REPL-05's rate limiter): the destination's opaque address handle (D-03)
-// and the message. Exactly three producer sites exist — DataRequest
-// emissions, DataRequest replies and DataSync-newer responses (the
-// egress-limiter scope pin) — and nothing else ever queues: proactive
+// (REPL-05's rate limiter): its dedupe identity — destination handle (D-03),
+// kind and key — and the message. Exactly two producer shapes exist —
+// DataRequest emissions, DataRequest replies and DataSync-newer responses
+// (the egress-limiter scope pin) — and nothing else ever queues: proactive
 // traffic (Hello, listings, retransmits) bypasses the limiter, which is what
 // bounds an empty node's recovery instead of letting it become a flood
 // (T-04-07).
 type queuedUnicast struct {
-	handle string
-	msg    port.Message
+	id  egressKey
+	msg port.Message
 }
 
 // listingFIFO is one destination's in-flight DataSync listing: the chunks not
@@ -477,6 +503,13 @@ type Core struct {
 
 	egress []queuedUnicast
 
+	// egressIDs is the egress queue's dedupe set, kept in lockstep with the
+	// queue: a pop deletes its identity and an overflow drop deletes the
+	// evicted identity in the same operation (T-3-21). egressDropped counts
+	// every drop.
+	egressIDs     map[egressKey]struct{}
+	egressDropped uint64
+
 	// nextSendAt is the earliest virtual time the next queued response may
 	// emit; it is meaningful exactly while the egress queue is non-empty
 	// (enqueueResponse arms it, the drain advances it).
@@ -527,6 +560,7 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 		retry:                retryHeap{index: make(map[pendingKey]int)},
 		listingByDst:         make(map[string]*listingFIFO),
 		recordQueued:         make(map[pendingKey]struct{}),
+		egressIDs:            make(map[egressKey]struct{}),
 		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
 }
@@ -860,12 +894,54 @@ func (c *Core) handleDataSync(now time.Time, source string, entries []port.SyncE
 // syncResponseInterval per response, enqueue order IS drain order, and the
 // first response after an idle queue emits immediately — nextSendAt clamps
 // to this call's now, so no head-of-line delay ever applies to the first
-// datagram of a burst.
+// datagram of a burst. The queue is bounded and deduplicated (XPORT-07):
+// the identity is (handle, kind, key), so the same answer requested twice —
+// the two-listings-1000-missing-keys case — occupies one slot, and an
+// overflow drops the OLDEST entry together with its identity (T-3-21) while
+// counting the drop. Duplicates are silent: the existing answer already
+// covers the request.
 func (c *Core) enqueueResponse(now time.Time, handle string, msg port.Message) {
+	id, ok := egressIdentity(handle, msg)
+	if !ok {
+		return
+	}
+	if _, dup := c.egressIDs[id]; dup {
+		return
+	}
 	if len(c.egress) == 0 {
 		c.nextSendAt = now
 	}
-	c.egress = append(c.egress, queuedUnicast{handle: handle, msg: msg})
+	c.egress = append(c.egress, queuedUnicast{id: id, msg: msg})
+	c.egressIDs[id] = struct{}{}
+	if len(c.egress) > maxEgressEntries {
+		c.dropOldestEgress()
+	}
+}
+
+// egressIdentity derives the dedupe identity of one queueable reactive
+// message. The only queueable shapes are a DataRequest and a
+// DataReplication; anything else is not a reactive unicast and is never
+// queued.
+func egressIdentity(handle string, msg port.Message) (egressKey, bool) {
+	switch m := msg.(type) {
+	case port.DataRequest:
+		return egressKey{handle: handle, kind: egressDataRequest, key: m.Key}, true
+	case port.DataReplication:
+		return egressKey{handle: handle, kind: egressDataReplication, key: m.Key}, true
+	}
+	return egressKey{}, false
+}
+
+// dropOldestEgress evicts the queue's oldest entry and deletes its dedupe
+// identity in the same operation: a retained identity would make a later
+// identical request look already queued and silently starve it (T-3-21,
+// RESEARCH Pitfall 10). The emptied slot is nilled to release its message.
+func (c *Core) dropOldestEgress() {
+	oldest := c.egress[0]
+	c.egress[0] = queuedUnicast{}
+	c.egress = c.egress[1:]
+	delete(c.egressIDs, oldest.id)
+	c.egressDropped++
 }
 
 // drainEgress emits every due queued response (REPL-05): while nextSendAt
@@ -876,18 +952,42 @@ func (c *Core) enqueueResponse(now time.Time, handle string, msg port.Message) {
 // Advance that arrives late (past several slots) still emits only one
 // response per call of this loop's steady state: the slot advances from
 // the actual emission time, never bursting a backlog in one tick — the
-// limiter is what survives empty-node recovery (T-04-07).
+// limiter is what survives empty-node recovery (T-04-07). A queued
+// DataReplication answer re-reads the stored record at drain time and is
+// skipped when the key is gone (the store has changed since enqueue); a
+// skipped entry consumes no slot.
 func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
 	for len(c.egress) > 0 && !now.Before(c.nextSendAt) {
 		q := c.egress[0]
 		c.egress[0] = queuedUnicast{}
 		c.egress = c.egress[1:]
-		out.Unicast(q.handle, q.msg)
+		delete(c.egressIDs, q.id)
+		msg, ok := c.resolveQueuedResponse(q)
+		if !ok {
+			continue
+		}
+		out.Unicast(q.id.handle, msg)
 		if now.After(c.nextSendAt) {
 			c.nextSendAt = now
 		}
 		c.nextSendAt = c.nextSendAt.Add(c.syncResponseInterval)
 	}
+}
+
+// resolveQueuedResponse returns the message to emit for one dequeued
+// response. A DataRequest is emitted as queued; a DataReplication answer
+// re-reads the record through Lookup and reports false when the key is gone
+// — the queue pins no Data, so the answer always carries the current record
+// (XPORT-07).
+func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
+	if q.id.kind != egressDataReplication {
+		return q.msg, true
+	}
+	rec, ok := c.store.Lookup(q.id.key)
+	if !ok {
+		return nil, false
+	}
+	return port.DataReplication{Key: q.id.key, Record: rec}, true
 }
 
 // NotifyLocalWrite is the explicit call a write's author makes after the
@@ -1530,6 +1630,14 @@ func (c *Core) QueuedResponses() int {
 // queued (RESEARCH Pitfall 23, T-3-20).
 func (c *Core) QueuedSends() int {
 	return c.listingCount + len(c.recordQueue) + len(c.egress)
+}
+
+// EgressDropped returns the number of egress entries evicted by the
+// maxEgressEntries cap (XPORT-07) — the observability seam for the drop
+// policy: every eviction is counted, and the evicted identity is re-queueable
+// (T-3-21).
+func (c *Core) EgressDropped() uint64 {
+	return c.egressDropped
 }
 
 // PeerCount returns the number of known peers — the O(1) peer-table gauge
