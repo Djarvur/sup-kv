@@ -29,6 +29,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
 	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -59,8 +60,11 @@ var (
 // dump confirmation) for the whole measured window while each iteration
 // performs one gRPC Set with WaitForReplication through the real wait seam.
 // The measured span is submission to acked report; accumulated totals are
-// reported as latency-ns/op plus max-latency-ns (whitespace-free units);
-// ns/op stays visible for the write itself.
+// reported as latency-ns/op plus max-latency-ns (whitespace-free units),
+// p50-ms/p99-ms give the same per-op spans' distribution (TEST-10: measured
+// durations, no self-pacing in the loop — the background burst's ~1ms
+// cadence is the workload the bound must hold under), and ns/op stays
+// visible for the write itself.
 func BenchmarkConfirmationLatency(b *testing.B) {
 	portA := integrationUDPPort(b)
 	portB := integrationUDPPort(b)
@@ -199,6 +203,7 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 
 	run := benchWaitRunSeq.Add(1)
 	b.ResetTimer()
+	durations := make([]time.Duration, 0, b.N)
 	var totalDrainNanos, maxDrainNanos int64
 	for i := range b.N {
 		key := fmt.Sprintf("bench/wait/%d/%07d", run, i)
@@ -216,6 +221,7 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 			b.Fatalf("Set %s: unacked report %d/%d — bounded confirmation latency under burst is the property under test, a miss is a bug",
 				key, resp.GetAckedCount(), resp.GetTotalPeers())
 		}
+		durations = append(durations, drain)
 		totalDrainNanos += int64(drain)
 		if int64(drain) > maxDrainNanos {
 			maxDrainNanos = int64(drain)
@@ -228,6 +234,7 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 	if burstErr != nil {
 		b.Fatalf("background burst failed: %v", burstErr)
 	}
+	testutil.ReportLatencyPercentiles(b, durations)
 	b.ReportMetric(float64(totalDrainNanos)/float64(b.N), "latency-ns/op")
 	b.ReportMetric(float64(maxDrainNanos), "max-latency-ns")
 }

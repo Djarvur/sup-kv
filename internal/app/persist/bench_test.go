@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/clock"
+	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
@@ -64,14 +65,19 @@ func benchSeedStore(tb testing.TB) *storage.Store {
 // run, per-iteration Save following the FileStore contract. bytes/op is the
 // mean encoded size per iteration and dump-bytes the (constant) dump size —
 // both derived via ReportMetric with whitespace-free unit strings; ns/op
-// stays visible for the Encode+Save span itself. No thresholds: a shared
-// machine's numbers are noise, D-13 keeps the gate human.
+// stays visible for the Encode+Save span itself, and p50-ms/p99-ms report
+// the same per-iteration spans' distribution (TEST-10: measured per-op
+// durations, no self-pacing — the loop runs as fast as the real path
+// allows). No thresholds: a shared machine's numbers are noise, D-13 keeps
+// the gate human.
 func BenchmarkDump10kKeys(b *testing.B) {
 	store := benchSeedStore(b)
 	dumps := persistfile.New(filepath.Join(b.TempDir(), "dump.json"))
+	durations := make([]time.Duration, 0, b.N)
 	b.ResetTimer()
 	var totalBytes, lastSize int64
 	for range b.N {
+		start := time.Now()
 		block, err := persist.Encode(store.Records())
 		if err != nil {
 			b.Fatalf("Encode 10k-key dump: %v", err)
@@ -80,9 +86,12 @@ func BenchmarkDump10kKeys(b *testing.B) {
 		if err != nil {
 			b.Fatalf("persistfile Save: %v", err)
 		}
+		durations = append(durations, time.Since(start))
 		totalBytes += int64(len(block))
 		lastSize = int64(len(block))
 	}
+	b.StopTimer()
+	testutil.ReportLatencyPercentiles(b, durations)
 	b.ReportMetric(float64(totalBytes)/float64(b.N), "bytes/op")
 	b.ReportMetric(float64(lastSize), "dump-bytes")
 }
