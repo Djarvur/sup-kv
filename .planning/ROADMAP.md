@@ -72,7 +72,7 @@ Plans:
   3. The simulator's blind spots are closed: per-node incoming-datagram budgets, size checks by the real encoder, record announcement after a virtual dump delay, restart with state, and deletions; `TestChaos_convergence` is stable across 10 000 seeds (fixed corpus plus fresh seeds), and convergence bounds hold under combined failures and partitions longer than `peer_timeout`
   4. The seams are pinned by tests, not conventions: a filesystem seam under `persistfile` with recording and failing fakes asserting write → fsync → rotate → rename → dir-fsync and a failure at each step; `persist.Open` clock seeding proven on the real composition path; a corrupted-datagram table plus `FuzzDecode`/`FuzzDumpDecode` with an in-repo corpus; deletion replication proven at codec, simulator, two-process and dump level; Watch cut/backpressure branches, metrics-by-observed-effect, per-decision tests referencing 14.x by name, and property shrinking over a small `(l, c, node)` space
   5. The heavy machinery runs on a schedule: a scheduled CI workflow (1000 seeds, `-shuffle=on -count=3`, `-bench . -benchtime=1x`), a nightly real-socket run at 10 000 keys × 1 KiB with the review's section-15 scenarios; benchmarks report p50/p99 without self-pacing on the real `persistfile`; `go test -race -count=20` over `cmd/sup-kv`, `udprepl` and affected packages green three times in a row (flakiness classes that require Phase 3-5 fixes carry their red test forward)
-**Plans**: 9/17 plans executed
+**Plans**: 10/17 plans executed
 
 Plans:
 **Wave 1**
@@ -87,7 +87,7 @@ Plans:
 - [x] 02-06-PLAN.md — Chaos stabilization: fixed seed corpus + drift-checked generator, poll-to-model semantics, corpus iteration with SUPKV_SIM_FRESH_SEEDS, deletions in mix (D-06, TEST-01)
 - [x] 02-07-PLAN.md — Deletion replication at four levels + corrupted-datagram negative table (D-08, TEST-02, TEST-08)
 - [x] 02-08-PLAN.md — Watch Send-error branch + metrics-by-effect exact values + per-parameter effect tests (D-08, TEST-14, TEST-12)
-- [ ] 02-10-PLAN.md — Benchmarks report p50/p99, no self-pacing, smoke target; flake-class audit + parameterized race-soak target (TEST-10, TEST-11)
+- [x] 02-10-PLAN.md — Benchmarks report p50/p99, no self-pacing, smoke target; flake-class audit + parameterized race-soak target (TEST-10, TEST-11)
 - [ ] 02-15-PLAN.md — simnet extension tests incl. same-seed determinism replay gate (D-05, TEST-06, TEST-02 sim level pin; moved from 02-03)
 - [ ] 02-16-PLAN.md — persist.Open clock seeding on the real composition path (D-07, TEST-07; moved from 02-04)
 
@@ -193,7 +193,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
-| 2. Engine — HLC Versioning and LWW Store | v1.0 | 9/17 | In Progress |  |
+| 2. Engine — HLC Versioning and LWW Store | v1.0 | 10/17 | In Progress |  |
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 2/2 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 6/6 | Complete | 2026-11-07 |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |

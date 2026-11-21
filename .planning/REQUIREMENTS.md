@@ -34,7 +34,7 @@
   - Acceptance: table of corrupted datagrams with the expected discard class; `FuzzDecode` and `FuzzDumpDecode` with an in-repo corpus run on a schedule
 - [ ] **TEST-09**: Convergence bounds hold under combined failures and long partitions (T-09)
   - Acceptance: three-node test with a partition longer than `peer_timeout` — convergence not before the first post-heal sync and not later than the bound; the bound is either documented with its no-fresh-loss qualifier or recalculated
-- [ ] **TEST-10**: Benchmarks measure what they claim (T-10)
+- [x] **TEST-10**: Benchmarks measure what they claim (T-10)
   - Acceptance: no benchmark paces itself; real `persistfile` and default parameters; p50 and p99 reported; smoke run `-benchtime=1x` in CI
 - [ ] **TEST-11**: Known flakiness classes are eliminated (T-11)
   - Acceptance: `go test -race -count=20` over `cmd/sup-kv`, `udprepl` and the affected package green three times in a row
@@ -219,7 +219,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-07 | Phase 2 | Pending |
 | TEST-08 | Phase 2 | Pending |
 | TEST-09 | Phase 2 | Pending |
-| TEST-10 | Phase 2 | Pending |
+| TEST-10 | Phase 2 | Complete |
 | TEST-11 | Phase 2 | Pending |
 | TEST-12 | Phase 2 | Complete |
 | TEST-13 | Phase 2 | Pending |

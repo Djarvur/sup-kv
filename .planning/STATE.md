@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-11-21T11:36:22.420Z"
+stopped_at: Completed 02-10-PLAN.md
+last_updated: "2026-11-21T11:48:11.081Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 8e9dae81b747493a421f7e8edc95f709aeff8e8e
+state_head: c8fc1ca20a1bcd4b0d2205670d20648e8a054640
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 13
+  completed_plans: 14
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 10 of 17
+Plan: 11 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -66,6 +66,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P06 | 574 | 2 tasks | 2 files |
 | Phase 02 P07 | 350 | 2 tasks | 2 files |
 | Phase 02 P08 | 983s | 2 tasks | 2 files |
+| Phase 02 P10 | 269s | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -116,6 +117,9 @@ Recent decisions affecting current work:
 - [Phase 02]: sync-response-rate effect needs a restarted seeded node (02-08): handleHello's discovery flush broadcasts the sender's pending records immediately and bypasses the egress limiter; a dump-loaded restart leaves pending empty, so the empty node's paced DataRequests are the only recovery path
 - [Phase 02]: Retransmit asserted as a named lower bound (02-08): >=1 plus a pre-kill baseline climb because cycle count depends on scheduler-dependent Ack timing on real sockets; conflict and discard are constructed single events and assert ==1
 - [Phase 02]: Per-parameter effects are named subtests (02-08): one per stand-observable parameter (startup-gate, hello-interval, sync-response-rate, value-max-bytes, peer-timeout), each with its own topology/surface; remaining flags map to existing unit/exec tests in the SUMMARY parameter table
+- [Phase 02]: Shared benchmark percentile reporter lives in the module-wide internal/testutil package: Go's internal rule blocks internal/udprepl and internal/grpcapi from internal/app/internal/testutil, and all three benchmarks share one implementation; the plan's app-internal path is a documented wrapper
+- [Phase 02]: Benchmarks report p50-ms/p99-ms from their own measured per-op spans with no self-pacing; the -benchtime=1x smoke reports p50==p99==the single sample
+- [Phase 02]: make race-soak is the single TEST-11 command definition (-race -count=20 over the affected set, COUNT override); T-11 dispositions: port window intact (mitigated), pre-arm SIGTERM carried per D-09 (TestShutdown_secondSignal remains the pin), README deadline fixed test-side per doc block
 
 ### Pending Todos
 
@@ -136,7 +140,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T11:36:22.293Z
-Stopped at: Completed 02-08-PLAN.md
+Last session: 2026-11-21T11:48:10.934Z
+Stopped at: Completed 02-10-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
