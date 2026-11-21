@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-12-PLAN.md
-last_updated: "2026-11-21T12:45:40.558Z"
+stopped_at: Completed 02-17-PLAN.md
+last_updated: "2026-11-21T13:01:18.314Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: bf2b6b4d92564e84821fe7170f0fdc3f5b6dd986
+state_head: efe7d3f599b8dec5c218441a7ec5368a3f37ea20
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 18
+  completed_plans: 19
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 15 of 17
+Plan: 16 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -71,6 +71,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P16 | 169s | 1 tasks | 1 files |
 | Phase 02 P09 | 900 | 3 tasks | 10 files |
 | Phase 02 P12 | 720s | 2 tasks | 8 files |
+| Phase 02 P17 | 8min | 1 tasks | 22 files |
 
 ## Accumulated Context
 
@@ -133,6 +134,8 @@ Recent decisions affecting current work:
 - [Phase 02]: P-01 engine test lives in package persistfile_test (external) not the plan's literal internal package: it composes only exported API and reuses open_seed_test.go's seedDumper/seedFixedNow helpers, while the internal form would need an unjustified //nolint:testpackage (02-15/02-16 precedent)
 - [Phase 02]: scripts/red-runner serializes packages with -p 1: the stand reds assert wall-clock pacing and throughput bounds, so sibling packages' race builds and load would corrupt the verdict's measurement
 - [Phase 02]: The P-01 process test asserts the dump still holds the record between Set (which confirms the covering dump, PERS-04) and SIGKILL/restart, so a red verdict names the loader's 61 440-byte decode bound rather than leaving the writer or the kill suspect
+- [Phase 02]: Fuzz targets choose external test packages over the existing test-binary decode seam: FuzzDecode drives decode() through DecodeDatagramForTest, FuzzDumpDecode through persist.Decode, adding no testpackage exemption and no production change
+- [Phase 02]: Fuzz seed builders are plain error-returning functions so the fuzz targets and the committed corpus files share one payload list; corruption fixtures carry construction guards (truncation still fails to unmarshal, base64 flip changes decoded bytes) to prevent class decay
 
 ### Pending Todos
 
@@ -153,7 +156,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T12:45:40.394Z
-Stopped at: Completed 02-12-PLAN.md
+Last session: 2026-11-21T13:01:18.154Z
+Stopped at: Completed 02-17-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
