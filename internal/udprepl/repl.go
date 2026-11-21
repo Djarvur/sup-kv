@@ -716,7 +716,9 @@ func (a *Adapter) mirrorStats() {
 	a.badProtoVersion.Store(d.BadProtoVersion)
 	a.ownEcho.Store(d.OwnEcho)
 	a.duplicateNodeID.Store(d.DuplicateNodeID)
-	a.peerCount.Store(uint64(len(a.core.PeerSnapshot())))
+	// PeerCount returns the peer-table length, never a negative value.
+	//nolint:gosec // G115: PeerCount is len(c.peers), a non-negative map length.
+	a.peerCount.Store(uint64(a.core.PeerCount()))
 	u := a.core.UnackedStats(time.Now())
 	a.unackedCount.Store(int64(u.Count))
 	a.unackedOldestNs.Store(int64(u.OldestAge))

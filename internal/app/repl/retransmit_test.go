@@ -234,6 +234,56 @@ func replKeys(msgs []port.DataReplication) []string {
 	return keys
 }
 
+// TestPending_gauges pins the O(1) pending gauges (XPORT-02(1), RESEARCH
+// Pitfalls 7 and 8): an empty pending set reports a zero count and age, the
+// oldest age follows the earliest createdAt even when writes are notified
+// out of time order, draining the oldest entry advances the age to the next
+// creation time, and PeerCount is exactly the peer-table length. The accessor
+// reads only the map length and the front of the createdAt-ordered list — no
+// walk of the pending set — so the empty case here is the zero-cost pin.
+func TestPending_gauges(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out) // startup Hello + empty listing
+	out.Drain()
+
+	if got := core.UnackedStats(now); got != (repl.UnackedStats{}) {
+		t.Fatalf("UnackedStats() on the empty pending set = %+v, want the zero gauge", got)
+	}
+	if got := core.PeerCount(); got != 0 {
+		t.Fatalf("PeerCount() on the empty peer table = %d, want 0", got)
+	}
+
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	core.HandleDatagram(now, helloFrom(peerID2), &out)
+	out.Drain()
+	if got := core.PeerCount(); got != 2 {
+		t.Fatalf("PeerCount() after two Hellos = %d, want the peer-table length 2", got)
+	}
+
+	// Out-of-order creation times: beta first at t0+2s, then alpha at t0 and
+	// gamma at t0+1s. The oldest age must follow the earliest createdAt, not
+	// the insertion order.
+	localWrite(t, core, st, at(2*time.Second), keyBeta, "b")
+	localWrite(t, core, st, at(0), keyAlpha, "a")
+	localWrite(t, core, st, at(time.Second), keyGamma, "g")
+	if got := core.UnackedStats(at(3 * time.Second)); got != (repl.UnackedStats{Count: 3, OldestAge: 3 * time.Second}) {
+		t.Fatalf("UnackedStats() after out-of-order insertions = %+v, want count 3 oldest age 3s (the alpha createdAt)", got)
+	}
+
+	// Drain the oldest entry: both waiters Ack alpha, so the age steps to
+	// gamma's createdAt.
+	alphaVer := pendingVersion(t, core, keyAlpha)
+	core.HandleDatagram(at(3*time.Second), ackFrom(peerID1, keyAlpha, alphaVer), &out)
+	core.HandleDatagram(at(3*time.Second), ackFrom(peerID2, keyAlpha, alphaVer), &out)
+	out.Drain()
+	if got := core.UnackedStats(at(3 * time.Second)); got != (repl.UnackedStats{Count: 2, OldestAge: 2 * time.Second}) {
+		t.Fatalf("UnackedStats() after draining the oldest entry = %+v, want count 2 oldest age 2s (the gamma createdAt)", got)
+	}
+}
+
 // TestRetransmit_backoffLadder proves the retransmission ladder (REPL-02,
 // the pinned A5 reading): one known peer, one write at t0 — retries fire at
 // exactly the cumulative deadlines 200/600/1400/3000/6200ms (backoff

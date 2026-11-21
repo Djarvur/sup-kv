@@ -15,10 +15,12 @@ package repl
 
 import (
 	"bytes"
+	"container/list"
 	"crypto/rand"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/storage"
@@ -266,24 +268,44 @@ type queuedUnicast struct {
 	msg    port.Message
 }
 
-// pendingEntry is one local write awaiting peer Acks (REPL-02): a
-// defensive copy of the written record (the storage.install precedent — the
-// author may reuse its buffer after NotifyLocalWrite returns), the exact
-// tracked version, the wait-set of known peers that have not yet Acked that
-// version, the set of peers that have (sorted ascending, idempotent —
-// handleAck inserts; eviction never touches it, which is what keeps an
-// Ack distinguishable from a peer_timeout eviction in PendingSnapshot,
-// T-05-04), the retransmission ladder state (next retry time and current
-// backoff — the ladder itself fires from Advance, plan 04-02 Task 2), and
-// the creation time behind UnackedStats' oldest age.
+// pendingKey identifies one tracked local write in the pending set: the key
+// and the exact record version awaiting Acks. The version is part of the
+// identity, not a field of the entry alone, so a superseded version can never
+// be confused with the write that replaced it (REPL-02, D-03).
+type pendingKey struct {
+	key     string
+	version version.RecordVersion
+}
+
+// pendingRef is one node of Core.pendingOrder: the tracked pair plus its
+// creation time, kept beside the key so the order walk never needs a map
+// lookup. The list is maintained in createdAt order, so its front is the
+// oldest entry UnackedStats reports.
+type pendingRef struct {
+	pk        pendingKey
+	createdAt time.Time
+}
+
+// pendingEntry is one local write awaiting peer Acks (REPL-02). It retains
+// no record: the store is the single record source, and every emission
+// resolves the record through StateStore.Lookup, skipping when the stored
+// version no longer matches the tracked pair (the memory half of R-02 and
+// the stale-send guard). The entry holds the exact tracked version, the
+// wait-set of known peers that have not yet Acked that version, the set of
+// peers that have (sorted ascending, idempotent — handleAck inserts;
+// eviction never touches it, which is what keeps an Ack distinguishable from
+// a peer_timeout eviction in PendingSnapshot, T-05-04), the retransmission
+// ladder state (next retry time and current backoff — the ladder itself
+// fires from Advance), the creation time behind UnackedStats' oldest age,
+// and the entry's node in Core.pendingOrder.
 type pendingEntry struct {
-	rec       storage.Record
 	version   version.RecordVersion
 	waitSet   map[uint16]struct{}
 	acked     []uint16
 	nextRetry time.Time
 	backoff   time.Duration
 	createdAt time.Time
+	elem      *list.Element
 }
 
 // Core is the replication decision state machine for one node. Not safe for
@@ -300,7 +322,17 @@ type Core struct {
 	store     StateStore
 	cfg       Config
 	peers     map[uint16]peer
-	pending   map[string]pendingEntry
+
+	// pending holds one entry per tracked (key, version) pair — no record
+	// Data (see pendingEntry). peerUnacked is the per-peer ledger: for every
+	// known peer, the set of pending keys it is still waiting on, so peer
+	// eviction touches only that peer's unacked entries instead of scanning
+	// the whole pending set (D-03). pendingOrder lists every pending pair in
+	// createdAt order for the O(1) oldest-age gauge.
+	pending      map[pendingKey]pendingEntry
+	peerUnacked  map[uint16]map[pendingKey]struct{}
+	pendingOrder *list.List
+
 	nextHello time.Time
 
 	// nextSync is the next sync-timer deadline; the zero time until the
@@ -352,7 +384,9 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 		store:                store,
 		cfg:                  cfg,
 		peers:                make(map[uint16]peer),
-		pending:              make(map[string]pendingEntry),
+		pending:              make(map[pendingKey]pendingEntry),
+		peerUnacked:          make(map[uint16]map[pendingKey]struct{}),
+		pendingOrder:         list.New(),
 		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
 }
@@ -510,13 +544,23 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 	if !discovery {
 		return
 	}
-	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
-		entry := c.pending[key]
+	for _, pk := range sortedPendingKeys(c.pending) {
+		entry := c.pending[pk]
 		entry.waitSet[in.NodeID] = struct{}{}
 		entry.backoff = c.cfg.AckTimeout
 		entry.nextRetry = now.Add(c.cfg.AckTimeout)
-		c.pending[key] = entry
-		out.Broadcast(port.DataReplication{Key: key, Record: entry.rec})
+		c.pending[pk] = entry
+		c.ledgerAdd(in.NodeID, pk)
+		rec, ok := c.store.Lookup(pk.key)
+		if !ok || rec.Version != pk.version {
+			// The store no longer holds the tracked version: nothing truthful
+			// can be flushed. The entry stays tracked (the retransmit scan
+			// removes it at its next due time), and the new peer is still
+			// recorded as a waiter — the flush's wait-set half is
+			// unconditional.
+			continue
+		}
+		out.Broadcast(port.DataReplication{Key: pk.key, Record: rec})
 	}
 }
 
@@ -549,9 +593,12 @@ func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Ou
 	// Remote supersession: a strictly greater remote version under the same
 	// key fulfills the tracking promise by winning — the same byte order
 	// storage.Merge joins by; an equal version (a redelivery) leaves
-	// tracking unchanged (REPL-02).
-	if entry, ok := c.pending[msg.Key]; ok && msg.Record.Version.Compare(entry.version) > 0 {
-		delete(c.pending, msg.Key)
+	// tracking unchanged (REPL-02). Every older tracked version under the
+	// key leaves, because the record they tracked no longer exists.
+	for pk := range c.pending {
+		if pk.key == msg.Key && msg.Record.Version.Compare(pk.version) > 0 {
+			c.removePending(pk)
+		}
 	}
 	out.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})
 }
@@ -579,17 +626,19 @@ func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Ou
 // peer is identified by the datagram's NodeID alone; nothing here writes
 // the peer table.
 func (c *Core) handleAck(peerID uint16, ack port.Ack) {
-	entry, ok := c.pending[ack.Key]
-	if !ok || entry.version != ack.Version {
+	pk := pendingKey{key: ack.Key, version: ack.Version}
+	entry, ok := c.pending[pk]
+	if !ok {
 		return
 	}
 	delete(entry.waitSet, peerID)
+	c.ledgerRemove(peerID, pk)
 	entry.acked = ackedInsert(entry.acked, peerID)
 	if len(entry.waitSet) == 0 && len(c.peers) > 0 {
-		delete(c.pending, ack.Key)
+		c.removePending(pk)
 		return
 	}
-	c.pending[ack.Key] = entry
+	c.pending[pk] = entry
 }
 
 // ackedInsert returns acked with id inserted at its sorted position — the
@@ -698,31 +747,45 @@ func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
 
 // NotifyLocalWrite is the explicit call a write's author makes after the
 // store write (D-05: no store subscriptions, no observers, no callbacks —
-// tests now, the gRPC handler in Phase 5). The core keeps a defensive copy
-// of rec (the storage.install precedent) as the pending entry — wait-set
-// seeded with every currently-known peer, ladder armed at cfg.AckTimeout —
-// and broadcasts the record as a DataReplication datagram. A newer local
-// write under the same key REPLACES the entry: fresh wait-set, ladder reset
-// — local supersession (REPL-02). Replication progress is never a
-// precondition of the write path: this enqueues-and-returns (D-05).
+// tests now, the gRPC handler in Phase 5). The store is the single record
+// source (the write is already installed there), so the core keeps only the
+// (key, version) tracking entry — wait-set seeded with every currently-known
+// peer, ladder armed at cfg.AckTimeout — and broadcasts the record as a
+// DataReplication datagram from a defensive copy (the author may reuse its
+// buffer once the call returns). A newer local write under the same key
+// REPLACES the older tracking: every entry with a strictly smaller version
+// leaves, fresh wait-set, ladder reset — local supersession (REPL-02). An
+// equal version is a no-op for tracking (a duplicate notification re-arms
+// nothing), while a stale smaller write still broadcasts without displacing
+// the newer entry. Replication progress is never a precondition of the write
+// path: this enqueues-and-returns (D-05).
 func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
+	c.removeSupersededLocal(key, rec.Version)
+	pk := pendingKey{key: key, version: rec.Version}
+	_, tracked := c.pending[pk]
+	if !tracked {
+		waitSet := make(map[uint16]struct{}, len(c.peers))
+		for id := range c.peers {
+			waitSet[id] = struct{}{}
+		}
+		entry := pendingEntry{
+			version:   rec.Version,
+			waitSet:   waitSet,
+			nextRetry: now.Add(c.cfg.AckTimeout),
+			backoff:   c.cfg.AckTimeout,
+			createdAt: now,
+		}
+		entry.elem = c.insertPendingOrder(pk, now)
+		c.pending[pk] = entry
+		for id := range waitSet {
+			c.ledgerAdd(id, pk)
+		}
+	}
 	own := storage.Record{
 		Version:  rec.Version,
 		Data:     bytes.Clone(rec.Data),
 		Deleted:  rec.Deleted,
 		Checksum: rec.Checksum,
-	}
-	waitSet := make(map[uint16]struct{}, len(c.peers))
-	for id := range c.peers {
-		waitSet[id] = struct{}{}
-	}
-	c.pending[key] = pendingEntry{
-		rec:       own,
-		version:   own.Version,
-		waitSet:   waitSet,
-		nextRetry: now.Add(c.cfg.AckTimeout),
-		backoff:   c.cfg.AckTimeout,
-		createdAt: now,
 	}
 	out.Broadcast(port.DataReplication{Key: key, Record: own})
 }
@@ -856,10 +919,13 @@ func (c *Core) evictPeers(now time.Time) {
 	}
 	for _, id := range expired {
 		delete(c.peers, id)
-		for key := range c.pending {
-			// wait-set only — acked stays (an eviction is never an Ack).
-			delete(c.pending[key].waitSet, id)
+		// The per-peer ledger bounds the walk: only this peer's unacked
+		// entries lose it as a waiter. Entries stay tracked (suspension),
+		// and acked stays untouched (an eviction is never an Ack).
+		for pk := range c.peerUnacked[id] {
+			delete(c.pending[pk].waitSet, id)
 		}
+		delete(c.peerUnacked, id)
 	}
 }
 
@@ -892,16 +958,24 @@ func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
 	if len(c.peers) == 0 || len(c.pending) == 0 {
 		return
 	}
-	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
-		entry := c.pending[key]
+	for _, pk := range sortedPendingKeys(c.pending) {
+		entry := c.pending[pk]
 		if now.Before(entry.nextRetry) {
 			continue
 		}
-		out.Broadcast(port.DataReplication{Key: key, Record: entry.rec})
+		rec, ok := c.store.Lookup(pk.key)
+		if !ok || rec.Version != pk.version {
+			// The tracked record is gone or was replaced: retransmitting
+			// anything would send bytes the store no longer vouches for, so
+			// the stale entry leaves instead (RESEARCH Pitfall 5).
+			c.removePending(pk)
+			continue
+		}
+		out.Broadcast(port.DataReplication{Key: pk.key, Record: rec})
 		c.retransmitted++
 		entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
 		entry.nextRetry = now.Add(entry.backoff)
-		c.pending[key] = entry
+		c.pending[pk] = entry
 	}
 }
 
@@ -966,10 +1040,9 @@ func (c *Core) retransmitDeadline(now time.Time) time.Time {
 // nothing is pending); callers reach it only with a non-empty pending set.
 func (c *Core) earliestRetry() time.Time {
 	var earliest time.Time
-	for key := range c.pending {
-		nextRetry := c.pending[key].nextRetry
-		if earliest.IsZero() || nextRetry.Before(earliest) {
-			earliest = nextRetry
+	for _, entry := range c.pending {
+		if earliest.IsZero() || entry.nextRetry.Before(earliest) {
+			earliest = entry.nextRetry
 		}
 	}
 	return earliest
@@ -1041,13 +1114,17 @@ type PendingInfo struct {
 // consume. Keys are iterated sorted and every WaitingOn is sorted ascending:
 // no map-iteration order reaches a read path either (probe #9 discipline).
 // Acked is cloned, not aliased — the snapshot shares no backing array with
-// core state (the storage.Records defensive-copy precedent).
+// core state (the storage.Records defensive-copy precedent). Two versions
+// under one key can coexist transiently (a stale smaller local write beside
+// a newer tracked one); the snapshot reports the greatest version under each
+// key, the one the store's LWW join would keep, so the public keyed-by-key
+// contract stays single-valued.
 func (c *Core) PendingSnapshot() map[string]PendingInfo {
 	out := make(map[string]PendingInfo, len(c.pending))
-	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
-		entry := c.pending[key]
-		out[key] = PendingInfo{
-			Version:   entry.version,
+	for _, pk := range sortedPendingKeys(c.pending) {
+		entry := c.pending[pk]
+		out[pk.key] = PendingInfo{
+			Version:   pk.version,
 			WaitingOn: slices.Sorted(maps.Keys(entry.waitSet)),
 			Acked:     slices.Clone(entry.acked),
 			NextRetry: entry.nextRetry,
@@ -1071,22 +1148,118 @@ func (c *Core) QueuedResponses() int {
 	return len(c.egress)
 }
 
+// PeerCount returns the number of known peers — the O(1) peer-table gauge
+// the production adapter's per-event mirror reads (RESEARCH Pitfall 8: the
+// copying PeerSnapshot allocates a whole map per call and is fit for tests
+// and observability, never the hot mirror).
+func (c *Core) PeerCount() int {
+	return len(c.peers)
+}
+
 // UnackedStats returns the pending-set gauge observed at now: the unacked
 // entry count and, with at least one entry, now minus the oldest entry's
-// creation time. A pure read; the wall clock enters through the now
-// parameter (the D-02 seam — the core never reads a clock itself).
+// creation time. Both halves are O(1): the count is the map length and the
+// oldest entry is the front of the createdAt-ordered pending list — the
+// accessor never walks the set (RESEARCH Pitfall 7). A pure read; the wall
+// clock enters through the now parameter (the D-02 seam — the core never
+// reads a clock itself).
 func (c *Core) UnackedStats(now time.Time) UnackedStats {
 	stats := UnackedStats{Count: len(c.pending)}
-	if stats.Count == 0 {
+	front := c.pendingOrder.Front()
+	if front == nil {
 		return stats
 	}
-	var oldest time.Time
-	for key := range c.pending {
-		createdAt := c.pending[key].createdAt
-		if oldest.IsZero() || createdAt.Before(oldest) {
-			oldest = createdAt
+	ref := front.Value.(pendingRef)
+	stats.OldestAge = now.Sub(ref.createdAt)
+	return stats
+}
+
+// sortedPendingKeys returns every pending pair ordered by key then version
+// bytes — the deterministic iteration order the emission and snapshot paths
+// share (probe #9: no map-iteration order reaches a read or emit path). The
+// slice is fresh; the pending set is never exposed.
+func sortedPendingKeys(pending map[pendingKey]pendingEntry) []pendingKey {
+	keys := make([]pendingKey, 0, len(pending))
+	for pk := range pending {
+		keys = append(keys, pk)
+	}
+	slices.SortFunc(keys, comparePendingKeys)
+	return keys
+}
+
+// comparePendingKeys orders two pending pairs by key in byte order, then by
+// their record-version bytes — the total order sortedPendingKeys and
+// pendingOrder use.
+func comparePendingKeys(a, b pendingKey) int {
+	if cmp := strings.Compare(a.key, b.key); cmp != 0 {
+		return cmp
+	}
+	return bytes.Compare(a.version[:], b.version[:])
+}
+
+// insertPendingOrder links pk into the createdAt-ordered pending list and
+// returns its node. The driver's now is non-decreasing, so the append is the
+// steady-state O(1) path; an out-of-order creation time (a test or a
+// recovered writer) inserts at its sorted position instead of corrupting the
+// oldest-age gauge.
+func (c *Core) insertPendingOrder(pk pendingKey, createdAt time.Time) *list.Element {
+	if back := c.pendingOrder.Back(); back == nil || !createdAt.Before(back.Value.(pendingRef).createdAt) {
+		return c.pendingOrder.PushBack(pendingRef{pk: pk, createdAt: createdAt})
+	}
+	for e := c.pendingOrder.Back(); e != nil; e = e.Prev() {
+		if !createdAt.Before(e.Value.(pendingRef).createdAt) {
+			return c.pendingOrder.InsertAfter(pendingRef{pk: pk, createdAt: createdAt}, e)
 		}
 	}
-	stats.OldestAge = now.Sub(oldest)
-	return stats
+	return c.pendingOrder.PushFront(pendingRef{pk: pk, createdAt: createdAt})
+}
+
+// removePending deletes one tracked pair from every structure that holds it
+// — the pending map, the createdAt-ordered list and every still-waiting
+// peer's ledger set. The pointed-to deletion is shared by the drain,
+// supersession and stale-record paths, so no path can leak a list node or a
+// ledger entry (T-3-14).
+func (c *Core) removePending(pk pendingKey) {
+	entry, ok := c.pending[pk]
+	if !ok {
+		return
+	}
+	delete(c.pending, pk)
+	if entry.elem != nil {
+		c.pendingOrder.Remove(entry.elem)
+	}
+	for id := range entry.waitSet {
+		c.ledgerRemove(id, pk)
+	}
+}
+
+// removeSupersededLocal deletes every tracked pair under key whose version is
+// strictly smaller than newer — the local-write supersession rule
+// (REPL-02). An equal version is not smaller, so an equal-version duplicate
+// notification leaves tracking untouched.
+func (c *Core) removeSupersededLocal(key string, newer version.RecordVersion) {
+	for pk := range c.pending {
+		if pk.key == key && pk.version.Compare(newer) < 0 {
+			c.removePending(pk)
+		}
+	}
+}
+
+// ledgerAdd records that peerID is waiting on pk — the per-peer index behind
+// O(peer unacked) eviction.
+func (c *Core) ledgerAdd(peerID uint16, pk pendingKey) {
+	set := c.peerUnacked[peerID]
+	if set == nil {
+		set = make(map[pendingKey]struct{})
+		c.peerUnacked[peerID] = set
+	}
+	set[pk] = struct{}{}
+}
+
+// ledgerRemove drops pk from peerID's ledger: the peer Acked it, or the
+// entry left tracking.
+func (c *Core) ledgerRemove(peerID uint16, pk pendingKey) {
+	if set := c.peerUnacked[peerID]; set != nil {
+		delete(set, pk)
+	}
 }
