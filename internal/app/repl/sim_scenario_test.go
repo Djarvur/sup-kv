@@ -27,7 +27,10 @@ import (
 // is asserted against the pointwise-supremum model of the write log
 // (chaosModelStore + recordMapsEqual) — never against a trace, never
 // against wall-clock precision (the CRDT merge laws make delivery order
-// irrelevant; the prohibitions of plan 06-05).
+// irrelevant; the prohibitions of plan 06-05). Plan 02-13 adds TEST-09's
+// combined-failure and long-partition scenarios here: the documented
+// convergence bounds carry the D-06 no-fresh-loss qualifier, and the
+// long-partition pair straddles the REPL-06 eviction boundary.
 
 // scnRunID returns a scenario run id: nodeID's decimal rendering with the
 // final digit forced to d, so replacement nodes announce run ids that are
@@ -438,6 +441,330 @@ func TestScenario_partitionDays(t *testing.T) {
 	if conflicts < 2*sharedKeys {
 		t.Fatalf("the cluster counted %d merge conflicts for %d displaced same-key versions, want >= %d %s",
 			conflicts, sharedKeys, 2*sharedKeys, scnReplay(seed, test))
+	}
+}
+
+// scnWritten is one recorded write the no-fresh-loss qualifier tracks: the
+// key and the exact record the author installed.
+type scnWritten struct {
+	key string
+	rec storage.Record
+}
+
+// scnConvergeBy drives virtual time from the scheduler's current instant in
+// chaosQuiesceStep increments until every node's store deep-equals model —
+// the pointwise supremum (chaosConverged) — or capTime passes, returning the
+// instant convergence was observed (the zero time and false when it never
+// was).
+func scnConvergeBy(
+	sched *simnet.Scheduler,
+	cluster *simnet.Cluster,
+	model *storage.Store,
+	capTime time.Time,
+) (time.Time, bool) {
+	for {
+		next := sched.Now().Add(chaosQuiesceStep)
+		if next.After(capTime) {
+			next = capTime
+		}
+		sched.RunUntil(next)
+		if chaosConverged(cluster, model) {
+			return next, true
+		}
+		if !next.Before(capTime) {
+			return time.Time{}, false
+		}
+	}
+}
+
+// scnAssertRecordsPresent fails t unless every recorded write is served
+// byte-equal by every node — the D-06 no-fresh-loss qualifier's executable
+// form: a record written on a live node before the heal instant is present
+// in the converged state (no fresh loss).
+func scnAssertRecordsPresent(t *testing.T, cluster *simnet.Cluster, writes []scnWritten, seed int64, test string) {
+	t.Helper()
+	for _, w := range writes {
+		for i := range cluster.Nodes() {
+			served, err := cluster.Store(i).Get(w.key)
+			if err != nil || !recordsEqual(served, w.rec) {
+				t.Fatalf("node %d serves (%+v, %v) under %q after the bound, want the byte-equal written record %+v (no fresh loss) %s",
+					i, served, err, w.key, w.rec, scnReplay(seed, test))
+			}
+		}
+	}
+}
+
+// scnHelloInterval is the design-default hello cadence (docs/IDEA.md
+// §Parameters), restated here because the long-partition subtests straddle
+// the REPL-06 eviction deadline (lastHello + peer_timeout) in whole hello
+// rounds: a returning peer's first unblocked Hello can only arrive on the
+// hello cadence, so the partition-length boundary is quantized by it.
+const scnHelloInterval = time.Second
+
+// TestScenario_longPartition proves TEST-09's long-partition bound (the
+// review's T-09 remedy) on three nodes: after a partition longer than
+// peer_timeout, convergence is NOT BEFORE the first post-heal sync and NOT
+// LATER than the documented partition-heal bound (boundPartitionHeal) — the
+// D-06 no-fresh-loss qualifier holding because no write follows the heal, so
+// every record written on a live node before the heal instant is present in
+// the converged state. Two named subtests straddle the REPL-06 eviction
+// boundary. The eviction rule is at-or-after lastHello+peer_timeout
+// (TestPeerTable_lifecycle, probe #18), so a partition ending exactly at the
+// deadline already evicts: the peer-table-survives side ends one hello round
+// before the deadline (the repeating ladder heals it without a sync round)
+// and the evicted side runs one hello round past it (only the first
+// post-heal sync round replays the partition's writes). The heal instant
+// itself must show divergence — the partition was real.
+func TestScenario_longPartition(t *testing.T) {
+	t.Parallel()
+	seed := chaosSeed(t)
+	const test = "longPartition"
+	t.Logf("%s", scnReplay(seed, test))
+
+	for _, tc := range []struct {
+		name     string
+		partLen  time.Duration
+		writesAt []time.Duration
+		evicted  bool
+	}{
+		{
+			// Ends one hello round before lastHello+peer_timeout: the peer
+			// tables survive, so the ladder alone heals the split.
+			name:     "peerTableSurvives",
+			partLen:  peerTimeout - 2*scnHelloInterval,
+			writesAt: []time.Duration{time.Second, 1500 * time.Millisecond, 2 * time.Second},
+		},
+		{
+			// Past the eviction deadline: the peers are gone, the partition's
+			// records drain from the ladders, and only the first post-heal
+			// sync round carries them back.
+			name:     "peerEvicted",
+			partLen:  peerTimeout + scnHelloInterval,
+			writesAt: []time.Duration{5200 * time.Millisecond, 5600 * time.Millisecond, 5900 * time.Millisecond},
+			evicted:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tag := simRNG(seed).IntN(1000)
+			var partStart, partEnd time.Time
+			policy := simFixedDelay(func(from, to string, now time.Time) bool {
+				isolated := (from == "n3") != (to == "n3")
+				return isolated && !now.Before(partStart) && now.Before(partEnd)
+			})
+			sched := simnet.NewScheduler(at(0))
+			cluster := simnet.NewCluster(sched, simRNG(seed), 3, repl.Config{}, policy)
+			quiesceDiscovery(t, sched, cluster)
+
+			// One record per node before the partition, fully replicated
+			// (quiesced) before it starts, then pin the last Hello: advance to
+			// the 2s tick's delivery so every pair's lastHello is 2s+one delay
+			// and the eviction deadline sits exactly peer_timeout later.
+			writes := make([]scnWritten, 0, 6)
+			for i := range 3 {
+				key := fmt.Sprintf("longpart/pre/%c", 'a'+i)
+				writes = append(writes, scnWritten{
+					key: key,
+					rec: cluster.Write(i, key, []byte(fmt.Sprintf("pre-%c-%d", 'a'+i, tag))),
+				})
+			}
+			if ok := scnQuiesce(sched, cluster); !ok {
+				t.Fatalf("the pre-partition writes did not quiesce %s", scnReplay(seed, test))
+			}
+			sched.RunUntil(at(2*time.Second + simOneWay))
+			partStart = sched.Now()
+			partEnd = partStart.Add(tc.partLen)
+
+			// The partition's writes: one per node inside the split.
+			for i := range 3 {
+				sched.RunUntil(partStart.Add(tc.writesAt[i]))
+				key := fmt.Sprintf("longpart/mid/%c", 'a'+i)
+				writes = append(writes, scnWritten{
+					key: key,
+					rec: cluster.Write(i, key, []byte(fmt.Sprintf("mid-%c-%d", 'a'+i, tag))),
+				})
+			}
+
+			// The heal instant: divergence teeth (the split was real) and the
+			// eviction verdict the subtest names.
+			sched.RunUntil(partEnd)
+			if recordMapsEqual(cluster.Store(0).Records(), cluster.Store(2).Records()) {
+				t.Fatalf("the stores already agree at the heal instant — the partition probe is vacuous %s", scnReplay(seed, test))
+			}
+			wantPeers := 2
+			if tc.evicted {
+				wantPeers = 1
+			}
+			if got := len(cluster.Core(0).PeerSnapshot()); got != wantPeers {
+				t.Fatalf("node 0's peer table holds %d rows at the heal instant, want %d — the eviction probe disagrees with the declared subtest shape %s",
+					got, wantPeers, scnReplay(seed, test))
+			}
+
+			// The cluster's sync ticks are at 0, sync_interval, 2×sync_interval
+			// from the simulation base; both subtests heal inside the first
+			// interval, so the first post-heal sync is the first tick.
+			firstPostHealSync := at(syncInterval)
+			model := chaosModelStore(cluster.WriteLog())
+			bound := partEnd.Add(boundPartitionHeal(len(writes)))
+			if tc.evicted {
+				// Not before the first post-heal sync: a returning node learns
+				// the partition's writes only from a listing, and no listing is
+				// emitted between the heal and the tick.
+				sched.RunUntil(firstPostHealSync.Add(-time.Nanosecond))
+				if chaosConverged(cluster, model) {
+					t.Fatalf("the cluster converged before the first post-heal sync — the heal-term lower bound is vacuous %s", scnReplay(seed, test))
+				}
+			}
+			convergedAt, withinBound := scnConvergeBy(sched, cluster, model, bound)
+			if !withinBound {
+				t.Fatalf("the cluster did not converge within the documented heal bound %v %s",
+					boundPartitionHeal(len(writes)), scnReplay(seed, test))
+			}
+			// The subtest shape decides which side of the first post-heal sync
+			// convergence must land on: the evicted peers need the sync's
+			// reconciliation term, the surviving peers must heal without it.
+			if usedSyncTerm := !convergedAt.Before(firstPostHealSync); usedSyncTerm != tc.evicted {
+				t.Fatalf("convergence at +%v against the first post-heal sync (+%v) contradicts the %q subtest shape (evicted=%v) %s",
+					convergedAt.Sub(partStart), firstPostHealSync.Sub(partStart), tc.name, tc.evicted, scnReplay(seed, test))
+			}
+			scnAssertRecordsPresent(t, cluster, writes, seed, test)
+			if ok := scnQuiesce(sched, cluster); !ok {
+				t.Fatalf("the cluster did not quiesce after the healed partition %s", scnReplay(seed, test))
+			}
+			scnAssertConverged(t, cluster, model, seed, test)
+		})
+	}
+}
+
+// combinedFailuresMargin is the documented allowance the combined-failure
+// bound carries beyond boundPartitionHeal: the D-06 qualifier limits the
+// bound to records written before the heal with no fresh loss, and the
+// restarted node's reconciliation waits for the hello cadence, so a few
+// hello rounds of scheduler-phase slack sit inside the qualifier rather than
+// being hidden in a re-derived constant.
+const combinedFailuresMargin = 5 * time.Second
+
+// TestScenario_combinedFailures proves TEST-09's combined-failure scenario:
+// three nodes under loss, duplication, a timed partition and one
+// ReplaceNode restart at once, converging no later than the
+// boundPartitionHeal expression for the key count used plus the documented
+// margin, with the D-06 no-fresh-loss qualifier — every record written on a
+// live node before the heal instant is present in the converged state (all
+// fault windows and writes end at the heal; only duplication continues, and
+// a duplicate can never lose a record). The heal instant itself must show
+// divergence: the partition and the restart were real.
+func TestScenario_combinedFailures(t *testing.T) {
+	t.Parallel()
+	seed := chaosSeed(t)
+	const test = "combinedFailures"
+	t.Logf("%s", scnReplay(seed, test))
+	rng := simRNG(seed)
+	tag := rng.IntN(1000)
+
+	var lossStart, lossEnd, partStart, partEnd time.Time
+	policy := simnet.Policy{
+		DupProb: 0.25,
+		Delay: func(rng *rand.Rand) time.Duration {
+			return time.Duration(1+rng.IntN(10)) * time.Millisecond
+		},
+		Partition: func(from, to string, now time.Time) bool {
+			// The loss episode: node 0's datagrams are lost for 600ms (the
+			// TestScenario_loss directed-window form, not a network-wide
+			// partition). The timed partition isolates node 2 from both peers
+			// for 8s — past peer_timeout, so eviction fires on both sides.
+			lost := (from == "n1" || to == "n1") && !now.Before(lossStart) && now.Before(lossEnd)
+			isolated := (from == "n3") != (to == "n3") && !now.Before(partStart) && now.Before(partEnd)
+			return lost || isolated
+		},
+	}
+	sched := simnet.NewScheduler(at(0))
+	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{}, policy)
+	quiesceDiscovery(t, sched, cluster)
+
+	// Pre-fault writes, one per node, fully replicated before any fault: the
+	// record the restart wipes locally must already live on both peers, or
+	// the no-fresh-loss qualifier could not hold.
+	writes := make([]scnWritten, 0, 8)
+	for i := range 3 {
+		key := fmt.Sprintf("comb/pre/%c", 'a'+i)
+		writes = append(writes, scnWritten{
+			key: key,
+			rec: cluster.Write(i, key, []byte(fmt.Sprintf("pre-%c-%d", 'a'+i, tag))),
+		})
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the pre-fault writes did not quiesce %s", scnReplay(seed, test))
+	}
+
+	t0 := sched.Now()
+	lossStart, lossEnd = t0, t0.Add(600*time.Millisecond)
+	partStart, partEnd = t0.Add(2*time.Second), t0.Add(10*time.Second)
+
+	// The loss episode, with writes on both sides inside it: node 0's
+	// broadcast and its first ladder rungs drop, the later rung heals it.
+	sched.RunUntil(t0.Add(300 * time.Millisecond))
+	writes = append(writes,
+		scnWritten{key: "comb/loss/a", rec: cluster.Write(0, "comb/loss/a", []byte(fmt.Sprintf("lost-a-%d", tag)))},
+		scnWritten{key: "comb/loss/b", rec: cluster.Write(1, "comb/loss/b", []byte(fmt.Sprintf("lost-b-%d", tag)))},
+	)
+
+	// The timed partition, with the restart inside it: the replacement boots
+	// empty while isolated, so it heals only through the post-heal listing.
+	sched.RunUntil(t0.Add(5 * time.Second))
+	newRun := scnRunID(3, 9)
+	cluster.ReplaceNode(2, newRun, 0)
+	sched.RunUntil(sched.Now().Add(time.Millisecond)) // fire the replacement's startup pump
+
+	// Writes after the eviction deadline (lastHello+peer_timeout): their
+	// authors' pending entries drain, so only the post-heal reconciliation
+	// can carry them across the split.
+	for _, w := range []struct {
+		at   time.Duration
+		node int
+		key  string
+	}{
+		{7500 * time.Millisecond, 0, "comb/part/a"},
+		{8 * time.Second, 1, "comb/part/b"},
+		{8500 * time.Millisecond, 2, "comb/part/c"},
+	} {
+		sched.RunUntil(t0.Add(w.at))
+		writes = append(writes, scnWritten{
+			key: w.key,
+			rec: cluster.Write(w.node, w.key, []byte(fmt.Sprintf("%s-%d", w.key, tag))),
+		})
+	}
+
+	// The heal instant: divergence teeth — the partition and the restart were
+	// not vacuous — and the fault classes the scenario claims actually fired.
+	sched.RunUntil(partEnd)
+	if recordMapsEqual(cluster.Store(0).Records(), cluster.Store(2).Records()) {
+		t.Fatalf("node 0 and the replacement already agree at the heal instant — the combined faults are vacuous %s", scnReplay(seed, test))
+	}
+	faults := cluster.Network().FaultStats()
+	if faults.Partitioned == 0 || faults.Duplicated == 0 {
+		t.Fatalf("the combined run observed partitioned=%d duplicated=%d, want both live %s",
+			faults.Partitioned, faults.Duplicated, scnReplay(seed, test))
+	}
+
+	// The documented bound: boundPartitionHeal over the distinct keys plus
+	// the named margin, asserted together with the no-fresh-loss qualifier.
+	model := chaosModelStore(cluster.WriteLog())
+	bound := partEnd.Add(boundPartitionHeal(len(writes)) + combinedFailuresMargin)
+	if _, ok := scnConvergeBy(sched, cluster, model, bound); !ok {
+		t.Fatalf("the cluster did not converge within the documented combined-failure bound %v %s",
+			boundPartitionHeal(len(writes))+combinedFailuresMargin, scnReplay(seed, test))
+	}
+	scnAssertRecordsPresent(t, cluster, writes, seed, test)
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the cluster did not quiesce after the combined failures healed %s", scnReplay(seed, test))
+	}
+	scnAssertConverged(t, cluster, model, seed, test)
+
+	// REPL-07's row update survived the combined faults: the peers' row for
+	// the restarted node carries the replacement's run id.
+	if got := cluster.Core(0).PeerSnapshot()[3].RunID; got != newRun {
+		t.Fatalf("node 0's peer row for the restarted node carries run %x, want the replacement's %x %s",
+			got[:], newRun[:], scnReplay(seed, test))
 	}
 }
 
