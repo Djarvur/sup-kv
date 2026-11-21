@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-09-PLAN.md
-last_updated: "2026-11-21T21:17:00.000Z"
+stopped_at: Completed 03-10-PLAN.md
+last_updated: "2026-11-21T21:38:23.000Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 3 plan 9 complete — XPORT-03 ceilings enforced
-state_head: 34e9a8fe031b679eb0d7d6874d619f26d9c3f44a
+last_activity_desc: Phase 3 plan 10 complete — read loop and socket policy
+state_head: 6d7d703a832a347955521799ef1121f06490543c
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 30
+  completed_plans: 31
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 10 of 13
+Plan: 11 of 13
 Status: Ready to execute
-Last activity: 2026-11-22 — Completed 03-09 (key and datagram ceilings)
+Last activity: 2026-11-22 — Completed 03-10 (read loop and socket policy)
 
-Progress: [█████████░] 88%
+Progress: [█████████░] 91%
 
 ## Performance Metrics
 
@@ -84,6 +84,7 @@ Progress: [█████████░] 88%
 | Phase 03 P07 | 20min | 3 tasks | 11 files |
 | Phase 03 P08 | 21min | 3 tasks | 11 files |
 | Phase 03 P09 | 602s | 3 tasks | 9 files |
+| Phase 03 P10 | 925s | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -203,6 +204,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-09: API key enforcement is write-side only (Set/SetIfAbsent/Delete before the engine); Get/List stay permissive for pre-upgrade long keys per RESEARCH OQ2, with Phase 5 owning load-time accounting.
 - [Phase 03]: 03-09: The startup comparison is `>` and both sides are pinned executably: --value-max-bytes=64 408 (exactly 65 507 bytes) starts, 64 409 exits 2, and 64 000 remains the P-01 executable guard distinct from the rows-unchanged TSV grep.
 - [Phase 03]: 03-09: F2c keeps its name but now pins the fix — the 70 000-character key is rejected locally and never replicates, while a 1 024-byte key with a 61 440-byte value replicates and lands in node B's final dump.
+- [Phase 03]: 03-10: The read loop exits only on `net.ErrClosed`; every other receive error increments `Adapter.ReadErrors`, logs at most once per second and sleeps the 100 ms backoff. The fake-`packetConn` test pins continuation (datagram processed, one backoff observed) and the no-spin bound, so 03-12 can publish the counter as-is.
+- [Phase 03]: 03-10: The `packetConn` seam carries `LocalAddr` because construction derives the core's own handle from the bound address (D-03) and the white-box test reads it; production binds set no `SO_REUSEADDR` (`WithAddressReuse` is test-only), and both sockets of a shared port must opt in — Linux only grants the double-bind when every socket set the option.
+- [Phase 03]: 03-10: The no-Hello WARN counts from the first `Advance` (not construction) and latches for the process lifetime; `helloSeen` ignores the node's own broadcast echo, so a lone node that hears only itself still warns. The non-wildcard bind WARN is emitted in `main` between `setupLogging` and `wire`, never a rejection.
 
 ### Pending Todos
 
@@ -223,7 +227,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T21:17:00.000Z
-Stopped at: Completed 03-09-PLAN.md
+Last session: 2026-11-21T21:38:23.000Z
+Stopped at: Completed 03-10-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`

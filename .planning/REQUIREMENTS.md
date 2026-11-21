@@ -64,9 +64,9 @@
   - Acceptance: benchmark on 1000 and 50 000 keys within 2×
 - [ ] **XPORT-07**: The sync-answer queue is bounded and deduplicated (R-11)
   - Acceptance: two listings with the same 1000 missing keys leave 1000 answers queued, not 2000
-- [ ] **XPORT-08**: The read loop does not silently die (R-14)
+- [x] **XPORT-08**: The read loop does not silently die (R-14)
   - Acceptance: the loop exits only on `net.ErrClosed`; any other read error is logged and counted, or the process exits; a node never keeps sending `Hello` while deaf
-- [ ] **XPORT-09**: Bind-address misuse is loud; duplicate instances fail; timers jitter (R-15)
+- [x] **XPORT-09**: Bind-address misuse is loud; duplicate instances fail; timers jitter (R-15)
   - Acceptance: a non-wildcard `--bind-addr` is rejected or produces an explanatory WARN; a second instance on the same address fails with "address already in use"; a node that received no `Hello` for `peer_timeout` after start WARNs
 - [ ] **XPORT-10**: Invalid datagram combinations are rejected and counted (R-16)
   - Acceptance: empty key, tombstone with data, unverified `Checksum` discarded with their own counters; envelope CRC coverage defined in docs
@@ -233,8 +233,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | XPORT-05 | Phase 3 | Complete |
 | XPORT-06 | Phase 3 | Pending |
 | XPORT-07 | Phase 3 | Pending |
-| XPORT-08 | Phase 3 | Pending |
-| XPORT-09 | Phase 3 | Pending |
+| XPORT-08 | Phase 3 | Complete |
+| XPORT-09 | Phase 3 | Complete |
 | XPORT-10 | Phase 3 | Pending |
 | XPORT-11 | Phase 3 | Pending |
 | XPORT-12 | Phase 3 | Complete |
