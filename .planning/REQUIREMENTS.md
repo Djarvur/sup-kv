@@ -54,23 +54,23 @@
   - Acceptance: two nodes on real Linux sockets with default buffers, 20 000 keys × 1 KiB, empty receiver — full convergence no later than 2 × `sync_interval` + N / `sync_response_rate`, 20 runs out of 20; test in CI; sending start chunk rotates across rounds; `SO_RCVBUF`/`SO_SNDBUF` set with actual values logged; the core gets a cheap key→version view instead of a store copy
 - [ ] **XPORT-02**: Event-loop cost does not grow with the unacked set; retransmits are paced with jitter (R-02)
   - Acceptance: (1) benchmark — iteration time at 10 and at 10 000 unacked records differs by at most 2×; (2) stand — a peer returning to a node holding 10 000 unacked 1 KiB records: set empty within N / `sync_response_rate` + 10 s, at most 3N retransmits; (3) open loop 1000 writes/s × 15 s over 10 000 distinct keys — at least 990 writes/s achieved, set empty 5 s after the end
-- [ ] **XPORT-03**: Key length and the `value_max_bytes` ceiling are validated (R-06)
+- [x] **XPORT-03**: Key length and the `value_max_bytes` ceiling are validated (R-06)
   - Acceptance: `Set` with a key longer than the documented limit returns `InvalidArgument`; a `value_max_bytes` under which the largest record does not fit a datagram exits with code 2 at startup; property: any accepted record encodes into a datagram ≤ 65 507 bytes
-- [ ] **XPORT-04**: Received versions are validated before touching the clock (R-07)
+- [x] **XPORT-04**: Received versions are validated before touching the clock (R-07)
   - Acceptance: a version with invalid `ver`/`var` fields or `l` beyond now + a configurable bound is discarded before any clock call, counted as its own class and WARN-logged; the same for versions inside `DataSync`
 - [x] **XPORT-05**: Socket buffers are configured and reported (R-08)
   - Acceptance: startup logs the actual sizes of both buffers; startup fails if the send buffer is smaller than the maximal datagram; values of 1, 20 and 60 KiB are delivered on Linux; the darwin ~9 KiB send limit is documented, not fixed (14.10)
-- [ ] **XPORT-06**: Handling of `DataRequest` and sync chunks does not depend on foreign records (R-09)
+- [x] **XPORT-06**: Handling of `DataRequest` and sync chunks does not depend on foreign records (R-09)
   - Acceptance: benchmark on 1000 and 50 000 keys within 2×
-- [ ] **XPORT-07**: The sync-answer queue is bounded and deduplicated (R-11)
+- [x] **XPORT-07**: The sync-answer queue is bounded and deduplicated (R-11)
   - Acceptance: two listings with the same 1000 missing keys leave 1000 answers queued, not 2000
 - [x] **XPORT-08**: The read loop does not silently die (R-14)
   - Acceptance: the loop exits only on `net.ErrClosed`; any other read error is logged and counted, or the process exits; a node never keeps sending `Hello` while deaf
 - [x] **XPORT-09**: Bind-address misuse is loud; duplicate instances fail; timers jitter (R-15)
   - Acceptance: a non-wildcard `--bind-addr` is rejected or produces an explanatory WARN; a second instance on the same address fails with "address already in use"; a node that received no `Hello` for `peer_timeout` after start WARNs
-- [ ] **XPORT-10**: Invalid datagram combinations are rejected and counted (R-16)
+- [x] **XPORT-10**: Invalid datagram combinations are rejected and counted (R-16)
   - Acceptance: empty key, tombstone with data, unverified `Checksum` discarded with their own counters; envelope CRC coverage defined in docs
-- [ ] **XPORT-11**: The store exposes a key→version view and point reads with tombstone visibility (Q-01; backs R-09, P-06, A-02)
+- [x] **XPORT-11**: The store exposes a key→version view and point reads with tombstone visibility (Q-01; backs R-09, P-06, A-02)
 - [x] **XPORT-12**: "Record acknowledged by peer X" travels as an `Outbox` result to the adapter and to waiters (Q-02; removes snapshot diffing and the 5 ms polling in `wait.go`, feeds A-01)
 - [x] **XPORT-13**: Dead code is removed (Q-09)
   - Acceptance: `lastLocal`/`cover` branch, exported `persist.Parse`, `ownHandle` field and `fsync_darwin.go` are gone or justified
@@ -228,15 +228,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-16 | Phase 2 | Complete |
 | XPORT-01 | Phase 3 | Pending |
 | XPORT-02 | Phase 3 | Pending |
-| XPORT-03 | Phase 3 | Pending |
-| XPORT-04 | Phase 3 | Pending |
+| XPORT-03 | Phase 3 | Complete |
+| XPORT-04 | Phase 3 | Complete |
 | XPORT-05 | Phase 3 | Complete |
-| XPORT-06 | Phase 3 | Pending |
-| XPORT-07 | Phase 3 | Pending |
+| XPORT-06 | Phase 3 | Complete |
+| XPORT-07 | Phase 3 | Complete |
 | XPORT-08 | Phase 3 | Complete |
 | XPORT-09 | Phase 3 | Complete |
-| XPORT-10 | Phase 3 | Pending |
-| XPORT-11 | Phase 3 | Pending |
+| XPORT-10 | Phase 3 | Complete |
+| XPORT-11 | Phase 3 | Complete |
 | XPORT-12 | Phase 3 | Complete |
 | XPORT-13 | Phase 3 | Complete |
 | PROTO-01 | Phase 4 | Pending |

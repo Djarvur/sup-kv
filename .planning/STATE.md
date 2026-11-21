@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-11-PLAN.md
-last_updated: "2026-11-21T22:05:57.000Z"
+stopped_at: 03-12-PLAN.md executed and halted on the red-gate flip — see 03-12-SUMMARY.md
+last_updated: "2026-11-21T22:34:00.000Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 3 plan 11 complete — dead-code removal
-state_head: 14c0cc6f740f0fd3671b25855cb54e54626227d5
+last_activity_desc: Phase 3 plan 12 executed — metrics and per-mutant runner landed; flip halted (R-01/R-02 burst red)
+state_head: bdf48f9bba282a21aa033147f3a2348213578423
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 32
+  completed_plans: 33
 ---
 
 # Project State
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 
 Phase: 3 (Transport) — EXECUTING
 Plan: 12 of 13
-Status: Ready to execute
-Last activity: 2026-11-22 — Completed 03-11 (dead-code removal)
+Status: HALTED — R-01 and R-02 burst red gates did not meet their bounds on this host; the rows were reverted per plan (see 03-12-SUMMARY.md). 03-13 is blocked pending a full-speed re-run or the scheduled job's evidence.
+Last activity: 2026-11-22 — Executed 03-12 (metrics + runner generalization; partial flip)
 
-Progress: [█████████░] 94%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
@@ -86,6 +86,7 @@ Progress: [█████████░] 94%
 | Phase 03 P09 | 602s | 3 tasks | 9 files |
 | Phase 03 P10 | 925s | 3 tasks | 8 files |
 | Phase 03 P11 | 649s | 2 tasks | 19 files |
+| Phase 03 P12 | 1382s | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -213,6 +214,10 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-11: `persist.Parse` was literally `Decode`'s error channel, so the codec table's Parse/Decode columns were merged into one `Decode` assertion per row — no expectation lost; `Open` already carried its own Decode closure.
 - [Phase 03]: 03-11: `fsops` now calls `os.File.Sync` directly; the darwin F_FULLFSYNC/EINTR/ENOTSUP path is the standard library's internal/poll `Fsync`, and S-PERS-03 records that as-built path. ADR 0010 was checked and left untouched (no fsync reference).
 - [Phase 03]: 03-11: The ownHandle inventory was file-counted, not call-counted — five listed files construct through `udprepl.New` and needed no edit, while `internal/app/repl/egress_internal_test.go`'s unqualified `New(...)` was found by `go vet`. Realized footprint: 16 modified + 3 deleted = 19 files.
+- [Phase 03]: 03-12: `Core.pacedSends` increments at the Outbox handoff in `drainListings`/`emitRecordSend`/`drainEgress`, never at enqueue (T-3-41); RPL-18's send-failure accounting stays Phase 7's OBSV-03, and `TestPaced_sendCounting` pins one emission against the whole enqueued listing round.
+- [Phase 03]: 03-12: The red-runner's tombstone mutant moved from `core.go`'s old `listingChunks` shape to `storage.Versions` (the 03-07 rewrite left `Versions` with no `Deleted` flag); across all 16 corpus seeds the control passes, `sync-without-tombstones` is killed only by 848612892191557850, and `periodic-sync-disabled` by the same three seeds.
+- [Phase 03]: 03-12: The flip halted at one of three rows — `TestRed_R02_unackedDrain` is green, while R-01 (7 453-7 734/8 000 keys at the 20.6 s bound) and R-02 burst (979.6-985.7 vs 990 writes/s) stayed red after three full runs and two standalone retries; the rows were reverted per the plan, and the failed-attempt evidence is committed beside the accepted runs.
+- [Phase 03]: 03-12: The bound misses are host-speed findings, not regressions — pre-fix evidence on this host measured 1 504/8 000 keys and 25.1 writes/s, the host runs `powersave` at ~1.64 GHz, and no system power setting was changed; 03-13 is blocked until a full-speed re-run or the scheduled job re-evaluates the two rows.
 
 ### Pending Todos
 
@@ -222,6 +227,7 @@ None yet.
 
 - Carried from v1.0: server-side branch-protection ruleset still deferred (org-plan 403); re-apply path recorded in docs/setup/branch-protection.md — revisit at the v1.0.1+/ruleset window noted in PROJECT.md
 - Carried from v1.0: macOS quickstart is option-b (Linux CI-verified + marked darwin loud-skip); v1.1 DOCS-09 must keep the pair working and DOCS-10 demotes darwin to development-only (14.10)
+- **03-12 halt:** `TestRed_R01_pacedSync20k` and `TestRed_R02_burst` remain red; the full red gate is green only with those rows reverted. Re-run `bash scripts/red-runner` on a host that sustains the documented throughput (this host's `powersave` governor holds ~1.64 GHz and misses by 3.5% and 0.5-1%). Do not start 03-13 until the two rows pass and 03-12 is re-summarized with the full three-row flip.
 
 ## Deferred Items
 
@@ -233,7 +239,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T22:05:57.000Z
-Stopped at: Completed 03-11-PLAN.md
-Resume file: None
-Next action: `/gsd:execute-phase 3` (03-12-PLAN.md)
+Last session: 2026-11-21T22:34:00.000Z
+Stopped at: 03-12-PLAN.md executed and halted on the red-gate flip (see .planning/phases/03-transport/03-12-SUMMARY.md)
+Resume file: .planning/phases/03-transport/03-13-PLAN.md
+Next action: re-run `bash scripts/red-runner` on a full-speed host; if R-01 and R-02 burst pass, flip those two rows and re-summarize 03-12 before `/gsd:execute-phase 3` (03-13)
