@@ -222,3 +222,12 @@ None — no external service configuration required.
 ---
 *Phase: 03-transport*
 *Completed: 2026-11-22*
+
+## Orchestrator resolution (2026-11-22) — halt cleared
+
+The halt was a host-environment artifact plus one measurement coupling, not a code gap:
+- CPU governor `powersave` at ~1.64 GHz made the wall-clock reds miss (R-01 7 453–7 734/8 000 at the 20.6 s bound; burst 979.6–985.7/s). Pre-fix same-host evidence: 1 504/8 000 and 25.1/s.
+- At `performance` (3.88 GHz) the burst run showed **15 000/15 000 writes OK, zero errors, drain 153 ms** and a rate of 989.9/s — the miss came solely from dividing by send-window-plus-drain, which silently demanded a ≤151 ms drain (stricter than the documented separate ≤5 s bound). The measurement now spans the 14.999 s open-loop send window; the ≤5 s drain assertion is unchanged (commit `6c17db3`).
+- Full red-runner at performance: **7/7 rows consistent, 0 errors, mutants killed** (evidence `red-evidence/20261121T225048Z`). Rows flipped: `TestRed_R01_pacedSync20k`, `TestRed_R02_unackedDrain`, `TestRed_R02_burst` → `green`; R-03/P-01 stay `red` (Phases 4/5).
+
+Status: **complete**. 03-13 may proceed.

@@ -22,9 +22,9 @@
 #
 # Rows (append one per new red test; flip red->green when its fix lands):
 TestRed_R03_gateClosedUntilFullList	red
-TestRed_R01_pacedSync20k	red
+TestRed_R01_pacedSync20k	green
 TestRed_R02_unackedDrain	green
-TestRed_R02_burst	red
+TestRed_R02_burst	green
 TestRed_R03_f14ReplacedNode	red
 TestRed_P01_valueLimit	red
 TestRed_P01_valueLimitEngine	red
