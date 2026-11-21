@@ -192,6 +192,10 @@ var families = []struct {
 	{"supkv_replication_peers", "gauge"},
 	{"supkv_replication_datagrams_sent_total", "counter"},
 	{"supkv_replication_datagrams_retransmitted_total", "counter"},
+	{"supkv_replication_datagrams_paced_total", "counter"},
+	{"supkv_replication_send_queue", "gauge"},
+	{"supkv_replication_egress_dropped_total", "counter"},
+	{"supkv_replication_read_errors_total", "counter"},
 	{"supkv_datagrams_discarded_total", "counter"},
 	{"supkv_merges_conflicts_total", "counter"},
 	{"supkv_clock_drift_warnings_total", "counter"},
@@ -216,6 +220,10 @@ func zeroSources() metrics.Sources {
 		Retransmitted: func() uint64 { return 0 },
 		MergeStats:    func() repl.MergeStats { return repl.MergeStats{} },
 		DumpStats:     func() persist.DumpStats { return persist.DumpStats{} },
+		Paced:         func() uint64 { return 0 },
+		SendQueue:     func() int { return 0 },
+		EgressDropped: func() uint64 { return 0 },
+		ReadErrors:    func() uint64 { return 0 },
 	}
 }
 
@@ -241,6 +249,10 @@ func TestMetrics_families(t *testing.T) {
 		"supkv_replication_unacked_oldest_age_seconds 0\n",
 		"supkv_replication_peers 0\n",
 		"supkv_replication_datagrams_retransmitted_total 0\n",
+		"supkv_replication_datagrams_paced_total 0\n",
+		"supkv_replication_send_queue 0\n",
+		"supkv_replication_egress_dropped_total 0\n",
+		"supkv_replication_read_errors_total 0\n",
 		"supkv_merges_conflicts_total 0\n",
 		"supkv_clock_drift_warnings_total 0\n",
 		"supkv_dumps_duration_seconds 0\n",
@@ -251,6 +263,11 @@ func TestMetrics_families(t *testing.T) {
 		"supkv_datagrams_discarded_total{class=\"bad_proto_version\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"own_broadcast\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"duplicate_node_id\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"empty_key\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"key_too_long\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"tombstone_with_data\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"bad_checksum\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"bad_version\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"hello\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"data\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"ack\"} 0\n",
@@ -259,6 +276,46 @@ func TestMetrics_families(t *testing.T) {
 	} {
 		if !strings.Contains(out, line) {
 			t.Errorf("zero-state output lacks the sample line %q:\n%s", line, out)
+		}
+	}
+}
+
+// TestMetrics_values pins the by-effect half of the metrics surface: Sources
+// carrying nonzero readings render those exact values — the four XPORT-07
+// emission families and the five wire-validation discard classes. A wiring
+// mistake that swapped two accessors, or a family still rendering a constant
+// zero, fails here even though TestMetrics_families (the zero-state contract)
+// would pass.
+func TestMetrics_values(t *testing.T) {
+	t.Parallel()
+	src := zeroSources()
+	src.Discards = func() repl.DiscardStats {
+		return repl.DiscardStats{
+			EmptyKey:          11,
+			KeyTooLong:        12,
+			TombstoneWithData: 13,
+			BadChecksum:       14,
+			BadVersion:        15,
+		}
+	}
+	src.Paced = func() uint64 { return 7001 }
+	src.SendQueue = func() int { return 23 }
+	src.EgressDropped = func() uint64 { return 3 }
+	src.ReadErrors = func() uint64 { return 5 }
+	out := renderTo(t, metrics.Snapshot(src))
+	for _, line := range []string{
+		"supkv_replication_datagrams_paced_total 7001\n",
+		"supkv_replication_send_queue 23\n",
+		"supkv_replication_egress_dropped_total 3\n",
+		"supkv_replication_read_errors_total 5\n",
+		"supkv_datagrams_discarded_total{class=\"empty_key\"} 11\n",
+		"supkv_datagrams_discarded_total{class=\"key_too_long\"} 12\n",
+		"supkv_datagrams_discarded_total{class=\"tombstone_with_data\"} 13\n",
+		"supkv_datagrams_discarded_total{class=\"bad_checksum\"} 14\n",
+		"supkv_datagrams_discarded_total{class=\"bad_version\"} 15\n",
+	} {
+		if !strings.Contains(out, line) {
+			t.Errorf("output lacks the by-effect sample line %q:\n%s", line, out)
 		}
 	}
 }

@@ -579,6 +579,75 @@ func TestSync_pacing(t *testing.T) {
 	}
 }
 
+// TestPaced_sendCounting pins the paced-send counter's event: it counts
+// datagrams handed to the Outbox by the pacers, never queue insertions
+// (T-3-41). The discriminator is the startup listing — the whole rotated
+// round is enqueued by one trigger, but only the first chunk has left — so
+// an enqueue-counting counter would already read the chunk count while the
+// correct one reads 1. Driving the round to completion proves the final
+// total equals the datagrams emitted, and one DataRequest reply proves the
+// egress pacer increments the same counter.
+func TestPaced_sendCounting(t *testing.T) {
+	t.Parallel()
+	const chunks = 12
+	now0 := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	for i := range chunks {
+		_, _, err := st.store.Set(oversizedKeyN(i), []byte("v"))
+		if err != nil {
+			t.Fatalf("store Set(oversized key %d): %v", i, err)
+		}
+	}
+
+	core.Advance(now0, &out)
+	emitted := len(dataSyncs(out.Drain()))
+	if emitted != 1 {
+		t.Fatalf("the startup Advance emitted %d listing chunks, want exactly 1", emitted)
+	}
+	if got, want := core.PacedSends(), uint64(1); got != want {
+		t.Fatalf("PacedSends() = %d after the startup Advance, want %d — the counter must count the one emission, not the %d enqueues", got, want, chunks)
+	}
+	if got, want := core.QueuedSends(), chunks-1; got != want {
+		t.Fatalf("QueuedSends() = %d after the startup Advance, want %d queued chunks", got, want)
+	}
+
+	now := now0
+	for emitted < chunks {
+		next := core.Advance(now, &out)
+		emitted += len(dataSyncs(out.Drain()))
+		if core.QueuedSends() == 0 {
+			break
+		}
+		if !next.After(now) {
+			t.Fatalf("Advance at t0+%v returned deadline %v, want strictly future", now.Sub(now0), next.Sub(now0))
+		}
+		now = next
+	}
+	if emitted != chunks {
+		t.Fatalf("the round emitted %d DataSync chunks, want %d", emitted, chunks)
+	}
+	if got := core.PacedSends(); got != uint64(emitted) {
+		t.Fatalf("PacedSends() = %d after the round, want %d — the number of datagrams emitted", got, emitted)
+	}
+
+	// The egress pacer shares the counter: a DataRequest for a held key
+	// enqueues one reply and the next Advance emits it.
+	_, _, err := st.store.Set(keyAlpha, []byte("v"))
+	if err != nil {
+		t.Fatalf("store Set(%q): %v", keyAlpha, err)
+	}
+	core.HandleDatagram(now, requestFrom(peerID1, keyAlpha), &out)
+	out.Drain()
+	core.Advance(now, &out)
+	if got := len(unicasts(out.Drain())); got != 1 {
+		t.Fatalf("the DataRequest Advance drained %d unicasts, want exactly 1", got)
+	}
+	if got, want := core.PacedSends(), uint64(emitted+1); got != want {
+		t.Fatalf("PacedSends() = %d after the egress reply, want %d — the egress pacer must share the emission counter", got, want)
+	}
+}
+
 // TestSync_rotation proves the broadcast round rotation (D-01, research
 // Pattern 1): round r starts at chunk r % len(chunks), so two rounds over a
 // 4-chunk store emit rotated start orders and the same multiset — a fixed

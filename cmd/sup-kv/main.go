@@ -613,6 +613,10 @@ func metricsSources(adapter *udprepl.Adapter, engine *persist.Engine) metrics.So
 		Retransmitted: adapter.Retransmissions,
 		MergeStats:    adapter.MergeStats,
 		DumpStats:     engine.DumpStats,
+		Paced:         adapter.PacedSends,
+		SendQueue:     adapter.SendQueue,
+		EgressDropped: adapter.EgressDropped,
+		ReadErrors:    adapter.ReadErrors,
 	}
 }
 

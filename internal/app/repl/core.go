@@ -569,6 +569,15 @@ type Core struct {
 	// (enqueueResponse arms it, the drain advances it).
 	nextSendAt time.Time
 
+	// pacedSends counts every datagram the three pacers — listing chunks,
+	// record sends and egress responses — hand to the Outbox, the emission
+	// volume the metrics surface publishes. It counts EMISSIONS, never
+	// enqueues: a queue insertion is not a send (T-3-41), and RPL-18's
+	// broader send-failure accounting stays Phase 7's (OBSV-03), not
+	// compounded here. Driver-goroutine-only mutation behind the copying
+	// accessor, the Discards precedent.
+	pacedSends uint64
+
 	// syncResponseInterval is the shared pacer spacing — the egress queue's
 	// per-response and the listing and record pacers' base — derived once
 	// at construction by the pinned deterministic integer arithmetic:
@@ -1201,6 +1210,7 @@ func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
 			continue
 		}
 		out.Unicast(q.id.handle, msg)
+		c.pacedSends++
 		if now.After(c.nextSendAt) {
 			c.nextSendAt = now
 		}
@@ -1426,6 +1436,7 @@ func (c *Core) drainListings(now time.Time, out *port.Outbox) {
 		} else {
 			out.Unicast(dst, port.DataSync{Entries: chunk})
 		}
+		c.pacedSends++
 		c.listingCount--
 		if len(q.entries) == 0 {
 			delete(c.listingByDst, dst)
@@ -1706,6 +1717,7 @@ func (c *Core) emitRecordSend(now time.Time, rs recordSend, out *port.Outbox) bo
 		return false
 	}
 	out.Broadcast(port.DataReplication{Key: rs.pk.key, Record: rec})
+	c.pacedSends++
 	if rs.retry {
 		c.retransmitted++
 		entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
@@ -1899,6 +1911,17 @@ func (c *Core) QueuedSends() int {
 // (T-3-21).
 func (c *Core) EgressDropped() uint64 {
 	return c.egressDropped
+}
+
+// PacedSends returns the number of datagrams the listing, record and egress
+// pacers have handed to the Outbox — the emission-volume seam the metrics
+// surface publishes as supkv_replication_datagrams_paced_total. The count is
+// taken at the Outbox handoff, never at enqueue (T-3-41): a queued datagram
+// has not been sent, so an enqueue-counting counter would publish the
+// RPL-18 lie this plan deliberately does not compound. A value read the
+// production adapter mirrors post-event like the discard counters.
+func (c *Core) PacedSends() uint64 {
+	return c.pacedSends
 }
 
 // PeerCount returns the number of known peers — the O(1) peer-table gauge

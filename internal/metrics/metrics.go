@@ -186,6 +186,14 @@ type Sources struct {
 	Retransmitted func() uint64
 	MergeStats    func() repl.MergeStats
 	DumpStats     func() persist.DumpStats
+
+	// The XPORT-07 emission set (03-12): the paced-datagram counter, the
+	// total send-queue gauge, the egress overflow drops and the receive-path
+	// error count — adapter accessors over the core's post-event mirrors.
+	Paced         func() uint64
+	SendQueue     func() int
+	EgressDropped func() uint64
+	ReadErrors    func() uint64
 }
 
 // Snapshot reads every source once and returns the whole family table: the
@@ -197,6 +205,7 @@ type Sources struct {
 // still publishes its full surface.
 func Snapshot(s Sources) []Family {
 	families := replicationFamilies(s.Unacked(), s.KnownPeers(), s.Retransmitted(), s.MergeStats())
+	families = append(families, pacingFamilies(s.Paced(), s.SendQueue(), s.EgressDropped(), s.ReadErrors())...)
 	families = append(families, trafficFamilies(s.Discards(), s.Sent())...)
 	families = append(families, dumpFamilies(s.DumpStats())...)
 	return append(families, runtimeFamilies()...)
@@ -257,6 +266,43 @@ func replicationFamilies(
 	}
 }
 
+// pacingFamilies builds the XPORT-07 emission families: the paced-datagram
+// counter (counted at the Outbox handoff, never at enqueue), the total
+// send-queue gauge (all three core queues), the egress overflow drops and the
+// receive-path errors — one reading of each seam per scrape.
+func pacingFamilies(paced uint64, sendQueue int, egressDropped, readErrors uint64) []Family {
+	return []Family{
+		{
+			Name: "supkv_replication_datagrams_paced_total", Type: Counter,
+			Help: "Replication datagrams emitted by the listing, record and egress pacers.",
+			Samples: []Sample{
+				{Value: float64(paced)},
+			},
+		},
+		{
+			Name: "supkv_replication_send_queue", Type: Gauge,
+			Help: "Replication datagrams waiting to emit across every core queue.",
+			Samples: []Sample{
+				{Value: float64(sendQueue)},
+			},
+		},
+		{
+			Name: "supkv_replication_egress_dropped_total", Type: Counter,
+			Help: "Egress responses dropped by the queue cap.",
+			Samples: []Sample{
+				{Value: float64(egressDropped)},
+			},
+		},
+		{
+			Name: "supkv_replication_read_errors_total", Type: Counter,
+			Help: "Receive-path errors the read loop survived.",
+			Samples: []Sample{
+				{Value: float64(readErrors)},
+			},
+		},
+	}
+}
+
 // trafficFamilies builds the two labeled families — outbound datagrams by
 // message type and inbound discards by classification (the OBS-02 surface in
 // full) — and always publishes the whole label vocabulary: a zero count is
@@ -283,6 +329,11 @@ func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family
 				{Labels: []Label{{Name: labelClass, Value: "bad_proto_version"}}, Value: float64(disc.BadProtoVersion)},
 				{Labels: []Label{{Name: labelClass, Value: "own_broadcast"}}, Value: float64(disc.OwnEcho)},
 				{Labels: []Label{{Name: labelClass, Value: "duplicate_node_id"}}, Value: float64(disc.DuplicateNodeID)},
+				{Labels: []Label{{Name: labelClass, Value: "empty_key"}}, Value: float64(disc.EmptyKey)},
+				{Labels: []Label{{Name: labelClass, Value: "key_too_long"}}, Value: float64(disc.KeyTooLong)},
+				{Labels: []Label{{Name: labelClass, Value: "tombstone_with_data"}}, Value: float64(disc.TombstoneWithData)},
+				{Labels: []Label{{Name: labelClass, Value: "bad_checksum"}}, Value: float64(disc.BadChecksum)},
+				{Labels: []Label{{Name: labelClass, Value: "bad_version"}}, Value: float64(disc.BadVersion)},
 			},
 		},
 	}

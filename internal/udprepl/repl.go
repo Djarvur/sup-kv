@@ -299,6 +299,14 @@ type Adapter struct {
 	sentDataRequest   atomic.Uint64
 	sentSync          atomic.Uint64
 
+	// The XPORT-07 emission set: the total datagram-queue depth (listing
+	// chunks, record sends and egress responses), the egress overflow drops
+	// and the paced emission count — core gauges/counters mirrored after
+	// every loop event like the retransmissions counter.
+	sendQueue     atomic.Int64
+	egressDropped atomic.Uint64
+	pacedSends    atomic.Uint64
+
 	// syncArrived mirrors the core's first-DataSync-received flag (the
 	// startup gate's sync half, API-04).
 	syncArrived atomic.Bool
@@ -806,6 +814,29 @@ func (a *Adapter) Retransmissions() uint64 {
 	return a.retransmitted.Load()
 }
 
+// PacedSends returns the number of datagrams the core's three pacers
+// (listing chunks, record sends and egress responses) have handed to the
+// Outbox, mirrored after the latest event-loop iteration — emissions, never
+// enqueues (T-3-41), safe from any goroutine.
+func (a *Adapter) PacedSends() uint64 {
+	return a.pacedSends.Load()
+}
+
+// SendQueue returns the total datagram-queue depth — listing chunks, record
+// sends and egress responses waiting to emit — mirrored from the core after
+// the latest event-loop iteration (RESEARCH Pitfall 23's total-queue gauge)
+// — safe from any goroutine.
+func (a *Adapter) SendQueue() int {
+	return int(a.sendQueue.Load())
+}
+
+// EgressDropped returns the egress-queue overflow drops mirrored from the
+// core after the latest event-loop iteration (XPORT-07's drop-policy seam) —
+// safe from any goroutine.
+func (a *Adapter) EgressDropped() uint64 {
+	return a.egressDropped.Load()
+}
+
 // SentByType counts the outbound datagrams this adapter has encoded and
 // handed to its socket, by message kind (the OBS-01 replication-topology
 // seam) — the vocabulary mirrors the wire Body oneof.
@@ -965,10 +996,11 @@ func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) {
 }
 
 // mirrorStats copies the core's discard counters, known-peer count, the
-// first-sync flag and the OBS-01 gauge set — the pending-set gauge, the
-// remote-merge counters and the retransmissions counter — into the atomics
-// after each loop iteration (D-04): cross-goroutine readers — the smoke
-// test, later observability — never touch core state.
+// first-sync flag, the OBS-01 gauge set — the pending-set gauge, the
+// remote-merge counters and the retransmissions counter — and the XPORT-07
+// emission set (total queue depth, egress drops, paced sends) into the
+// atomics after each loop iteration (D-04): cross-goroutine readers — the
+// smoke test, later observability — never touch core state.
 func (a *Adapter) mirrorStats() {
 	d := a.core.Discards()
 	a.badCRC.Store(d.BadCRC)
@@ -991,6 +1023,9 @@ func (a *Adapter) mirrorStats() {
 	a.mergeConflicts.Store(m.Conflicts)
 	a.mergeDriftWarning.Store(m.DriftWarnings)
 	a.retransmitted.Store(a.core.Retransmissions())
+	a.sendQueue.Store(int64(a.core.QueuedSends()))
+	a.egressDropped.Store(a.core.EgressDropped())
+	a.pacedSends.Store(a.core.PacedSends())
 	a.syncArrived.Store(a.core.SyncArrived())
 }
 
