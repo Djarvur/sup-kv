@@ -72,7 +72,7 @@ Plans:
   3. The simulator's blind spots are closed: per-node incoming-datagram budgets, size checks by the real encoder, record announcement after a virtual dump delay, restart with state, and deletions; `TestChaos_convergence` is stable across 10 000 seeds (fixed corpus plus fresh seeds), and convergence bounds hold under combined failures and partitions longer than `peer_timeout`
   4. The seams are pinned by tests, not conventions: a filesystem seam under `persistfile` with recording and failing fakes asserting write → fsync → rotate → rename → dir-fsync and a failure at each step; `persist.Open` clock seeding proven on the real composition path; a corrupted-datagram table plus `FuzzDecode`/`FuzzDumpDecode` with an in-repo corpus; deletion replication proven at codec, simulator, two-process and dump level; Watch cut/backpressure branches, metrics-by-observed-effect, per-decision tests referencing 14.x by name, and property shrinking over a small `(l, c, node)` space
   5. The heavy machinery runs on a schedule: a scheduled CI workflow (1000 seeds, `-shuffle=on -count=3`, `-bench . -benchtime=1x`), a nightly real-socket run at 10 000 keys × 1 KiB with the review's section-15 scenarios; benchmarks report p50/p99 without self-pacing on the real `persistfile`; `go test -race -count=20` over `cmd/sup-kv`, `udprepl` and affected packages green three times in a row (flakiness classes that require Phase 3-5 fixes carry their red test forward)
-**Plans**: 15/17 plans executed
+**Plans**: 16/17 plans executed
 
 Plans:
 **Wave 1**
@@ -97,7 +97,7 @@ Plans:
 - [x] 02-17-PLAN.md — FuzzDecode/FuzzDumpDecode with committed in-repo corpora (D-08, TEST-08; moved from 02-07)
 
 **Wave 4** *(blocked on Wave 3)*
-- [ ] 02-13-PLAN.md — TEST-09 combined/long-partition scenario tests + red-runner overlay mutant stage (D-02, TEST-01, TEST-09)
+- [x] 02-13-PLAN.md — TEST-09 combined/long-partition scenario tests + red-runner overlay mutant stage (D-02, TEST-01, TEST-09)
 
 **Wave 5** *(blocked on Wave 4)*
 - [ ] 02-11-PLAN.md — Nightly documented-scale stand wiring (F9 10k × 1 KiB selection) + scheduled.yml six-job nightly set with parameterized 10k-seed dispatch + ci.yml tightening (D-09, TEST-16, TEST-06 nightly 10k × 1 KiB, TEST-08 deep fuzz, TEST-11 soak)
@@ -193,7 +193,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
-| 2. Engine — HLC Versioning and LWW Store | v1.0 | 15/17 | In Progress |  |
+| 2. Engine — HLC Versioning and LWW Store | v1.0 | 16/17 | In Progress |  |
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 2/2 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 6/6 | Complete | 2026-11-07 |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |

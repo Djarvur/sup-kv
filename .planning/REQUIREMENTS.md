@@ -16,7 +16,7 @@
 
 ### Test Harness
 
-- [ ] **TEST-01**: `TestChaos_convergence` is stable and mutation-sensitive (T-01)
+- [x] **TEST-01**: `TestChaos_convergence` is stable and mutation-sensitive (T-01)
   - Acceptance: 0 failures on 10 000 seeds; fixed seed corpus plus fresh seeds each run; test fails under "sync without tombstones" and "periodic sync disabled" mutants
 - [x] **TEST-02**: Deletion replication is proven at every level (T-02)
   - Acceptance: codec round-trip of every message with `Deleted: true`; `Cluster.Delete` in the simulator and deletions in chaos; two processes: `Delete` on A → `NotFound` on B and `"deleted":true` in B's dump; a node down during the delete learns it after start
@@ -32,7 +32,7 @@
   - Acceptance: `Open` with injected time earlier than the dump max — the first local write dominates all loaded versions
 - [ ] **TEST-08**: Datagram decoder has negative tests and fuzzing (T-08)
   - Acceptance: table of corrupted datagrams with the expected discard class; `FuzzDecode` and `FuzzDumpDecode` with an in-repo corpus run on a schedule
-- [ ] **TEST-09**: Convergence bounds hold under combined failures and long partitions (T-09)
+- [x] **TEST-09**: Convergence bounds hold under combined failures and long partitions (T-09)
   - Acceptance: three-node test with a partition longer than `peer_timeout` — convergence not before the first post-heal sync and not later than the bound; the bound is either documented with its no-fresh-loss qualifier or recalculated
 - [x] **TEST-10**: Benchmarks measure what they claim (T-10)
   - Acceptance: no benchmark paces itself; real `persistfile` and default parameters; p50 and p99 reported; smoke run `-benchtime=1x` in CI
@@ -210,7 +210,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | SPEC-01 | Phase 1 | Complete |
 | SPEC-02 | Phase 1 | Complete |
-| TEST-01 | Phase 2 | Pending |
+| TEST-01 | Phase 2 | Complete |
 | TEST-02 | Phase 2 | Complete |
 | TEST-03 | Phase 2 | Complete |
 | TEST-04 | Phase 2 | Complete |
@@ -218,7 +218,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-06 | Phase 2 | Pending |
 | TEST-07 | Phase 2 | Complete |
 | TEST-08 | Phase 2 | Pending |
-| TEST-09 | Phase 2 | Pending |
+| TEST-09 | Phase 2 | Complete |
 | TEST-10 | Phase 2 | Complete |
 | TEST-11 | Phase 2 | Pending |
 | TEST-12 | Phase 2 | Complete |

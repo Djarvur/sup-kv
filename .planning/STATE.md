@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-17-PLAN.md
-last_updated: "2026-11-21T13:01:18.314Z"
+stopped_at: Completed 02-13-PLAN.md
+last_updated: "2026-11-21T13:44:58.158Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: efe7d3f599b8dec5c218441a7ec5368a3f37ea20
+state_head: 96409e355fbae862713d7bdd4e4defd0066b3249
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 19
+  completed_plans: 20
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 16 of 17
+Plan: 17 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -72,6 +72,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P09 | 900 | 3 tasks | 10 files |
 | Phase 02 P12 | 720s | 2 tasks | 8 files |
 | Phase 02 P17 | 8min | 1 tasks | 22 files |
+| Phase 02 P13 | 40min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -136,6 +137,10 @@ Recent decisions affecting current work:
 - [Phase 02]: The P-01 process test asserts the dump still holds the record between Set (which confirms the covering dump, PERS-04) and SIGKILL/restart, so a red verdict names the loader's 61 440-byte decode bound rather than leaving the writer or the kill suspect
 - [Phase 02]: Fuzz targets choose external test packages over the existing test-binary decode seam: FuzzDecode drives decode() through DecodeDatagramForTest, FuzzDumpDecode through persist.Decode, adding no testpackage exemption and no production change
 - [Phase 02]: Fuzz seed builders are plain error-returning functions so the fuzz targets and the committed corpus files share one payload list; corruption fixtures carry construction guards (truncation still fails to unmarshal, base64 flip changes decoded bytes) to prevent class decay
+- [Phase 02]: long-partition subtests straddle the REPL-06 at-or-after eviction boundary at peer_timeout ± one hello round: a partition of exactly peer_timeout evicts at its heal instant, so the plan's 'exactly = not yet evicted' assumption is inverted by the code
+- [Phase 02]: periodic-sync-disabled mutant advances nextSync then returns on the timer path: a bare return leaves the deadline in the past and livelocks the scheduler, so the runner also rejects go-test timeouts as non-kills
+- [Phase 02]: mutant kill seeds are per-mutant verified corpus lists (sync-without-tombstones: 1 seed; periodic-sync-disabled: 3 seeds) because an exhaustive 16-seed scan showed different sensitivity, and every probed seed must fail
+- [Phase 02]: TEST-09 no-fresh-loss qualifier is structural: all writes and fault windows end at the heal (loss via deterministic directed windows, only duplication continues), and every pre-heal record is asserted present byte-equal on every node
 
 ### Pending Todos
 
@@ -156,7 +161,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T13:01:18.154Z
-Stopped at: Completed 02-17-PLAN.md
+Last session: 2026-11-21T13:44:57.930Z
+Stopped at: Completed 02-13-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
