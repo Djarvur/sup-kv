@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-06-PLAN.md
-last_updated: "2026-11-21T19:55:28.499Z"
+stopped_at: Completed 03-07-PLAN.md
+last_updated: "2026-11-21T20:30:04.000Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 3 execution started
-state_head: 06dbcd679becd0bb938678908f676651395439f6
+state_head: d550a6255eb545d0ebda003c4cad97de50f462af
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 27
+  completed_plans: 28
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 7 of 13
+Plan: 8 of 13
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 3 execution started
 
@@ -81,6 +81,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P04 | 10min | 2 tasks | 9 files |
 | Phase 03 P05 | 15min | 3 tasks | 4 files |
 | Phase 03 P06 | 1252s | 3 tasks | 17 files |
+| Phase 03 P07 | 20min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -179,6 +180,14 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-06: Eviction and supersession resolve an honest false; WaitSetEmpty is emitted only on the last-waiter transition during eviction, so an already-suspended entry is not re-announced.
 - [Phase 03]: 03-06: Tasks 2 and 3 share commit c1da11e because the LocalNotify/WaitReplicated signature change and PendingCopy removal are one compile unit; splitting would leave go build ./... broken.
 - [Phase 03]: 03-06: Tracker tests write the store record before notifying (the production author sequence): a notification for an unstored record is removed by the retransmit scan and would make the eviction wait time out.
+- [Phase 03]: 03-07: Three pacers share the normalized syncResponseInterval with independent slots; the egress spacing stays exact while the listing and record spacing carry the ±10% deterministic jitter.
+- [Phase 03]: 03-07: A destination is in flight exactly while its listing FIFO exists; a busy trigger advances nextSync and enqueues nothing, so the short-interval stand can never livelock.
+- [Phase 03]: 03-07: The discovery flush and retransmits share one (key, version)-deduplicated queue; the author's first broadcast stays immediate, and the ladder is re-armed only at emission.
+- [Phase 03]: 03-07: A flush send whose record is absent leaves the entry tracked (only the retry path deletes stale entries), preserving the 03-05/03-06 synthetic-notify contract.
+- [Phase 03]: 03-07: Jitter is FNV-1a(runID, counter, salt): positive-only on Hello/sync deadlines, ±10% on listing/record spacing, and never on a ladder deadline.
+- [Phase 03]: 03-07: The egress identity is (handle, kind, key); the version stays out and DataReplication answers re-read the store at drain, so the queue never pins Data.
+- [Phase 03]: 03-07: The egress cap and its dedupe map mutate in one function (dropOldestEgress); QueuedResponses keeps its egress meaning while QueuedSends is the total-queue seam.
+- [Phase 03]: 03-07: The empty-disk scenario bound adds the sync-jitter envelope, and partitionDays asserts conflicts ≥ sharedKeys because a paced flush can supersede the loser before it crosses the wire.
 
 ### Pending Todos
 
@@ -199,7 +208,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T19:55:28.322Z
-Stopped at: Completed 03-06-PLAN.md
+Last session: 2026-11-21T20:27:29.000Z
+Stopped at: Completed 03-07-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
