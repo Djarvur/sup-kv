@@ -874,3 +874,160 @@ func TestRetransmit_heapInvariant(t *testing.T) {
 	assertRetryBeat(2300*time.Millisecond, []string{keyAlpha}, 2700*time.Millisecond)
 	assertRetryBeat(2700*time.Millisecond, []string{keyAlpha}, 3500*time.Millisecond)
 }
+
+// TestOutboxResults_drainResets pins the result stream's two contracts
+// (XPORT-12): DrainResults returns every result in emission order and resets
+// the stream, and the message stream is independent — draining one never
+// touches the other. An undrained result stream is the growth trap the
+// production Run loop's per-event drain exists to prevent.
+func TestOutboxResults_drainResets(t *testing.T) {
+	t.Parallel()
+
+	ver := version.PackVersion(testNowMs, 0, localID)
+	var out port.Outbox
+	out.Broadcast(port.Hello{})
+	out.Ack("k", ver, 7)
+	out.Superseded("k", ver)
+	out.Drained("k", ver)
+	out.WaitSetEmpty("k", ver)
+
+	got := out.DrainResults()
+	if len(got) != 4 {
+		t.Fatalf("DrainResults returned %d results, want 4", len(got))
+	}
+	wantKinds := []port.ResultKind{port.ResultAck, port.ResultSuperseded, port.ResultDrained, port.ResultWaitSetEmpty}
+	for i, want := range wantKinds {
+		if got[i].Kind != want {
+			t.Fatalf("result %d kind = %v, want %v (emission order preserved)", i, got[i].Kind, want)
+		}
+		if got[i].Key != "k" || got[i].Version != ver {
+			t.Fatalf("result %d identity = (%q, %x), want (\"k\", %x)", i, got[i].Key, got[i].Version[:], ver[:])
+		}
+	}
+	if got[0].Peer != 7 {
+		t.Fatalf("Ack result peer = %d, want 7", got[0].Peer)
+	}
+	if again := out.DrainResults(); len(again) != 0 {
+		t.Fatalf("second DrainResults returned %d results, want the stream reset", len(again))
+	}
+
+	// The message stream is independent: DrainResults did not reset it.
+	if drained := out.Drain(); len(drained) != 1 {
+		t.Fatalf("Drain after DrainResults returned %d messages, want the one broadcast", len(drained))
+	}
+	out.Ack("other", ver, 1)
+	if drained := out.Drain(); len(drained) != 0 {
+		t.Fatalf("Drain after Drain returned %d messages, want none", len(drained))
+	}
+	if left := out.DrainResults(); len(left) != 1 || left[0].Key != "other" {
+		t.Fatalf("Drain touched the result stream: DrainResults = %+v, want the one pending result", left)
+	}
+}
+
+// TestOutboxResults_resolutionEvents drives the four emission sites through
+// the core (XPORT-12): a matching Ack (stranger included) emits ResultAck,
+// the wait-set-emptying Ack additionally emits ResultDrained with the
+// TRACKED version, a strictly greater remote apply emits ResultSuperseded
+// with the tracked version, and evicting the last waiter emits
+// ResultWaitSetEmpty while the entry stays suspended.
+func TestOutboxResults_resolutionEvents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ack_and_drained", func(t *testing.T) {
+		t.Parallel()
+		core, st := newTestCore()
+		var out port.Outbox
+		core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+		out.Drain()
+		ver := localWrite(t, core, st, at(0), keyAlpha, "alpha")
+
+		core.HandleDatagram(at(10*time.Millisecond), ackFrom(peerID1, keyAlpha, ver), &out)
+		out.Drain()
+		results := out.DrainResults()
+		if len(results) != 2 {
+			t.Fatalf("drain results = %+v, want exactly Ack then Drained", results)
+		}
+		if results[0].Kind != port.ResultAck || results[0].Peer != peerID1 || results[0].Version != ver {
+			t.Fatalf("first result = %+v, want the peer's Ack for the tracked version", results[0])
+		}
+		if results[1].Kind != port.ResultDrained || results[1].Version != ver {
+			t.Fatalf("second result = %+v, want Drained for the tracked version", results[1])
+		}
+	})
+
+	t.Run("stranger_ack_counted", func(t *testing.T) {
+		t.Parallel()
+		core, st := newTestCore()
+		var out port.Outbox
+		core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+		out.Drain()
+		ver := localWrite(t, core, st, at(0), keyAlpha, "alpha")
+
+		// A node outside the wait-set still produces the counting Ack
+		// (WR-01); the wait-set remains non-empty, so no Drained follows.
+		core.HandleDatagram(at(10*time.Millisecond), ackFrom(strangerID, keyAlpha, ver), &out)
+		out.Drain()
+		results := out.DrainResults()
+		if len(results) != 1 || results[0].Kind != port.ResultAck || results[0].Peer != strangerID {
+			t.Fatalf("drain results = %+v, want exactly the stranger's Ack", results)
+		}
+		if got := core.PendingSnapshot()[keyAlpha].WaitingOn; !slices.Equal(got, []uint16{peerID1}) {
+			t.Fatalf("the stranger Ack moved the wait-set to %v, want [%d]", got, peerID1)
+		}
+	})
+
+	t.Run("remote_superseded", func(t *testing.T) {
+		t.Parallel()
+		core, st := newTestCore()
+		var out port.Outbox
+		core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+		out.Drain()
+		ver := localWrite(t, core, st, at(0), keyAlpha, "alpha")
+
+		core.HandleDatagram(at(10*time.Millisecond), replFrom(peerID2, keyAlpha, remoteRecord(testNowMs+1000, peerID2, "newer")), &out)
+		out.Drain()
+		results := out.DrainResults()
+		if len(results) != 1 || results[0].Kind != port.ResultSuperseded || results[0].Version != ver {
+			t.Fatalf("drain results = %+v, want Superseded for the tracked version %x", results, ver[:])
+		}
+		if _, tracked := core.PendingSnapshot()[keyAlpha]; tracked {
+			t.Fatal("the superseded entry is still tracked")
+		}
+	})
+
+	t.Run("local_superseded", func(t *testing.T) {
+		t.Parallel()
+		core, st := newTestCore()
+		var out port.Outbox
+		core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+		out.Drain()
+		ver := localWrite(t, core, st, at(0), keyAlpha, "alpha")
+
+		newer := storage.Record{Version: version.PackVersion(testNowMs+1000, 0, localID), Data: []byte("newer")}
+		core.NotifyLocalWrite(at(10*time.Millisecond), keyAlpha, newer, &out)
+		out.Drain()
+		results := out.DrainResults()
+		if len(results) != 1 || results[0].Kind != port.ResultSuperseded || results[0].Version != ver {
+			t.Fatalf("drain results = %+v, want Superseded for the older tracked version %x", results, ver[:])
+		}
+	})
+
+	t.Run("eviction_wait_set_empty", func(t *testing.T) {
+		t.Parallel()
+		core, st := newTestCore()
+		var out port.Outbox
+		core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+		out.Drain()
+		ver := localWrite(t, core, st, at(0), keyAlpha, "alpha")
+
+		core.Advance(at(5*time.Second), &out) // peer_timeout eviction at the at-or-after boundary.
+		out.Drain()
+		results := out.DrainResults()
+		if len(results) != 1 || results[0].Kind != port.ResultWaitSetEmpty || results[0].Version != ver {
+			t.Fatalf("drain results = %+v, want WaitSetEmpty for the tracked version %x", results, ver[:])
+		}
+		if _, tracked := core.PendingSnapshot()[keyAlpha]; !tracked {
+			t.Fatal("eviction dropped the suspended entry, want it retained")
+		}
+	})
+}

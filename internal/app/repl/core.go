@@ -536,7 +536,7 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 	case port.DataReplication:
 		c.applyRemote(in.Source, msg, out)
 	case port.Ack:
-		c.handleAck(in.NodeID, msg)
+		c.handleAck(in.NodeID, msg, out)
 	case port.DataRequest:
 		c.handleDataRequest(now, in.Source, msg.Key)
 	case port.DataSync:
@@ -660,9 +660,12 @@ func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Ou
 	// key fulfills the tracking promise by winning — the same byte order
 	// storage.Merge joins by; an equal version (a redelivery) leaves
 	// tracking unchanged (REPL-02). Every older tracked version under the
-	// key leaves, because the record they tracked no longer exists.
+	// key leaves, because the record they tracked no longer exists, and
+	// each emits its Superseded result with the TRACKED version — the
+	// displaced write's resolution is an honest false (XPORT-12).
 	for pk := range c.pending {
 		if pk.key == msg.Key && msg.Record.Version.Compare(pk.version) > 0 {
+			out.Superseded(pk.key, pk.version)
 			c.removePending(pk)
 		}
 	}
@@ -686,12 +689,16 @@ func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Ou
 // may appear in acked without ever having been waited on, and the acked
 // length can exceed the write-time peer snapshot; the D-08 report keeps
 // its peer set fixed at write time (D-10) by reading the count clamped to
-// the write-time total (grpcapi's waitForDrain). The empty-table guard is
-// load-bearing: an entry whose every waiter was evicted stays retained in
-// suspension, and an Ack can only drain when peers actually exist. The
-// peer is identified by the datagram's NodeID alone; nothing here writes
-// the peer table.
-func (c *Core) handleAck(peerID uint16, ack port.Ack) {
+// the write-time total (grpcapi's waitForReplication). The empty-table
+// guard is load-bearing: an entry whose every waiter was evicted stays
+// retained in suspension, and an Ack can only drain when peers actually
+// exist. The peer is identified by the datagram's NodeID alone; nothing
+// here writes the peer table. Every matching Ack emits an [port.Result] —
+// including a stranger's, the count the waiter tracker needs — and a
+// drain emits the Drained result at the deletion point (XPORT-12): the
+// result stream is how a waiter learns what this call observed, without a
+// callback entering the core.
+func (c *Core) handleAck(peerID uint16, ack port.Ack, out *port.Outbox) {
 	pk := pendingKey{key: ack.Key, version: ack.Version}
 	entry, ok := c.pending[pk]
 	if !ok {
@@ -700,7 +707,9 @@ func (c *Core) handleAck(peerID uint16, ack port.Ack) {
 	delete(entry.waitSet, peerID)
 	c.ledgerRemove(peerID, pk)
 	entry.acked = ackedInsert(entry.acked, peerID)
+	out.Ack(pk.key, pk.version, peerID)
 	if len(entry.waitSet) == 0 && len(c.peers) > 0 {
+		out.Drained(pk.key, pk.version)
 		c.removePending(pk)
 		return
 	}
@@ -826,7 +835,7 @@ func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
 // the newer entry. Replication progress is never a precondition of the write
 // path: this enqueues-and-returns (D-05).
 func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
-	c.removeSupersededLocal(key, rec.Version)
+	c.removeSupersededLocal(key, rec.Version, out)
 	pk := pendingKey{key: key, version: rec.Version}
 	_, tracked := c.pending[pk]
 	if !tracked {
@@ -876,7 +885,7 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 		c.nextHello = now.Add(c.cfg.HelloInterval)
 	}
 	c.syncListing(now, out)
-	c.evictPeers(now)
+	c.evictPeers(now, out)
 	c.scanRetransmit(now, out)
 	c.drainEgress(now, out)
 	return c.nextDeadline(now)
@@ -976,8 +985,11 @@ func chunkSyncEntries(entries []port.SyncEntry, budget int) [][]port.SyncEntry {
 // (handleHello), so this scan is exactly the gone-after-peer_timeout
 // reading. An evicted peer is re-learned by its next Hello exactly like a
 // first Hello — there is no blacklist state of any kind, and the table
-// holds any number of peers (N nodes from day one).
-func (c *Core) evictPeers(now time.Time) {
+// holds any number of peers (N nodes from day one). Removing a tracked
+// entry's LAST waiter emits the WaitSetEmpty result with the tracked
+// version — the entry stays suspended, and a waiter learns the honest
+// false (an eviction is never an Ack, XPORT-12).
+func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 	expired := make([]uint16, 0, len(c.peers))
 	for id := range c.peers {
 		if !now.Before(c.peers[id].lastHello.Add(c.cfg.PeerTimeout)) {
@@ -990,7 +1002,18 @@ func (c *Core) evictPeers(now time.Time) {
 		// entries lose it as a waiter. Entries stay tracked (suspension),
 		// and acked stays untouched (an eviction is never an Ack).
 		for pk := range c.peerUnacked[id] {
-			delete(c.pending[pk].waitSet, id)
+			entry, ok := c.pending[pk]
+			if !ok {
+				continue
+			}
+			if _, waiting := entry.waitSet[id]; !waiting {
+				continue
+			}
+			delete(entry.waitSet, id)
+			if len(entry.waitSet) == 0 {
+				out.WaitSetEmpty(pk.key, pk.version)
+			}
+			c.pending[pk] = entry
 		}
 		delete(c.peerUnacked, id)
 	}
@@ -1310,10 +1333,13 @@ func (c *Core) removePending(pk pendingKey) {
 // removeSupersededLocal deletes every tracked pair under key whose version is
 // strictly smaller than newer — the local-write supersession rule
 // (REPL-02). An equal version is not smaller, so an equal-version duplicate
-// notification leaves tracking untouched.
-func (c *Core) removeSupersededLocal(key string, newer version.RecordVersion) {
+// notification leaves tracking untouched. Each displaced pair emits its
+// Superseded result with the TRACKED (older) version — a waiter for that
+// write learns its version lost to a newer local write (XPORT-12).
+func (c *Core) removeSupersededLocal(key string, newer version.RecordVersion, out *port.Outbox) {
 	for pk := range c.pending {
 		if pk.key == key && pk.version.Compare(newer) < 0 {
+			out.Superseded(pk.key, pk.version)
 			c.removePending(pk)
 		}
 	}

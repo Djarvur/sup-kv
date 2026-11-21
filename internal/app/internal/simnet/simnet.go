@@ -662,6 +662,7 @@ func (c *Cluster) deliver(i int, in port.InboundDatagram) {
 	var out port.Outbox
 	c.nodes[i].core.HandleDatagram(now, in, &out)
 	c.route(i, out.Drain())
+	out.DrainResults() // the result stream is ignored in simulation, but never accumulated.
 	c.drive(i, now)
 }
 
@@ -689,6 +690,7 @@ func (c *Cluster) drive(i int, now time.Time) {
 		var out port.Outbox
 		deadline := c.nodes[i].core.Advance(now, &out)
 		c.route(i, out.Drain())
+		out.DrainResults() // Advance emits no results today; the drain keeps the contract total.
 		if !deadline.After(now) {
 			continue
 		}
@@ -741,6 +743,7 @@ func (c *Cluster) Write(i int, key string, data []byte) storage.Record {
 	var out port.Outbox
 	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
 	c.route(i, out.Drain())
+	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
 	c.drive(i, now)
 	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
 	return rec
@@ -778,6 +781,7 @@ func (c *Cluster) Delete(i int, key string) (storage.Record, error) {
 	var out port.Outbox
 	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
 	c.route(i, out.Drain())
+	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
 	c.drive(i, now)
 	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
 	return rec, nil
