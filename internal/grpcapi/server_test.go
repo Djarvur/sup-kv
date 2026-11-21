@@ -18,8 +18,8 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/Djarvur/sup-kv/internal/app/persist"
-	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
 	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/port"
@@ -121,14 +121,14 @@ type testServerConfig struct {
 	// gate pass always-open wiring and call awaitGateOpen.
 	gate grpcapi.ServerOptions
 
-	// waitTimeout, knownPeers and pendingCopy are the wait_for_replication
-	// seams (API-05, plan 05-05), merged into the same ServerOptions the
-	// gate wiring rides on. waitTimeout zero means NewServer's 1s default
-	// (D-09, A2); nil knownPeers/pendingCopy mean zero peers — the
-	// single-node configuration reporting acked immediately (D-11).
-	waitTimeout time.Duration
-	knownPeers  func() uint64
-	pendingCopy func() map[string]repl.PendingInfo
+	// waitTimeout, knownPeers and waitReplicated are the
+	// wait_for_replication seams (API-05, plan 05-05), merged into the same
+	// ServerOptions the gate wiring rides on. waitTimeout zero means
+	// NewServer's 1s default (D-09, A2); nil knownPeers/waitReplicated mean
+	// the single-node configuration reporting acked immediately (D-11).
+	waitTimeout    time.Duration
+	knownPeers     func() uint64
+	waitReplicated func(ctx context.Context, key string, ver version.RecordVersion, total uint32, timeout time.Duration) (acked bool, ackedCount uint32)
 }
 
 // openGateOptions returns the gate wiring the open-gate harnesses use: the
@@ -215,7 +215,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	opts := cfg.gate
 	opts.WaitTimeout = cfg.waitTimeout
 	opts.KnownPeers = cfg.knownPeers
-	opts.PendingCopy = cfg.pendingCopy
+	opts.WaitReplicated = cfg.waitReplicated
 
 	api := grpcapi.NewServer(eng, nil, hub, opts)
 	gateCtx, cancelGate := context.WithCancel(t.Context())

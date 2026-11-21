@@ -2,13 +2,13 @@ package grpcapi_test
 
 // The TEST-05 bounded-confirmation-latency benchmark (D-13, plan 06-08):
 // BenchmarkConfirmationLatency measures per-write wait_for_replication
-// appearance-to-drain latency under a continuous ~1000 writes/s background
-// burst, through the REAL stack — one server wired with the wait seam over
-// a real two-adapter asymmetric UDP topology (the wait_integration_test.go
-// construction), a bufconn-dialed gRPC client, the production mirror
-// timing. An unacked report FAILS the benchmark: bounded confirmation
-// latency is the property under test, a miss is a bug, never noise.
-// Manual `make bench` target only, no thresholds (D-13).
+// submission-to-resolution latency under a continuous ~1000 writes/s
+// background burst, through the REAL stack — one server wired with the
+// tracker wait seam over a real two-adapter asymmetric UDP topology (the
+// wait_integration_test.go construction), a bufconn-dialed gRPC client, the
+// production result-event timing. An unacked report FAILS the benchmark:
+// bounded confirmation latency is the property under test, a miss is a bug,
+// never noise. Manual `make bench` target only, no thresholds (D-13).
 
 import (
 	"context"
@@ -134,7 +134,7 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 
 	opts := openGateOptions()
 	opts.KnownPeers = adapterA.KnownPeers
-	opts.PendingCopy = adapterA.PendingCopy
+	opts.WaitReplicated = adapterA.WaitReplicated
 	opts.WaitTimeout = benchWaitTimeout
 	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
 	gateCtx, cancelGate := context.WithCancel(b.Context())
@@ -193,7 +193,7 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 				burstErr = fmt.Errorf("burst Get(%q): %w", key, err)
 				return
 			}
-			err = adapterA.NotifyLocalWrite(key, rec)
+			err = adapterA.NotifyLocalWrite(key, rec, false)
 			if err != nil {
 				burstErr = fmt.Errorf("burst NotifyLocalWrite(%q): %w", key, err)
 				return

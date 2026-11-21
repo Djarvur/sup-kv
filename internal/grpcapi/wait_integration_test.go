@@ -25,13 +25,12 @@ import (
 )
 
 // The wait_for_replication integration harness (05-REVIEW CR-01). Unlike
-// wait_test.go's fakeMirror — whose fixtures can publish mirror states the
-// real repl core never produces — this file drives the wait through a REAL
-// udprepl.Adapter pair exchanging real datagrams over real UDP sockets: the
-// production mirror timing, where the core deletes a pending entry inside
-// the very handleAck call that completes Ack coverage and the adapter
-// refreshes its mirror only after whole event-loop iterations, one datagram
-// per iteration.
+// wait_test.go's scripted tracker fake — whose fixtures can publish states
+// the real repl core never produces — this file drives the wait through a
+// REAL udprepl.Adapter pair exchanging real datagrams over real UDP
+// sockets: the production result seam, where the core deletes a pending
+// entry inside the very handleAck call that completes Ack coverage and the
+// adapter resolves the waiter tracker from the resulting Outbox event.
 //
 // The two nodes bind DIFFERENT loopback ports and target each other's port
 // as their broadcast address: broadcast Hello discovery crosses over, while
@@ -167,17 +166,16 @@ func (s peerStore) Lookup(key string) (storage.Record, bool) { return s.store.Lo
 // Versions returns the shallow key→version view, tombstones included.
 func (s peerStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
-// TestWaitIntegration_ackedThroughRealAdapterMirror drives 05-REVIEW CR-01's
+// TestWaitIntegration_ackedThroughRealAdapterTracker drives 05-REVIEW CR-01's
 // exact production scenario end to end: one known peer, a Set with
 // wait_for_replication, the notify→broadcast→apply→ack cycle over real UDP
-// datagrams — a cycle that routinely finishes inside one 5ms poll window on
-// a healthy link — and the D-08 report coming back acked=true 1/1 from what
-// the real adapter mirror published. The response must also arrive well
-// under the appearance bound: the wait must observe the replication on the
-// mirror, not burn waitAppear before reporting an honest-looking false.
-// Finally the Ack chain is corroborated as real: the peer holds the record
-// byte-equal.
-func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
+// datagrams, and the D-08 report coming back acked=true 1/1 from what the
+// real adapter's tracker observed through the core's result stream. The
+// tracker is created synchronously when the write is notified (before the
+// notification is enqueued), so a cycle that finishes within microseconds
+// cannot be missed — there is no appearance window to wait out. Finally the
+// Ack chain is corroborated as real: the peer holds the record byte-equal.
+func TestWaitIntegration_ackedThroughRealAdapterTracker(t *testing.T) {
 	t.Parallel()
 
 	portA := integrationUDPPort(t)
@@ -240,7 +238,7 @@ func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
 
 	opts := openGateOptions()
 	opts.KnownPeers = adapterA.KnownPeers
-	opts.PendingCopy = adapterA.PendingCopy
+	opts.WaitReplicated = adapterA.WaitReplicated
 	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
 	gateCtx, cancelGate := context.WithCancel(t.Context())
 	t.Cleanup(cancelGate)
@@ -286,7 +284,7 @@ func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
 			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
 	}
 	if elapsed >= waitAssertBound {
-		t.Fatalf("Set took %v: want well under %v — a healthy cycle must resolve on the observed mirror, not burn the 500ms appearance bound",
+		t.Fatalf("Set took %v: want well under %v — a healthy cycle must resolve on the observed result event, with no appearance phase to burn",
 			elapsed, waitAssertBound)
 	}
 

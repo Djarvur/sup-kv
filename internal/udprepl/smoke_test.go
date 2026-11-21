@@ -334,7 +334,7 @@ func TestSmoke_twoNodesUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node A store Get(%q): %v", smokeKey, err)
 	}
-	err = adapterA.NotifyLocalWrite(smokeKey, rec)
+	err = adapterA.NotifyLocalWrite(smokeKey, rec, false)
 	if err != nil {
 		t.Fatalf("node A NotifyLocalWrite(%q): %v", smokeKey, err)
 	}

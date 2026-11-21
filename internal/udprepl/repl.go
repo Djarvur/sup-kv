@@ -21,6 +21,7 @@ import (
 	"math"
 	"net"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -76,21 +77,6 @@ const (
 	// wedged loop eventually fills the queue and blocks authors, a
 	// bounded backpressure that never silently drops a write.
 	notifyQueue = 1024
-
-	// drainedRetention is how long the pending mirror keeps a drained
-	// entry's resolved row published (the wait_for_replication
-	// observability fix, 05-REVIEW CR-01). The core deletes a pending
-	// entry inside the very handleAck call that completes Ack coverage
-	// (REPL-02), so a healthy cycle that finishes between two mirror
-	// refreshes would otherwise move the published mirror straight from
-	// "partial Acked" to "absent", and no reader could ever observe the
-	// full-coverage state the D-08 report needs. The retained row is the
-	// resolution itself — WaitingOn nil, Acked exactly the peers the core
-	// had recorded as Acked at deletion — kept for one bounded window:
-	// comfortably longer than the API's 5ms poll period and scheduler
-	// jitter, with memory bounded by one row per key drained inside the
-	// window.
-	drainedRetention = 250 * time.Millisecond
 )
 
 // errNoStandaloneBody rejects a port message that has no datagram body of
@@ -124,40 +110,74 @@ type inboundEvent struct {
 
 // localWrite is one author's NotifyLocalWrite notification on the event
 // loop's queue, with the record defensively copied at enqueue — the author
-// may reuse its buffer once the call returns.
+// may reuse its buffer once the call returns. The queue carries no track
+// flag: the tracker is created synchronously in NotifyLocalWrite before the
+// enqueue, so no later code can mistake a notification for a tracker
+// creation site.
 type localWrite struct {
 	key string
 	rec storage.Record
 }
 
-// drainedRow is one drained pending entry as the mirror retains it for
-// drainedRetention: the resolved PendingInfo row (version tracked, WaitingOn
-// nil, Acked everyone the core had recorded as Acked at the deletion) and
-// the retention deadline the row is dropped after.
-type drainedRow struct {
-	info  repl.PendingInfo
-	until time.Time
+// trackerKey identifies one wait-requesting local write: the key and the
+// exact record version the wait observes. The version is part of the
+// identity, never a field compared later, so a superseded version can never
+// be confused with the write that replaced it.
+type trackerKey struct {
+	key     string
+	version version.RecordVersion
 }
 
-// published returns the row's PendingInfo with a fresh Acked clone, so no
-// two published snapshots ever share a backing array (the copy-on-write
-// pin — callers must not mutate a returned map or its slices).
-func (r drainedRow) published() repl.PendingInfo {
-	return repl.PendingInfo{
-		Version:   r.info.Version,
-		WaitingOn: nil,
-		Acked:     slices.Clone(r.info.Acked),
-		NextRetry: r.info.NextRetry,
+// tracker is one write's replication observation state — the adapter-side
+// waiter the core's result stream resolves. The mutex guards acked,
+// resolved and ok; done is closed exactly once, on the first resolution,
+// while the mutex is held, so a waiter waking on it observes the final
+// state. The acked set is sorted ascending and idempotent (a re-Ack adds no
+// second entry): full coverage means len(acked) reaches the write-time
+// peer total.
+type tracker struct {
+	mu       sync.Mutex
+	acked    []uint16
+	resolved bool
+	ok       bool
+	done     chan struct{}
+}
+
+// newTracker returns a tracker with its done channel armed and no
+// resolution yet.
+func newTracker() *tracker {
+	return &tracker{done: make(chan struct{})}
+}
+
+// resolveLocked records the first resolution and closes done; later results
+// are ignored, so done is closed exactly once. The caller holds t.mu.
+func (t *tracker) resolveLocked(ok bool) {
+	if t.resolved {
+		return
 	}
+	t.resolved = true
+	t.ok = ok
+	close(t.done)
+}
+
+// insertPeer returns peers with id inserted at its sorted position, or
+// unchanged when already present — the sorted, idempotent Acked discipline
+// the core's ackedInsert applies.
+func insertPeer(peers []uint16, id uint16) []uint16 {
+	pos, found := slices.BinarySearch(peers, id)
+	if found {
+		return peers
+	}
+	return slices.Insert(peers, pos, id)
 }
 
 // Adapter is the UDP replication adapter for one node: it owns the bound
 // socket and drives one repl.Core. Exactly one goroutine — the caller's
 // Run — mutates core state (D-04); the read goroutine only queues inbound
-// datagrams, write authors only queue notifications, and the discard
-// counters, known-peer count and the replication read states (the
-// first-sync signal and the pending snapshot) are mirrored into atomics
-// after every loop iteration so cross-goroutine readers never touch core
+// datagrams, write authors only queue notifications and create waiter
+// trackers, and the discard counters, known-peer count and the replication
+// read states (the first-sync signal and each write's tracker) are
+// mutex- or atomic-guarded so cross-goroutine readers never touch core
 // state.
 type Adapter struct {
 	conn          *net.UDPConn
@@ -203,40 +223,19 @@ type Adapter struct {
 	sentSync          atomic.Uint64
 
 	// syncArrived mirrors the core's first-DataSync-received flag (the
-	// startup gate's sync half, API-04); pendingCopy mirrors the core's
-	// pending snapshot as a fresh copy-on-write map — the pointer is
-	// replaced wholesale after every loop iteration, never mutated in
-	// place, so readers may hold a snapshot across events. The published
-	// map additionally carries recently drained entries' resolved rows for
-	// drainedRetention (the CR-01 observability fix).
+	// startup gate's sync half, API-04).
 	syncArrived atomic.Bool
-	pendingCopy atomic.Pointer[map[string]repl.PendingInfo]
 
-	// lastAck holds the (key, version) of an Ack message the event loop
-	// JUST fed the core (recorded in Run's inbound case, consumed and
-	// cleared by the iteration's mirrorState): an entry that vanishes from
-	// the core's pending snapshot in the same iteration its Ack was
-	// processed drained by full Ack coverage, while an entry that vanishes
-	// on any other event — a strictly greater remote version's supersession
-	// above all — must not be published as Acked-resolved (the Q2 pin: a
-	// superseded version's Acks did not all arrive). Exactly one event per
-	// iteration (D-04) makes the correlation exact; clearing it per mirror
-	// keeps an old Ack from mislabeling a later supersession.
-	lastAck struct {
-		ok      bool
-		key     string
-		version version.RecordVersion
-	}
-
-	// prevPending is the previous iteration's raw core pending snapshot —
-	// the present→absent transition detector behind the drained-row
-	// retention. Event-loop goroutine only, like all core reads.
-	prevPending map[string]repl.PendingInfo
-
-	// drained holds the recently drained entries' resolved rows until
-	// their drainedRetention deadline. Event-loop goroutine only; at most
-	// one row per key, bounded by the keys drained inside the window.
-	drained map[string]drainedRow
+	// trackers maps each wait-requesting local write's identity to its
+	// waiter tracker (XPORT-12). NotifyLocalWrite is the ONLY production
+	// creation site — synchronously, before the notification is enqueued —
+	// so a wait starting immediately after that call always finds it. The
+	// Run loop only looks trackers up: a result for an absent identity is
+	// dropped and never causes a map insert, and every WaitReplicated return
+	// path (resolution, zero-peer release, ctx cancel, timeout) deletes its
+	// entry, so the map is bounded by concurrent waits.
+	trackersMu sync.Mutex
+	trackers   map[trackerKey]*tracker
 }
 
 // New binds the node's udp4 socket and constructs the replication core over
@@ -297,7 +296,7 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 		inbound:       make(chan inboundEvent, inboundQueue),
 		notify:        make(chan localWrite, notifyQueue),
 		done:          make(chan struct{}),
-		drained:       make(map[string]drainedRow),
+		trackers:      make(map[trackerKey]*tracker),
 		recvBuf:       recvBuf,
 		sendBuf:       sendBuf,
 	}, nil
@@ -433,10 +432,10 @@ func checkSendBuffer(actual int) error {
 // context cancellation, inbound datagrams, local-write notifications and
 // the timer channel re-armed from Advance's returned deadline. After every
 // event it calls the core handler with [time.Now] (the production now
-// seam), drains the shared Outbox through encode+send, and mirrors the
-// core's counters and replication read states into atomics. Run returns
-// ctx's error; closing the context unblocks both the loop and the read
-// goroutine.
+// seam), drains the shared Outbox's message stream through encode+send,
+// applies the result stream to the waiter trackers, and mirrors the core's
+// counters and replication read states into atomics. Run returns ctx's
+// error; closing the context unblocks both the loop and the read goroutine.
 func (a *Adapter) Run(ctx context.Context) error {
 	go a.readLoop()
 	defer func() { _ = a.conn.Close() }() // unblocks the read goroutine's ReadFromUDP.
@@ -444,6 +443,7 @@ func (a *Adapter) Run(ctx context.Context) error {
 	var out port.Outbox
 	next := a.core.Advance(time.Now(), &out)
 	a.flush(&out)
+	a.applyResults(&out)
 	var timer *time.Timer
 	for {
 		timer = armTimer(timer, next)
@@ -455,44 +455,56 @@ func (a *Adapter) Run(ctx context.Context) error {
 			in := decode(ev.datagram)
 			in.Source = ev.source
 			a.core.HandleDatagram(time.Now(), in, &out)
-			if ack, ok := in.Msg.(port.Ack); ok {
-				// The mirror's drained-row retention correlates this Ack
-				// with the entry it drained at the iteration's mirror
-				// (retainDrained); a non-Ack event leaves any stale
-				// record from an earlier iteration irrelevant — the flag
-				// clears after every mirror.
-				a.lastAck.ok = true
-				a.lastAck.key = ack.Key
-				a.lastAck.version = ack.Version
-			}
 		case lw := <-a.notify:
+			// The tracker, when the write requested one, was created in
+			// NotifyLocalWrite BEFORE this enqueue. Neither this case nor
+			// the core handler creates one: a result for an absent trackers
+			// entry is dropped (applyResults), never an insert.
 			a.core.NotifyLocalWrite(time.Now(), lw.key, lw.rec, &out)
 		case <-timerChan(timer):
 			// A due deadline — the Advance below fires the due timers.
 		}
 		next = a.core.Advance(time.Now(), &out)
 		a.flush(&out)
+		a.applyResults(&out)
 		a.mirrorStats()
-		a.mirrorState()
 	}
 }
 
 // NotifyLocalWrite enqueues the explicit post-write replication call
 // (D-05) for the event loop: it defensively copies the record and returns
 // without doing any protocol work, so the write path stays available. The
-// event loop's core handler broadcasts the DataReplication. The enqueue
-// and the closed-loop decision are one select over the notify channel and
-// the loop's done channel, with a re-check after a won send (D-15
-// P4-IN-01 — the former pre-check-then-enqueue pair raced Run's exit and
-// could report nil for a notification nobody will ever drain): while Run
-// is active the send enqueues into the bounded 1024-deep buffer (D-05) and
-// reports nil; once Run has returned, done is closed, so either the
+// event loop's core handler broadcasts the DataReplication. When track is
+// true the write asked for a wait_for_replication report, and the tracker
+// for its exact (key, version) identity is created HERE — synchronously,
+// under trackersMu, BEFORE the channel send (XPORT-12): the gRPC handler
+// calls [Adapter.WaitReplicated] immediately after this method returns, so
+// a tracker created later (say, when the loop dequeues the notification)
+// would be missed, and the old appearance race the polling mirror worked
+// around could return. This is the sole production creation site — the
+// queue struct carries no track flag, so no later code can create a
+// tracker from a notification either.
+//
+// The enqueue and the closed-loop decision are one select over the notify
+// channel and the loop's done channel, with a re-check after a won send
+// (D-15 P4-IN-01 — the former pre-check-then-enqueue pair raced Run's exit
+// and could report nil for a notification nobody will ever drain): while
+// Run is active the send enqueues into the bounded 1024-deep buffer (D-05)
+// and reports nil; once Run has returned, done is closed, so either the
 // select's done branch or — when a buffered send still won the uniform
 // choice against the already closed done — the post-send re-check reports
-// [ErrRunLoopExited]. A writer never blocks forever on a loop that no
-// longer receives, never panics, and the drop is surfaced to the author,
-// never silent.
-func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) error {
+// [ErrRunLoopExited]. A failed notify deletes the just-created tracker
+// before returning, so the zero-value path (Run already gone, no waiter
+// will ever resolve it) cannot leak a map entry. A writer never blocks
+// forever on a loop that no longer receives, never panics, and the drop is
+// surfaced to the author, never silent.
+//
+//nolint:revive // flag-parameter: track is the wait_for_replication request crossing the D-05 notification seam (XPORT-12); a second method would split the producer contract.
+func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record, track bool) error {
+	keyID := trackerKey{key: key, version: rec.Version}
+	if track {
+		a.ensureTracker(keyID)
+	}
 	lw := localWrite{
 		key: key,
 		rec: storage.Record{
@@ -511,13 +523,133 @@ func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) error {
 		// deterministic error — never a nil report for a dropped write.
 		select {
 		case <-a.done:
+			a.deleteTracker(keyID)
 			return ErrRunLoopExited
 		default:
 		}
 		return nil
 	case <-a.done:
+		a.deleteTracker(keyID)
 		return ErrRunLoopExited
 	}
+}
+
+// ensureTracker returns the tracker for k, creating it when absent. Only
+// NotifyLocalWrite calls this — the sole production creation site; a
+// tracker already present for the same identity is reused (a repeated
+// tracked notification of one write shares its resolution).
+func (a *Adapter) ensureTracker(k trackerKey) *tracker {
+	a.trackersMu.Lock()
+	defer a.trackersMu.Unlock()
+	if tr := a.trackers[k]; tr != nil {
+		return tr
+	}
+	tr := newTracker()
+	a.trackers[k] = tr
+	return tr
+}
+
+// lookupTracker returns the tracker for k, or nil when the write was not
+// tracked. Every caller drops a nil result — no path inserts through a
+// lookup.
+func (a *Adapter) lookupTracker(k trackerKey) *tracker {
+	a.trackersMu.Lock()
+	defer a.trackersMu.Unlock()
+	return a.trackers[k]
+}
+
+// deleteTracker removes k's tracker; a no-op when absent. Every
+// WaitReplicated return path and a failed notify call it, so the map stays
+// bounded by concurrent waits (T-3-16).
+func (a *Adapter) deleteTracker(k trackerKey) {
+	a.trackersMu.Lock()
+	defer a.trackersMu.Unlock()
+	delete(a.trackers, k)
+}
+
+// applyResults consumes the core's result stream after one handler
+// (XPORT-12): every result resolves or accumulates on the tracker for its
+// exact (key, version) identity. ResultAck inserts the peer into acked
+// without resolving (an Ack alone is not full coverage); ResultDrained
+// resolves ok=true (full write-time coverage); ResultSuperseded and
+// ResultWaitSetEmpty resolve ok=false (honest false — the tracked version
+// lost, or its last waiter was evicted). A result for an absent tracker is
+// DROPPED, never a map insert: NotifyLocalWrite is the sole creation site,
+// so an absent identity is an untracked write (track=false) or a
+// directly-driven core in a white-box test, and neither has a waiter.
+// Event-loop goroutine only; each tracker's own mutex is the
+// cross-goroutine edge.
+func (a *Adapter) applyResults(out *port.Outbox) {
+	for _, res := range out.DrainResults() {
+		tr := a.lookupTracker(trackerKey{key: res.Key, version: res.Version})
+		if tr == nil {
+			continue
+		}
+		tr.mu.Lock()
+		switch res.Kind {
+		case port.ResultAck:
+			tr.acked = insertPeer(tr.acked, res.Peer)
+		case port.ResultDrained:
+			tr.resolveLocked(true)
+		case port.ResultSuperseded, port.ResultWaitSetEmpty:
+			tr.resolveLocked(false)
+		}
+		tr.mu.Unlock()
+	}
+}
+
+// WaitReplicated waits for one wait-requesting local write's replication
+// outcome — the adapter half of the wait_for_replication seam (XPORT-12,
+// D-04). total is the write-time peer snapshot the caller captured; the
+// return is the observed report: acked is true only on full write-time
+// coverage, and ackedCount is the observed Ack count clamped to total
+// (WR-01: a matching Ack from a node outside the write-time snapshot still
+// counts in the core, so the raw length can exceed total).
+//
+// The success rule is resolved && ok && clamped == total: full write-time
+// coverage is the only success. Eviction (ResultWaitSetEmpty) and
+// supersession (ResultSuperseded) are honest false reports, and a timeout
+// or ctx cancellation returns the last observed count with acked=false —
+// the wait never reports a success it did not observe.
+//
+// total == 0 is the D-11 single-node case: a write with no peers is acked
+// immediately with nothing awaited, and this call is the RELEASE point for
+// the tracker the adapter created at notify time (the zero-peer path never
+// enters the waiting loop). An absent tracker reports an immediate
+// (false, 0) without polling: two paths reach it — a write notified with
+// track=false, and a white-box test driving the core directly — and
+// neither has a waiter to resolve.
+//
+// One wait per write identity is expected (the gRPC handler issues exactly
+// one). A second concurrent wait for the same identity shares the same
+// tracker's resolution; the first return deletes the map entry, and the
+// second reads the already-final tracker state before its own delete is a
+// no-op. Every return path deletes the tracker, so the map is bounded by
+// concurrent waits (T-3-16).
+func (a *Adapter) WaitReplicated(ctx context.Context, key string, ver version.RecordVersion, total uint32, timeout time.Duration) (acked bool, ackedCount uint32) {
+	k := trackerKey{key: key, version: ver}
+	if total == 0 {
+		a.deleteTracker(k)
+		return true, 0
+	}
+	tr := a.lookupTracker(k)
+	if tr == nil {
+		return false, 0
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-tr.done:
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+	tr.mu.Lock()
+	// The acked set holds uint16 peer ids, so its length cannot truncate.
+	count := min(uint32(len(tr.acked)), total) //nolint:gosec // G115: len(acked) <= 65536 by the uint16 peer-id domain.
+	ok := tr.resolved && tr.ok && count == total
+	tr.mu.Unlock()
+	a.deleteTracker(k)
+	return ok, count
 }
 
 // SocketBuffers returns the kernel's effective SO_RCVBUF/SO_SNDBUF sizes read
@@ -605,30 +737,6 @@ func (a *Adapter) SyncArrived() bool {
 	return a.syncArrived.Load()
 }
 
-// PendingCopy returns an immutable snapshot of the core's pending set (the
-// wait_for_replication read seam, API-05), mirrored after the latest
-// event-loop iteration — safe from any goroutine. The snapshot also carries
-// recently drained entries' resolved rows (WaitingOn nil, Acked complete at
-// the deletion) for drainedRetention: the core deletes a drained entry
-// immediately, so without the retention a full-coverage cycle that finishes
-// between two refreshes would never be observable (05-REVIEW CR-01). A
-// retained row is dropped as soon as the core tracks the key again, and
-// rows expire by wall clock. The caller must not mutate the returned map
-// or its slices: the mirror replaces the published pointer wholesale
-// (copy-on-write — the map and every WaitingOn/Acked slice are fresh
-// copies, sharing no backing array with core state or other published
-// maps) and never mutates an already-published map, so a snapshot held
-// across events stays stable. Before the first loop iteration has
-// mirrored, the snapshot is empty — nothing is pending. gRPC handler
-// goroutines read pending state only here, never by calling the
-// single-driver core.
-func (a *Adapter) PendingCopy() map[string]repl.PendingInfo {
-	if p := a.pendingCopy.Load(); p != nil {
-		return *p
-	}
-	return nil
-}
-
 // readLoop is the one read goroutine feeding the event loop's inbound queue
 // (D-04): it owns the socket's single 65 507-byte receive buffer for the
 // socket's lifetime and defensively copies every read's bytes before
@@ -704,11 +812,11 @@ func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) {
 	}
 }
 
-// mirrorStats copies the core's discard counters, known-peer count and the
-// OBS-01 gauge set — the pending-set gauge, the remote-merge counters and
-// the retransmissions counter — into the atomics after each loop iteration
-// (D-04): cross-goroutine readers — the smoke test, later observability —
-// never touch core state.
+// mirrorStats copies the core's discard counters, known-peer count, the
+// first-sync flag and the OBS-01 gauge set — the pending-set gauge, the
+// remote-merge counters and the retransmissions counter — into the atomics
+// after each loop iteration (D-04): cross-goroutine readers — the smoke
+// test, later observability — never touch core state.
 func (a *Adapter) mirrorStats() {
 	d := a.core.Discards()
 	a.badCRC.Store(d.BadCRC)
@@ -726,90 +834,7 @@ func (a *Adapter) mirrorStats() {
 	a.mergeConflicts.Store(m.Conflicts)
 	a.mergeDriftWarning.Store(m.DriftWarnings)
 	a.retransmitted.Store(a.core.Retransmissions())
-}
-
-// mirrorState copies the core's replication read states into the atomics
-// after each loop iteration (D-04) — the same post-event site mirrorStats
-// runs at, so a reader never sees the pair torn across an event: the
-// first-sync flag (API-04) stored as-is, and the pending snapshot (API-05)
-// rebuilt as a fresh copy-on-write map whose entries clone every
-// WaitingOn/Acked slice, sharing no backing array with core state. The
-// published map also carries the recently drained entries' resolved rows
-// (retainDrained) for keys the core no longer tracks — a live entry always
-// shadows its retained row. Pending sets are small at this scale (entries
-// drain within about one RTT normally), so the per-event copy is cheap.
-func (a *Adapter) mirrorState() {
 	a.syncArrived.Store(a.core.SyncArrived())
-	snap := a.core.PendingSnapshot()
-	a.retainDrained(snap, time.Now())
-	copied := make(map[string]repl.PendingInfo, len(snap)+len(a.drained))
-	for key, info := range snap {
-		copied[key] = repl.PendingInfo{
-			Version:   info.Version,
-			WaitingOn: slices.Clone(info.WaitingOn),
-			Acked:     slices.Clone(info.Acked),
-			NextRetry: info.NextRetry,
-		}
-	}
-	for key, row := range a.drained {
-		if _, live := snap[key]; !live {
-			copied[key] = row.published()
-		}
-	}
-	a.pendingCopy.Store(&copied)
-}
-
-// retainDrained detects the entries that left the core's pending set since
-// the previous iteration and, when the leaving was the drain — the
-// just-processed event was the entry's own Ack, key and version matching
-// the last observed snapshot row — keeps a resolved row in the published
-// mirror for drainedRetention. The row's Acked set is the union of the
-// last observed WaitingOn and Acked, deduplicated by the sort-then-Compact
-// after it: a peer may legitimately sit in BOTH sets at the last
-// observation — it Acked while unknown to the peer table (the handleAck
-// counting behavior, WR-01) and a later discovery flush re-added it to the
-// wait-set (D-15 P4-WR-01) — and the naive union would publish it twice.
-// With the dedup the row is exactly the core's acked set at deletion: the
-// core's deletion fires inside the handleAck that empties the wait-set, so
-// every peer neither Acked nor evicted at the last observation Acked in
-// this very iteration, and eviction never adds to Acked (T-05-04) —
-// evicted-never-acked peers honestly excluded. A
-// vanishing on any other event (remote supersession, local replacement —
-// the latter keeps the key present anyway) retains nothing, so the mirror
-// never claims Acked coverage for a version the peers moved past (the Q2
-// pin). Rows expire by wall clock; a key re-draining overwrites its row.
-// Event-loop goroutine only (all core reads are).
-func (a *Adapter) retainDrained(snap map[string]repl.PendingInfo, now time.Time) {
-	for key, prev := range a.prevPending {
-		if _, live := snap[key]; live {
-			continue
-		}
-		if !a.lastAck.ok || a.lastAck.key != key || a.lastAck.version != prev.Version {
-			continue
-		}
-		acked := append(slices.Clone(prev.Acked), prev.WaitingOn...)
-		slices.Sort(acked)
-		acked = slices.Compact(acked)
-		a.drained[key] = drainedRow{
-			info: repl.PendingInfo{
-				Version:   prev.Version,
-				WaitingOn: nil,
-				Acked:     acked,
-				NextRetry: prev.NextRetry,
-			},
-			until: now.Add(drainedRetention),
-		}
-	}
-	for key, row := range a.drained {
-		if now.After(row.until) {
-			delete(a.drained, key)
-		}
-	}
-	// One event per iteration (D-04): the correlation describes exactly
-	// the event this mirror consumed — clear it so a stale Ack can never
-	// mislabel a later supersession's disappearance.
-	a.lastAck.ok = false
-	a.prevPending = snap
 }
 
 // armTimer re-arms (or first creates) t for the next deadline and returns

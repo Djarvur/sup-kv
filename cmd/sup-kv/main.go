@@ -456,11 +456,11 @@ func wire(cfg config) (*wired, net.Listener, error) {
 	}()
 
 	srv := grpcapi.NewServer(engine, adapter.NotifyLocalWrite, hub, grpcapi.ServerOptions{
-		SyncArrived: adapter.SyncArrived,
-		KnownPeers:  adapter.KnownPeers,
-		PendingCopy: adapter.PendingCopy,
-		StartupGate: cfg.startupGate,
-		WaitTimeout: cfg.waitTimeout,
+		SyncArrived:    adapter.SyncArrived,
+		KnownPeers:     adapter.KnownPeers,
+		WaitReplicated: adapter.WaitReplicated,
+		StartupGate:    cfg.startupGate,
+		WaitTimeout:    cfg.waitTimeout,
 	})
 
 	apiCtx, apiCancel := context.WithCancel(context.Background())

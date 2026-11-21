@@ -32,10 +32,13 @@ import (
 
 // LocalNotify is the post-write replication notification seam: the gRPC
 // write handler is "the author" of the phase-4 D-05 explicit-call contract.
-// It receives the record the write just installed and reports nil when the
-// notification was accepted for the replication loop, or a non-nil error
-// when it was dropped (udprepl.ErrRunLoopExited once that loop has exited).
-type LocalNotify func(key string, rec storage.Record) error
+// It receives the record the write just installed and whether the write
+// requested a wait_for_replication report (track), so the adapter can
+// create the waiter tracker synchronously before enqueueing the
+// notification (XPORT-12). It reports nil when the notification was
+// accepted for the replication loop, or a non-nil error when it was dropped
+// (udprepl.ErrRunLoopExited once that loop has exited).
+type LocalNotify func(key string, rec storage.Record, track bool) error
 
 // Server implements the apiproto.SupKVServiceServer surface over one persist
 // Engine. The UnimplementedSupKVServiceServer embed is mandatory with
@@ -147,7 +150,7 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 	if err != nil {
 		return nil, mapError(err)
 	}
-	s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false)
+	s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false, req.GetWaitForReplication())
 	resp := &apiproto.SetResponse{Version: ver[:]}
 	if req.GetWaitForReplication() {
 		timeout := s.waitTimeout(req.GetWaitTimeoutMs())
@@ -179,7 +182,7 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 	if err != nil {
 		return nil, mapError(err)
 	}
-	s.notifyLocalWrite(req.GetKey(), ver, nil, true)
+	s.notifyLocalWrite(req.GetKey(), ver, nil, true, req.GetWaitForReplication())
 	resp := &apiproto.DeleteResponse{Version: ver[:]}
 	if req.GetWaitForReplication() {
 		timeout := s.waitTimeout(req.GetWaitTimeoutMs())
@@ -256,11 +259,13 @@ func (s *Server) SnapshotLoad(_ context.Context, req *apiproto.SnapshotLoadReque
 // the write's own inputs — the engine-stamped version, the request value
 // (nil for a tombstone) and the checksum the store computed for exactly
 // those inputs — so the notified record is the stored one; the defensive
-// copy keeps the record's bytes owned by the notification. The notify
-// error is deliberately ignored: a failed notify (ErrRunLoopExited during
-// shutdown) never lies about the durable write, which the engine already
-// confirmed.
-func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []byte, deleted bool) {
+// copy keeps the record's bytes owned by the notification. track carries
+// the request's wait_for_replication flag through to the adapter, which
+// creates the waiter tracker synchronously before enqueueing when set
+// (XPORT-12). The notify error is deliberately ignored: a failed notify
+// (ErrRunLoopExited during shutdown) never lies about the durable write,
+// which the engine already confirmed.
+func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []byte, deleted, track bool) {
 	if s.notify == nil {
 		return
 	}
@@ -270,7 +275,7 @@ func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []
 		Deleted:  deleted,
 		Checksum: storage.RecordChecksum(key, ver, data, deleted),
 	}
-	_ = s.notify(key, rec)
+	_ = s.notify(key, rec, track)
 }
 
 // mapError translates one engine error into its pinned RPC code, matching

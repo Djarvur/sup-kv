@@ -9,7 +9,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
-	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
 const (
@@ -32,13 +32,14 @@ const (
 
 // ServerOptions carries the startup-gate wiring (API-04, API-06): the
 // sync-arrived signal source and the backstop deadline — plus the
-// wait_for_replication seams (API-05, wait.go): the peer-count and pending
-// mirrors and the operator-tunable wait default. The zero value is legal —
-// a nil SyncArrived means the sync path can never fire (the resolver only
-// polls it when non-nil), a zero StartupGate and a zero WaitTimeout
-// normalize to their 1s design defaults, and nil wait seams mean zero
-// peers — so a bare ServerOptions{} is a single-node server whose gate
-// opens after one second and whose writes report acked immediately (D-11).
+// wait_for_replication seams (API-05, wait.go): the peer-count source, the
+// tracker wait seam and the operator-tunable wait default. The zero value
+// is legal — a nil SyncArrived means the sync path can never fire (the
+// resolver only polls it when non-nil), a zero StartupGate and a zero
+// WaitTimeout normalize to their 1s design defaults, and nil wait seams
+// mean the single-node configuration — so a bare ServerOptions{} is a
+// single-node server whose gate opens after one second and whose writes
+// report acked immediately (D-11).
 //
 // Exported fields on an exported struct on purpose: main (plan 05-06)
 // injects the udprepl adapter's SyncArrived mirror, tests inject fakes,
@@ -60,20 +61,21 @@ type ServerOptions struct {
 
 	// KnownPeers reports the known-peer count for the wait_for_replication
 	// aggregate (D-08/D-10): the wait captures it exactly once before any
-	// polling, so peers discovered mid-wait never extend the awaited set.
+	// waiting, so peers discovered mid-wait never extend the awaited set.
 	// Production injects the udprepl adapter's KnownPeers atomic mirror;
 	// a nil seam — like a zero count — means zero peers, the single-node
 	// configuration reporting acked immediately (D-11).
 	KnownPeers func() uint64
 
-	// PendingCopy returns the adapter's mirrored pending set — the
-	// wait_for_replication read seam (API-05): immutable copy-on-write
-	// snapshots of repl.PendingInfo keyed by key, refreshed by the
-	// adapter's event loop after every iteration. Handler goroutines read
-	// replication state only here, never by calling the single-driver
-	// core. The wait polls it for the written (key, version) entry's
-	// appearance and drain; a nil seam means zero peers (D-11).
-	PendingCopy func() map[string]repl.PendingInfo
+	// WaitReplicated is the wait_for_replication tracker seam (XPORT-12,
+	// D-04): it waits for the (key, version) write's tracker, bounded by
+	// timeout and ctx, and reports the observed acked flag and count
+	// against the write-time peer total. Production injects the udprepl
+	// adapter's method value; a nil seam is the single-node wiring (D-11)
+	// — no tracker can exist through this seam, so the wait reports
+	// (true, 0, 0) immediately. Handler goroutines wait only here, never
+	// by calling the single-driver core.
+	WaitReplicated func(ctx context.Context, key string, ver version.RecordVersion, total uint32, timeout time.Duration) (acked bool, ackedCount uint32)
 
 	// WaitTimeout is the operator-tunable wait_for_replication default
 	// (D-09, A2): NewServer substitutes the 1s design default when zero
