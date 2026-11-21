@@ -80,6 +80,11 @@ const (
 	// broadcast round; every other key is a peer's opaque address handle.
 	broadcastDst = ""
 
+	// jitterDivisor is the jitter envelope's denominator: timer jitter spans
+	// a tenth of the interval (positive-only), pacer jitter a tenth of the
+	// spacing (±).
+	jitterDivisor = 10
+
 	// Deterministic jitter salts: one per call site, so the three independent
 	// jitter streams never alias and a same-seed replay stays byte-identical
 	// (T-3-22).
@@ -1097,6 +1102,7 @@ func (c *Core) syncListing(now time.Time) {
 		return
 	}
 	chunks := c.listingChunks()
+	//nolint:gosec // G115: the modulus is len(chunks), an int, so the result fits.
 	start := int(c.syncRotation % uint64(len(chunks)))
 	for i := range chunks {
 		c.enqueueListingChunk(now, broadcastDst, chunks[(start+i)%len(chunks)])
@@ -1116,6 +1122,7 @@ func (c *Core) enqueueRestartListing(now time.Time, peerID uint16, handle string
 	}
 	chunks := c.listingChunks()
 	row := c.peers[peerID]
+	//nolint:gosec // G115: the modulus is len(chunks), an int, so the result fits.
 	start := int(row.rotation % uint64(len(chunks)))
 	row.rotation++
 	c.peers[peerID] = row
@@ -1190,6 +1197,7 @@ func (c *Core) jitterOffset(seq, salt uint64, span time.Duration) time.Duration 
 	_, _ = h.Write(buf[:])
 	binary.BigEndian.PutUint64(buf[:], salt)
 	_, _ = h.Write(buf[:])
+	//nolint:gosec // G115: the modulus is a positive Duration, so the result is a valid Duration.
 	return time.Duration(h.Sum64() % uint64(span))
 }
 
@@ -1198,7 +1206,7 @@ func (c *Core) jitterOffset(seq, salt uint64, span time.Duration) time.Duration 
 // interval.
 func (c *Core) helloJitter() time.Duration {
 	c.helloJitterSeq++
-	return c.jitterOffset(c.helloJitterSeq, helloJitterSalt, c.cfg.HelloInterval/10)
+	return c.jitterOffset(c.helloJitterSeq, helloJitterSalt, c.cfg.HelloInterval/jitterDivisor)
 }
 
 // syncJitter returns the sync timer's positive-only jitter in
@@ -1206,7 +1214,7 @@ func (c *Core) helloJitter() time.Duration {
 // configured interval.
 func (c *Core) syncJitter() time.Duration {
 	c.syncJitterSeq++
-	return c.jitterOffset(c.syncJitterSeq, syncJitterSalt, c.cfg.SyncInterval/10)
+	return c.jitterOffset(c.syncJitterSeq, syncJitterSalt, c.cfg.SyncInterval/jitterDivisor)
 }
 
 // jitteredSpacing returns base with a deterministic +-10% offset —
@@ -1216,16 +1224,12 @@ func (c *Core) syncJitter() time.Duration {
 // retransmit ladder's deadlines never pass through this helper (the loss
 // bound depends on them).
 func (c *Core) jitteredSpacing(base time.Duration, seq uint64) time.Duration {
-	span := base / 10
+	span := base / jitterDivisor
 	if span <= 0 {
 		return base
 	}
 	offset := c.jitterOffset(seq, spacingJitterSalt, 2*span+1) - span
-	spacing := base + offset
-	if spacing < time.Nanosecond {
-		spacing = time.Nanosecond
-	}
-	return spacing
+	return max(base+offset, time.Nanosecond)
 }
 
 // listingChunks builds the full DataSync listing chunk sequence from one

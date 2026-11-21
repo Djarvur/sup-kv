@@ -536,7 +536,8 @@ func TestSync_pacing(t *testing.T) {
 	core, st := newTestCore()
 	var out port.Outbox
 	for i := range chunks {
-		if _, _, err := st.store.Set(oversizedKeyN(i), []byte("v")); err != nil {
+		_, _, err := st.store.Set(oversizedKeyN(i), []byte("v"))
+		if err != nil {
 			t.Fatalf("store Set(oversized key %d): %v", i, err)
 		}
 	}
@@ -593,7 +594,8 @@ func TestSync_rotation(t *testing.T) {
 	want := make([]string, 0, chunks)
 	for i := range chunks {
 		key := oversizedKeyN(i)
-		if _, _, err := st.store.Set(key, []byte("v")); err != nil {
+		_, _, err := st.store.Set(key, []byte("v"))
+		if err != nil {
 			t.Fatalf("store Set(oversized key %d): %v", i, err)
 		}
 		want = append(want, key)
@@ -626,7 +628,8 @@ func TestSync_listingBusy(t *testing.T) {
 	core, st := newSyncCore(repl.Config{SyncInterval: 200 * time.Millisecond})
 	var out port.Outbox
 	for i := range chunks {
-		if _, _, err := st.store.Set(oversizedKeyN(i), []byte("v")); err != nil {
+		_, _, err := st.store.Set(oversizedKeyN(i), []byte("v"))
+		if err != nil {
 			t.Fatalf("store Set(oversized key %d): %v", i, err)
 		}
 	}

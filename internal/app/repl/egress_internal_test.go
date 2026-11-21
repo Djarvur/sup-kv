@@ -10,6 +10,7 @@ package repl
 
 import (
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
@@ -57,9 +58,7 @@ func (s *egressStore) Lookup(key string) (storage.Record, bool) {
 // Versions returns a fresh copy of the fake store's version view.
 func (s *egressStore) Versions() map[string]version.RecordVersion {
 	out := make(map[string]version.RecordVersion, len(s.versions))
-	for key, v := range s.versions {
-		out[key] = v
-	}
+	maps.Copy(out, s.versions)
 	return out
 }
 
@@ -71,9 +70,9 @@ func newEgressCore() *Core {
 	}, Config{})
 }
 
-// egressNow returns the virtual time at off.
-func egressNow(off time.Duration) time.Time {
-	return time.UnixMilli(egressTestNowMs).Add(off)
+// egressNow returns the fixed virtual test instant.
+func egressNow() time.Time {
+	return time.UnixMilli(egressTestNowMs)
 }
 
 // missingEntries builds n distinct listing entries for keys the fake store
@@ -96,7 +95,7 @@ func missingEntries(n int) []port.SyncEntry {
 func TestEgress_boundedDeduped(t *testing.T) {
 	t.Parallel()
 	core := newEgressCore()
-	now := egressNow(0)
+	now := egressNow()
 	const missing = 1000
 	entries := missingEntries(missing)
 
@@ -119,7 +118,7 @@ func TestEgress_boundedDeduped(t *testing.T) {
 func TestEgress_identitySeparates(t *testing.T) {
 	t.Parallel()
 	core := newEgressCore()
-	now := egressNow(0)
+	now := egressNow()
 	core.enqueueResponse(now, "peer-a", port.DataRequest{Key: "cfg/k"})
 	core.enqueueResponse(now, "peer-a", port.DataRequest{Key: "cfg/k"})
 	core.enqueueResponse(now, "peer-b", port.DataRequest{Key: "cfg/k"})
@@ -139,7 +138,7 @@ func TestEgress_identitySeparates(t *testing.T) {
 func TestEgress_capDropsOldest(t *testing.T) {
 	t.Parallel()
 	core := newEgressCore()
-	now := egressNow(0)
+	now := egressNow()
 	evicted := "cap/000000"
 	core.enqueueResponse(now, "peer", port.DataRequest{Key: evicted})
 	for i := 1; i <= maxEgressEntries; i++ {
@@ -179,7 +178,7 @@ func TestEgress_drainSkipsGoneRecords(t *testing.T) {
 	t.Parallel()
 	core := newEgressCore()
 	st, _ := core.store.(*egressStore)
-	now := egressNow(0)
+	now := egressNow()
 	var out port.Outbox
 	core.Advance(now, &out) // startup Hello + empty listing, outside the assertion
 	out.Drain()

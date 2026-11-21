@@ -1217,7 +1217,8 @@ func TestRetransmit_skipDrainedAndSuperseded(t *testing.T) {
 
 		// The store record changes under the queued beta send without a core
 		// notification: the queued version is stale.
-		if _, _, err := st.store.Set(keyBeta, []byte("changed")); err != nil {
+		_, _, err := st.store.Set(keyBeta, []byte("changed"))
+		if err != nil {
 			t.Fatalf("store Set(%q): %v", keyBeta, err)
 		}
 		core.Advance(helloAt.Add(150*time.Millisecond), &out)
