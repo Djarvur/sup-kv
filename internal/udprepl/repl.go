@@ -102,9 +102,13 @@ var errNoStandaloneBody = errors.New("udprepl: message has no standalone datagra
 // configuration sentinels: the request-width guard (T-3-01) and the
 // one-maximal-datagram send floor (T-3-03) wrap them with the compared
 // sizes, so callers can match the class without parsing the numbers.
+// errUnexpectedSocketType guards the one assertion the udp4 listen path needs
+// ([net.PacketConn] to [*net.UDPConn]): unreachable with the standard library,
+// but a construction failure must return, never panic, if it ever were.
 var (
-	errBufferRequestRange = errors.New("udprepl: socket buffer request out of range")
-	errSendBufferTooSmall = errors.New("udprepl: effective send buffer cannot hold one maximal datagram")
+	errBufferRequestRange   = errors.New("udprepl: socket buffer request out of range")
+	errSendBufferTooSmall   = errors.New("udprepl: effective send buffer cannot hold one maximal datagram")
+	errUnexpectedSocketType = errors.New("udprepl: unexpected socket type from udp4 listen")
 )
 
 // ErrRunLoopExited is the NotifyLocalWrite verdict once the adapter's event
@@ -187,7 +191,7 @@ func insertPeer(peers []uint16, id uint16) []uint16 {
 }
 
 // packetConn is the adapter's socket seam: the datagram operations the
-// replication adapter uses, exactly as *net.UDPConn provides them. The
+// replication adapter uses, exactly as [*net.UDPConn] provides them. The
 // interface exists so the receive path can be driven by a fake in the
 // white-box read-loop test (XPORT-08) — a non-closed read error must be
 // provably survivable, and no real socket produces one on demand. LocalAddr
@@ -196,8 +200,8 @@ func insertPeer(peers []uint16, id uint16) []uint16 {
 type packetConn interface {
 	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
 	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
-	SetReadBuffer(bytes int) error
-	SetWriteBuffer(bytes int) error
+	SetReadBuffer(size int) error
+	SetWriteBuffer(size int) error
 	SyscallConn() (syscall.RawConn, error)
 	LocalAddr() net.Addr
 	Close() error
@@ -340,7 +344,7 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 	if cfg.OnDiscard == nil {
 		cfg.OnDiscard = logDiscard
 	}
-	bound, err := listenDatagram(bindAddr, o.addressReuse)
+	bound, err := listenDatagram(bindAddr, o)
 	if err != nil {
 		return nil, fmt.Errorf("udprepl: bind udp4 %s: %w", bindAddr, err)
 	}
@@ -395,16 +399,17 @@ func logDiscard(class, detail string) {
 	slog.Debug("Discarded datagram", "class", class, "detail", detail)
 }
 
-// listenDatagram binds the udp4 socket. Only when reuse is true does it set
-// SO_REUSEADDR through a pre-bind Control hook; production passes false, so
-// a second process binding the same address fails with EADDRINUSE and can
-// never silently split the node's unicast traffic between two sockets
-// (XPORT-09, T-3-34). SO_BROADCAST is deliberately absent: Go sets it on
-// every datagram socket (RESEARCH Pattern 7), and setting it here would only
-// disguise that the reuse option is the sole socket-option concern.
-func listenDatagram(bindAddr string, reuse bool) (*net.UDPConn, error) {
+// listenDatagram binds the udp4 socket. Only when the resolved options ask
+// for address reuse does it set SO_REUSEADDR through a pre-bind Control hook;
+// production resolves the zero options, so a second process binding the same
+// address fails with EADDRINUSE and can never silently split the node's
+// unicast traffic between two sockets (XPORT-09, T-3-34). SO_BROADCAST is
+// deliberately absent: Go sets it on every datagram socket (RESEARCH
+// Pattern 7), and setting it here would only disguise that the reuse option
+// is the sole socket-option concern.
+func listenDatagram(bindAddr string, o options) (*net.UDPConn, error) {
 	var lc net.ListenConfig
-	if reuse {
+	if o.addressReuse {
 		var opErr error
 		lc.Control = func(_, _ string, c syscall.RawConn) error {
 			err := c.Control(func(fd uintptr) {
@@ -426,7 +431,7 @@ func listenDatagram(bindAddr string, reuse bool) (*net.UDPConn, error) {
 	conn, ok := packetConn.(*net.UDPConn)
 	if !ok {
 		_ = packetConn.Close()
-		return nil, fmt.Errorf("udp4 listen returned %T, want *net.UDPConn", packetConn)
+		return nil, fmt.Errorf("%w: got %T", errUnexpectedSocketType, packetConn)
 	}
 	return conn, nil
 }

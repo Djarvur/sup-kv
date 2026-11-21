@@ -9,7 +9,6 @@ package udprepl
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"syscall"
@@ -22,6 +21,15 @@ import (
 const (
 	waitLoopDeadline = 5 * time.Second
 	waitLoopStep     = 5 * time.Millisecond
+)
+
+// The scripted read faults: package-level sentinels, because the lint gate's
+// err113 rule forbids constructing errors at use sites and the tests only
+// need distinguishable, stable values.
+var (
+	errFakeNoRawSocket     = errors.New("fakePacketConn: no raw socket")
+	errInjectedReadFault   = errors.New("injected receive fault")
+	errPersistentReadFault = errors.New("persistent receive fault")
 )
 
 // fakeRead is one scripted read result: a datagram to deliver or an error
@@ -134,20 +142,20 @@ func (c *fakePacketConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 
 // WriteToUDP accepts and discards one datagram — the read-loop tests never
 // exercise the send path.
-func (c *fakePacketConn) WriteToUDP(b []byte, _ *net.UDPAddr) (int, error) {
+func (*fakePacketConn) WriteToUDP(b []byte, _ *net.UDPAddr) (int, error) {
 	return len(b), nil
 }
 
 // SetReadBuffer is a no-op: no kernel socket exists here.
-func (c *fakePacketConn) SetReadBuffer(_ int) error { return nil }
+func (*fakePacketConn) SetReadBuffer(_ int) error { return nil }
 
 // SetWriteBuffer is a no-op: no kernel socket exists here.
-func (c *fakePacketConn) SetWriteBuffer(_ int) error { return nil }
+func (*fakePacketConn) SetWriteBuffer(_ int) error { return nil }
 
 // SyscallConn reports the absent raw socket; the read-loop tests never read
 // socket options through it.
-func (c *fakePacketConn) SyscallConn() (syscall.RawConn, error) {
-	return nil, errors.New("fakePacketConn: no raw socket")
+func (*fakePacketConn) SyscallConn() (syscall.RawConn, error) {
+	return nil, errFakeNoRawSocket
 }
 
 // LocalAddr returns the scripted datagram source address.
@@ -198,7 +206,7 @@ func TestReadLoop_survivesNonClosedError(t *testing.T) {
 	// Script one fault followed by one real datagram; the backoff starts
 	// before the datagram can be read, so the measured wait is the pause.
 	start := time.Now()
-	conn.fail(fmt.Errorf("injected receive fault"))
+	conn.fail(errInjectedReadFault)
 	conn.feed([]byte("after-the-fault"))
 
 	var ev inboundEvent
@@ -237,7 +245,7 @@ func TestReadLoop_survivesNonClosedError(t *testing.T) {
 func TestReadLoop_persistentErrorExitsOnClose(t *testing.T) {
 	t.Parallel()
 	conn := newFakePacketConn()
-	conn.failEveryRead(fmt.Errorf("persistent receive fault"))
+	conn.failEveryRead(errPersistentReadFault)
 	adapter := newAdapterWithConn(conn)
 	done := make(chan struct{})
 	go func() {

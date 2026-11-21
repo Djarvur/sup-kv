@@ -920,7 +920,9 @@ func runAdapter(t *testing.T, adapter *udprepl.Adapter) {
 // every socket on the address has SO_REUSEADDR, which is exactly the
 // asymmetry the policy relies on.
 func TestListen_noAddressReuse(t *testing.T) {
+	t.Parallel()
 	t.Run("a second production bind fails with EADDRINUSE", func(t *testing.T) {
+		t.Parallel()
 		udpPort := freeUDPPort(t)
 		bind := fmt.Sprintf("0.0.0.0:%d", udpPort)
 		broadcast := fmt.Sprintf("127.255.255.255:%d", udpPort)
@@ -945,6 +947,7 @@ func TestListen_noAddressReuse(t *testing.T) {
 	})
 
 	t.Run("the explicit option restores same-port binding", func(t *testing.T) {
+		t.Parallel()
 		udpPort := freeUDPPort(t)
 		bind := fmt.Sprintf("0.0.0.0:%d", udpPort)
 		broadcast := fmt.Sprintf("127.255.255.255:%d", udpPort)
