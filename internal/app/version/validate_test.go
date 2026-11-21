@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
@@ -167,5 +168,110 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("Validate(%x) = %v, want %v", tt.v[:], err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// layoutOK is the test's independent reading of the RFC 9562 layout rule: the
+// version 7 nibble in octet 6's high bits and the variant 0b10 in octet 8's
+// top two bits, exactly the masks the package documents.
+func layoutOK(v version.RecordVersion) bool {
+	return v[6]&uuidVerMask == uuidVerBits && v[8]&uuidVarMask == uuidVarBits
+}
+
+// modelVerdict is the test's independent model of Validate at (nowMs, leadMs):
+// a layout failure first, then the overflow-safe future bound, which rejects
+// only readings strictly beyond the inclusive now+lead edge.
+func modelVerdict(v version.RecordVersion, nowMs, leadMs int64) error {
+	if !layoutOK(v) {
+		return version.ErrVersionLayout
+	}
+	l, _, _ := v.Unpack()
+	if l >= nowMs && l-nowMs > leadMs {
+		return version.ErrVersionFuture
+	}
+	return nil
+}
+
+// verdictMatches reports whether got carries the want sentinel, or both are nil.
+func verdictMatches(got, want error) bool {
+	if want == nil {
+		return got == nil
+	}
+	return errors.Is(got, want)
+}
+
+// validateSafe calls Validate and converts a panic into a value the property
+// loop can assert on, so a bad draw is reported with its bytes instead of
+// aborting the test binary.
+func validateSafe(v version.RecordVersion, now time.Time, maxLead time.Duration) (panicked any, err error) {
+	defer func() { panicked = recover() }()
+	return nil, v.Validate(now, maxLead)
+}
+
+// TestValidate_property proves Validate is total over arbitrary wire bytes and
+// consistent with the package's own packing (XPORT-04, T-3-07/T-3-08/T-3-09):
+// 2000 seeded raw versions — attacker-chosen bit patterns — never panic and
+// always agree with an independently computed layout/bound model; 1000
+// PackVersion outputs around the future edge obey the inclusive boundary. The
+// "property seed:" line printed by testutil.NewRNG carries the replay seed.
+func TestValidate_property(t *testing.T) {
+	t.Parallel()
+	rng := testutil.NewRNG(t)
+	now := time.UnixMilli(testNowMs)
+	nowMs := now.UnixMilli()
+	leadMs := validateLead.Milliseconds()
+
+	const (
+		rawDraws     = 2000
+		packedDraws  = 1000
+		windowMs     = int64(61 * 1000) // one second beyond the 60 s lead.
+		nearBoundary = int64(1000)      // readings within a second of the edge.
+	)
+
+	for range rawDraws {
+		v := testutil.RandRawVersion(rng)
+		panicked, err := validateSafe(v, now, validateLead)
+		if panicked != nil {
+			t.Fatalf("Validate panicked on raw version %x: %v", v[:], panicked)
+		}
+		want := modelVerdict(v, nowMs, leadMs)
+		if !verdictMatches(err, want) {
+			t.Fatalf("Validate(%x) = %v, want %v (replay with the property seed above)",
+				v[:], err, want)
+		}
+	}
+
+	var accepted, future int
+	for range packedDraws {
+		var l int64
+		if rng.IntN(2) == 0 {
+			// Half the draws hug the inclusive edge so both branches of the
+			// future bound are exercised, not just the vast past.
+			l = nowMs + leadMs - nearBoundary/2 + rng.Int64N(nearBoundary+1)
+		} else {
+			l = nowMs - hourMs + rng.Int64N(hourMs+windowMs)
+		}
+		v := version.PackVersion(l,
+			uint16(rng.IntN(testCounterMax+1)),
+			uint16(rng.IntN(maxNodeID+1)))
+		panicked, err := validateSafe(v, now, validateLead)
+		if panicked != nil {
+			t.Fatalf("Validate panicked on packed version %x: %v", v[:], panicked)
+		}
+		if l <= nowMs+leadMs {
+			accepted++
+			if err != nil {
+				t.Fatalf("Validate(%x) with l=%d = %v, want nil", v[:], l, err)
+			}
+			continue
+		}
+		future++
+		if !errors.Is(err, version.ErrVersionFuture) {
+			t.Fatalf("Validate(%x) with l=%d = %v, want ErrVersionFuture", v[:], l, err)
+		}
+	}
+	if accepted == 0 || future == 0 {
+		t.Fatalf("the packed arm exercised accepted=%d future=%d, want both non-zero",
+			accepted, future)
 	}
 }
