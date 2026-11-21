@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-11-21T18:39:18.367Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-11-21T18:46:02.197Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 3 execution started
-state_head: f186d0981047b0a127c29ae7d12a56b30f62a172
+state_head: b955d29fb939b224f200618612bc2753bc3b1af4
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 23
+  completed_plans: 24
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 3 of 13
+Plan: 4 of 13
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 3 execution started
 
@@ -77,6 +77,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P11 | 694s | 3 tasks | 3 files |
 | Phase 3 P01 | 427s | 3 tasks | 5 files |
 | Phase 03 P02 | 297s | 3 tasks | 6 files |
+| Phase 03 P03 | 148 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -155,6 +156,9 @@ Recent decisions affecting current work:
 - [Phase 03]: Every view read returns caller-owned state: Lookup clones Data and Versions builds a fresh map, never a view of store internals.
 - [Phase 03]: storage.MaxKeyBytes = 1024 documents write-side-only validation; reads stay permissive for pre-upgrade long keys.
 - [Phase 03]: Cluster.Write panics naming operation, key and node on a rejected store write, and Write/Delete read through the point Lookup, not Records().
+- [Phase 03]: Version layout is validated before the future bound, keeping ErrVersionLayout and ErrVersionFuture distinguishable for the bad_version discard class (XPORT-04, D-06).
+- [Phase 03]: The 46 RFC 9562 rand_b filler bits are accepted so a conforming third-party UUIDv7 passes; rejecting them would break interoperability.
+- [Phase 03]: Validate's future bound is inclusive at now+maxLead, overflow-safe by subtraction, with a negative lead clamped to zero.
 
 ### Pending Todos
 
@@ -175,7 +179,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T18:39:18.200Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-11-21T18:46:01.850Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
