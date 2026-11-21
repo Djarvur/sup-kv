@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-14-PLAN.md
-last_updated: "2026-11-19T20:53:00.625Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-11-21T10:40:58.798Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 51d7c92446aec9e69f40f5ba5eb79ae986e12fbe
+state_head: 2f274f1b902c1900dd6f6ed883c91a11d0f3cddb
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 6 of 17
+Plan: 7 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P03 | 441 | 2 tasks | 1 files |
 | Phase 02 P04 | 1191s | 2 tasks | 5 files |
 | Phase 02 P14 | 178s | 1 tasks | 1 files |
+| Phase 02 P05 | 1044 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -98,6 +99,8 @@ Recent decisions affecting current work:
 - [Phase 02]: fsops internal-test placement: justified //nolint:testpackage keeps the plan's artifact name fsops_test.go with package persistfile (the internal/stand precedent) so the fakes reach the unexported FileStore.ops injection point; exported constructors unchanged, nothing added to internal/port
 - [Phase 02]: D-07 blocking proof rides a synctest bubble with an in-memory blockingDumpPort (startDumper pattern): deterministic not-returned window, no real-time flake surface for the nightly -race -count=20 soak
 - [Phase 02]: internal/stand nondarwin half: the darwin-untested leak assertion is a real runtime check — go/build MatchFile against an explicit darwin context over every sibling .go file (constraint-form-agnostic), so a leaked scenario file fails the darwin cell with a named error; the loud statement is a wrapped const keeping the plan's grep gate at exactly one phrase line
+- [Phase 02]: R-03's stand closed window is shaped structurally (A seeded+stopped, replaced node alone with a 30 s backstop, then A restarts) rather than raced against a live multi-chunk listing; v1.0's Get answers NotFound, never Unavailable
+- [Phase 02]: All four stand red tests assert the documented acceptance expressions (R-01 2×sync_interval + N/rate; R-02 N/rate + 10 s and ≤3N; burst ≥990/s and 5 s drain; R-03 five-point PROTO-01), so Phases 3-5 flip only the expectation-table rows
 
 ### Pending Todos
 
@@ -118,7 +121,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-19T20:53:00.554Z
-Stopped at: Completed 02-14-PLAN.md
+Last session: 2026-11-21T10:40:58.632Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
