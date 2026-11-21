@@ -500,7 +500,7 @@ type Core struct {
 
 	// Per-site monotone counters: the deterministic jitter sequence for the
 	// Hello and sync timers and for the listing and record pacer spacings
-	// (T-3-22 — no math/rand, same-seed replay stays byte-identical).
+	// (T-3-22 — deterministic hash only, same-seed replay stays byte-identical).
 	helloJitterSeq   uint64
 	syncJitterSeq    uint64
 	listingJitterSeq uint64
@@ -1185,7 +1185,7 @@ func (c *Core) drainListings(now time.Time, out *port.Outbox) {
 // jitterOffset returns a deterministic offset in [0, span) derived from the
 // core's runID, the site's monotone sequence number and the site salt:
 // FNV-1a over the run identity, so identical seeds replay identically and no
-// math/rand state enters the core (T-3-22). A non-positive span returns zero.
+// PRNG state enters the core (T-3-22). A non-positive span returns zero.
 func (c *Core) jitterOffset(seq, salt uint64, span time.Duration) time.Duration {
 	if span <= 0 {
 		return 0
