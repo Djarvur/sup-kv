@@ -504,6 +504,75 @@ func runToCompletion(t *testing.T, bin string, env []string, args ...string) (st
 	return out.String(), err
 }
 
+// TestMain_valueMaxDatagram pins XPORT-03's startup ceiling executably: the
+// P-01 flag value (64000) and the exact largest fitting value (64 408) still
+// start and serve, while one byte more (64 409) and a clearly oversized
+// value (65 500) exit with the usage code and an error naming
+// --value-max-bytes, the key limit and the ceiling. The equality case pins
+// the comparison as `>` (the record is exactly 65 507 bytes and passes); the
+// adjacent case pins it as exclusive. This test is the executable guard for
+// the "64 000 is still accepted" claim; the P-01 expectation-row grep only
+// guards that those rows stay unchanged for Phase 5.
+func TestMain_valueMaxDatagram(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	for _, tc := range []struct {
+		name     string
+		valueMax int
+	}{
+		{"64000 starts and serves", 64000},
+		{"the exact boundary starts and serves", startupBoundaryValue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dumpPath := filepath.Join(t.TempDir(), "dump.json")
+			udpPort := freeUDPPort(t)
+			grpcPort := freeTCPPort(t)
+			addr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+			node := startLoggedNode(t, bin, nil,
+				"--node-id=1",
+				"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+				"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+				"--grpc-addr="+addr,
+				"--dump-path="+dumpPath,
+				"--startup-gate=10ms",
+				"--value-max-bytes="+strconv.Itoa(tc.valueMax),
+			)
+			awaitServing(t, addr, servingDeadline)
+			if stderr := node.stderr.String(); strings.Contains(stderr, datagramCeilingLine) {
+				t.Fatalf("--value-max-bytes=%d produced the datagram-ceiling error while starting:\n%s", tc.valueMax, stderr)
+			}
+			signalAndWaitExit(t, node)
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		valueMax int
+	}{
+		{"one byte over the ceiling exits 2", startupBoundaryOverValue},
+		{"a clearly oversized value exits 2", 65500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := runToCompletion(t, bin, nil,
+				"--node-id=1",
+				"--bind-addr=127.0.0.1:9",
+				"--broadcast-addr=127.255.255.255:9",
+				"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+				"--value-max-bytes="+strconv.Itoa(tc.valueMax),
+			)
+			assertExitCode(t, err, exitUsageCode)
+			for _, want := range []string{datagramCeilingLine, "--value-max-bytes=" + strconv.Itoa(tc.valueMax), "1024-byte key limit", "65507"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("over-ceiling startup output does not contain %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
 // TestMain_lifecycle drives the whole node lifecycle through the real
 // binary: the startup gate opens (SERVING over real TCP — the timeout path,
 // since a lone node receives no DataSync), a SupKV client Sets and Gets one
@@ -736,8 +805,15 @@ func TestShutdown_secondSignal(t *testing.T) {
 // (exitUsage — the collected env-error path the malformed SUPKV_LOG_* values
 // must abort through, never a silent default).
 const (
-	logProbeWait  = 300 * time.Millisecond
-	exitUsageCode = 2
+	logProbeWait        = 300 * time.Millisecond
+	exitUsageCode       = 2
+	datagramCeilingLine = "datagram ceiling"
+
+	// startupBoundaryValue is the largest --value-max-bytes whose maximal-key
+	// record encodes to exactly 65 507 bytes; equality passes because the
+	// startup check is `>`. One byte more crosses the ceiling.
+	startupBoundaryValue     = 64408
+	startupBoundaryOverValue = startupBoundaryValue + 1
 )
 
 // logProbeSocket binds a wildcard udp4 socket with SO_REUSEADDR and

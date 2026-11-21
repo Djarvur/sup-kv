@@ -32,7 +32,7 @@ line numbers in the Spec edition the review audited.
 |---|---|---|---|
 | S-DM-01 | All records live in one in-process Go map guarded by a single reader-writer mutex | implemented | `internal/app/storage/store.go:83-89` |
 | S-DM-02 | Persistence writes the map to disk; the one-JSON-document requirement was rewritten by the 2026-11-19 amendment into the shipped JSON Lines dump format | superseded-by-amendment | `internal/app/persist/codec.go:62-85`; REVIEW §13 |
-| S-DM-03 | Keys are plain strings and a per-service prefix is only advice; the API additionally rejects the empty key, and nothing caps key length anywhere | implemented | `internal/app/storage/store.go:87`; `internal/grpcapi/server.go:103,135,175`; REVIEW G-11 (key-length bound lands with XPORT-03) |
+| S-DM-03 | Keys are plain strings and a per-service prefix is only advice; the API additionally rejects the empty key, and key length is capped at 1 024 bytes (XPORT-03) | implemented | `internal/app/storage/store.go:20-27` (`MaxKeyBytes`); `internal/grpcapi/server.go:151,196,304` (API check); `internal/app/repl/core.go:815` (receive check); `cmd/sup-kv/main.go:439` (startup datagram ceiling); `internal/udprepl/maxdatagram.go` (ceiling oracle); REVIEW G-11 |
 | S-DM-04 | Every write stamps a UUIDv7 record version, and on merge the greater version takes the key | implemented | `internal/app/storage/store.go:175-180,234-250` |
 | S-DM-05 | Record payload is raw bytes, emptied by deletion and capped at 60 KiB | implemented | `internal/app/storage/store.go:15,160,188,209,220` |
 | S-DM-06 | Each record carries a Deleted flag serving as a permanent tombstone | implemented | `internal/app/storage/store.go:55-60` |

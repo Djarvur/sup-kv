@@ -59,6 +59,31 @@ sup-kv is sized for small clusters and small values:
 - replication occupies one UDP broadcast segment — no WAN, no explicit peer
   lists.
 
+## Record and datagram limits
+
+Every accepted record must fit one UDP datagram, and the write API enforces
+the two bounds that make that true:
+
+- **Keys are at most 1 024 bytes**, measured in bytes of the key string
+  (not runes). `Set`, `SetIfAbsent` and `Delete` reject a longer key with
+  `InvalidArgument`, and the replication receive path discards an inbound
+  datagram that carries one (`key_too_long`). `Get` and `List` stay
+  permissive so records written by an older version under a longer key
+  remain readable.
+- **Values are at most `--value-max-bytes`** (environment twin
+  `SUPKV_VALUE_MAX_BYTES`, default 61 440 bytes).
+- **The combined record must fit 65 507 bytes** — the maximum IPv4 UDP
+  payload. With a maximal 1 024-byte key the largest fitting value is
+  64 408 bytes: 1 024 + 64 408 plus the envelope overhead is exactly the
+  ceiling. At startup the node measures the worst case through the real
+  codec; a `--value-max-bytes` that cannot fit exits with code 2 and an
+  error naming the flag, the key limit and the computed size. The default
+  61 440 leaves roughly 3 KiB of headroom.
+- **`--max-clock-lead`** (environment twin `SUPKV_MAX_CLOCK_LEAD`, default
+  60s) bounds how far ahead of local time a received record version may
+  be. Keep the same value on every node: a node with a smaller bound
+  discards versions its peers still consider valid.
+
 ## Read semantics
 
 Reads are local: a `Get` is served from the node it lands on, with no

@@ -61,6 +61,7 @@ var (
 	errNodeIDEnv         = errors.New("must be an integer within the 16-bit node ID space")
 	errLogFormatEnv      = errors.New("must be json or text")
 	errIncompleteCertSet = errors.New("the metrics certificate envs must be set together")
+	errDatagramCeiling   = errors.New("value-max-bytes exceeds the datagram ceiling")
 )
 
 // Process exit codes: a configuration error (missing or malformed knob)
@@ -398,7 +399,11 @@ func finalizeConfig(cfg *config, nodeID uint64, envErr error) error {
 	if missing := missingRequired(*cfg); len(missing) > 0 {
 		return fmt.Errorf("%w: %s", errMissingRequired, strings.Join(missing, ", "))
 	}
-	return checkMetricsCerts(*cfg)
+	err := checkMetricsCerts(*cfg)
+	if err != nil {
+		return err
+	}
+	return checkDatagramCeiling(*cfg)
 }
 
 // checkMetricsCerts enforces D-02's all-or-nothing contract before any bind
@@ -414,6 +419,39 @@ func checkMetricsCerts(cfg config) error {
 	}
 	return fmt.Errorf("%w: %s, %s and %s",
 		errIncompleteCertSet, envMetricsCert, envMetricsKey, envMetricsClientCA)
+}
+
+// checkDatagramCeiling enforces XPORT-03's startup half: the largest record
+// the write API accepts — a key of storage.MaxKeyBytes with a value of
+// value_max_bytes — must encode into one UDP datagram. The size comes from
+// udprepl.MaxRecordDatagramBytes, which marshals the real schema at
+// worst-case varint widths, so this check cannot undercount a maximal
+// record (and is why --value-max-bytes=64000 still starts: its worst case
+// is well below the ceiling). A non-positive value-max-bytes is the store's
+// own default (storage.NewStore normalizes it), so the check evaluates that
+// same effective value. The probe width is bounded by the ceiling itself: a
+// misconfigured multi-gigabyte value is over the ceiling before any key or
+// envelope byte, and materializing it just to measure would turn a config
+// typo into an out-of-memory startup. Called by finalizeConfig, before any
+// bind or socket work, so a bad combination exits with the usage code (2)
+// rather than starting a node whose largest confirmed write could never
+// replicate.
+func checkDatagramCeiling(cfg config) error {
+	valueBytes := cfg.valueMaxBytes
+	if valueBytes <= 0 {
+		valueBytes = defaultValueMaxBytes
+	}
+	probe := min(valueBytes, udprepl.MaxDatagramBytes)
+	size := udprepl.MaxRecordDatagramBytes(storage.MaxKeyBytes, probe)
+	if probe == valueBytes && size <= udprepl.MaxDatagramBytes {
+		return nil
+	}
+	measured := strconv.Itoa(size)
+	if probe < valueBytes {
+		measured = "at least " + measured
+	}
+	return fmt.Errorf("%w: --value-max-bytes=%d with the %d-byte key limit needs %s-byte datagrams, over the %d-byte UDP ceiling",
+		errDatagramCeiling, cfg.valueMaxBytes, storage.MaxKeyBytes, measured, udprepl.MaxDatagramBytes)
 }
 
 // startEngine opens the real dump store at the configured path, resolves

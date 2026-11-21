@@ -37,6 +37,10 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/Djarvur/sup-kv/internal/app/storage"
 	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
@@ -134,14 +138,13 @@ const (
 	standKeyFromB       = "stand/emptydisk/from-b"
 )
 
-// The F2c scenario's constants: the review's 70 000-character key — over
-// the UDP datagram ceiling once enveloped, so the kernel rejects every
-// send with EMSGSIZE — and the stable OS error text the adapter logs on
-// each rejected send (udprepl's Adapter.write logs "send to %s: %v",
-// carrying the kernel's sendto message).
+// The F2c scenario's constants: the review's 70 000-character key, which
+// the API now rejects before it can reach the wire, and the design-default
+// value limit the boundary record pairs with a maximal key (the stand nodes
+// run without --value-max-bytes, so 61 440 is their accepted maximum).
 const (
-	standOversizeKeyLen = 70000
-	standSendFailLine   = "sendto: message too long"
+	standOversizeKeyLen     = 70000
+	standBoundaryValueBytes = 61440
 )
 
 // TestStand_killNineRestart is the flagship TEST-04 scenario on the real
@@ -536,22 +539,23 @@ func emptyDiskRecovered(t *testing.T, client apiproto.SupKVServiceClient, keys [
 	}
 }
 
-// TestStand_oversizeKeyF2c pins the review's F2c CURRENT behavior as a
-// green pin (XPORT-03 fixes it in Phase 3): node A Sets a
-// 70 000-character key — Set returns OK (the local store write and the
-// confirmed dump both succeed) — and every replication datagram carrying
-// the record is rejected by the kernel with EMSGSIZE, which the adapter
-// logs on A's stderr. The key never reaches node B: over the derived
-// window (the review's checked 2×sync_interval plus the discovery, gate
-// and slack margin) B's endpoint serves nothing under the key, and B's
-// final confirmed dump after a clean stop carries no record for it. The
-// write is real on A: its own endpoint serves the key throughout.
+// TestStand_oversizeKeyF2c pins review finding F2c at process level against
+// the fixed behavior (XPORT-03): node A Sets a 70 000-character key and the
+// API rejects it locally with InvalidArgument, because the one key-length
+// ceiling (storage.MaxKeyBytes) runs before the store. The original finding
+// — Set OK locally, then every replication datagram refused by the kernel
+// with EMSGSIZE forever — is fixed by the key bound rather than by kernel
+// error handling; the scenario keeps its name for traceability. The key
+// therefore never reaches node B: over the derived window (2×sync_interval
+// plus the discovery, gate and slack margin) B's endpoint serves nothing
+// under it, and neither node's final dump carries a record for it. The
+// positive half proves the bound admits the documented maximum: a key of
+// exactly storage.MaxKeyBytes bytes with a 61 440-byte value replicates to
+// B and lands in B's final confirmed dump.
 func TestStand_oversizeKeyF2c(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
-	// Node A's stderr is the lock-guarded live buffer: this scenario polls
-	// the send failures while A still runs (the sendto assertion's shape).
-	nodeA := startStandLoggedNode(t, p, standNodeAID)
+	nodeA := startStandNode(t, p, standNodeAID)
 	nodeB := startStandNode(t, p, standNodeBID)
 	awaitServing(t, p.grpcA, servingDeadline)
 	awaitServing(t, p.grpcB, servingDeadline)
@@ -560,63 +564,60 @@ func TestStand_oversizeKeyF2c(t *testing.T) {
 	clientB := standClient(t, p.grpcB)
 
 	// The F2c key: standOversizeKeyLen characters of a repeating marker,
-	// so the dump-grep and log assertions stay readable.
+	// so the dump-grep assertions stay readable.
 	oversizeKey := strings.Repeat("f2c-", standOversizeKeyLen/len("f2c-"))
 
-	// Set returns OK: the F2c finding's first half — the local write and
-	// the confirmed dump succeed; only the replication egress fails. The
-	// value is the review's 1-byte shape: the value fits the store's limit
-	// so the write is accepted, while the enveloped record overflows the
-	// datagram ceiling.
-	standSetWith(t, clientA, oversizeKey, "f")
+	// The fixed half: the API rejects the key locally, before the store, so
+	// there is no confirmed-but-unsendable record.
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	_, err := clientA.Set(ctx, &apiproto.SetRequest{Key: oversizeKey, Value: []byte("f")})
+	cancel()
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Set with a %d-byte key: want InvalidArgument from the key bound, got %v", len(oversizeKey), err)
+	}
 
-	// The rejected sends surface on A's stderr: poll the live log buffer
-	// for the kernel's EMSGSIZE message the adapter logs on every failed
-	// send.
-	waitFor(t, standConvergeDeadline, "the sendto message-too-long failures in node A's stderr", func() bool {
-		return strings.Contains(nodeA.stderr.String(), standSendFailLine)
-	})
+	// The rejection is real on A: its own endpoint must not serve the key.
+	if _, found := standGet(t, clientA, oversizeKey); found {
+		t.Fatalf("node A serves the rejected %d-byte key", len(oversizeKey))
+	}
 
 	// The never-replicated half: the key must stay absent from node B for
-	// the full window — the review's checked 2×sync_interval plus the
-	// discovery, gate and slack margin, derived from the flags the nodes
-	// run with. waitFor cannot express "the absence holds for the whole
-	// window", so the poll's condition is the elapsed window AND
-	// continued absence — an early appearance fails the same waitFor
-	// loudly at its deadline instead of passing silently.
+	// the full window — 2×sync_interval plus the discovery, gate and slack
+	// margin, derived from the flags the nodes run with. waitFor cannot
+	// express "the absence holds for the whole window", so the poll's
+	// condition is the elapsed window AND continued absence — an early
+	// appearance fails the same waitFor loudly at its deadline instead of
+	// passing silently.
 	window := 2*standSyncInterval + standStartupGate + 2*standHelloInterval + 2*time.Second
 	start := time.Now()
-	waitFor(t, window+checkTimeout, "the oversize key to stay absent from node B for the full window", func() bool {
+	waitFor(t, window+checkTimeout, "the rejected oversize key to stay absent from node B for the full window", func() bool {
 		return time.Since(start) >= window && standAbsent(t, clientB, oversizeKey)
 	})
 	t.Logf("oversize key stayed unreplicated for the full %v window (2x sync_interval + margin)", window)
 
-	// The disk-level truth: stop B cleanly (the D-19 final dump) and
-	// assert its dump carries no record for the key. An empty store may
-	// never have produced a dump file at all — B applied nothing, so there
-	// was nothing to persist — so the dump half of the never-replicated
-	// assertion applies only when the final dump exists; either way the
-	// key is not in it.
-	signalAndWaitExit(t, nodeB)
-	dumpB, dumpErr := os.ReadFile(p.dumpB)
-	switch {
-	case dumpErr == nil:
-		if strings.Contains(string(dumpB), oversizeKey) {
-			t.Fatalf("node B's final dump at %s carries the oversize key — it replicated, contradicting F2c:\n%s",
-				p.dumpB, dumpB)
-		}
-	case os.IsNotExist(dumpErr):
-		// No dump file: consistent with B never having applied anything.
-	default:
-		t.Fatalf("read node B's final dump %s: %v", p.dumpB, dumpErr)
-	}
+	// The positive half: the documented maximum — a 1 024-byte key and a
+	// 61 440-byte value (the default limit) — passes the API and the
+	// datagram ceiling, replicates to B, and survives B's final dump.
+	boundaryKey := strings.Repeat("b", storage.MaxKeyBytes)
+	boundaryValue := strings.Repeat("v", standBoundaryValueBytes)
+	standSetWith(t, clientA, boundaryKey, boundaryValue)
+	waitFor(t, standConvergeDeadline, "the 1 024-byte-key / 61 440-byte-value record on node B", func() bool {
+		value, found := standGet(t, clientB, boundaryKey)
+		return found && value == boundaryValue
+	})
 
-	// The write is real on A: its own endpoint serves the key.
-	if value, found := standGet(t, clientA, oversizeKey); !found || value != "f" {
-		t.Fatalf("node A does not serve the oversize key it Set: (%q, %t)", value, found)
+	// The disk-level truth after B's clean stop (the D-19 final dump): the
+	// boundary record is there and the oversize key is not.
+	signalAndWaitExit(t, nodeB)
+	dumpB := readFinalDump(t, p.dumpB)
+	if !strings.Contains(dumpB, boundaryKey) {
+		t.Fatalf("node B's final dump at %s lacks the boundary key that replicated:\n%s", p.dumpB, dumpB)
+	}
+	if strings.Contains(dumpB, oversizeKey) {
+		t.Fatalf("node B's final dump at %s carries the rejected oversize key:\n%s", p.dumpB, dumpB)
 	}
 
 	signalAndWaitExit(t, nodeA)
-	assertNoPanic(t, nodeA, "the oversize-key node A")
-	assertNoPanic(t, nodeB, "the never-replicated node B")
+	assertNoPanic(t, nodeA, "the key-bound node A")
+	assertNoPanic(t, nodeB, "the boundary-replicating node B")
 }
