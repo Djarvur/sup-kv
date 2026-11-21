@@ -192,3 +192,107 @@ func TestCore_keyCountCostFlat(t *testing.T) {
 	assertFlat(t, "HandleDatagram(DataRequest)", benchHandleDataRequest)
 	assertFlat(t, "HandleDatagram(DataSync)", benchHandleDataSync)
 }
+
+// benchSmallUnacked and benchLargeUnacked are XPORT-02(1)'s acceptance pair:
+// the event-loop iteration cost at 10 and 10 000 unacked records may differ
+// by at most 2x.
+const (
+	benchSmallUnacked = 10
+	benchLargeUnacked = 10_000
+
+	// benchUnackedMaxRatio is XPORT-02(1)'s hard acceptance bound, never
+	// relaxed.
+	benchUnackedMaxRatio = 2.0
+)
+
+// benchUnackedFixture builds the core under measurement with unacked pending
+// entries from one author and one known peer, so the retransmit scanner is
+// armed while every retry deadline stays in the future: the measured Advance
+// never emits, and the pending entries hold no Data by construction.
+func benchUnackedFixture(tb testing.TB, unacked int) *repl.Core {
+	tb.Helper()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out) // startup Hello + listing, before the measured loop
+	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+	out.Drain()
+	for i := range unacked {
+		key := fmt.Sprintf("bench/unacked-%06d", i)
+		rec := storage.Record{Version: version.PackVersion(testNowMs+int64(i), 0, localID)}
+		core.NotifyLocalWrite(at(0), key, rec, &out)
+		out.Drain()
+	}
+	return core
+}
+
+// BenchmarkCoreEventLoop measures one idle event-loop iteration — Advance,
+// UnackedStats and PeerCount — over pending sets of 10 and 10 000 records.
+// The iteration is deliberately at a fixed virtual instant with every retry
+// deadline in the future, so the measured work is the timer/deadline/gauges
+// path only: no retransmission, no egress drain, no record lookup.
+func BenchmarkCoreEventLoop(b *testing.B) {
+	for _, unacked := range []int{benchSmallUnacked, benchLargeUnacked} {
+		b.Run(fmt.Sprintf("unacked=%d", unacked), func(b *testing.B) {
+			benchCoreEventLoop(b, unacked)
+		})
+	}
+}
+
+// benchCoreEventLoop is the shared body of the event-loop benchmark and the
+// flatness gate's measurement.
+func benchCoreEventLoop(b *testing.B, unacked int) {
+	b.Helper()
+	core := benchUnackedFixture(b, unacked)
+	now := at(time.Nanosecond)
+	var out port.Outbox
+	b.ReportAllocs()
+	b.ReportMetric(float64(unacked), "unacked")
+	b.ResetTimer()
+	for range b.N {
+		core.Advance(now, &out)
+		out.Drain()
+		_ = core.UnackedStats(now)
+		_ = core.PeerCount()
+	}
+}
+
+// TestCore_unackedCostFlat is XPORT-02(1)'s executable acceptance: one
+// event-loop iteration costs at most 2x more at 10 000 unacked records than
+// at 10. Warm-up runs precede every measurement; a zero measurement fails by
+// name instead of skipping, and the failure names both ns/op values and the
+// ratio. The test stays sequential (no t.Parallel): it is a wall-clock ratio
+// gate, and running it beside the sibling benchmark test would measure
+// scheduler contention instead of the core.
+//
+//nolint:paralleltest // Wall-clock ratio gate: a parallel sibling benchmark would contaminate the measurement.
+func TestCore_unackedCostFlat(t *testing.T) {
+	measure := func(unacked int) float64 {
+		t.Helper()
+		testing.Benchmark(func(b *testing.B) {
+			b.Helper()
+			benchCoreEventLoop(b, unacked)
+		}) // warm-up
+		result := testing.Benchmark(func(b *testing.B) {
+			b.Helper()
+			benchCoreEventLoop(b, unacked)
+		})
+		if result.N == 0 {
+			t.Fatalf("unacked=%d: benchmark ran zero iterations", unacked)
+		}
+		nsPerOp := float64(result.NsPerOp())
+		if nsPerOp <= 0 {
+			t.Fatalf("unacked=%d: measured %v ns/op, want a positive measurement", unacked, result.NsPerOp())
+		}
+		return nsPerOp
+	}
+	small := measure(benchSmallUnacked)
+	large := measure(benchLargeUnacked)
+	ratio := large / small
+	t.Logf("core event loop: unacked=%d = %.1f ns/op, unacked=%d = %.1f ns/op, ratio %.2f",
+		benchSmallUnacked, small, benchLargeUnacked, large, ratio)
+	if ratio > benchUnackedMaxRatio {
+		t.Fatalf("core event loop: unacked=%d = %.1f ns/op vs unacked=%d = %.1f ns/op (ratio %.2f > %.1f) — iteration cost scales with the unacked set (XPORT-02)",
+			benchLargeUnacked, large, benchSmallUnacked, small, ratio, benchUnackedMaxRatio)
+	}
+}
