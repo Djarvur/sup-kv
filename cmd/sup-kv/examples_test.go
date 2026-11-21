@@ -25,6 +25,7 @@ package main_test
 // failing block never leaks a node into the next one.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,6 +36,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // examplesMarker selects the fenced blocks of docs/EXAMPLES.md that CI
@@ -118,25 +120,45 @@ const (
 	keepSurvivors
 )
 
+// docBlockBudget bounds one verbatim doc block: the README/EXAMPLES
+// walkthroughs take single-digit seconds locally, so a minute per block is
+// generous headroom while a wedged node/grpcurl wait still fails with this
+// test's own deadline instead of the package-wide `go test` timeout — the
+// T-11 README-deadline flake class, where -count=20 multiplies every run
+// and a hang must not consume the whole soak. The effective deadline is
+// clamped 250ms inside t.Deadline() when the test has one (the
+// main_test.go waitFor pattern), so an explicit -timeout also wins.
+const docBlockBudget = time.Minute
+
 // runBashVerbatim executes one doc block with bash -e in dir: the block
 // arrives on stdin, combined stdout/stderr is captured and returned, and any
 // failure is fatal with the block and its output in the message — the doc's
-// commands must succeed exactly as a stranger would run them. Output is
-// captured to a file, not a pipe: a block's background node INHERITS the
-// bash-side descriptors, and with a pipe the exec package waits for every
-// writer to close before Run returns — a node the block left running (bash -e
-// aborts on the first failing command, before the block's own cleanup) would
-// hang the run until the test timeout. The bash runs as its own process
-// group and the group is SIGKILLed once bash has exited, so a failed block
-// cannot leak its node into the next run either way; the file is read after
-// the kill, when no writer is left, so its content is stable.
+// commands must succeed exactly as a stranger would run them. Each block is
+// bounded by docBlockBudget (clamped inside t.Deadline()): a wedged block
+// fails here, in its own run, with the block and captured output attached.
+// Output is captured to a file, not a pipe: a block's background node
+// INHERITS the bash-side descriptors, and with a pipe the exec package waits
+// for every writer to close before Run returns — a node the block left
+// running (bash -e aborts on the first failing command, before the block's
+// own cleanup) would hang the run until the test timeout. The bash runs as
+// its own process group and the group is SIGKILLed once bash has exited, so
+// a failed block cannot leak its node into the next run either way; the file
+// is read after the kill, when no writer is left, so its content is stable.
 func runBashVerbatim(t *testing.T, dir string, env []string, block, what string, survivors blockSurvivors) string {
 	t.Helper()
+	blockDeadline := time.Now().Add(docBlockBudget)
+	if hard, ok := t.Deadline(); ok {
+		if clamp := hard.Add(-hardDeadlineMargin); clamp.Before(blockDeadline) {
+			blockDeadline = clamp
+		}
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), blockDeadline)
+	defer cancel()
 	outFile, err := os.CreateTemp(t.TempDir(), "doc-block-output-*")
 	if err != nil {
 		t.Fatalf("create the output capture file: %v", err)
 	}
-	cmd := exec.CommandContext(t.Context(), "bash", "-e")
+	cmd := exec.CommandContext(ctx, "bash", "-e")
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin = strings.NewReader(block + "\n")
@@ -158,6 +180,10 @@ func runBashVerbatim(t *testing.T, dir string, env []string, block, what string,
 		t.Fatalf("read the captured output: %v", err)
 	}
 	out := string(raw)
+	ctxErr := ctx.Err()
+	if ctxErr != nil {
+		t.Fatalf("%s exceeded its doc-block deadline (%v): %v\n--- block ---\n%s\n--- output ---\n%s", what, docBlockBudget, ctxErr, block, out)
+	}
 	if runErr != nil {
 		t.Fatalf("%s failed: %v\n--- block ---\n%s\n--- output ---\n%s", what, runErr, block, out)
 	}

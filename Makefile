@@ -1,9 +1,15 @@
-.PHONY: lint test bench red-run generate build proto buf-lint buf-format buf-breaking release release-snapshot
+.PHONY: lint test bench bench-smoke race-soak red-run generate build proto buf-lint buf-format buf-breaking release release-snapshot
 
 # Version stamping for the build target (D-18): version from git describe,
 # commit from the short sha, "dev" when git is unavailable.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
+# Repetition count for race-soak: the TEST-11 command's default is the full
+# 20 runs; `make race-soak COUNT=1` is the cheap local sanity pass. The
+# ×3-green-across-runs bar is realized by plan 11's scheduled job, not by
+# one local invocation.
+COUNT ?= 20
 
 ## lint: strict golangci-lint gate (same pinned binary as CI via the go.mod tool directive).
 ## config verify first: `run` silently ignores unknown top-level config keys (T-01-01),
@@ -25,6 +31,31 @@ test:
 ## stay excluded (-run anchored empty); compare two runs by hand.
 bench:
 	go test -run '^$$' -bench . ./internal/app/persist/ ./internal/udprepl/ ./internal/grpcapi/
+
+## bench-smoke: TEST-10's CI smoke — every benchmark exactly once
+## (-benchtime=1x) on the real paths (real persistfile, default parameters)
+## so CI exercises the measurement code and asserts the p50-ms/p99-ms lines
+## appear; no thresholds, no self-pacing. Plan 11's scheduled bench job
+## invokes this target, so the command has exactly one definition.
+bench-smoke:
+	go test -run '^$$' -bench . -benchtime=1x ./internal/app/persist/ ./internal/udprepl/ ./internal/grpcapi/
+
+## race-soak: TEST-11's flake command — the affected set under the race
+## detector for COUNT repetitions (default 20, the command D-09 names;
+## `make race-soak COUNT=1` is the cheap sanity pass). The ×3-green bar
+## spans scheduled runs: plan 11's nightly job runs this target three
+## nights and requires green across runs.
+## Flake classes audited after the internal/stand harness move:
+##   1. UDP port pick-to-bind — structurally mitigated: internal/stand's
+##      private window [28100, 32678) plus the claim registry moved intact.
+##   2. SIGTERM before the handler is installed — a real product-side
+##      binary window, carried per D-09's bar (needs a Phase 3-5 fix;
+##      TestShutdown_secondSignal stays the existing post-arm pin).
+##   3. README/EXAMPLES verbatim-block deadline — fixed test-side: each
+##      doc block is bounded by docBlockBudget clamped inside t.Deadline()
+##      (cmd/sup-kv/examples_test.go), so a wedged block fails its own run.
+race-soak:
+	go test -race -count=$(COUNT) ./cmd/sup-kv/ ./internal/udprepl/ ./internal/app/repl/ ./internal/app/persist/ ./internal/persistfile/ ./internal/grpcapi/
 
 ## red-run: the D-01 expected-red gate. Runs scripts/red-runner: the
 ## env-gated red tests with SUPKV_RED_TESTS=1 (the script exports it), every
