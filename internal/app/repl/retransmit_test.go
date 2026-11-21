@@ -774,3 +774,103 @@ func TestRetransmit_ackDrainSemantics(t *testing.T) {
 		})
 	}
 }
+
+// TestRetransmit_heapInvariant pins the indexed due-heap (XPORT-02(1),
+// RESEARCH "Don't Hand-Roll"): after a scripted insert/ack/supersede/evict/
+// re-arm sequence, the heap's earliest deadline agrees with the minimum
+// NextRetry over a walk of PendingSnapshot — no deletion or re-arm leaves a
+// stale item that could fire early — and entries with equal deadlines emit
+// deterministically in their insertion order. Silence one nanosecond before
+// the minimum and the exactly-at-minimum emission are the observable proxy
+// for the heap root; advancing past it without an emission proves a stale
+// item did not survive.
+func TestRetransmit_heapInvariant(t *testing.T) {
+	t.Parallel()
+	cfg := repl.Config{
+		HelloInterval: 10 * time.Second,
+		SyncInterval:  10 * time.Second,
+		PeerTimeout:   2 * time.Second,
+	}
+	core, st := newSyncCore(cfg)
+	var out port.Outbox
+	core.Advance(at(0), &out) // startup Hello + empty listing
+	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+	core.HandleDatagram(at(0), helloFrom(peerID2), &out)
+	out.Drain()
+
+	// Equal-deadline insertions in ascending key order: emission order must
+	// be the insertion order (which is also the standing sorted-key pin).
+	localWrite(t, core, st, at(0), keyAlpha, "a")
+	localWrite(t, core, st, at(0), keyBeta, "b")
+	localWrite(t, core, st, at(0), keyGamma, "g")
+	core.Advance(at(200*time.Millisecond), &out)
+	if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha, keyBeta, keyGamma}) {
+		t.Fatalf("equal-deadline emission order = %v, want the insertion order [cfg/alpha cfg/beta cfg/gamma]", got)
+	}
+	for _, key := range []string{keyAlpha, keyBeta, keyGamma} {
+		if got := core.PendingSnapshot()[key].NextRetry; !got.Equal(at(600 * time.Millisecond)) {
+			t.Fatalf("after the first ladder step %q NextRetry = %v, want the common 600ms deadline", key, got)
+		}
+	}
+
+	// Ack beta away (both waiters), supersede alpha with a newer local write,
+	// and supersede gamma with a strictly greater remote version.
+	betaVer := pendingVersion(t, core, keyBeta)
+	core.HandleDatagram(at(250*time.Millisecond), ackFrom(peerID1, keyBeta, betaVer), &out)
+	core.HandleDatagram(at(250*time.Millisecond), ackFrom(peerID2, keyBeta, betaVer), &out)
+	out.Drain()
+	localWrite(t, core, st, at(300*time.Millisecond), keyAlpha, "a2")
+	greaterGamma := remoteRecord(testNowMs+1, peerID1, "remote gamma")
+	if greaterGamma.Version.Compare(pendingVersion(t, core, keyGamma)) <= 0 {
+		t.Fatalf("test remote version %x not strictly greater than the tracked gamma version", greaterGamma.Version[:])
+	}
+	core.HandleDatagram(at(400*time.Millisecond), replFrom(peerID1, keyGamma, greaterGamma), &out)
+	out.Drain()
+	if snap := core.PendingSnapshot(); len(snap) != 1 {
+		t.Fatalf("after the Ack and both supersessions PendingSnapshot holds %d entries, want only the replacement alpha: %v", len(snap), snap)
+	}
+
+	// The replacement alpha is due at 500ms; the next ladder steps land at
+	// 900ms and 1700ms. Silence one nanosecond before each proves the heap
+	// root (and only it) is the next retry.
+	assertRetryBeat := func(off time.Duration, want []string, wantNext time.Duration) {
+		t.Helper()
+		core.Advance(at(off-time.Nanosecond), &out)
+		if repls := broadcastRepls(out.Drain()); len(repls) != 0 {
+			t.Fatalf("Advance one nanosecond before t0+%v emitted %v, want silence — a stale heap item fired early", off, replKeys(repls))
+		}
+		core.Advance(at(off), &out)
+		if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, want) {
+			t.Fatalf("Advance at t0+%v emitted %v, want %v", off, got, want)
+		}
+		if got := core.PendingSnapshot()[keyAlpha].NextRetry; !got.Equal(at(wantNext)) {
+			t.Fatalf("after the t0+%v emission NextRetry = %v, want the re-armed %v", off, got, at(wantNext))
+		}
+	}
+	assertRetryBeat(500*time.Millisecond, []string{keyAlpha}, 900*time.Millisecond)
+	assertRetryBeat(900*time.Millisecond, []string{keyAlpha}, 1700*time.Millisecond)
+
+	// Both peers expire at 2s (last Hello at 0 + peer_timeout, the at-or-after
+	// boundary): eviction precedes the scan, so the overdue 1700ms item fires
+	// nothing and the entry stays tracked with its ladder paused.
+	core.Advance(at(2*time.Second), &out)
+	if repls := broadcastRepls(out.Drain()); len(repls) != 0 {
+		t.Fatalf("the eviction Advance emitted %v, want none — an empty peer table suspends the scanner", replKeys(repls))
+	}
+	if got := core.PeerCount(); got != 0 {
+		t.Fatalf("PeerCount() after the eviction = %d, want 0", got)
+	}
+	if got := core.PendingSnapshot()[keyAlpha].NextRetry; !got.Equal(at(1700 * time.Millisecond)) {
+		t.Fatalf("suspension moved NextRetry to %v, want it retained at 1700ms", got)
+	}
+
+	// The returning Hello is discovery: it flushes the pending entry, re-adds
+	// the peer and restarts the ladder at 2.1s+200ms.
+	core.HandleDatagram(at(2100*time.Millisecond), helloFrom(peerID1), &out)
+	if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha}) {
+		t.Fatalf("the discovery flush emitted %v, want exactly the pending alpha", got)
+	}
+	assertRetryBeat(2300*time.Millisecond, []string{keyAlpha}, 2700*time.Millisecond)
+	assertRetryBeat(2700*time.Millisecond, []string{keyAlpha}, 3500*time.Millisecond)
+}

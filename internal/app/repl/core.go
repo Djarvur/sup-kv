@@ -15,6 +15,7 @@ package repl
 
 import (
 	"bytes"
+	"container/heap"
 	"container/list"
 	"crypto/rand"
 	"fmt"
@@ -308,6 +309,64 @@ type pendingEntry struct {
 	elem      *list.Element
 }
 
+// retryItem is one due-heap node: the tracked pair, its armed retransmission
+// deadline and the monotonically increasing push sequence that breaks
+// equal-deadline ties deterministically (the simnet eventHeap shape).
+type retryItem struct {
+	nextRetry time.Time
+	seq       uint64
+	pk        pendingKey
+}
+
+// retryHeap is the indexed min-heap of pending retry deadlines: items order
+// by (nextRetry, seq), and index locates a tracked pair's item in O(1), so a
+// re-arm is [heap.Fix] and a deletion is [heap.Remove] — both O(log n) and
+// leaving no stale item behind (T-3-14). The heap is the only due-time index
+// Advance consults: an iteration with nothing due touches the root alone.
+type retryHeap struct {
+	items []retryItem
+	index map[pendingKey]int
+}
+
+// Len implements [heap.Interface].
+func (h *retryHeap) Len() int { return len(h.items) }
+
+// Less implements [heap.Interface]: earlier deadline first, then the push
+// sequence — a deterministic total order for equal deadlines.
+func (h *retryHeap) Less(i, j int) bool {
+	if !h.items[i].nextRetry.Equal(h.items[j].nextRetry) {
+		return h.items[i].nextRetry.Before(h.items[j].nextRetry)
+	}
+	return h.items[i].seq < h.items[j].seq
+}
+
+// Swap implements [heap.Interface] and keeps index in step with the heap.
+func (h *retryHeap) Swap(i, j int) {
+	h.items[i], h.items[j] = h.items[j], h.items[i]
+	h.index[h.items[i].pk] = i
+	h.index[h.items[j].pk] = j
+}
+
+// Push implements [heap.Interface].
+func (h *retryHeap) Push(x any) {
+	item := x.(retryItem)
+	h.index[item.pk] = len(h.items)
+	h.items = append(h.items, item)
+}
+
+// Pop implements [heap.Interface]: container/heap pops the root by swapping
+// it to the end first, so removing the last item is the root removal; the
+// index entry goes with it.
+func (h *retryHeap) Pop() any {
+	old := h.items
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = retryItem{}
+	h.items = old[:n-1]
+	delete(h.index, item.pk)
+	return item
+}
+
 // Core is the replication decision state machine for one node. Not safe for
 // concurrent use: exactly one driver goroutine — the adapter's event loop
 // in production, the simulator's scheduler in tests — calls the handlers
@@ -332,6 +391,11 @@ type Core struct {
 	pending      map[pendingKey]pendingEntry
 	peerUnacked  map[uint16]map[pendingKey]struct{}
 	pendingOrder *list.List
+
+	// retry is the indexed due-heap over the same pending pairs;
+	// retrySeq assigns each push's equal-deadline tie-break.
+	retry    retryHeap
+	retrySeq uint64
 
 	nextHello time.Time
 
@@ -387,6 +451,7 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 		pending:              make(map[pendingKey]pendingEntry),
 		peerUnacked:          make(map[uint16]map[pendingKey]struct{}),
 		pendingOrder:         list.New(),
+		retry:                retryHeap{index: make(map[pendingKey]int)},
 		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
 }
@@ -550,6 +615,7 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 		entry.backoff = c.cfg.AckTimeout
 		entry.nextRetry = now.Add(c.cfg.AckTimeout)
 		c.pending[pk] = entry
+		c.fixRetry(pk, entry.nextRetry)
 		c.ledgerAdd(in.NodeID, pk)
 		rec, ok := c.store.Lookup(pk.key)
 		if !ok || rec.Version != pk.version {
@@ -780,6 +846,7 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 		for id := range waitSet {
 			c.ledgerAdd(id, pk)
 		}
+		c.pushRetry(pk, entry.nextRetry)
 	}
 	own := storage.Record{
 		Version:  rec.Version,
@@ -950,33 +1017,52 @@ func (c *Core) evictPeers(now time.Time) {
 // scan granularity — while any entry is pending, Advance's returned
 // deadline is never more than cfg.RetransmitInterval past now, so a due
 // retry is honored at scan granularity (research A5); with no pending
-// entries this scanner contributes no deadline. Emission order is keys
-// sorted ascending: no map-iteration order ever reaches an emit path
-// (REPL-02, research Pitfall 1 / probe #9). Every emission counts in the
-// retransmissions counter (OBS-01) — the adapter mirrors it post-event.
+// entries this scanner contributes no deadline. Only due heap items are
+// touched — an Advance with nothing due reads the heap root and nothing
+// else, so the scan cost is flat in the pending-set size (XPORT-02). Due
+// emissions are ordered by (key, version) — no map-iteration or heap-order
+// leak reaches an emit path (REPL-02, research Pitfall 1 / probe #9). Every
+// emission counts in the retransmissions counter (OBS-01) — the adapter
+// mirrors it post-event.
 func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
 	if len(c.peers) == 0 || len(c.pending) == 0 {
 		return
 	}
-	for _, pk := range sortedPendingKeys(c.pending) {
-		entry := c.pending[pk]
-		if now.Before(entry.nextRetry) {
-			continue
-		}
-		rec, ok := c.store.Lookup(pk.key)
-		if !ok || rec.Version != pk.version {
-			// The tracked record is gone or was replaced: retransmitting
-			// anything would send bytes the store no longer vouches for, so
-			// the stale entry leaves instead (RESEARCH Pitfall 5).
-			c.removePending(pk)
-			continue
-		}
-		out.Broadcast(port.DataReplication{Key: pk.key, Record: rec})
-		c.retransmitted++
-		entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
-		entry.nextRetry = now.Add(entry.backoff)
-		c.pending[pk] = entry
+	due := c.popDueRetries(now)
+	slices.SortFunc(due, compareRetryItems)
+	for _, item := range due {
+		c.retransmitOne(now, item, out)
 	}
+}
+
+// compareRetryItems orders due items by key then version bytes — the sorted
+// emission discipline shared with every other emit path.
+func compareRetryItems(a, b retryItem) int {
+	return comparePendingKeys(a.pk, b.pk)
+}
+
+// retransmitOne emits one due entry's record, re-read from the store (the
+// entry retains no Data): an absent or version-mismatched record leaves the
+// entry untrustworthy, so it is removed instead of sent (RESEARCH Pitfall 5);
+// a match is broadcast, counted, and the ladder re-arms from the emission
+// time — never from the enqueue time (RESEARCH Pitfall 4).
+func (c *Core) retransmitOne(now time.Time, item retryItem, out *port.Outbox) {
+	pk := item.pk
+	entry, ok := c.pending[pk]
+	if !ok {
+		return
+	}
+	rec, ok := c.store.Lookup(pk.key)
+	if !ok || rec.Version != pk.version {
+		c.removePending(pk)
+		return
+	}
+	out.Broadcast(port.DataReplication{Key: pk.key, Record: rec})
+	c.retransmitted++
+	entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
+	entry.nextRetry = now.Add(entry.backoff)
+	c.pending[pk] = entry
+	c.pushRetry(pk, entry.nextRetry)
 }
 
 // nextDeadline returns the earliest strictly-future deadline over the armed
@@ -1021,31 +1107,18 @@ func (c *Core) earliestPeerExpiry() time.Time {
 // retransmitDeadline returns the retransmit scan's deadline contribution:
 // the granularity ceiling now+cfg.RetransmitInterval (research A5 — while
 // any entry is pending, the driver never sleeps longer than this), clamped
-// by the earliest pending nextRetry when the scanner is armed. During
-// suspension (an empty peer table) the ladder is paused — its stale retry
-// times must not leak into the deadline — so the ceiling alone bounds the
-// sleep.
+// by the due-heap root when the scanner is armed. During suspension (an
+// empty peer table) the ladder is paused — its stale retry times must not
+// leak into the deadline — so the ceiling alone bounds the sleep.
 func (c *Core) retransmitDeadline(now time.Time) time.Time {
 	ceiling := now.Add(c.cfg.RetransmitInterval)
 	if len(c.peers) == 0 {
 		return ceiling
 	}
-	if earliest := c.earliestRetry(); earliest.Before(ceiling) {
-		return earliest
+	if root := c.retryRoot(); !root.IsZero() && root.Before(ceiling) {
+		return root
 	}
 	return ceiling
-}
-
-// earliestRetry returns the earliest pending nextRetry (the zero time when
-// nothing is pending); callers reach it only with a non-empty pending set.
-func (c *Core) earliestRetry() time.Time {
-	var earliest time.Time
-	for _, entry := range c.pending {
-		if earliest.IsZero() || entry.nextRetry.Before(earliest) {
-			earliest = entry.nextRetry
-		}
-	}
-	return earliest
 }
 
 // Discards returns the discard-class counters (D-02) — a value copy, safe
@@ -1228,6 +1301,7 @@ func (c *Core) removePending(pk pendingKey) {
 	if entry.elem != nil {
 		c.pendingOrder.Remove(entry.elem)
 	}
+	c.removeRetry(pk)
 	for id := range entry.waitSet {
 		c.ledgerRemove(id, pk)
 	}
@@ -1262,4 +1336,53 @@ func (c *Core) ledgerRemove(peerID uint16, pk pendingKey) {
 	if set := c.peerUnacked[peerID]; set != nil {
 		delete(set, pk)
 	}
+}
+
+// pushRetry arms pk's deadline in the due-heap with the next sequence
+// number — the equal-deadline tie-break order of first insertion.
+func (c *Core) pushRetry(pk pendingKey, nextRetry time.Time) {
+	c.retrySeq++
+	heap.Push(&c.retry, retryItem{nextRetry: nextRetry, seq: c.retrySeq, pk: pk})
+}
+
+// fixRetry re-arms an already tracked pair's deadline in place (O(log n));
+// the pair keeps its original sequence, so re-arms never reorder equal
+// deadlines.
+func (c *Core) fixRetry(pk pendingKey, nextRetry time.Time) {
+	idx, ok := c.retry.index[pk]
+	if !ok {
+		return
+	}
+	c.retry.items[idx].nextRetry = nextRetry
+	heap.Fix(&c.retry, idx)
+}
+
+// removeRetry deletes pk's due-heap item (O(log n)), leaving no stale entry
+// for the scan or the deadline read to trip over.
+func (c *Core) removeRetry(pk pendingKey) {
+	idx, ok := c.retry.index[pk]
+	if !ok {
+		return
+	}
+	heap.Remove(&c.retry, idx)
+}
+
+// retryRoot returns the earliest armed deadline, the zero time when the heap
+// is empty — the O(1) read behind nextDeadline.
+func (c *Core) retryRoot() time.Time {
+	if len(c.retry.items) == 0 {
+		return time.Time{}
+	}
+	return c.retry.items[0].nextRetry
+}
+
+// popDueRetries removes and returns every heap item due at now — the only
+// entries Advance touches, regardless of pending-set size. The caller owns
+// the returned slice; popped items are absent from the heap index already.
+func (c *Core) popDueRetries(now time.Time) []retryItem {
+	var due []retryItem
+	for len(c.retry.items) > 0 && !c.retry.items[0].nextRetry.After(now) {
+		due = append(due, heap.Pop(&c.retry).(retryItem))
+	}
+	return due
 }
