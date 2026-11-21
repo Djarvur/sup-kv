@@ -14,7 +14,7 @@ tool (
 
 require (
 	google.golang.org/grpc v1.85.0
-	google.golang.org/protobuf v1.36.13-0.20261016172727-e9ee2a76ab8e
+	google.golang.org/protobuf v1.37.0-rc.1
 )
 
 require (
