@@ -18,7 +18,7 @@
 
 - [ ] **TEST-01**: `TestChaos_convergence` is stable and mutation-sensitive (T-01)
   - Acceptance: 0 failures on 10 000 seeds; fixed seed corpus plus fresh seeds each run; test fails under "sync without tombstones" and "periodic sync disabled" mutants
-- [ ] **TEST-02**: Deletion replication is proven at every level (T-02)
+- [x] **TEST-02**: Deletion replication is proven at every level (T-02)
   - Acceptance: codec round-trip of every message with `Deleted: true`; `Cluster.Delete` in the simulator and deletions in chaos; two processes: `Delete` on A → `NotFound` on B and `"deleted":true` in B's dump; a node down during the delete learns it after start
 - [x] **TEST-03**: "Confirmed write is on disk" is pinned by tests, not by convention (T-03)
   - Acceptance: filesystem seam under `persistfile` with recording and failing fakes asserting the order "write → fsync → rotate → rename → dir fsync" and a failure at each step; blocking `Save` fake — while it stands, `Set` does not return; processes: single node `Set` → OK, SIGKILL, start, `Get` succeeds
@@ -211,7 +211,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SPEC-01 | Phase 1 | Complete |
 | SPEC-02 | Phase 1 | Complete |
 | TEST-01 | Phase 2 | Pending |
-| TEST-02 | Phase 2 | Pending |
+| TEST-02 | Phase 2 | Complete |
 | TEST-03 | Phase 2 | Complete |
 | TEST-04 | Phase 2 | Pending |
 | TEST-05 | Phase 2 | Complete |

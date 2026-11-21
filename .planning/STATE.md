@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-10-PLAN.md
-last_updated: "2026-11-21T11:48:11.081Z"
+stopped_at: Completed 02-15-PLAN.md
+last_updated: "2026-11-21T12:00:36.520Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: c8fc1ca20a1bcd4b0d2205670d20648e8a054640
+state_head: 4e7faa665db156d8cda35f41d5c657756868750b
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 14
+  completed_plans: 15
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 11 of 17
+Plan: 12 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -67,6 +67,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P07 | 350 | 2 tasks | 2 files |
 | Phase 02 P08 | 983s | 2 tasks | 2 files |
 | Phase 02 P10 | 269s | 2 tasks | 7 files |
+| Phase 02 P15 | 10min | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -120,6 +121,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Shared benchmark percentile reporter lives in the module-wide internal/testutil package: Go's internal rule blocks internal/udprepl and internal/grpcapi from internal/app/internal/testutil, and all three benchmarks share one implementation; the plan's app-internal path is a documented wrapper
 - [Phase 02]: Benchmarks report p50-ms/p99-ms from their own measured per-op spans with no self-pacing; the -benchtime=1x smoke reports p50==p99==the single sample
 - [Phase 02]: make race-soak is the single TEST-11 command definition (-race -count=20 over the affected set, COUNT override); T-11 dispositions: port window intact (mitigated), pre-arm SIGTERM carried per D-09 (TestShutdown_secondSignal remains the pin), README deadline fixed test-side per doc block
+- [Phase 02]: Extension tests live in the external simnet_test package: the internal form would need a //nolint:testpackage suppression (skip-regexp covers only *_internal_test.go) while the external form imports replproto under the depguard $test exemption and reuses the existing simnet_test.go helpers
+- [Phase 02]: The determinism replay gate asserts extension activation (OversizeRefused > 0, RecvBudgetRefused > 0, non-empty stores) before comparing same-seed digests, so a zero-policy replay cannot pass vacuously
 
 ### Pending Todos
 
@@ -140,7 +143,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T11:48:10.934Z
-Stopped at: Completed 02-10-PLAN.md
+Last session: 2026-11-21T12:00:36.434Z
+Stopped at: Completed 02-15-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
