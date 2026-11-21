@@ -1,6 +1,12 @@
 # Quality gates: strict lint + 4-cell OS/arch gate matrix.
 # Check-run names ("lint", "gate (<cell>)") are the required-check contexts
 # recorded in the branch-protection ruleset — any matrix change is a ruleset change.
+#
+# TEST-05 policy: the internal/stand socket tests are non-skippable on Linux —
+# a capability-probe miss is a FATAL naming the probe, never a t.Skip. The
+# darwin cell (macos-15) reports the limitation through the named
+# TestPlatform_darwinReplicationUntested green result, and the cross-compile
+# cell builds only.
 name: CI
 
 on:
@@ -80,6 +86,10 @@ jobs:
       - if: ${{ !matrix.cross }}
         run: |
           go vet ./...
+          # TEST-05: Linux socket tests mandatory — the stand package fails the
+          # cell on any skip; runs redundantly inside ./... for a named
+          # check-run entry.
+          go test -race ./internal/stand/
           go test -race ./...
           go mod tidy
           git diff --exit-code go.mod go.sum
