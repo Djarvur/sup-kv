@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-11-21T10:40:58.798Z"
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-11-21T10:57:56.159Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 2f274f1b902c1900dd6f6ed883c91a11d0f3cddb
+state_head: 309eeb66b78bab027607cbdd78e6cce81bfdc71f
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 7 of 17
+Plan: 8 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -63,6 +63,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P04 | 1191s | 2 tasks | 5 files |
 | Phase 02 P14 | 178s | 1 tasks | 1 files |
 | Phase 02 P05 | 1044 | 2 tasks | 1 files |
+| Phase 02 P06 | 574 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,9 @@ Recent decisions affecting current work:
 - [Phase 02]: internal/stand nondarwin half: the darwin-untested leak assertion is a real runtime check — go/build MatchFile against an explicit darwin context over every sibling .go file (constraint-form-agnostic), so a leaked scenario file fails the darwin cell with a named error; the loud statement is a wrapped const keeping the plan's grep gate at exactly one phrase line
 - [Phase 02]: R-03's stand closed window is shaped structurally (A seeded+stopped, replaced node alone with a 30 s backstop, then A restarts) rather than raced against a live multi-chunk listing; v1.0's Get answers NotFound, never Unavailable
 - [Phase 02]: All four stand red tests assert the documented acceptance expressions (R-01 2×sync_interval + N/rate; R-02 N/rate + 10 s and ≤3N; burst ≥990/s and 5 s drain; R-03 five-point PROTO-01), so Phases 3-5 flip only the expectation-table rows
+- [Phase 02]: Chaos corpus format is bare decimal seed lines (no header): head -1 of testdata/chaos-seeds.txt stays a valid SUPKV_SIM_SEED replay argument for the plan verify and CI scripts
+- [Phase 02]: Deletion-heavy chaos scenarios use a deterministic closing drain sweep (each node's sorted live keys, no rng or time advance) so the corpus guarantees empty/tombstone-only final states without weakening model equality, the 10x hard cap, or the fault teeth
+- [Phase 02]: Chaos deletes target the acting node's sorted live keys via a pre-drawn pick index: 'against live keys' holds at execution time while every random input stays fixed before any event runs
 
 ### Pending Todos
 
@@ -121,7 +125,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T10:40:58.632Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-11-21T10:57:56.056Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
