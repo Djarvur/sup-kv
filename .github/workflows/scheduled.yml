@@ -1,6 +1,7 @@
 # Scheduled heavy machinery (D-09, TEST-16): one cron workflow carrying the
 # nightly 1000-seed chaos sweep, the bench smoke, the assert-red Critical run,
-# the race soak, the documented-scale real-socket stand, and deep fuzzing.
+# the 20x R-01 documented-scale evidence run, the race soak, the
+# documented-scale real-socket stand, and deep fuzzing.
 # PR CI (ci.yml) keeps its fast gate; the heavy jobs live here only.
 #
 # Every job pins the same actions ci.yml uses (checkout@v7, setup-go@v7 with
@@ -144,6 +145,42 @@ jobs:
           go-version-file: go.mod
       - name: "Nightly real-socket stand (TEST-06: 10 000 x 1 KiB)"
         run: go test -race -count=1 ./internal/stand/
+
+  red-r01-x20:
+    runs-on: ubuntu-latest
+    # XPORT-01's acceptance is 20 runs out of 20 at the documented 20 000-key
+    # scale — a duty too expensive for the red-run job (RESEARCH Pitfall 2:
+    # ~70-90 s/run plus seeding, so 25-40 min on a hosted runner). Dedicated
+    # job (RESEARCH A5): 120 min of job headroom bounds a wedged runner while
+    # -timeout 110m bounds the test binary itself. No skip flags: after the
+    # 03-12 flip a failure means the transport bound is not met and MUST fail
+    # CI, never pass quietly.
+    timeout-minutes: 120
+    env:
+      SUPKV_STAND_NIGHTLY: "1"
+      SUPKV_RED_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: R-01 paced sync, 20 000 keys x 1 KiB, 20/20 (XPORT-01)
+        run: go test -race -count=20 -timeout 110m ./internal/stand/ -run '^TestRed_R01_pacedSync20k$'
+      # This job invokes go test directly rather than scripts/red-runner, so
+      # no red-evidence directory is expected in a fresh checkout. State that
+      # honestly instead of faking one: the 20/20 verdict is this job's exit
+      # status, and only a run that did leave a summary prints one.
+      - name: 20x R-01 evidence summary
+        if: always()
+        run: |
+          # compgen -G keeps the glob honest under the runner's -e: no
+          # evidence directory is a normal case here, never an error.
+          if compgen -G ".planning/phases/02-stand-and-simulator-as-tests/red-evidence/*/summary.txt" >/dev/null; then
+            latest=$(ls -1dt .planning/phases/02-stand-and-simulator-as-tests/red-evidence/*/ | head -n 1)
+            cat "${latest}summary.txt"
+          else
+            echo "red-r01-x20 invoked go test directly (no red-runner evidence directory is expected): the 20/20 verdict is the job's exit status"
+          fi
 
   deep-fuzz:
     runs-on: ubuntu-latest

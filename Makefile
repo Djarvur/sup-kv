@@ -54,8 +54,17 @@ bench-smoke:
 ##   3. README/EXAMPLES verbatim-block deadline — fixed test-side: each
 ##      doc block is bounded by docBlockBudget clamped inside t.Deadline()
 ##      (cmd/sup-kv/examples_test.go), so a wedged block fails its own run.
+## Cost of the WR-06 addition (plan 03-13): `time go test -race -count=1
+## ./internal/stand/` measures 6.53 s wall on the 3.88 GHz
+## performance-governor host, so repeating it COUNT=20 projects ~2.2 min
+## locally (~2-3 min on a 2-core hosted runner per review 02's estimate).
+## The package's red tests skip without SUPKV_RED_TESTS, so the soak
+## repeats only the ordinary stand suite and no red scenario inflates the
+## count. The full target measures 81 s at COUNT=1 (the chaos package is
+## the bulk), so COUNT=20 projects ~27 min — inside the 120-minute
+## race-flake job budget unchanged.
 race-soak:
-	go test -race -count=$(COUNT) ./cmd/sup-kv/ ./internal/udprepl/ ./internal/app/repl/ ./internal/app/persist/ ./internal/persistfile/ ./internal/grpcapi/
+	go test -race -count=$(COUNT) ./cmd/sup-kv/ ./internal/udprepl/ ./internal/app/repl/ ./internal/app/persist/ ./internal/persistfile/ ./internal/grpcapi/ ./internal/stand/
 
 ## red-run: the D-01 expected-red gate. Runs scripts/red-runner: the
 ## env-gated red tests with SUPKV_RED_TESTS=1 (the script exports it), every
