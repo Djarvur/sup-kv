@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"format_version\":1}\n{\"key\":\"fuzz/data\",\"record_version\":\"0192cc09140070018003000000000000\",\"data\":\"dmFsdWU=\",\"deleted\":false,\"checksum\":3571255277}\n{\"key\":\"fuzz/torn\"")
