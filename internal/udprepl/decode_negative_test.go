@@ -491,11 +491,11 @@ func TestWire_deleteRoundTrip(t *testing.T) {
 		}
 	})
 
-	t.Run("dump_codec_tombstone_with_data_current_behavior", func(t *testing.T) {
+	t.Run("dump_codec_tombstone_with_data_fidelity", func(t *testing.T) {
 		t.Parallel()
-		// The codec echoes Deleted:true alongside non-empty Data — the same
-		// XPORT-10 current behavior the negative table's row 8 pins; the
-		// codec's job is fidelity, the rejection belongs to the decoder fix.
+		// The dump codec echoes Deleted:true alongside non-empty Data: the
+		// codec's job is fidelity, and the inbound rejection of that shape is
+		// the core's validation class (landed in 03-08), not the loader's.
 		const key = "neg/delete-roundtrip/dump-with-data"
 		ver := version.PackVersion(testNowMs, negVersionMultiple+2, nodeIDB)
 		data := []byte("tombstone-dump-payload")

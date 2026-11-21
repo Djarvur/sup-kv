@@ -685,3 +685,501 @@ func TestDiscard_onDiscardSeam(t *testing.T) {
 		})
 	}
 }
+
+// wireRecord builds a wire-valid record for key: the checksum is the
+// production domain over exactly the given fields, so only a field the test
+// deliberately mutates can invalidate it.
+func wireRecord(key string, ver version.RecordVersion, data []byte, deleted bool) storage.Record {
+	return storage.Record{
+		Version:  ver,
+		Data:     data,
+		Deleted:  deleted,
+		Checksum: storage.RecordChecksum(key, ver, data, deleted),
+	}
+}
+
+// validWireVersion returns a layout-valid version one second inside the 60 s
+// default lead.
+func validWireVersion(counter uint16) version.RecordVersion {
+	return version.PackVersion(testNowMs+1000, counter, peerID1)
+}
+
+// futureWireVersion returns a layout-valid version exactly one millisecond
+// beyond now+defaultMaxClockLead — the boundary the future check rejects.
+func futureWireVersion() version.RecordVersion {
+	return version.PackVersion(testNowMs+defaultMaxClockLead.Milliseconds()+1, 0, peerID1)
+}
+
+// badLayoutWireVersion returns the all-ones 16-byte version: a version
+// nibble of 0xF and variant bits 0b11, the RFC 9562 layout violation the
+// poison version class is for.
+func badLayoutWireVersion() version.RecordVersion {
+	return version.RecordVersion{
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	}
+}
+
+// onlyClass returns the DiscardStats with exactly class counted once — the
+// token-to-counter mapping pinned on its own.
+func onlyClass(class string) repl.DiscardStats {
+	var stats repl.DiscardStats
+	switch class {
+	case repl.DiscardEmptyKey:
+		stats.EmptyKey = 1
+	case repl.DiscardKeyTooLong:
+		stats.KeyTooLong = 1
+	case repl.DiscardTombstoneWithData:
+		stats.TombstoneWithData = 1
+	case repl.DiscardBadChecksum:
+		stats.BadChecksum = 1
+	case repl.DiscardBadVersion:
+		stats.BadVersion = 1
+	}
+	return stats
+}
+
+// sumDiscards totals every discard class — the conservation check across all
+// ten counters.
+func sumDiscards(stats repl.DiscardStats) uint64 {
+	return stats.BadCRC + stats.Undecodable + stats.BadProtoVersion + stats.OwnEcho +
+		stats.DuplicateNodeID + stats.EmptyKey + stats.KeyTooLong + stats.TombstoneWithData +
+		stats.BadChecksum + stats.BadVersion
+}
+
+// validationRow is one TestDiscard_validationClasses table row: the datagram,
+// the class it must be discarded as ("" = the row is an accepted control),
+// key material that must never reach a detail or a log line, and — for an
+// accepted record — the key the store must then serve.
+type validationRow struct {
+	name       string
+	in         port.InboundDatagram
+	wantClass  string
+	secret     string
+	wantStored string
+}
+
+// TestDiscard_validationClasses pins the wire-validation pipeline row by row
+// (XPORT-03/04/10, D-06): one row per class — including the DataSync-entry
+// rows and a mixed listing whose second entry invalidates the whole datagram
+// — asserts the class token, the exact counter set, the detail contract (the
+// source handle only, never key material), and that the datagram reached
+// neither the store nor the clock and ran no handler. The order rows carry
+// two simultaneous faults and pin which one is reported. Two control rows
+// prove the pipeline is not rejecting everything: a valid record is applied
+// (and Acknowledged) and an Ack carrying a future version is processed,
+// because Ack validates its key and nothing else.
+func TestDiscard_validationClasses(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	longKey := strings.Repeat("s3cr3t-key-material/", 100)[:storage.MaxKeyBytes+1]
+
+	// Table-local fixtures, built once: every record is wire-valid except
+	// the specific field its row mutates.
+	emptyKeyRec := wireRecord("", validWireVersion(1), []byte("empty-value"), false)
+	longKeyRec := wireRecord(longKey, validWireVersion(2), []byte("long-value"), false)
+	tombstoneData := wireRecord("neg/tombstone", validWireVersion(3), []byte("payload"), true)
+	badChecksum := wireRecord("neg/checksum", validWireVersion(4), []byte("payload"), false)
+	badChecksum.Checksum ^= 1
+	futureRec := wireRecord("neg/future", futureWireVersion(), []byte("payload"), false)
+	futureNoChecksum := futureRec
+	futureNoChecksum.Checksum ^= 1
+	badLayoutRec := wireRecord("neg/layout", badLayoutWireVersion(), []byte("payload"), false)
+
+	rows := []validationRow{
+		{
+			name:      "data replication with an empty key",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: "", Record: emptyKeyRec}),
+			wantClass: repl.DiscardEmptyKey,
+		},
+		{
+			name:      "data replication with a key over the limit",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: longKey, Record: longKeyRec}),
+			wantClass: repl.DiscardKeyTooLong,
+			secret:    longKey,
+		},
+		{
+			name:      "data replication tombstone carrying data",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: "neg/tombstone", Record: tombstoneData}),
+			wantClass: repl.DiscardTombstoneWithData,
+			secret:    "neg/tombstone",
+		},
+		{
+			name:      "data replication with a forged checksum",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: "neg/checksum", Record: badChecksum}),
+			wantClass: repl.DiscardBadChecksum,
+			secret:    "neg/checksum",
+		},
+		{
+			name:      "data replication with a far-future version",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: "neg/future", Record: futureRec}),
+			wantClass: repl.DiscardBadVersion,
+			secret:    "neg/future",
+		},
+		{
+			name:      "data replication with a bad version layout",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: "neg/layout", Record: badLayoutRec}),
+			wantClass: repl.DiscardBadVersion,
+			secret:    "neg/layout",
+		},
+		{
+			name:      "order: an empty key is reported before the record checksum",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: "", Record: func() storage.Record { rec := emptyKeyRec; rec.Checksum ^= 1; return rec }()}),
+			wantClass: repl.DiscardEmptyKey,
+		},
+		{
+			name:      "order: tombstone-with-data is reported before the record checksum",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: "neg/tombstone", Record: func() storage.Record { rec := tombstoneData; rec.Checksum ^= 1; return rec }()}),
+			wantClass: repl.DiscardTombstoneWithData,
+			secret:    "neg/tombstone",
+		},
+		{
+			name:      "order: a bad checksum is reported before a far-future version",
+			in:        datagramFrom(peerID1, port.DataReplication{Key: "neg/future", Record: futureNoChecksum}),
+			wantClass: repl.DiscardBadChecksum,
+			secret:    "neg/future",
+		},
+		{
+			name:      "data request with an empty key",
+			in:        datagramFrom(peerID1, port.DataRequest{Key: ""}),
+			wantClass: repl.DiscardEmptyKey,
+		},
+		{
+			name:      "data request with a key over the limit",
+			in:        datagramFrom(peerID1, port.DataRequest{Key: longKey}),
+			wantClass: repl.DiscardKeyTooLong,
+			secret:    longKey,
+		},
+		{
+			name:      "ack with an empty key",
+			in:        datagramFrom(peerID1, port.Ack{Key: "", Version: validWireVersion(5)}),
+			wantClass: repl.DiscardEmptyKey,
+		},
+		{
+			name:      "ack with a key over the limit",
+			in:        datagramFrom(peerID1, port.Ack{Key: longKey, Version: validWireVersion(6)}),
+			wantClass: repl.DiscardKeyTooLong,
+			secret:    longKey,
+		},
+		{
+			name: "data sync entry with an empty key",
+			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+				{Key: "", Version: validWireVersion(7)},
+			}}),
+			wantClass: repl.DiscardEmptyKey,
+		},
+		{
+			name: "data sync entry with a key over the limit",
+			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+				{Key: longKey, Version: validWireVersion(8)},
+			}}),
+			wantClass: repl.DiscardKeyTooLong,
+			secret:    longKey,
+		},
+		{
+			name: "data sync entry with a far-future version",
+			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+				{Key: "sync/future", Version: futureWireVersion()},
+			}}),
+			wantClass: repl.DiscardBadVersion,
+			secret:    "sync/future",
+		},
+		{
+			name: "mixed data sync: the second entry invalidates the whole datagram",
+			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+				{Key: "sync/valid", Version: validWireVersion(9)},
+				{Key: "sync/poison", Version: futureWireVersion()},
+			}}),
+			wantClass: repl.DiscardBadVersion,
+			secret:    "sync/poison",
+		},
+		{
+			name: "order: an earlier entry's version is reported before a later entry's key",
+			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+				{Key: "sync/future", Version: futureWireVersion()},
+				{Key: "", Version: validWireVersion(10)},
+			}}),
+			wantClass: repl.DiscardBadVersion,
+			secret:    "sync/future",
+		},
+		{
+			name:       "control: a valid record is applied and acknowledged",
+			in:         datagramFrom(peerID1, port.DataReplication{Key: "control/valid", Record: wireRecord("control/valid", validWireVersion(11), []byte("value"), false)}),
+			wantStored: "control/valid",
+		},
+		{
+			name: "control: an ack's version is not validated",
+			in:   datagramFrom(peerID1, port.Ack{Key: "control/ack", Version: futureWireVersion()}),
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			var events []discardEvent
+			var logs []string
+			clk := &countingClock{inner: clock.NewClock(func() time.Time { return time.UnixMilli(testNowMs) }, 0, 0, testDriftWarn)}
+			st := &stateStore{store: storage.NewStore(localID, clk, storage.Config{})}
+			core := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{
+				OnDiscard: func(class, detail string) { events = append(events, discardEvent{class: class, detail: detail}) },
+				Log:       func(msg string) { logs = append(logs, msg) },
+			})
+			var out port.Outbox
+			core.HandleDatagram(now, row.in, &out)
+			emitted := out.Drain()
+
+			if row.wantClass == "" {
+				assertAcceptedDatagram(t, row, core, st, clk, events)
+				return
+			}
+			assertDiscardedDatagram(t, row, core, st, clk, events, logs, emitted)
+		})
+	}
+}
+
+// assertAcceptedDatagram asserts the positive control: no discard event, no
+// counter movement, and — when the row names a key — the record really
+// reached the store through a clock-observed apply.
+func assertAcceptedDatagram(t *testing.T, row validationRow, core *repl.Core, st *stateStore, clk *countingClock, events []discardEvent) {
+	t.Helper()
+	if len(events) != 0 {
+		t.Fatalf("accepted datagram fired %d discard event(s), want none: %+v", len(events), events)
+	}
+	if got := core.Discards(); got != (repl.DiscardStats{}) {
+		t.Errorf("Discards() = %+v, want none for an accepted datagram", got)
+	}
+	if row.wantStored == "" {
+		return
+	}
+	if _, ok := st.store.Lookup(row.wantStored); !ok {
+		t.Errorf("store does not hold %q after an accepted datagram — the pipeline rejected valid input", row.wantStored)
+	}
+	if clk.updates == 0 {
+		t.Error("the accepted record's apply never reached the clock")
+	}
+}
+
+// assertDiscardedDatagram asserts one rejection's full contract: the class
+// and its exact counter, the source-only detail, no handler side effects (no
+// emission, no queued send, no sync flag), zero clock calls, an untouched
+// store, and exactly one rate-limited WARN naming only the class.
+func assertDiscardedDatagram(t *testing.T, row validationRow, core *repl.Core, st *stateStore, clk *countingClock, events []discardEvent, logs []string, emitted []port.Outbound) {
+	t.Helper()
+	if len(events) != 1 {
+		t.Fatalf("OnDiscard fired %d times, want exactly 1: %+v", len(events), events)
+	}
+	if events[0].class != row.wantClass {
+		t.Fatalf("OnDiscard class = %q, want %q", events[0].class, row.wantClass)
+	}
+	if events[0].detail != row.in.Source {
+		t.Fatalf("OnDiscard detail = %q, want the source handle %q only (T-6-05 contract)", events[0].detail, row.in.Source)
+	}
+	if row.secret != "" && strings.Contains(events[0].detail, row.secret) {
+		t.Errorf("OnDiscard detail %q leaks key material", events[0].detail)
+	}
+	if got, want := core.Discards(), onlyClass(row.wantClass); got != want {
+		t.Errorf("Discards() = %+v, want exactly %+v — one datagram, one class", got, want)
+	}
+	if len(emitted) != 0 {
+		t.Errorf("handler emitted %d message(s) for a discarded datagram, want none: %v", len(emitted), emitted)
+	}
+	if got := core.QueuedSends(); got != 0 {
+		t.Errorf("QueuedSends() = %d, want none — no handler may run for a discarded datagram", got)
+	}
+	if core.SyncArrived() {
+		t.Error("SyncArrived() = true — handleDataSync ran for a discarded listing")
+	}
+	if clk.ticks != 0 || clk.updates != 0 {
+		t.Errorf("clock calls (Tick %d, Update %d) for a discarded datagram, want zero of each (T-3-24)", clk.ticks, clk.updates)
+	}
+	if got := len(st.store.Records()); got != 0 {
+		t.Errorf("store holds %d records after a discarded datagram, want none", got)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("Config.Log fired %d time(s), want one rate-limited WARN: %v", len(logs), logs)
+	}
+	if !strings.Contains(logs[0], row.wantClass) {
+		t.Errorf("WARN %q does not name its class %q", logs[0], row.wantClass)
+	}
+	if row.secret != "" && strings.Contains(logs[0], row.secret) {
+		t.Errorf("WARN %q leaks key material", logs[0])
+	}
+}
+
+// countingClock is T-3-24's proof seam: it counts Tick and Update calls and
+// otherwise delegates to a real clock, so a test asserts an invalid datagram
+// never reaches the clock at all — not merely that its reading was unused.
+type countingClock struct {
+	inner   *clock.Clock
+	ticks   int
+	updates int
+}
+
+// Tick counts the call and delegates the reading.
+func (c *countingClock) Tick() (int64, uint16, time.Duration) {
+	c.ticks++
+	return c.inner.Tick()
+}
+
+// Update counts the call and delegates the reading.
+func (c *countingClock) Update(remoteL int64, remoteC uint16) (int64, uint16, time.Duration) {
+	c.updates++
+	return c.inner.Update(remoteL, remoteC)
+}
+
+// TestDiscard_beforeClock is the T-3-24 acceptance: one datagram per invalid
+// class (and per invalid DataSync entry shape) is fed to a single core over a
+// store whose clock counts every call, and after each feed the clock shows
+// zero Tick and zero Update, the store is empty, the sync flag is false, and
+// exactly one more discard has been counted. Validation is therefore strictly
+// before any clock or store call, not merely before the value is used.
+func TestDiscard_beforeClock(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	longKey := strings.Repeat("clock-proof/", 100)[:storage.MaxKeyBytes+1]
+
+	invalid := []struct {
+		name string
+		in   port.InboundDatagram
+	}{
+		{"empty key replication", datagramFrom(peerID1, port.DataReplication{
+			Key: "", Record: wireRecord("", validWireVersion(1), []byte("v"), false),
+		})},
+		{"long key replication", datagramFrom(peerID1, port.DataReplication{
+			Key: longKey, Record: wireRecord(longKey, validWireVersion(2), []byte("v"), false),
+		})},
+		{"tombstone with data", datagramFrom(peerID1, port.DataReplication{
+			Key: "t/tombstone", Record: wireRecord("t/tombstone", validWireVersion(3), []byte("v"), true),
+		})},
+		{"bad checksum", datagramFrom(peerID1, port.DataReplication{
+			Key: "t/checksum", Record: func() storage.Record {
+				rec := wireRecord("t/checksum", validWireVersion(4), []byte("v"), false)
+				rec.Checksum++
+				return rec
+			}(),
+		})},
+		{"future version", datagramFrom(peerID1, port.DataReplication{
+			Key: "t/future", Record: wireRecord("t/future", futureWireVersion(), []byte("v"), false),
+		})},
+		{"bad layout version", datagramFrom(peerID1, port.DataReplication{
+			Key: "t/layout", Record: wireRecord("t/layout", badLayoutWireVersion(), []byte("v"), false),
+		})},
+		{"empty key request", datagramFrom(peerID1, port.DataRequest{Key: ""})},
+		{"long key request", datagramFrom(peerID1, port.DataRequest{Key: longKey})},
+		{"empty key ack", datagramFrom(peerID1, port.Ack{Key: "", Version: validWireVersion(5)})},
+		{"long key ack", datagramFrom(peerID1, port.Ack{Key: longKey, Version: validWireVersion(6)})},
+		{"sync empty key", datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+			{Key: "", Version: validWireVersion(7)},
+		}})},
+		{"sync long key", datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+			{Key: longKey, Version: validWireVersion(8)},
+		}})},
+		{"sync future version", datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+			{Key: "t/sync-future", Version: futureWireVersion()},
+		}})},
+		{"sync valid then poisoned entry", datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
+			{Key: "t/sync-ok", Version: validWireVersion(9)},
+			{Key: "t/sync-poison", Version: futureWireVersion()},
+		}})},
+	}
+
+	clk := &countingClock{inner: clock.NewClock(func() time.Time { return time.UnixMilli(testNowMs) }, 0, 0, testDriftWarn)}
+	st := &stateStore{store: storage.NewStore(localID, clk, storage.Config{})}
+	core := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{})
+	var out port.Outbox
+	for i, tc := range invalid {
+		core.HandleDatagram(now, tc.in, &out)
+		out.Drain()
+		if got := sumDiscards(core.Discards()); got != uint64(i+1) {
+			t.Fatalf("after %q the discard total is %d, want %d — one datagram, one class", tc.name, got, i+1)
+		}
+		if clk.ticks != 0 || clk.updates != 0 {
+			t.Fatalf("after %q the clock was called (Tick %d, Update %d), want zero of each (T-3-24)", tc.name, clk.ticks, clk.updates)
+		}
+		if got := len(st.store.Records()); got != 0 {
+			t.Fatalf("after %q the store holds %d records, want none", tc.name, got)
+		}
+		if core.SyncArrived() {
+			t.Fatalf("after %q SyncArrived() = true — a discarded listing reached handleDataSync", tc.name)
+		}
+	}
+}
+
+// TestDiscard_warnRateLimited pins T-3-25's rate limiter: the validation WARN
+// is per class and driven by the handler's event time — one WARN per class
+// per 10 s, no matter how many datagrams flood in, with the boundary firing
+// at exactly the interval (`>=`). The per-datagram OnDiscard seam still fires
+// for every datagram (it is the counter path), and neither the WARN nor the
+// detail carries key material.
+func TestDiscard_warnRateLimited(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	const warnInterval = 10 * time.Second // the pinned discardWarnInterval
+	longKey := strings.Repeat("warn-secret/", 100)[:storage.MaxKeyBytes+1]
+
+	var logs []string
+	var events []discardEvent
+	clk := &countingClock{inner: clock.NewClock(func() time.Time { return time.UnixMilli(testNowMs) }, 0, 0, testDriftWarn)}
+	st := &stateStore{store: storage.NewStore(localID, clk, storage.Config{})}
+	core := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{
+		OnDiscard: func(class, detail string) { events = append(events, discardEvent{class: class, detail: detail}) },
+		Log:       func(msg string) { logs = append(logs, msg) },
+	})
+	var out port.Outbox
+	feedLongKey := func(at time.Time) {
+		t.Helper()
+		core.HandleDatagram(at, datagramFrom(peerID1, port.DataReplication{
+			Key: longKey, Record: wireRecord(longKey, validWireVersion(1), []byte("v"), false),
+		}), &out)
+		out.Drain()
+	}
+	feedEmptyKey := func(at time.Time) {
+		t.Helper()
+		core.HandleDatagram(at, datagramFrom(peerID1, port.DataReplication{
+			Key: "", Record: wireRecord("", validWireVersion(2), []byte("v"), false),
+		}), &out)
+		out.Drain()
+	}
+
+	// Six key_too_long datagrams inside one interval: exactly one WARN, six
+	// per-datagram seam events.
+	for range 3 {
+		feedLongKey(now)
+	}
+	feedLongKey(now.Add(warnInterval - time.Nanosecond))
+	if len(logs) != 1 {
+		t.Fatalf("Config.Log fired %d time(s) inside one interval, want 1: %v", len(logs), logs)
+	}
+	if len(events) != 4 {
+		t.Fatalf("OnDiscard fired %d time(s), want 4 — the seam is per datagram, the WARN is the limited surface", len(events))
+	}
+
+	// Exactly at the interval the class warns again, and a fresh class gets
+	// its own slot immediately.
+	feedLongKey(now.Add(warnInterval))
+	if len(logs) != 2 {
+		t.Fatalf("Config.Log fired %d time(s) at the interval boundary, want 2: %v", len(logs), logs)
+	}
+	feedEmptyKey(now.Add(warnInterval))
+	if len(logs) != 3 {
+		t.Fatalf("Config.Log fired %d time(s) after a second class, want 3 (per-class slots): %v", len(logs), logs)
+	}
+	for _, line := range logs {
+		if !strings.Contains(line, "class ") {
+			t.Errorf("WARN %q does not name its class", line)
+		}
+		if strings.Contains(line, longKey) || strings.Contains(line, "warn-secret") {
+			t.Errorf("WARN %q leaks key material", line)
+		}
+	}
+	for _, event := range events {
+		if event.detail != handleFor(peerID1) {
+			t.Errorf("OnDiscard detail = %q, want the source handle only", event.detail)
+		}
+	}
+	if got := sumDiscards(core.Discards()); got != 6 {
+		t.Errorf("discard total = %d, want 6 — the limiter never suppresses the counter", got)
+	}
+	if clk.ticks != 0 || clk.updates != 0 {
+		t.Errorf("clock calls (Tick %d, Update %d) for discarded datagrams, want zero of each", clk.ticks, clk.updates)
+	}
+}
