@@ -173,7 +173,7 @@ func TestProp_replayCommandExecutes(t *testing.T) {
 		t.Fatalf("replay command %q does not target this package", command)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), replayTimeout)
-	defer cancel()
+	t.Cleanup(cancel)
 	out, err := exec.CommandContext(ctx, "sh", "-c", command).CombinedOutput()
 	if err != nil {
 		t.Fatalf("replay command %q failed: %v\n%s", command, err, out)

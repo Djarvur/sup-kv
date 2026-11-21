@@ -44,6 +44,11 @@ const modulePath = "github.com/Djarvur/sup-kv"
 // source file resolves to its import path by the tail after this segment.
 const appAnchor = "/internal/app/"
 
+// replayCallerSkip is the frame distance from [runtime.Caller] inside
+// callerPackagePath to the calling test: callerPackagePath <- replayFor <-
+// NewRNG or ReplayCommand <- test function.
+const replayCallerSkip = 3
+
 // seedFlag replays a property test with a fixed seed: the D-04 contract
 // behind NewRNG (a package-level test flag is the standard replay hook; the
 // gochecknoglobals exclusion for test files does not reach this normal
@@ -81,7 +86,7 @@ func ReplayCommand(t *testing.T, testName string, seed int64) string {
 // -seed flag. -v keeps the seed line visible on a replay.
 func replayFor(name string, seed int64) string {
 	return fmt.Sprintf("go test %s -run '%s' -v -args -seed=%d",
-		callerPackagePath(3), runPattern(name), seed)
+		callerPackagePath(replayCallerSkip), runPattern(name), seed)
 }
 
 // callerPackagePath returns the import path of the package owning the source
@@ -94,11 +99,11 @@ func callerPackagePath(skip int) string {
 	if !ok {
 		return modulePath
 	}
-	idx := strings.LastIndex(file, appAnchor)
-	if idx < 0 {
+	_, tail, found := strings.CutLast(file, appAnchor)
+	if !found {
 		return modulePath
 	}
-	dir := path.Dir(file[idx+len(appAnchor):])
+	dir := path.Dir(tail)
 	if dir == "." {
 		return modulePath + strings.TrimSuffix(appAnchor, "/")
 	}

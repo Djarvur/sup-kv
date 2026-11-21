@@ -127,9 +127,10 @@ func TestDecisions_referencedByTests(t *testing.T) {
 
 	var missing []string
 	for _, row := range decisionIndex {
-		if _, err := os.Stat(filepath.Join(adrDir, row.adrFile)); err != nil {
+		_, statErr := os.Stat(filepath.Join(adrDir, row.adrFile))
+		if statErr != nil {
 			t.Errorf("decision %s: ADR file docs/adr/%s: %v",
-				row.decision, row.adrFile, err)
+				row.decision, row.adrFile, statErr)
 		}
 		pattern := citationPattern(row)
 		found := false
