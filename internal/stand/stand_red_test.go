@@ -868,3 +868,83 @@ func TestRed_R03_f14ReplacedNode(t *testing.T) { //nolint:paralleltest // a sequ
 	assertNoPanic(t, nodeA, "the F14 seeded node A")
 	assertNoPanic(t, nodeB, "the replaced node B")
 }
+
+// The P-01 (decision 14.11 / ADR 0011) scenario's constants: the review's
+// F15 flag value — an ACCEPTED --value-max-bytes above the codec's frozen
+// 61 440-byte decode bound — the reviewer's 63 000-byte record and the
+// acceptance's exact-limit boundary case (a value of exactly
+// value_max_bytes). Both sizes pass the store's ValueMaxBytes check and
+// both are discarded by the decode bound today.
+const (
+	redP01ValueMax    = 64000
+	redP01ReviewBytes = 63000
+	redP01KeyFmt      = "red/p01/value-%d"
+)
+
+// TestRed_P01_valueLimit pins review finding P-01 at process level as an
+// expected-red test (D-01): a write confirmed to the client must survive a
+// restart at any ACCEPTED --value-max-bytes value (decision 14.11 /
+// ADR 0011; REVIEW.md §6 P-01: a record of exactly value_max_bytes survives
+// a restart at any accepted flag value). The decoder's 61 440-byte bound is
+// not the flag: with --value-max-bytes=64000 the store accepts a 63 000-byte
+// value and one of exactly 64 000 bytes, the engine writes the record into
+// the dump and confirms the Set (PERS-04), and the next start's Decode
+// discards it as oversize — the key silently disappears. The review's F15
+// measured exactly that: Set OK, then "after restart the key is gone" with
+// `discarded 1 undecodable dumped records at startup`. The test asserts the
+// documented acceptance (the full value comes back after a restart), so
+// Phase 5's single-sourced limit changes only the expectation-table row.
+//
+// Both subtests restart the same node over the same dump path by SIGKILL:
+// the dump is what the client's Set was confirmed against, so the kill
+// cannot be blamed for a loss — the loss is the loader's.
+func TestRed_P01_valueLimit(t *testing.T) { //nolint:paralleltest // two sequential SIGKILL/restart node lifecycles: the wall-clock windows and the shared harness stay sequential by the file contract.
+	if os.Getenv("SUPKV_RED_TESTS") != "1" {
+		t.Skip("red test: runs only with SUPKV_RED_TESTS=1 (D-01)")
+	}
+	for _, size := range []int{redP01ReviewBytes, redP01ValueMax} { //nolint:paralleltest // the subtests are one sequential SIGKILL/restart lifecycle over the real stand, not independent parallel units (file doc).
+		t.Run(fmt.Sprintf("%d-bytes", size), func(t *testing.T) {
+			redAssertP01SurvivesRestart(t, size)
+		})
+	}
+}
+
+// redAssertP01SurvivesRestart drives one P-01 scenario: a node with the
+// review's accepted --value-max-bytes confirms a value of size bytes,
+// takes SIGKILL, and restarts over the same dump; the acceptance is that
+// Get returns the full value. The dump assertion between the two phases
+// separates the writer's persistence from the loader's loss.
+func redAssertP01SurvivesRestart(t *testing.T, size int) {
+	t.Helper()
+	p := newStandPair(t)
+	limit := "--value-max-bytes=" + strconv.Itoa(redP01ValueMax)
+	key := fmt.Sprintf(redP01KeyFmt, size)
+	value := strings.Repeat("v", size)
+
+	node := startStandNode(t, p, standNodeAID, limit)
+	awaitServing(t, p.grpcA, servingDeadline)
+	standSetWith(t, standClient(t, p.grpcA), key, value)
+
+	// Set returned, so the dump covering the record completed (PERS-04):
+	// the record is on disk before the kill.
+	dump := readFinalDump(t, p.dumpA)
+	if !strings.Contains(dump, `"key":"`+key+`"`) {
+		t.Fatalf("the confirmed %d-byte record is not in the dump %s after Set returned", size, p.dumpA)
+	}
+	killAndReap(t, node)
+
+	// Restart the SAME node — same identity, same ports, same dump path.
+	node = startStandNode(t, p, standNodeAID, limit)
+	awaitServing(t, p.grpcA, servingDeadline)
+	got, found := standGet(t, standClient(t, p.grpcA), key)
+	if !found {
+		t.Fatalf("the %d-byte value confirmed with --value-max-bytes=%d is gone after restart: the dump holds the record but the loader discards it (P-01, decision 14.11 / ADR 0011)",
+			size, redP01ValueMax)
+	}
+	if got != value {
+		t.Fatalf("the %d-byte value after restart = %d bytes, want the full value (P-01)", size, len(got))
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the restarted P-01 node")
+}
