@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,15 @@ const (
 	chaosDelayMinMs  = 10_000
 	chaosDelaySpanMs = 30_000
 	chaosQuiesceStep = 100 * time.Millisecond
+	chaosDeleteProb  = 0.30
+	chaosDrainProb   = 0.25
+	chaosPickSpan    = 1 << 16
+
+	// chaosFreshSeedsEnv parameterizes the fresh-seed batch each run appends
+	// to the fixed corpus (Q1: the scheduled job sets larger values);
+	// chaosFreshSeedsDef is the fast PR-CI default.
+	chaosFreshSeedsEnv = "SUPKV_SIM_FRESH_SEEDS"
+	chaosFreshSeedsDef = 1
 
 	// The committed fixed seed corpus (D-06): one decimal int64 seed per
 	// line and nothing else, so `head -1` of the file is always a valid
@@ -54,8 +64,10 @@ const (
 )
 
 // chaosSeed returns this run's seed (D-06): SUPKV_SIM_SEED when set,
-// otherwise a fresh wall-clock draw — either way the test logs the exact
-// replay command on every run so a failing run reproduces byte for byte.
+// otherwise a fresh wall-clock draw — either way the caller logs the exact
+// replay command so a failing run reproduces byte for byte. The chaos test's
+// env branch takes the first path; its corpus and fresh-seed branches draw
+// their own seeds, and the scenario suite shares this helper.
 func chaosSeed(t *testing.T) int64 {
 	t.Helper()
 	if raw := os.Getenv(simSeedEnv); raw != "" {
@@ -138,6 +150,51 @@ func TestChaos_seedCorpusGenerator(t *testing.T) {
 	}
 }
 
+// chaosCorpusSeedsFromFile reads the committed corpus: one decimal seed per
+// line, with blank and #-comment lines ignored for forward compatibility.
+func chaosCorpusSeedsFromFile(t *testing.T) []int64 {
+	t.Helper()
+	data, err := os.ReadFile(chaosCorpusPath)
+	if err != nil {
+		t.Fatalf("reading the committed chaos seed corpus %s: %v", chaosCorpusPath, err)
+	}
+	var seeds []int64
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		seed, parseErr := strconv.ParseInt(line, 10, 64)
+		if parseErr != nil {
+			t.Fatalf("%s line %q is not an int64 seed: %v", chaosCorpusPath, line, parseErr)
+		}
+		seeds = append(seeds, seed)
+	}
+	if len(seeds) == 0 {
+		t.Fatalf("the committed chaos seed corpus %s carries no seeds", chaosCorpusPath)
+	}
+	return seeds
+}
+
+// chaosFreshSeedCount returns the fresh-seed batch size:
+// SUPKV_SIM_FRESH_SEEDS when set (the scheduled job scales it), else the
+// fast PR-CI default.
+func chaosFreshSeedCount(t *testing.T) int {
+	t.Helper()
+	raw := os.Getenv(chaosFreshSeedsEnv)
+	if raw == "" {
+		return chaosFreshSeedsDef
+	}
+	count, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("%s=%q is not an integer fresh-seed count: %v", chaosFreshSeedsEnv, raw, err)
+	}
+	if count < 0 {
+		t.Fatalf("%s=%q is negative", chaosFreshSeedsEnv, raw)
+	}
+	return count
+}
+
 // chaosDelay is the chaos one-way delay draw: 1..10 virtual milliseconds.
 func chaosDelay(rng *rand.Rand) time.Duration {
 	return time.Duration(1+rng.IntN(10)) * time.Millisecond
@@ -147,13 +204,18 @@ func chaosDelay(rng *rand.Rand) time.Duration {
 // naming in node_id order).
 func simHandle(i int) string { return fmt.Sprintf("n%d", i+1) }
 
-// chaosWrite is one scenario write: the virtual offset from the simulation
-// base, the writing node, the key and the payload.
+// chaosWrite is one scenario operation: the virtual offset from the
+// simulation base, the acting node, the write key and payload, and — for a
+// deletion — the del flag plus pick, which selects the target among the
+// acting node's live keys at execution time (pick modulo the sorted live-key
+// count, the D-05 Cluster.Delete seam).
 type chaosWrite struct {
 	off  time.Duration
 	node int
 	key  string
 	data []byte
+	del  bool
+	pick int
 }
 
 // chaosPartition is one symmetric partition window: the directed pair is
@@ -173,27 +235,38 @@ type chaosScenario struct {
 	partitions []chaosPartition
 	dropProb   float64
 	dupProb    float64
+	drain      bool
 }
 
 // drawChaosScenario draws one scenario from rng (TEST-03's 2..N shape): 2 to
-// chaosMaxNodes nodes, tens of testutil.RandKey-style writes on random nodes
-// at random virtual times across ~200 virtual seconds, and one to three
+// chaosMaxNodes nodes, tens of testutil.RandKey-style operations on random
+// nodes at random virtual times across ~200 virtual seconds — writes plus
+// deletions against live keys (D-05, chaosDeleteProb) — and one to three
 // random symmetric partition windows of tens of virtual seconds each; drop
 // probability at most 0.25, duplicate at most 0.10 (docs/IDEA.md §Failure
-// scenarios' chaos fault set).
+// scenarios' chaos fault set). One in four scenarios is deletion-heavy
+// (chaosDrainProb): a closing sweep deletes every key still live at the end,
+// so its final state is empty or tombstone-only (the TEST-01 empty-state
+// probe).
 func drawChaosScenario(rng *rand.Rand) chaosScenario {
 	sc := chaosScenario{
 		nodes:    2 + rng.IntN(chaosMaxNodes-1),
 		dropProb: 0.05 + rng.Float64()*0.20,
 		dupProb:  0.02 + rng.Float64()*0.08,
+		drain:    rng.Float64() < chaosDrainProb,
 	}
 	for i := range chaosWriteCount {
-		sc.writes = append(sc.writes, chaosWrite{
+		op := chaosWrite{
 			off:  time.Duration(rng.IntN(chaosLenMs)) * time.Millisecond,
 			node: rng.IntN(sc.nodes),
 			key:  testutil.RandKey(rng),
 			data: []byte(fmt.Sprintf("chaos-payload-%d", i)),
-		})
+		}
+		if rng.Float64() < chaosDeleteProb {
+			op.del = true
+			op.pick = rng.IntN(chaosPickSpan)
+		}
+		sc.writes = append(sc.writes, op)
 	}
 	slices.SortFunc(sc.writes, func(a, b chaosWrite) int { return cmp.Compare(a.off, b.off) })
 	for range 1 + rng.IntN(chaosPartMax) {
@@ -222,23 +295,34 @@ func (sc chaosScenario) blocked(from, to string, now time.Time) bool {
 
 // chaosRun is one completed scenario run's observable outcome: the delivery
 // trace digest, every node's final records, the fault counters, the
-// quiescence verdict against the hard cap, the cluster's write log (the
-// model input) and the node count.
+// quiescence and convergence verdicts against the hard cap (with the virtual
+// instants of each), the successful deletion count, the cluster's write log
+// (the model input) and the node count.
 type chaosRun struct {
-	digest   string
-	stores   []map[string]storage.Record
-	faults   simnet.FaultStats
-	quiesced bool
-	log      []simnet.LoggedWrite
-	nodes    int
+	digest     string
+	stores     []map[string]storage.Record
+	faults     simnet.FaultStats
+	quiesced   bool
+	converged  bool
+	quiesceAt  time.Time
+	convergeAt time.Time
+	deletes    int
+	log        []simnet.LoggedWrite
+	nodes      int
 }
 
 // runChaosScenario runs one whole scenario under one seed: discovery, the
-// scripted writes at their virtual times, then the quiescence drive — no
-// PendingDeliveries, every core's UnackedStats().Count zero and every
-// core's QueuedResponses() zero (the plan 04-02/04-03 seams), with a hard
-// virtual cap of 10 × sync_interval past the last write whose expiry leaves
-// quiesced false for the caller to fail on.
+// scripted operations at their virtual times — writes and deletions against
+// live keys (the D-05 Cluster.Delete path) — then the quiescence-and-
+// convergence drive. Quiescence (no PendingDeliveries, every core's
+// UnackedStats().Count zero, every core's QueuedResponses() zero) is
+// necessary but not sufficient: while R-05 delays a returning peer's
+// knowledge to its next periodic sync, the three seams can hold before every
+// store equals the pointwise-supremum model. After quiescence the loop keeps
+// stepping and polling until every store equals that model, all within the
+// UNCHANGED hard cap of 10 × sync_interval past the last operation. Expiry
+// leaves quiesced/converged false for the caller to fail on; the
+// quiescence/convergence instants are recorded for the delta distribution.
 func runChaosScenario(seed int64) chaosRun {
 	rng := simRNG(seed)
 	sc := drawChaosScenario(rng)
@@ -250,20 +334,45 @@ func runChaosScenario(seed int64) chaosRun {
 		Partition: sc.blocked,
 	})
 	sched.RunUntil(at(50 * time.Millisecond))
+	deletes := 0
 	for _, w := range sc.writes {
 		sched.RunUntil(at(w.off))
+		if w.del {
+			key, ok := liveChaosKey(cluster.Store(w.node), w.pick)
+			if !ok {
+				continue
+			}
+			_, err := cluster.Delete(w.node, key)
+			if err == nil {
+				deletes++
+			}
+			continue
+		}
 		cluster.Write(w.node, w.key, w.data)
+	}
+	if sc.drain {
+		deletes += drainChaosLiveKeys(cluster)
 	}
 
 	capTime := at(sc.writes[len(sc.writes)-1].off + 10*syncInterval)
-	quiesced := false
-	for !quiesced {
+	model := chaosModelStore(cluster.WriteLog())
+	quiesced, converged := false, false
+	var quiesceAt, convergeAt time.Time
+	for {
 		next := sched.Now().Add(chaosQuiesceStep)
 		if next.After(capTime) {
 			next = capTime
 		}
 		sched.RunUntil(next)
-		quiesced = chaosQuiescent(cluster, next)
+		if !quiesced && chaosQuiescent(cluster, next) {
+			quiesced = true
+			quiesceAt = next
+		}
+		if quiesced && chaosConverged(cluster, model) {
+			converged = true
+			convergeAt = next
+			break
+		}
 		if !next.Before(capTime) {
 			break
 		}
@@ -274,12 +383,63 @@ func runChaosScenario(seed int64) chaosRun {
 		stores[i] = cluster.Store(i).Records()
 	}
 	return chaosRun{
-		digest:   cluster.Network().TraceDigest(),
-		stores:   stores,
-		faults:   cluster.Network().FaultStats(),
-		quiesced: quiesced,
-		log:      cluster.WriteLog(),
-		nodes:    cluster.Nodes(),
+		digest:     cluster.Network().TraceDigest(),
+		stores:     stores,
+		faults:     cluster.Network().FaultStats(),
+		quiesced:   quiesced,
+		converged:  converged,
+		quiesceAt:  quiesceAt,
+		convergeAt: convergeAt,
+		deletes:    deletes,
+		log:        cluster.WriteLog(),
+		nodes:      cluster.Nodes(),
+	}
+}
+
+// liveChaosKey returns the deletion target among store's live (non-tombstone)
+// keys: sorted key order with pick modulo the live count — deterministic, with
+// no map iteration order in the choice. ok is false when nothing is live.
+func liveChaosKey(store *storage.Store, pick int) (string, bool) {
+	records := store.Records()
+	live := make([]string, 0, len(records))
+	for key, rec := range records {
+		if !rec.Deleted {
+			live = append(live, key)
+		}
+	}
+	if len(live) == 0 {
+		return "", false
+	}
+	slices.Sort(live)
+	return live[pick%len(live)], true
+}
+
+// drainChaosLiveKeys deletes every key the cluster still holds live — the
+// deletion-heavy scenario's closing sweep. Nodes are walked in order and each
+// takes its smallest live key, so the total live count strictly shrinks and
+// the loop terminates; no rng draw or time advance is involved. Each delete
+// installs a fresh local tombstone unconditionally (Store.Delete's install),
+// so every authored live record is overwritten by a later tombstone from its
+// author and the pointwise-supremum model ends empty or tombstone-only.
+func drainChaosLiveKeys(cluster *simnet.Cluster) int {
+	deletes := 0
+	for {
+		progressed := false
+		for i := range cluster.Nodes() {
+			key, ok := liveChaosKey(cluster.Store(i), 0)
+			if !ok {
+				continue
+			}
+			_, err := cluster.Delete(i, key)
+			if err != nil {
+				continue
+			}
+			deletes++
+			progressed = true
+		}
+		if !progressed {
+			return deletes
+		}
 	}
 }
 
@@ -292,6 +452,19 @@ func chaosQuiescent(cluster *simnet.Cluster, now time.Time) bool {
 	}
 	for i := range cluster.Nodes() {
 		if cluster.Core(i).UnackedStats(now).Count != 0 || cluster.Core(i).QueuedResponses() != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// chaosConverged reports whether every node's store equals the pointwise-
+// supremum model — the post-quiescence condition TEST-01 asserts (quiescence
+// alone is necessary but not sufficient under the R-05 delayed heal).
+func chaosConverged(cluster *simnet.Cluster, model *storage.Store) bool {
+	want := model.Records()
+	for i := range cluster.Nodes() {
+		if !recordMapsEqual(cluster.Store(i).Records(), want) {
 			return false
 		}
 	}
@@ -312,25 +485,64 @@ func chaosModelStore(log []simnet.LoggedWrite) *storage.Store {
 
 // TestChaos_convergence proves the phase's own acceptance criterion (TEST-03,
 // D-06/D-07): a 2..N-node cluster over a seeded virtual network that drops,
-// duplicates, reorders and partitions datagrams converges — after quiescence
-// every node's store deep-equals the pointwise-supremum model of all writes
-// (Version, Data, Deleted, Checksum; tombstones included in the comparison),
-// and the fault coverage assertions hold (all four classes fired — a run
-// that dropped nothing fails). The seed prints on every run; a failing run
-// replays exactly with the printed command.
+// duplicates, reorders, partitions and deletes converges — after quiescence
+// the run polls until every node's store deep-equals the pointwise-supremum
+// model of all operations (Version, Data, Deleted, Checksum; tombstones
+// included in the comparison), and the fault coverage assertions hold (all
+// four network classes plus deletions fired — a run that dropped nothing or
+// deleted nothing fails). With SUPKV_SIM_SEED set the test runs that single
+// seed first (the replay path); otherwise it runs every seed of the committed
+// corpus as a named subtest plus SUPKV_SIM_FRESH_SEEDS fresh wall-clock runs.
+// The seed prints on every run; a failing run replays exactly with the
+// printed command.
 func TestChaos_convergence(t *testing.T) {
 	t.Parallel()
-	seed := chaosSeed(t)
+	if os.Getenv(simSeedEnv) != "" {
+		chaosAssertConvergence(t, chaosSeed(t))
+		return
+	}
+	for _, seed := range chaosCorpusSeedsFromFile(t) {
+		t.Run(fmt.Sprintf("corpus/%d", seed), func(t *testing.T) {
+			t.Parallel()
+			chaosAssertConvergence(t, seed)
+		})
+	}
+	for i := range chaosFreshSeedCount(t) {
+		t.Run(fmt.Sprintf("fresh/%d", i), func(t *testing.T) {
+			t.Parallel()
+			chaosAssertConvergence(t, time.Now().UnixNano())
+		})
+	}
+}
+
+// chaosAssertConvergence runs one seed and asserts the full TEST-03 evidence:
+// the cluster quiesced AND every store reached the pointwise-supremum model
+// within the hard cap, the final stores deep-equal the model (Version, Data,
+// Deleted, Checksum; tombstones included), and the fault coverage assertions
+// hold (all four network classes plus deletions fired — a run that dropped
+// nothing or deleted nothing fails). The replay command prints on every run;
+// the per-seed quiescence/convergence delta is logged for the 10k proof's
+// distribution evidence.
+func chaosAssertConvergence(t *testing.T, seed int64) {
+	t.Helper()
 	t.Logf(chaosReplayFmt, seed)
 	run := runChaosScenario(seed)
+	if run.quiesced && run.converged {
+		t.Logf("seed %d: quiesced at +%v, converged at +%v (delta %v)",
+			seed, run.quiesceAt.Sub(at(0)), run.convergeAt.Sub(at(0)), run.convergeAt.Sub(run.quiesceAt))
+	}
 	if !run.quiesced {
-		t.Fatalf("the cluster did not quiesce within 10*sync_interval past the last write (faults %+v, nodes %d) "+chaosReplayFmt,
+		t.Fatalf("the cluster did not quiesce within 10*sync_interval past the last operation (faults %+v, nodes %d) "+chaosReplayFmt,
+			run.faults, run.nodes, seed)
+	}
+	if !run.converged {
+		t.Fatalf("the cluster quiesced but did not reach the pointwise-supremum model within 10*sync_interval past the last operation (faults %+v, nodes %d) "+chaosReplayFmt,
 			run.faults, run.nodes, seed)
 	}
 	model := chaosModelStore(run.log)
 	for i := range run.stores {
 		if !recordMapsEqual(run.stores[i], model.Records()) {
-			t.Fatalf("node %d holds %d records, the pointwise-supremum model holds %d — divergence after quiescence "+chaosReplayFmt,
+			t.Fatalf("node %d holds %d records, the pointwise-supremum model holds %d — divergence after convergence "+chaosReplayFmt,
 				i, len(run.stores[i]), len(model.Records()), seed)
 		}
 	}
@@ -342,11 +554,43 @@ func TestChaos_convergence(t *testing.T) {
 		{"duplicated", run.faults.Duplicated},
 		{"reordered", run.faults.Reordered},
 		{"partitioned", run.faults.Partitioned},
+		{"deleted", uint64(run.deletes)},
 	} {
 		if tc.got == 0 {
-			t.Fatalf("fault class %s observed 0 times — the chaos run did not exercise this class "+chaosReplayFmt, tc.name, seed)
+			t.Fatalf("class %s observed 0 times — the chaos run did not exercise it "+chaosReplayFmt, tc.name, seed)
 		}
 	}
+}
+
+// TestChaos_corpusEmptyStateProbe proves the committed corpus carries the
+// TEST-01 empty-state probe: at least one fixed seed's final pointwise-
+// supremum model is empty or tombstone-only — a valid convergence point, so
+// the convergence assertion is not quietly a live-data-only assertion.
+func TestChaos_corpusEmptyStateProbe(t *testing.T) {
+	t.Parallel()
+	for _, seed := range chaosCorpusSeedsFromFile(t) {
+		run := runChaosScenario(seed)
+		if !run.quiesced || !run.converged {
+			continue // the convergence test owns that failure
+		}
+		model := chaosModelStore(run.log).Records()
+		if chaosRecordsTombstoneOnly(model) {
+			t.Logf("seed %d: final model is empty or tombstone-only (%d records, %d deletes)", seed, len(model), run.deletes)
+			return
+		}
+	}
+	t.Fatal("no corpus seed ends empty or tombstone-only — the corpus lost its TEST-01 empty-state probe")
+}
+
+// chaosRecordsTombstoneOnly reports whether records is empty or every record
+// is a tombstone.
+func chaosRecordsTombstoneOnly(records map[string]storage.Record) bool {
+	for _, rec := range records {
+		if !rec.Deleted {
+			return false
+		}
+	}
+	return true
 }
 
 // TestChaos_determinismReplay proves the fixed-seed determinism the phase
