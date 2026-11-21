@@ -3,7 +3,9 @@ package persist_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"maps"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -27,6 +29,17 @@ const (
 	// tornTailCut bytes off the dump's tail, landing the cut mid-JSON of the
 	// last record line — the torn-tail residue class.
 	tornTailCut = 10
+	// The TEST-15 small (l, c, node) space — the same 3x3x3 box the storage
+	// merge property draws from (prop_small_space_test.go), so a counterexample
+	// in either suite reduces to the same short adjacent-version shape. Half
+	// the codec property's record versions come from here and the wide half
+	// stays the unchanged testutil draw.
+	smallSpaceLBase     = int64(1730000000000)
+	smallSpaceLRange    = 3
+	smallSpaceCRange    = 3
+	smallSpaceNodeRange = 3
+	smallSpaceKeyRange  = 3
+	smallSpaceRecords   = 8
 )
 
 // dumpLine is the test-side mirror of the codec's record line — the shape
@@ -102,40 +115,164 @@ func encodeRecords(t *testing.T, extras map[string]storage.Record) []byte {
 	return dump
 }
 
-// TestCodec_roundTripProperty proves the full-map round-trip over 500
-// seeded random stores, tombstones included: Encode then Decode returns a
-// deep-equal map with nothing discarded, and re-encoding the decode output
-// yields bytes identical to the first encode — byte stability through the
-// round trip (PERS-01, D-06).
+// smallSpaceVersion returns a version drawn from TEST-15's tiny space: l in
+// {base, base+1, base+2}, counter 0..2, node 1..3.
+func smallSpaceVersion(rng *rand.Rand) version.RecordVersion {
+	return version.PackVersion(
+		smallSpaceLBase+int64(rng.IntN(smallSpaceLRange)),
+		uint16(rng.IntN(smallSpaceCRange)),
+		uint16(1+rng.IntN(smallSpaceNodeRange)),
+	)
+}
+
+// mixedVersion draws half the versions from the small space and half from the
+// unchanged wide testutil draw — the TEST-15 distribution.
+func mixedVersion(rng *rand.Rand) version.RecordVersion {
+	if rng.IntN(2) == 0 {
+		return smallSpaceVersion(rng)
+	}
+	return testutil.RandVersion(rng)
+}
+
+// payloadForVersion derives the record payload from the version alone: the
+// version bytes for a live record, a tombstone for every third first byte. Two
+// records with equal versions are therefore byte-identical — the same-write
+// premise the storage small-space property relies on.
+func payloadForVersion(ver version.RecordVersion) storage.Record {
+	if ver[0]%3 == 0 {
+		return storage.Record{Version: ver, Deleted: true}
+	}
+	return storage.Record{Version: ver, Data: ver[:]}
+}
+
+// mixedSpaceRecords returns a map drawn with the TEST-15 distribution: keys
+// from a three-key set and half the versions from the small (l, c, node)
+// space, every record sealed for the codec's checksum check.
+func mixedSpaceRecords(rng *rand.Rand) map[string]storage.Record {
+	records := make(map[string]storage.Record, smallSpaceRecords)
+	for range 1 + rng.IntN(smallSpaceRecords) {
+		key := fmt.Sprintf("codec-%d", rng.IntN(smallSpaceKeyRange))
+		records[key] = sealed(key, payloadForVersion(mixedVersion(rng)))
+	}
+	return records
+}
+
+// boundaryFixture seals one record per version under boundary-<i> keys, the
+// shape every version-boundary subtest round-trips.
+func boundaryFixture(versions []version.RecordVersion) map[string]storage.Record {
+	records := make(map[string]storage.Record, len(versions))
+	for i, ver := range versions {
+		key := fmt.Sprintf("boundary-%d", i)
+		records[key] = sealed(key, payloadForVersion(ver))
+	}
+	return records
+}
+
+// equalLVersions pins the equal-l class: one l, counters 0..2, one node.
+func equalLVersions(rng *rand.Rand) []version.RecordVersion {
+	base := smallSpaceLBase + int64(rng.IntN(smallSpaceLRange))
+	node := uint16(1 + rng.IntN(smallSpaceNodeRange))
+	versions := make([]version.RecordVersion, smallSpaceLRange)
+	for i := range versions {
+		versions[i] = version.PackVersion(base, uint16(i), node)
+	}
+	return versions
+}
+
+// equalLCounterVersions pins the equal-l-equal-c class: one l, one counter,
+// nodes 1..3 — the class only the node ID separates.
+func equalLCounterVersions(rng *rand.Rand) []version.RecordVersion {
+	base := smallSpaceLBase + int64(rng.IntN(smallSpaceLRange))
+	counter := uint16(rng.IntN(smallSpaceCRange))
+	versions := make([]version.RecordVersion, smallSpaceNodeRange)
+	for i := range versions {
+		versions[i] = version.PackVersion(base, counter, uint16(1+i))
+	}
+	return versions
+}
+
+// adjacentLVersions pins the adjacent-l class: l, l+1, l+2 with one counter
+// and one node.
+func adjacentLVersions(rng *rand.Rand) []version.RecordVersion {
+	base := smallSpaceLBase + int64(rng.IntN(smallSpaceLRange))
+	counter := uint16(rng.IntN(smallSpaceCRange))
+	node := uint16(1 + rng.IntN(smallSpaceNodeRange))
+	versions := make([]version.RecordVersion, smallSpaceLRange)
+	for i := range versions {
+		versions[i] = version.PackVersion(base+int64(i), counter, node)
+	}
+	return versions
+}
+
+// assertCodecRoundTrip asserts the full-map round trip over one generated map:
+// Encode then Decode returns the same records with nothing discarded, and
+// re-encoding the decode output reproduces the first bytes — byte stability
+// through the round trip (PERS-01, D-06).
+func assertCodecRoundTrip(t *testing.T, step int, records map[string]storage.Record) {
+	t.Helper()
+	dump, err := persist.Encode(records)
+	if err != nil {
+		t.Fatalf("step %d Encode() error = %v, want nil", step, err)
+	}
+	decoded, discarded, err := persist.Decode(dump)
+	if err != nil {
+		t.Fatalf("step %d Decode() error = %v, want nil (replay with the property seed above)",
+			step, err)
+	}
+	if discarded != 0 {
+		t.Fatalf("step %d Decode() discarded = %d, want 0 (replay with the property seed above)",
+			step, discarded)
+	}
+	if !recordsEqual(decoded, records) {
+		t.Fatalf("step %d round trip changed the records (replay with the property seed above)", step)
+	}
+	again, err := persist.Encode(decoded)
+	if err != nil {
+		t.Fatalf("step %d re-Encode() error = %v, want nil", step, err)
+	}
+	if !bytes.Equal(again, dump) {
+		t.Fatalf("step %d re-encode is not byte-identical (replay with the property seed above)", step)
+	}
+}
+
+// TestCodec_roundTripProperty proves the full-map round-trip over 500 seeded
+// random maps per boundary class, tombstones included: Encode then Decode
+// returns a deep-equal map with nothing discarded, and re-encoding the decode
+// output yields bytes identical to the first encode — byte stability through
+// the round trip (PERS-01, D-06). The first subtest draws with TEST-15's
+// mixed distribution (half the versions from the small (l, c, node) space);
+// the other three pin the version-boundary classes the small space puts in
+// reach, so equal-l and adjacent-l collisions are explored deliberately.
 func TestCodec_roundTripProperty(t *testing.T) {
 	t.Parallel()
-	rng := testutil.NewRNG(t)
-	for step := range codecPropertySteps {
-		records := testutil.RandStore(rng).Records()
-		dump, err := persist.Encode(records)
-		if err != nil {
-			t.Fatalf("step %d Encode() error = %v, want nil", step, err)
+	t.Run("mixed small-space and wide draws round-trip byte-stably", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range codecPropertySteps {
+			assertCodecRoundTrip(t, step, mixedSpaceRecords(rng))
 		}
-		decoded, discarded, err := persist.Decode(dump)
-		if err != nil {
-			t.Fatalf("step %d Decode() error = %v, want nil (replay with the property seed above)",
-				step, err)
+	})
+	t.Run("equal-l boundaries round-trip byte-stably", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range codecPropertySteps {
+			assertCodecRoundTrip(t, step, boundaryFixture(equalLVersions(rng)))
 		}
-		if discarded != 0 {
-			t.Fatalf("step %d Decode() discarded = %d, want 0 (replay with the property seed above)",
-				step, discarded)
+	})
+	t.Run("equal-l-equal-c-different-node boundaries round-trip byte-stably", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range codecPropertySteps {
+			assertCodecRoundTrip(t, step, boundaryFixture(equalLCounterVersions(rng)))
 		}
-		if !recordsEqual(decoded, records) {
-			t.Fatalf("step %d round trip changed the records (replay with the property seed above)", step)
+	})
+	t.Run("adjacent-l boundaries round-trip byte-stably", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range codecPropertySteps {
+			assertCodecRoundTrip(t, step, boundaryFixture(adjacentLVersions(rng)))
 		}
-		again, err := persist.Encode(decoded)
-		if err != nil {
-			t.Fatalf("step %d re-Encode() error = %v, want nil", step, err)
-		}
-		if !bytes.Equal(again, dump) {
-			t.Fatalf("step %d re-encode is not byte-identical (replay with the property seed above)", step)
-		}
-	}
+	})
 }
 
 // TestCodec_byteStability proves the deterministic shape of the dump:
@@ -283,8 +420,10 @@ func TestCodec_discardClasses(t *testing.T) {
 }
 
 // TestWatermark_fullProperty proves the FULL watermark law (VERS-04): over
-// 500 seeded random stores the watermark equals an independent field-wise
-// max scan; the WR-01 fixture — a watermark record at (dumpMax,
+// 500 seeded random maps the watermark equals an independent field-wise
+// max scan — the maps drawn with TEST-15's mixed distribution, so half the
+// versions come from the small (l, c, node) space and equal-l boundaries are
+// explored deliberately; the WR-01 fixture — a watermark record at (dumpMax,
 // watermarkC) against an older-l record carrying a higher counter — yields
 // the exact (l, c) pair and not l alone or the global max counter; the
 // empty map yields (0, 0).
@@ -294,7 +433,7 @@ func TestWatermark_fullProperty(t *testing.T) {
 		t.Parallel()
 		rng := testutil.NewRNG(t)
 		for step := range codecPropertySteps {
-			records := testutil.RandStore(rng).Records()
+			records := mixedSpaceRecords(rng)
 			var wantL int64
 			var wantC uint16
 			for _, rec := range records {
