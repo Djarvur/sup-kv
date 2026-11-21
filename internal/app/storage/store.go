@@ -17,6 +17,15 @@ const (
 	deletedFlag          = 1
 )
 
+// MaxKeyBytes is the documented key-length ceiling (XPORT-03): a longer key
+// is rejected at the API boundary and on inbound datagrams. The binding
+// constraint is the 65 507-byte datagram ceiling together with the
+// 61 440-byte default value limit — 1 024 key bytes + 64 408 value bytes +
+// the envelope overhead fill exactly 65 507. Validation is write-side only:
+// the store keeps serving pre-upgrade records under longer keys, so reads
+// stay permissive; Set/Delete and the receive path enforce this constant.
+const MaxKeyBytes = 1024
+
 // Config holds the store tuning parameters; it is immutable once handed to
 // NewStore. A zero or negative ValueMaxBytes is normalized to the design
 // default of 61440, and a nil OnChange to a no-op: the store is total over
@@ -150,6 +159,50 @@ func (s *Store) Get(key string) (Record, error) {
 		Data:     bytes.Clone(rec.Data),
 		Checksum: rec.Checksum,
 	}, nil
+}
+
+// Version returns the stored version for key — tombstones included — and
+// false when the key holds no record. It holds the read lock for one map
+// lookup and copies no Data: the cheap per-entry probe a sync comparison
+// takes instead of a whole-store snapshot.
+func (s *Store) Version(key string) (version.RecordVersion, bool) {
+	s.mu.RLock()
+	rec, ok := s.records[key]
+	s.mu.RUnlock()
+	return rec.Version, ok
+}
+
+// Lookup returns a copy of the stored record for key, tombstones included:
+// unlike Get, a deleted record is returned with Deleted true instead of
+// ErrNotFound. This is the tombstone-visible point read reconciliation
+// needs; the returned Data is a caller-owned clone, exactly like Get's.
+func (s *Store) Lookup(key string) (Record, bool) {
+	s.mu.RLock()
+	rec, ok := s.records[key]
+	s.mu.RUnlock()
+	if !ok {
+		return Record{}, false
+	}
+	return Record{
+		Version:  rec.Version,
+		Data:     bytes.Clone(rec.Data),
+		Deleted:  rec.Deleted,
+		Checksum: rec.Checksum,
+	}, true
+}
+
+// Versions returns a fresh map of every key — tombstones included — to its
+// stored version, copying no Data. The map is caller-owned: mutating it
+// never affects the store, and a consumer that needs the record itself
+// calls Lookup for that key.
+func (s *Store) Versions() map[string]version.RecordVersion {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]version.RecordVersion, len(s.records))
+	for key, rec := range s.records {
+		out[key] = rec.Version
+	}
+	return out
 }
 
 // Set stores data under key, replacing any prior record under LWW, and
