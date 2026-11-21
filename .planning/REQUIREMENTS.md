@@ -22,7 +22,7 @@
   - Acceptance: codec round-trip of every message with `Deleted: true`; `Cluster.Delete` in the simulator and deletions in chaos; two processes: `Delete` on A → `NotFound` on B and `"deleted":true` in B's dump; a node down during the delete learns it after start
 - [x] **TEST-03**: "Confirmed write is on disk" is pinned by tests, not by convention (T-03)
   - Acceptance: filesystem seam under `persistfile` with recording and failing fakes asserting the order "write → fsync → rotate → rename → dir fsync" and a failure at each step; blocking `Save` fake — while it stands, `Set` does not return; processes: single node `Set` → OK, SIGKILL, start, `Get` succeeds
-- [ ] **TEST-04**: Startup gate is tested as a property, not a boolean flag (T-04)
+- [x] **TEST-04**: Startup gate is tested as a property, not a boolean flag (T-04)
   - Acceptance: the R-03 acceptance tests (see PROTO-01) fail on the current code
 - [x] **TEST-05**: Real-socket tests are never silently skipped (T-05)
   - Acceptance: in Linux CI a skipped socket test is an error; the macOS cell either runs at least one two-node test or the docs state darwin replication is untested; the test binary is built with `-race`
@@ -213,7 +213,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-01 | Phase 2 | Pending |
 | TEST-02 | Phase 2 | Complete |
 | TEST-03 | Phase 2 | Complete |
-| TEST-04 | Phase 2 | Pending |
+| TEST-04 | Phase 2 | Complete |
 | TEST-05 | Phase 2 | Complete |
 | TEST-06 | Phase 2 | Pending |
 | TEST-07 | Phase 2 | Complete |
