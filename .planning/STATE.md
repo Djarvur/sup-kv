@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-16-PLAN.md
-last_updated: "2026-11-21T12:09:52.258Z"
+stopped_at: Completed 02-09-PLAN.md
+last_updated: "2026-11-21T12:27:23.164Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 34a0c63ac1e772d9debbf3dcf8be301e44db58a4
+state_head: 0e79b618a07daf63953d5333fdd15f3eed50ba6e
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 16
+  completed_plans: 17
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 13 of 17
+Plan: 14 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -69,6 +69,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P10 | 269s | 2 tasks | 7 files |
 | Phase 02 P15 | 10min | 1 tasks | 1 files |
 | Phase 02 P16 | 169s | 1 tasks | 1 files |
+| Phase 02 P09 | 900 | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -125,6 +126,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Extension tests live in the external simnet_test package: the internal form would need a //nolint:testpackage suppression (skip-regexp covers only *_internal_test.go) while the external form imports replproto under the depguard $test exemption and reuses the existing simnet_test.go helpers
 - [Phase 02]: The determinism replay gate asserts extension activation (OversizeRefused > 0, RecvBudgetRefused > 0, non-empty stores) before comparing same-seed digests, so a zero-policy replay cannot pass vacuously
 - [Phase 02]: 02-16: the TEST-07 proof lives in package persistfile_test (external) composing only exported API — the internal package would need an unjustified //nolint:testpackage, and the external form reuses dumpfile_test.go's writeFile helper (same reasoning as 02-15's simnet_test)
+- [Phase 02]: TEST-13 coverage meta-test lives in internal/app/repl: an 11-row index (decision, ADR file, anchor test) with word-bounded citation matching and self-exclusion; a decision counts when a test file carries ADR 000N or decision 14.N, so 14.10 cannot satisfy 14.1
+- [Phase 02]: The printed property replay hint is package-scoped: testutil resolves the caller's import path from the internal/app anchor via runtime.Caller (os-free, depguard-safe) and ReplayCommand shares the one format helper; a test executes the printed string and asserts exit 0 plus the same test's re-run
+- [Phase 02]: TEST-15 small-space records derive every field from the version so equal versions are byte-identical — the premise the equal-version no-op law needs; a separate subtest pins that an incoming equal-version record with different bytes is ignored
 
 ### Pending Todos
 
@@ -145,7 +149,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T12:09:52.189Z
-Stopped at: Completed 02-16-PLAN.md
+Last session: 2026-11-21T12:27:23.082Z
+Stopped at: Completed 02-09-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`

@@ -40,10 +40,10 @@
   - Acceptance: `go test -race -count=20` over `cmd/sup-kv`, `udprepl` and the affected package green three times in a row
 - [x] **TEST-12**: Metrics and configuration are tested by observed effect (T-12)
   - Acceptance: one test per parameter observing its effect; `/metrics` after a conflict+retransmit+discard scenario reports exact values
-- [ ] **TEST-13**: Every section-14 decision has a test referencing it by name (T-13)
+- [x] **TEST-13**: Every section-14 decision has a test referencing it by name (T-13)
 - [x] **TEST-14**: Watch cut and backpressure branches are covered (T-14)
   - Acceptance: deterministic snapshot-then-live cut test; slow-subscriber disconnect and `Send` error branches covered
-- [ ] **TEST-15**: Property tests minimize counterexamples and explore equal-`l` versions (T-15)
+- [x] **TEST-15**: Property tests minimize counterexamples and explore equal-`l` versions (T-15)
   - Acceptance: half the drawn versions from a small `(l, c, node)` space; the printed replay command works
 - [ ] **TEST-16**: Scheduled CI workflow exists (T-16)
   - Acceptance: 1000 seeds, `-shuffle=on -count=3`, `-bench . -benchtime=1x` on a schedule
@@ -222,9 +222,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-10 | Phase 2 | Complete |
 | TEST-11 | Phase 2 | Pending |
 | TEST-12 | Phase 2 | Complete |
-| TEST-13 | Phase 2 | Pending |
+| TEST-13 | Phase 2 | Complete |
 | TEST-14 | Phase 2 | Complete |
-| TEST-15 | Phase 2 | Pending |
+| TEST-15 | Phase 2 | Complete |
 | TEST-16 | Phase 2 | Pending |
 | XPORT-01 | Phase 3 | Pending |
 | XPORT-02 | Phase 3 | Pending |
