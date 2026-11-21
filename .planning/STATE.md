@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-06-PLAN.md
-last_updated: "2026-11-21T10:57:56.159Z"
+stopped_at: Completed 02-07-PLAN.md
+last_updated: "2026-11-21T11:12:33.953Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 309eeb66b78bab027607cbdd78e6cce81bfdc71f
+state_head: 56da2fc9b22262fa37e15d6607bfcfd93acd93dd
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 8 of 17
+Plan: 9 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P14 | 178s | 1 tasks | 1 files |
 | Phase 02 P05 | 1044 | 2 tasks | 1 files |
 | Phase 02 P06 | 574 | 2 tasks | 2 files |
+| Phase 02 P07 | 350 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -105,6 +106,10 @@ Recent decisions affecting current work:
 - [Phase 02]: Chaos corpus format is bare decimal seed lines (no header): head -1 of testdata/chaos-seeds.txt stays a valid SUPKV_SIM_SEED replay argument for the plan verify and CI scripts
 - [Phase 02]: Deletion-heavy chaos scenarios use a deterministic closing drain sweep (each node's sorted live keys, no rng or time advance) so the corpus guarantees empty/tombstone-only final states without weakening model equality, the 10x hard cap, or the fault teeth
 - [Phase 02]: Chaos deletes target the acting node's sorted live keys via a pre-drawn pick index: 'against live keys' holds at execution time while every random input stays fixed before any event runs
+- [Phase 02]: Negative-table counter exactness rides an asymmetric adapter whose broadcast lands in a test-held sink socket, so own-echo can never contaminate the per-class DiscardStats deltas
+- [Phase 02]: Wrong-proto_version is Decoded at decode() and BadProtoVersion at the core: the negative table asserts the codec verdict and the counter separately, pinning D-02's split
+- [Phase 02]: Empty-key, tombstone-with-data and oversize rows pin CURRENT behavior with explicit XPORT-10/XPORT-03 forward references (processed evidence = the apply Ack where no counter exists) and flip in Phase 3
+- [Phase 02]: DELETE-twice is codes.NotFound (the store no-op, no version burned) plus exactly one dump record line; node-down-during-delete bound derives from explicitly pinned flags, never production defaults
 
 ### Pending Todos
 
@@ -125,7 +130,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T10:57:56.056Z
-Stopped at: Completed 02-06-PLAN.md
+Last session: 2026-11-21T11:12:33.706Z
+Stopped at: Completed 02-07-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
