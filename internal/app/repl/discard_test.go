@@ -33,7 +33,7 @@ func newDiscardCore(logs *[]string) *repl.Core {
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
 	cfg := repl.Config{Log: func(msg string) { *logs = append(*logs, msg) }}
-	return repl.New(localID, testRunID(localID), handleFor(localID), st, cfg)
+	return repl.New(localID, testRunID(localID), st, cfg)
 }
 
 // TestDiscard_classes proves the five discard classes distinguishable and
@@ -646,7 +646,7 @@ func TestDiscard_onDiscardSeam(t *testing.T) {
 			var events []discardEvent
 			fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 			st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
-			core := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{
+			core := repl.New(localID, testRunID(localID), st, repl.Config{
 				OnDiscard: func(class, detail string) {
 					events = append(events, discardEvent{class: class, detail: detail})
 				},
@@ -919,7 +919,7 @@ func TestDiscard_validationClasses(t *testing.T) {
 			var logs []string
 			clk := &countingClock{inner: clock.NewClock(func() time.Time { return time.UnixMilli(testNowMs) }, 0, 0, testDriftWarn)}
 			st := &stateStore{store: storage.NewStore(localID, clk, storage.Config{})}
-			core := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{
+			core := repl.New(localID, testRunID(localID), st, repl.Config{
 				OnDiscard: func(class, detail string) { events = append(events, discardEvent{class: class, detail: detail}) },
 				Log:       func(msg string) { logs = append(logs, msg) },
 			})
@@ -1084,7 +1084,7 @@ func TestDiscard_beforeClock(t *testing.T) {
 
 	clk := &countingClock{inner: clock.NewClock(func() time.Time { return time.UnixMilli(testNowMs) }, 0, 0, testDriftWarn)}
 	st := &stateStore{store: storage.NewStore(localID, clk, storage.Config{})}
-	core := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{})
+	core := repl.New(localID, testRunID(localID), st, repl.Config{})
 	var out port.Outbox
 	for i, tc := range invalid {
 		core.HandleDatagram(now, tc.in, &out)
@@ -1120,7 +1120,7 @@ func TestDiscard_warnRateLimited(t *testing.T) {
 	var events []discardEvent
 	clk := &countingClock{inner: clock.NewClock(func() time.Time { return time.UnixMilli(testNowMs) }, 0, 0, testDriftWarn)}
 	st := &stateStore{store: storage.NewStore(localID, clk, storage.Config{})}
-	core := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{
+	core := repl.New(localID, testRunID(localID), st, repl.Config{
 		OnDiscard: func(class, detail string) { events = append(events, discardEvent{class: class, detail: detail}) },
 		Log:       func(msg string) { logs = append(logs, msg) },
 	})

@@ -64,7 +64,7 @@ func (s *egressStore) Versions() map[string]version.RecordVersion {
 
 // newEgressCore returns a core over the mutable fake store.
 func newEgressCore() *Core {
-	return New(egressTestLocal, [16]byte{1, 2, 3}, "self", &egressStore{
+	return New(egressTestLocal, [16]byte{1, 2, 3}, &egressStore{
 		versions: make(map[string]version.RecordVersion),
 		records:  make(map[string]storage.Record),
 	}, Config{})

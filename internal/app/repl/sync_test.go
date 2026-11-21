@@ -432,7 +432,7 @@ func TestSync_chunking(t *testing.T) {
 		t.Parallel()
 		now0 := at(0)
 		core1, st := newTestCore()
-		core2 := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{})
+		core2 := repl.New(localID, testRunID(localID), st, repl.Config{})
 		var out port.Outbox
 		for i, keyLen := range graduatedKeyLens {
 			_, _, err := st.store.Set(graduatedKey(i, keyLen), []byte("v"))
@@ -737,7 +737,7 @@ func syncFrom(peerID uint16, entries ...port.SyncEntry) port.InboundDatagram {
 func newSyncCore(cfg repl.Config) (*repl.Core, *stateStore) {
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
-	return repl.New(localID, testRunID(localID), handleFor(localID), st, cfg), st
+	return repl.New(localID, testRunID(localID), st, cfg), st
 }
 
 // TestSync_compare proves the DataSync receive path's per-key compare

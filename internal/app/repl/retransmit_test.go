@@ -101,7 +101,7 @@ func newTestCore() (*repl.Core, *stateStore) {
 func newTestCoreWithConfig(cfg repl.Config) (*repl.Core, *stateStore) {
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
-	return repl.New(localID, testRunID(localID), handleFor(localID), st, cfg), st
+	return repl.New(localID, testRunID(localID), st, cfg), st
 }
 
 // newLimitedTestCore returns the local node's core over a real store whose
@@ -113,7 +113,7 @@ func newLimitedTestCore(valueMax int, logs *[]string) (*repl.Core, *stateStore) 
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{ValueMaxBytes: valueMax})}
 	cfg := repl.Config{Log: func(msg string) { *logs = append(*logs, msg) }}
-	return repl.New(localID, testRunID(localID), handleFor(localID), st, cfg), st
+	return repl.New(localID, testRunID(localID), st, cfg), st
 }
 
 // helloFrom builds a decoded Hello datagram from peerID arriving from its

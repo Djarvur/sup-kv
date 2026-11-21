@@ -497,12 +497,11 @@ func (h *retryHeap) Pop() any {
 // through the production adapter's post-event atomics. Results, never
 // callbacks: no handler takes a callback, a channel or a goroutine.
 type Core struct {
-	nodeID    uint16
-	runID     [16]byte
-	ownHandle string
-	store     StateStore
-	cfg       Config
-	peers     map[uint16]peer
+	nodeID uint16
+	runID  [16]byte
+	store  StateStore
+	cfg    Config
+	peers  map[uint16]peer
 
 	// pending holds one entry per tracked (key, version) pair — no record
 	// Data (see pendingEntry). peerUnacked is the per-peer ledger: for every
@@ -612,16 +611,15 @@ type Core struct {
 	peerWarned   bool
 }
 
-// New returns a core for nodeID with the per-process runID. ownHandle is
-// this node's own address as the adapter sees it (the local socket address
-// string) — opaque to the core (D-03), kept for the later own-echo and
-// duplicate-node_id classification work. store must be non-nil.
-func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg Config) *Core {
+// New returns a core for nodeID with the per-process runID. store must be
+// non-nil: the core itself owns no I/O (the depguard boundary), so the
+// adapter passes the store in and every decision reads and merges through
+// it.
+func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 	cfg = cfg.normalized()
 	return &Core{
 		nodeID:               nodeID,
 		runID:                runID,
-		ownHandle:            ownHandle,
 		store:                store,
 		cfg:                  cfg,
 		peers:                make(map[uint16]peer),

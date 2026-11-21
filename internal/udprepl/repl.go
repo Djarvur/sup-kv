@@ -374,7 +374,7 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 		broadcastAddr: broadcast,
 		nodeID:        nodeID,
 		runID:         runID,
-		core:          repl.New(nodeID, runID, conn.LocalAddr().String(), store, cfg),
+		core:          repl.New(nodeID, runID, store, cfg),
 		log:           logFn,
 		inbound:       make(chan inboundEvent, inboundQueue),
 		notify:        make(chan localWrite, notifyQueue),

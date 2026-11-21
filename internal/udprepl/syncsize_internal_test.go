@@ -111,7 +111,7 @@ func TestSync_chunkWireBudget(t *testing.T) {
 		t.Fatalf("store Set(oversized key): %v", err)
 	}
 
-	core := repl.New(wireNodeID, repl.NewRunID(), "n7", st, repl.Config{})
+	core := repl.New(wireNodeID, repl.NewRunID(), st, repl.Config{})
 	var out port.Outbox
 	var syncs []port.DataSync
 	collect := func(drained []port.Outbound) {

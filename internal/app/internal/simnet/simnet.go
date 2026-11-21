@@ -532,7 +532,7 @@ func (c *Cluster) newClusterNode(i int, nodeID uint16, runID [16]byte) clusterNo
 		runID:  runID,
 		handle: handle,
 		store:  store,
-		core:   repl.New(nodeID, runID, handle, nodeStore{store: store}, c.cfg),
+		core:   repl.New(nodeID, runID, nodeStore{store: store}, c.cfg),
 	}
 }
 

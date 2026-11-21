@@ -46,36 +46,36 @@ func (c Config) normalized() Config {
 
 // waiter is one write's confirmation ticket: done is closed exactly once —
 // by a covering dump's success or failure fan-out, or by Run's exit sweep —
-// and err, written under the engine mutex before the close, carries the
-// resolution. Channel close over [sync.Cond] because only channels
+// and err, written before the close, carries the resolution. The ticket
+// needs no version: runDump captures the list before taking the Records
+// snapshot, so every captured waiter is covered by that dump (see
+// confirmWaiters). Channel close over [sync.Cond] because only channels
 // broadcast an error to every waiter (D-03, D-05).
 type waiter struct {
-	ver  version.RecordVersion
 	done chan struct{}
 	err  error
 }
 
 // Engine is the write-confirmation engine over one storage.Store: a local
-// write registers a waiter for its freshly stamped version and blocks until
-// a dump whose snapshot contains that record completed (nil — the write is
-// on disk, PERS-04) or failed (ErrDumpFailed — the record stays readable in
-// memory, D-05). Engine is safe for concurrent use by multiple goroutines;
-// the engine mutex is held only to swap waiter lists and the cover version,
-// never across codec or port I/O, and exactly one dumper goroutine — the
-// caller-launched Run — serializes every Save.
+// write registers a waiter and blocks until a dump whose snapshot contains
+// that record completed (nil — the write is on disk, PERS-04) or failed
+// (ErrDumpFailed — the record stays readable in memory, D-05). Engine is
+// safe for concurrent use by multiple goroutines; the engine mutex is held
+// only to swap waiter lists and the dirty epoch, never across codec or port
+// I/O, and exactly one dumper goroutine — the caller-launched Run —
+// serializes every Save.
 type Engine struct {
-	mu        sync.Mutex
-	store     *storage.Store
-	dumps     port.DumpStore
-	cfg       Config
-	waiters   []*waiter
-	lastLocal version.RecordVersion
-	dirty     bool
-	oldest    time.Time
-	changed   chan struct{}
-	flushCh   chan chan error
-	runDone   chan struct{}
-	closed    bool
+	mu      sync.Mutex
+	store   *storage.Store
+	dumps   port.DumpStore
+	cfg     Config
+	waiters []*waiter
+	dirty   bool
+	oldest  time.Time
+	changed chan struct{}
+	flushCh chan chan error
+	runDone chan struct{}
+	closed  bool
 
 	// dumpNanos, dumpTotal and dumpErrors carry DumpStats lock-free for
 	// scrapers (OBS-01): runDump is the single writer — the serialized
@@ -275,23 +275,24 @@ func (e *Engine) sweepClosed() {
 }
 
 // runDump is the serialized dump cycle: under the mutex it captures the
-// cover version and the current waiter list and clears the dirty epoch,
-// then releases the mutex before any encode or I/O — write-path
-// dirty-marking must never block on adapter I/O. The Encode+Save span is
-// measured and recorded into the DumpStats atomics on success and failure
-// alike (OBS-01). On success every captured waiter resolves nil: the cover
-// discipline is the PERS-04 invariant — lastLocal is updated under the
-// mutex by every write path after its store write installed the record, so
-// any waiter whose version is not greater than the captured cover had its
-// record installed before the capture, hence inside the Records snapshot
-// taken after, and confirmation always means on-disk containment, never
-// elapsed time. On failure every current waiter resolves ErrDumpFailed
-// while the state stays readable in memory, dirty re-arms from a fresh
-// epoch and the re-armed debounce timer starts the next attempt one
-// interval later — never a tight retry loop (D-05, research A8).
+// current waiter list and clears the dirty epoch, then releases the mutex
+// before any encode or I/O — write-path dirty-marking must never block on
+// adapter I/O. The Encode+Save span is measured and recorded into the
+// DumpStats atomics on success and failure alike (OBS-01). On success every
+// captured waiter resolves nil, and that is sound without a version
+// watermark (PERS-04, RESEARCH Pitfall 15): await appends a waiter only
+// after its store write installed the record, under the same mutex the
+// capture holds, and the capture happens BEFORE Encode takes the Records
+// snapshot — so every captured waiter's record is in the snapshot this dump
+// saves. A write racing the capture either appends before it (covered by
+// this snapshot) or re-marks the engine dirty after it (covered by the
+// next), so no waiter is ever confirmed against a dump that misses its
+// record. On failure every current waiter resolves ErrDumpFailed while the
+// state stays readable in memory, dirty re-arms from a fresh epoch and the
+// re-armed debounce timer starts the next attempt one interval later —
+// never a tight retry loop (D-05, research A8).
 func (e *Engine) runDump() error {
 	e.mu.Lock()
-	cover := e.lastLocal
 	captured := e.waiters
 	e.waiters = nil
 	e.dirty = false
@@ -307,7 +308,7 @@ func (e *Engine) runDump() error {
 		e.failWaiters(captured)
 		return err
 	}
-	e.confirmWaiters(captured, cover)
+	e.confirmWaiters(captured)
 	return nil
 }
 
@@ -332,37 +333,20 @@ func (e *Engine) DumpStats() DumpStats {
 	}
 }
 
-// confirmWaiters resolves the covered waiters of a completed dump with nil.
-// A captured waiter above the cover is kept for the next epoch — unreachable
-// in practice, since the cover dominates every version registered before
-// the capture, but stranded never: the kept waiter returns to e.waiters, so
-// the next epoch's confirm/fail fan-out — or Run's exit sweep — provably
-// resolves it. Beside the guard sits its invariant assertion (03 WR-01,
-// D-15): a kept waiter must still be UNRESOLVED here, because resolution
-// closes done exactly once and takes the waiter out of the engine — a
-// resolved waiter reaching this branch is a double-resolution in the
-// making, so it is answered by never re-queueing it (the next fan-out
-// would double-close its done channel). The belt stays documented AND
-// asserted; TestConfirmWaiters_aboveCoverInvariant pins both branches.
-func (e *Engine) confirmWaiters(captured []*waiter, cover version.RecordVersion) {
-	e.mu.Lock()
-	var covered []*waiter
+// confirmWaiters resolves every waiter captured by a completed dump with
+// nil. Nothing is retained: the capture proof in runDump is that await
+// appends a waiter only after the caller's store write installed the record
+// and under the same mutex the capture holds, while the capture precedes
+// Encode(e.store.Records()) — every captured record is therefore inside the
+// snapshot the dump saved, and confirmation always means on-disk
+// containment, never elapsed time (PERS-04, RESEARCH Pitfall 15). A write
+// that loses the race to the capture is not in captured; it stays
+// registered and the next dump — or Run's exit sweep — resolves it.
+func (e *Engine) confirmWaiters(captured []*waiter) {
 	for _, w := range captured {
-		if w.ver.Compare(cover) > 0 {
-			select {
-			case <-w.done:
-				// Invariant violated: already resolved, never re-queue.
-				continue
-			default:
-			}
-			e.waiters = append(e.waiters, w)
-			continue
-		}
 		w.err = nil
-		covered = append(covered, w)
 	}
-	e.mu.Unlock()
-	for _, w := range covered {
+	for _, w := range captured {
 		close(w.done)
 	}
 }
@@ -413,7 +397,7 @@ func (e *Engine) Set(key string, data []byte) (version.RecordVersion, time.Durat
 	if err != nil {
 		return ver, drift, err
 	}
-	return ver, drift, e.await(ver)
+	return ver, drift, e.await()
 }
 
 // Delete writes a fresh-version tombstone for key and blocks until a dump
@@ -424,7 +408,7 @@ func (e *Engine) Delete(key string) (version.RecordVersion, time.Duration, error
 	if err != nil {
 		return ver, drift, err
 	}
-	return ver, drift, e.await(ver)
+	return ver, drift, e.await()
 }
 
 // SetIfAbsent stores data under key only when the key holds no record,
@@ -437,25 +421,23 @@ func (e *Engine) SetIfAbsent(key string, data []byte) (version.RecordVersion, ti
 	if err != nil {
 		return ver, drift, err
 	}
-	return ver, drift, e.await(ver)
+	return ver, drift, e.await()
 }
 
-// await registers a waiter for ver — freshly installed in the store by the
-// caller — marks the engine dirty and blocks until a dump resolution closes
-// the waiter. lastLocal tracks the highest locally stamped version under
-// the mutex, keeping the cover discipline runDump resolves by. The
-// dirty-mark path is generic — any state change dirties; only local writes
-// register waiters, and Phase 4's remote merges will reuse the dirty path
-// without waiters.
-func (e *Engine) await(ver version.RecordVersion) error {
-	w := &waiter{ver: ver, done: make(chan struct{})}
+// await registers a waiter — the caller's record is freshly installed in the
+// store — marks the engine dirty and blocks until a dump resolution closes
+// the waiter. Registering under the same mutex hold that marks dirty is what
+// lets runDump treat every captured waiter as covered: the store write
+// happened before this call, and the dump's capture cannot interleave
+// between that write and the append. The dirty-mark path is generic — any
+// state change dirties; only local writes register waiters, and remote
+// merges reuse the dirty path without waiters.
+func (e *Engine) await() error {
+	w := &waiter{done: make(chan struct{})}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
 		return ErrClosed
-	}
-	if ver.Compare(e.lastLocal) > 0 {
-		e.lastLocal = ver
 	}
 	if !e.dirty {
 		e.oldest = time.Now()

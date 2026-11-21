@@ -70,7 +70,7 @@ func benchFixture(tb testing.TB, keys int) (*repl.Core, []port.SyncEntry) {
 			head = append(head, port.SyncEntry{Key: key, Version: ver})
 		}
 	}
-	core := repl.New(localID, testRunID(localID), handleFor(localID),
+	core := repl.New(localID, testRunID(localID),
 		&stateStore{store: store}, repl.Config{SyncResponseRate: benchSyncRate})
 	var out port.Outbox
 	core.Advance(at(0), &out) // startup Hello + listing, before the measured loop

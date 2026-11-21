@@ -79,7 +79,7 @@ func seedGraduatedKeys(t *testing.T, st *stateStore) {
 // round across Advances.
 func freshListing(t *testing.T, st *stateStore) []port.DataSync {
 	t.Helper()
-	fresh := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{})
+	fresh := repl.New(localID, testRunID(localID), st, repl.Config{})
 	var out port.Outbox
 	syncs := dataSyncs(advanceDrain(fresh, &out, at(0)))
 	if len(syncs) != 2 {

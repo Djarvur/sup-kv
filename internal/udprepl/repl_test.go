@@ -86,8 +86,8 @@ func TestWire_twoNodeHandoff(t *testing.T) {
 
 	now := time.UnixMilli(testNowMs)
 	storeA, storeB := newTestStore(nodeIDA), newTestStore(nodeIDB)
-	coreA := repl.New(nodeIDA, runIDA, handleA, storeA, repl.Config{})
-	coreB := repl.New(nodeIDB, runIDB, handleB, storeB, repl.Config{})
+	coreA := repl.New(nodeIDA, runIDA, storeA, repl.Config{})
+	coreB := repl.New(nodeIDB, runIDB, storeB, repl.Config{})
 
 	// Startup: the first Advance on each core emits exactly one broadcast
 	// Hello and schedules the next one a hello_interval later.
