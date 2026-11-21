@@ -172,8 +172,16 @@ func assertStartupHello(t *testing.T, node string, next time.Time, drained []por
 	if _, ok := drained[1].Msg.(port.DataSync); !ok {
 		t.Fatalf("node %s startup emitted %T second, want the startup port.DataSync", node, drained[1].Msg)
 	}
-	if want := now.Add(time.Second); !next.Equal(want) { // hello_interval default, IDEA §Parameters.
-		t.Fatalf("node %s next hello deadline %v, want %v", node, next, want)
+	// The hello deadline carries a positive-only deterministic jitter of at
+	// most a tenth of the interval (D-01's timer half): never before the
+	// configured interval, never past the envelope.
+	earliest := now.Add(time.Second) // hello_interval default, IDEA §Parameters.
+	latest := now.Add(time.Second + time.Second/10)
+	if next.Before(earliest) {
+		t.Fatalf("node %s next hello deadline %v is before %v — the deadline must never fire early", node, next, earliest)
+	}
+	if !next.Before(latest) {
+		t.Fatalf("node %s next hello deadline %v, want within the positive-only jitter envelope [%v, %v)", node, next, earliest, latest)
 	}
 }
 

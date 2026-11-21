@@ -31,6 +31,11 @@ const (
 	wireNodeID      = uint16(7)
 	wireBudget      = 1400
 	wireOversizeLen = 1400
+
+	// wireListingStep is the multi-chunk drain's virtual step: above the
+	// jittered listing spacing at the 500/s default (2ms + 10%), so each
+	// Advance crosses exactly one listing pacer slot.
+	wireListingStep = 3 * time.Millisecond
 )
 
 // wireGraduatedLens are the eight graduated key lengths whose per-entry
@@ -108,15 +113,26 @@ func TestSync_chunkWireBudget(t *testing.T) {
 
 	core := repl.New(wireNodeID, repl.NewRunID(), "n7", st, repl.Config{})
 	var out port.Outbox
-	core.Advance(now, &out)
 	var syncs []port.DataSync
-	for _, ob := range out.Drain() {
-		if !ob.Broadcast {
-			continue
+	collect := func(drained []port.Outbound) {
+		for _, ob := range drained {
+			if !ob.Broadcast {
+				continue
+			}
+			if msg, ok := ob.Msg.(port.DataSync); ok {
+				syncs = append(syncs, msg)
+			}
 		}
-		if msg, ok := ob.Msg.(port.DataSync); ok {
-			syncs = append(syncs, msg)
-		}
+	}
+	// The listing pacer emits one datagram per interval (D-01), so the
+	// three-chunk startup round completes across successive Advances.
+	advance := now
+	core.Advance(advance, &out)
+	collect(out.Drain())
+	for core.QueuedSends() > 0 {
+		advance = advance.Add(wireListingStep)
+		core.Advance(advance, &out)
+		collect(out.Drain())
 	}
 	if len(syncs) != 3 {
 		t.Fatalf("the startup sync emitted %d chunks, want 3 (at-budget, follow-up, oversized)", len(syncs))
