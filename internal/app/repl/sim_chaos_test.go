@@ -1,10 +1,13 @@
 package repl_test
 
 import (
+	"bytes"
 	"cmp"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
@@ -38,6 +41,16 @@ const (
 	chaosDelayMinMs  = 10_000
 	chaosDelaySpanMs = 30_000
 	chaosQuiesceStep = 100 * time.Millisecond
+
+	// The committed fixed seed corpus (D-06): one decimal int64 seed per
+	// line and nothing else, so `head -1` of the file is always a valid
+	// SUPKV_SIM_SEED replay argument. The seeds are drawn from one PCG
+	// stream whose fixed constant is chaosCorpusGenSeed; regeneration is
+	// byte-exact on every machine (the generator test owns the format).
+	chaosCorpusPath     = "testdata/chaos-seeds.txt"
+	chaosCorpusGenSeed  = int64(0x5eedc0de5eed)
+	chaosCorpusCount    = 16
+	chaosCorpusRegenEnv = "SUPKV_SIM_CORPUS_REGEN"
 )
 
 // chaosSeed returns this run's seed (D-06): SUPKV_SIM_SEED when set,
@@ -53,6 +66,76 @@ func chaosSeed(t *testing.T) int64 {
 		return seed
 	}
 	return time.Now().UnixNano()
+}
+
+// chaosCorpusSeeds draws the committed corpus's seeds from one PCG stream:
+// simRNG splits the fixed constant into the generator's two 32-bit halves
+// exactly as a replayed run seed is split, and math/rand/v2's PCG is
+// specified, so every machine regenerates the identical sequence (D-06).
+func chaosCorpusSeeds() []int64 {
+	rng := simRNG(chaosCorpusGenSeed)
+	seeds := make([]int64, 0, chaosCorpusCount)
+	for range chaosCorpusCount {
+		seeds = append(seeds, rng.Int64())
+	}
+	return seeds
+}
+
+// chaosCorpusFile renders the corpus in its committed format: one decimal
+// seed per line and a trailing newline, nothing else — no header comment, so
+// `head -1` of the file stays a valid replay seed.
+func chaosCorpusFile(seeds []int64) []byte {
+	var out []byte
+	for _, seed := range seeds {
+		out = strconv.AppendInt(out, seed, 10)
+		out = append(out, '\n')
+	}
+	return out
+}
+
+// chaosCorpusLoad returns the committed corpus bytes, or want when the file
+// is missing or SUPKV_SIM_CORPUS_REGEN=1 asked for a rewrite — the write gate
+// that keeps a green run from silently changing the committed corpus.
+func chaosCorpusLoad(t *testing.T, want []byte) []byte {
+	t.Helper()
+	got, err := os.ReadFile(chaosCorpusPath)
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
+		t.Fatalf("reading %s: %v", chaosCorpusPath, err)
+	}
+	if !missing && os.Getenv(chaosCorpusRegenEnv) != "1" {
+		return got
+	}
+	err = os.MkdirAll(filepath.Dir(chaosCorpusPath), 0o750)
+	if err != nil {
+		t.Fatalf("creating the corpus directory: %v", err)
+	}
+	err = os.WriteFile(chaosCorpusPath, want, 0o600)
+	if err != nil {
+		t.Fatalf("writing regenerated %s: %v", chaosCorpusPath, err)
+	}
+	t.Logf("regenerated %s", chaosCorpusPath)
+	return want
+}
+
+// TestChaos_seedCorpusGenerator proves the committed corpus is exactly the
+// generator's output (D-06, T-2-12): every run regenerates the bytes in
+// memory twice — the second run proving determinism — and compares them with
+// the committed file, failing on any drift. The write itself is gated: the
+// file is rewritten only when it is missing or SUPKV_SIM_CORPUS_REGEN=1, so a
+// green run never silently changes the committed corpus.
+func TestChaos_seedCorpusGenerator(t *testing.T) {
+	t.Parallel()
+	want := chaosCorpusFile(chaosCorpusSeeds())
+	again := chaosCorpusFile(chaosCorpusSeeds())
+	if !bytes.Equal(want, again) {
+		t.Fatal("corpus regeneration is nondeterministic: two in-process runs differ")
+	}
+	got := chaosCorpusLoad(t, want)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("%s drifts from the generator (%d committed bytes vs %d generated); rerun with %s=1 to regenerate",
+			chaosCorpusPath, len(got), len(want), chaosCorpusRegenEnv)
+	}
 }
 
 // chaosDelay is the chaos one-way delay draw: 1..10 virtual milliseconds.
