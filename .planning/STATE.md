@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-07-PLAN.md
-last_updated: "2026-11-21T20:30:04.000Z"
+stopped_at: Completed 03-08-PLAN.md
+last_updated: "2026-11-21T21:01:04.000Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 3 execution started
-state_head: d550a6255eb545d0ebda003c4cad97de50f462af
+state_head: d3ffc2674d12748476b528875d504ff1e9db396c
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 28
+  completed_plans: 29
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 8 of 13
+Plan: 9 of 13
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 3 execution started
 
@@ -82,6 +82,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P05 | 15min | 3 tasks | 4 files |
 | Phase 03 P06 | 1252s | 3 tasks | 17 files |
 | Phase 03 P07 | 20min | 3 tasks | 11 files |
+| Phase 03 P08 | 21min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -188,6 +189,14 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-07: The egress identity is (handle, kind, key); the version stays out and DataReplication answers re-read the store at drain, so the queue never pins Data.
 - [Phase 03]: 03-07: The egress cap and its dedupe map mutate in one function (dropOldestEgress); QueuedResponses keeps its egress meaning while QueuedSends is the total-queue seam.
 - [Phase 03]: 03-07: The empty-disk scenario bound adds the sync-jitter envelope, and partitionDays asserts conflicts ≥ sharedKeys because a paced flush can supersede the loser before it crosses the wire.
+- [Phase 03]: 03-08: Validation is a pipeline step between classification and handleMessage, returning (class, detail, valid); its position is the contract because handleMessage is the only path to ApplyRemote, hence to Clock.Update.
+- [Phase 03]: 03-08: The validation detail is exactly the source handle; the class is OnDiscard's first argument, so no key name or node id rides the detail or the per-class WARN (T-3-27).
+- [Phase 03]: 03-08: An Ack validates its key but not its version — it carries no record, so a crafted future Ack is a harmless tracking no-op; a control row pins the asymmetry.
+- [Phase 03]: 03-08: Config.MaxClockLead normalizes ≤ 0 to 60 s inside the core; the launch flag's default is documentation only, and scenarios that legitimately need more set an explicit lead (clockJumps 4 h, farAhead 25 h, drift test 2 min).
+- [Phase 03]: 03-08: The validation WARN is one per class per 10 s of event-loop time via a per-class timestamp map; counters and the OnDiscard seam stay per-datagram, and no wall clock is read.
+- [Phase 03]: 03-08: Every hand-built inbound record fixture must carry the production checksum (replFrom recomputes it); a zero-checksum fixture would otherwise be rejected and a test could pass for the wrong reason.
+- [Phase 03]: 03-08: The metrics label vocabulary stays at five classes; 03-12 owns the five new class samples, so this plan stops at the adapter's Discards() mirror.
+- [Phase 03]: 03-08: Task 1's commit carried the test-model, fixture and negative-table adaptations because the Task 1 verify runs the whole TestDiscard_ filter and the table pins pre-fix behavior; Task 2's commit added the three proof tests.
 
 ### Pending Todos
 
@@ -208,7 +217,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T20:27:29.000Z
-Stopped at: Completed 03-07-PLAN.md
+Last session: 2026-11-21T21:01:04.000Z
+Stopped at: Completed 03-08-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
