@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-11-21T18:24:47.030Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-11-21T18:39:18.367Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 3 execution started
-state_head: 30cef98286b096e612f31528f3301d6ba8f2d911
+state_head: f186d0981047b0a127c29ae7d12a56b30f62a172
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 22
+  completed_plans: 23
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 2 of 13
+Plan: 3 of 13
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 3 execution started
 
@@ -76,6 +76,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P13 | 40min | 2 tasks | 4 files |
 | Phase 02 P11 | 694s | 3 tasks | 3 files |
 | Phase 3 P01 | 427s | 3 tasks | 5 files |
+| Phase 03 P02 | 297s | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -150,6 +151,10 @@ Recent decisions affecting current work:
 - [Phase 03]: validateBufferRequest accepts exactly MaxInt32/2 and rejects anything above it: the kernel doubles the request, so the read-back must fit a 32-bit int (T-3-01); this resolves the plan Task 3 table contradiction in favor of the primary guard contract.
 - [Phase 03]: Every buffer-configuration failure (set, read-back, send floor) is a construction error that closes the socket before New returns; no degraded node starts.
 - [Phase 03]: The stand delivery test passes --sync-response-rate explicitly so its paced bound term derives from a flag the nodes actually run with; this also clears unparam on startStandLoggedNode.
+- [Phase 03]: Store read view is tombstone-visible by construction: Version, Lookup and Versions include deleted records while Get stays live-only.
+- [Phase 03]: Every view read returns caller-owned state: Lookup clones Data and Versions builds a fresh map, never a view of store internals.
+- [Phase 03]: storage.MaxKeyBytes = 1024 documents write-side-only validation; reads stay permissive for pre-upgrade long keys.
+- [Phase 03]: Cluster.Write panics naming operation, key and node on a rejected store write, and Write/Delete read through the point Lookup, not Records().
 
 ### Pending Todos
 
@@ -170,7 +175,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T18:24:46.842Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-11-21T18:39:18.200Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
