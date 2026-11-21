@@ -2,16 +2,16 @@ package udprepl_test
 
 // The decoder negative table (TEST-08, D-08) and the deletion codec
 // round-trip (TEST-02 level 1). The table drives decode() — the adapter's
-// mechanical half — and asserts each corruption's CURRENT verdict from the
-// fixed vocabulary (Decoded/BadCRC/Undecodable), plus the core's discard
-// counter delta for every class that exists today, observed through
-// Adapter.Discards() after feeding the datagram over a real loopback
-// socket. Rows whose rejection is a Phase 3 fix (empty key,
-// tombstone-with-data — XPORT-10) pin the CURRENT Decoded behavior with an
-// explicit forward reference: they flip when the fix lands, exactly like
-// the red tests' expectation table. No production code is touched — the
-// negative table is the pin; fuzz targets with committed corpora are the
-// sibling plan 02-17, wave 3.
+// mechanical half — and asserts each corruption's verdict from the fixed
+// vocabulary (Decoded/BadCRC/Undecodable), plus the core's discard counter
+// delta for every class, observed through Adapter.Discards() after feeding
+// the datagram over a real loopback socket. The wire-validation rows (empty
+// key, tombstone-with-data, key length, record checksum, far-future version
+// — XPORT-03/04/10) assert the classes the core's validation pipeline
+// landed in 03-08: decode() still frames them (Decoded) and the core
+// discards them before any store or clock call. No production code is
+// touched — the negative table is the pin; fuzz targets with committed
+// corpora are the sibling plan 02-17, wave 3.
 //
 // The deletion round-trip is level 1 of the phase's four-level TEST-02
 // proof: a DataReplication tombstone survives the wire codec intact, and
@@ -40,15 +40,28 @@ import (
 
 // The negative table's construction constants: the review's F2c
 // 70 000-character key (over the maximal IPv4 UDP payload once
-// enveloped), that payload ceiling, the record fixtures' vector payloads,
-// and the version counters that keep every row's record distinct.
+// enveloped), that payload ceiling, the feedable one-byte-over-the-key-limit
+// length, the record fixtures' vector payloads, and the version counters
+// that keep every row's record distinct.
 const (
 	negOversizeKeyLen  = 70000
-	negMaxUDPPayload   = 65507    // the largest payload one IPv4 UDP datagram carries
-	negVectorBytes     = 32       // the truncated-body fixture's data length
-	negVersionMultiple = 3        // one counter per row, so fixtures never share a version
-	negChecksumLong    = 0xFFFFFF // forces the trailing checksum varint to four bytes — the truncation point
+	negMaxKeyBytesLen  = storage.MaxKeyBytes + 1 // 1 025: the first rejected key length
+	negMaxUDPPayload   = 65507                   // the largest payload one IPv4 UDP datagram carries
+	negVectorBytes     = 32                      // the truncated-body fixture's data length
+	negVersionMultiple = 3                       // one counter per row, so fixtures never share a version
+	negChecksumLong    = 0xFFFFFF                // forces the trailing checksum varint to four bytes — the truncation point
 )
+
+// negFarFutureVersion returns the 16-byte all-ones version: its version
+// nibble (0xF) and variant bits (0b11) violate the RFC 9562 layout and its
+// reading is far beyond any clock lead — the crafted poison the version
+// class rejects.
+func negFarFutureVersion() version.RecordVersion {
+	return version.RecordVersion{
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	}
+}
 
 // negativeRow is one corrupted-datagram table row: build constructs the
 // exact bytes, wantStatus is decode()'s CURRENT mechanical verdict,
@@ -65,13 +78,14 @@ type negativeRow struct {
 	check      func(t *testing.T, in port.InboundDatagram)
 }
 
-// TestDecode_negativeTable pins the decoder's reject behavior against the
-// eight corruption classes D-08 names. Each row asserts (a) the mechanical
-// verdict decode() returns and (b) where a counter exists TODAY, the
-// DiscardStats delta the adapter exposes after the same datagram is fed
-// through its real event loop — so a row that silently reclassifies or
-// stops counting fails here first. Rows 7 and 8 are current-behavior pins
-// of the XPORT-10 defects: they assert Decoded today and flip in Phase 3.
+// TestDecode_negativeTable pins the decoder's reject behavior across D-08's
+// corruption classes and the wire-validation classes the core landed in
+// 03-08. Each row asserts (a) the mechanical verdict decode() returns and
+// (b) the DiscardStats delta the adapter exposes after the same datagram is
+// fed through its real event loop — so a row that silently reclassifies or
+// stops counting fails here first. The decode-only oversize row stays
+// Decoded with feed=false (the kernel refuses the send); its feedable
+// one-byte-over-the-limit sibling asserts the core's key_too_long class.
 func TestDecode_negativeTable(t *testing.T) {
 	t.Parallel()
 
@@ -188,7 +202,7 @@ func TestDecode_negativeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "oversize_datagram_over_udp_ceiling_decodes_today",
+			name: "oversize_key_decode_only_over_udp_ceiling",
 			build: func(t *testing.T) []byte {
 				t.Helper()
 				key := strings.Repeat("f2c-", negOversizeKeyLen/len("f2c-"))
@@ -202,11 +216,11 @@ func TestDecode_negativeTable(t *testing.T) {
 			feed:       false, // the kernel refuses a real send — F2c
 			check: func(t *testing.T, in port.InboundDatagram) {
 				t.Helper()
-				// CURRENT behavior: decode() has no size bound, so an
-				// oversized slice still decodes; the kernel's EMSGSIZE on
-				// the send path is what keeps it off the wire (F2c, stand
-				// TestStand_oversizeKeyF2c). XPORT-03 adds the decoder-side
-				// bound in Phase 3 — this row flips with that fix.
+				// The codec has no size bound, so an oversized slice still
+				// decodes; the kernel's EMSGSIZE on the send path is what
+				// keeps it off the wire (F2c, the rewritten stand scenario in
+				// 03-09). The feedable one-byte-over-the-limit row below
+				// asserts the core's key_too_long class over a real socket.
 				msg, ok := in.Msg.(port.DataReplication)
 				if !ok {
 					t.Fatalf("Msg = %T, want port.DataReplication", in.Msg)
@@ -217,19 +231,39 @@ func TestDecode_negativeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "empty_key_decoded_today_xport_10_forward_reference",
+			name: "key_too_long_over_max_key_bytes",
 			build: func(t *testing.T) []byte {
 				t.Helper()
-				return negEncode(t, port.DataReplication{Key: "", Record: negRecord(t, "", 5, []byte("empty-key-value"), false)})
+				key := strings.Repeat("k", negMaxKeyBytesLen)
+				return negEncode(t, port.DataReplication{Key: key, Record: negRecord(t, key, 5, []byte("long-key-value"), false)})
 			},
 			wantStatus: port.Decoded,
-			feed:       true, // processed today: the apply Acks — no discard class exists yet
+			wantClass:  repl.DiscardKeyTooLong,
+			feed:       true, // feedable: the key exceeds storage.MaxKeyBytes by one byte
 			check: func(t *testing.T, in port.InboundDatagram) {
 				t.Helper()
-				// CURRENT behavior: an empty key decodes and reaches the
-				// store. Rejection is XPORT-10 (Phase 3) — this row flips
-				// with the fix and must then assert Undecodable (or the
-				// replacement class the fix chooses).
+				msg, ok := in.Msg.(port.DataReplication)
+				if !ok {
+					t.Fatalf("Msg = %T, want port.DataReplication", in.Msg)
+				}
+				if len(msg.Key) != negMaxKeyBytesLen {
+					t.Fatalf("decoded key length = %d, want %d", len(msg.Key), negMaxKeyBytesLen)
+				}
+			},
+		},
+		{
+			name: "empty_key_discarded_by_core",
+			build: func(t *testing.T) []byte {
+				t.Helper()
+				return negEncode(t, port.DataReplication{Key: "", Record: negRecord(t, "", 6, []byte("empty-key-value"), false)})
+			},
+			wantStatus: port.Decoded,
+			wantClass:  repl.DiscardEmptyKey,
+			feed:       true, // the core discards it before the store — XPORT-10
+			check: func(t *testing.T, in port.InboundDatagram) {
+				t.Helper()
+				// decode() frames the datagram; the core's validation
+				// pipeline owns the empty-key verdict (landed in 03-08).
 				msg, ok := in.Msg.(port.DataReplication)
 				if !ok {
 					t.Fatalf("Msg = %T, want port.DataReplication", in.Msg)
@@ -243,19 +277,20 @@ func TestDecode_negativeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "tombstone_with_data_decoded_today_xport_10_forward_reference",
+			name: "tombstone_with_data_discarded_by_core",
 			build: func(t *testing.T) []byte {
 				t.Helper()
 				const key = "neg/tombstone-with-data"
-				return negEncode(t, port.DataReplication{Key: key, Record: negRecord(t, key, 6, []byte("tombstone-payload"), true)})
+				return negEncode(t, port.DataReplication{Key: key, Record: negRecord(t, key, 7, []byte("tombstone-payload"), true)})
 			},
 			wantStatus: port.Decoded,
-			feed:       true, // processed today: the apply Acks — no discard class exists yet
+			wantClass:  repl.DiscardTombstoneWithData,
+			feed:       true, // the core discards it before the store — XPORT-10
 			check: func(t *testing.T, in port.InboundDatagram) {
 				t.Helper()
-				// CURRENT behavior: Deleted:true with non-empty Data decodes
-				// and merges like any record. Rejection is XPORT-10 (Phase
-				// 3) — this row flips with the fix.
+				// decode() stays a faithful codec: Deleted:true with non-empty
+				// Data decodes intact, and the core's validation pipeline
+				// rejects it (landed in 03-08).
 				msg, ok := in.Msg.(port.DataReplication)
 				if !ok {
 					t.Fatalf("Msg = %T, want port.DataReplication", in.Msg)
@@ -265,6 +300,79 @@ func TestDecode_negativeTable(t *testing.T) {
 				}
 				if string(msg.Record.Data) != "tombstone-payload" {
 					t.Fatalf("decoded data = %q, want the payload to survive the tombstone flag", msg.Record.Data)
+				}
+			},
+		},
+		{
+			name:       "bad_checksum_one_flipped_data_byte",
+			build:      negFlippedDataByte,
+			wantStatus: port.Decoded,
+			wantClass:  repl.DiscardBadChecksum,
+			feed:       true, // the envelope CRC is recomputed; only the record checksum is wrong
+			check: func(t *testing.T, in port.InboundDatagram) {
+				t.Helper()
+				msg, ok := in.Msg.(port.DataReplication)
+				if !ok {
+					t.Fatalf("Msg = %T, want port.DataReplication", in.Msg)
+				}
+				if len(msg.Record.Data) == 0 || msg.Record.Data[0] != 'c'^corruptByte {
+					t.Fatalf("decoded data = %x, want the one-byte-flipped payload", msg.Record.Data)
+				}
+				got := storage.RecordChecksum(msg.Key, msg.Record.Version, msg.Record.Data, msg.Record.Deleted)
+				if got == msg.Record.Checksum {
+					t.Fatal("fixture bug: the record checksum still matches the flipped payload")
+				}
+			},
+		},
+		{
+			name: "bad_version_far_future",
+			build: func(t *testing.T) []byte {
+				t.Helper()
+				const key = "neg/far-future"
+				ver := negFarFutureVersion()
+				return negEncode(t, port.DataReplication{Key: key, Record: storage.Record{
+					Version:  ver,
+					Data:     []byte("future"),
+					Checksum: storage.RecordChecksum(key, ver, []byte("future"), false),
+				}})
+			},
+			wantStatus: port.Decoded,
+			wantClass:  repl.DiscardBadVersion,
+			feed:       true, // the checksum is correct; the version layout/future bound rejects it
+			check: func(t *testing.T, in port.InboundDatagram) {
+				t.Helper()
+				msg, ok := in.Msg.(port.DataReplication)
+				if !ok {
+					t.Fatalf("Msg = %T, want port.DataReplication", in.Msg)
+				}
+				if msg.Record.Version != negFarFutureVersion() {
+					t.Fatalf("decoded version = %x, want the all-ones poison intact", msg.Record.Version[:])
+				}
+			},
+		},
+		{
+			name: "bad_version_far_future_sync_entry",
+			build: func(t *testing.T) []byte {
+				t.Helper()
+				return negEncode(t, port.DataSync{Entries: []port.SyncEntry{
+					{Key: "neg/sync-entry-ok", Version: version.PackVersion(testNowMs, 8, nodeIDB)},
+					{Key: "neg/sync-entry-poison", Version: negFarFutureVersion()},
+				}})
+			},
+			wantStatus: port.Decoded,
+			wantClass:  repl.DiscardBadVersion,
+			feed:       true, // one poisoned entry discards the whole listing
+			check: func(t *testing.T, in port.InboundDatagram) {
+				t.Helper()
+				msg, ok := in.Msg.(port.DataSync)
+				if !ok {
+					t.Fatalf("Msg = %T, want port.DataSync", in.Msg)
+				}
+				if len(msg.Entries) != 2 {
+					t.Fatalf("decoded %d sync entries, want 2", len(msg.Entries))
+				}
+				if msg.Entries[1].Version != negFarFutureVersion() {
+					t.Fatalf("second entry version = %x, want the all-ones poison intact", msg.Entries[1].Version[:])
 				}
 			},
 		},
@@ -486,6 +594,16 @@ func discardCount(stats repl.DiscardStats, class string) uint64 {
 		return stats.OwnEcho
 	case repl.DiscardDuplicateNodeID:
 		return stats.DuplicateNodeID
+	case repl.DiscardEmptyKey:
+		return stats.EmptyKey
+	case repl.DiscardKeyTooLong:
+		return stats.KeyTooLong
+	case repl.DiscardTombstoneWithData:
+		return stats.TombstoneWithData
+	case repl.DiscardBadChecksum:
+		return stats.BadChecksum
+	case repl.DiscardBadVersion:
+		return stats.BadVersion
 	default:
 		return 0
 	}
@@ -504,6 +622,16 @@ func bumpDiscard(stats *repl.DiscardStats, class string) {
 		stats.OwnEcho++
 	case repl.DiscardDuplicateNodeID:
 		stats.DuplicateNodeID++
+	case repl.DiscardEmptyKey:
+		stats.EmptyKey++
+	case repl.DiscardKeyTooLong:
+		stats.KeyTooLong++
+	case repl.DiscardTombstoneWithData:
+		stats.TombstoneWithData++
+	case repl.DiscardBadChecksum:
+		stats.BadChecksum++
+	case repl.DiscardBadVersion:
+		stats.BadVersion++
 	}
 }
 
@@ -560,6 +688,46 @@ func negTruncatedBody(t *testing.T) []byte {
 		t.Fatalf("fixture bug: the truncated body (%d of %d bytes) still unmarshals", len(truncated), len(body))
 	}
 	return negEnvelope(t, repl.SupportedProtoVersion, runIDB[:], truncated)
+}
+
+// negFlippedDataByte builds the bad-checksum row: a real encoded
+// DataReplication whose body is unmarshaled, one Data byte flipped and the
+// body re-marshaled under a FRESHLY computed envelope CRC — so the CRC gate
+// passes and only the record checksum no longer covers the payload.
+func negFlippedDataByte(t *testing.T) []byte {
+	t.Helper()
+	const key = "neg/bad-checksum"
+	rec := negRecord(t, key, 9, []byte("checksum-payload"), false)
+	datagram := negEncode(t, port.DataReplication{Key: key, Record: rec})
+	var env replproto.Envelope
+	err := proto.Unmarshal(datagram, &env)
+	if err != nil {
+		t.Fatalf("unmarshal bad-checksum envelope: %v", err)
+	}
+	var body replproto.Body
+	err = proto.Unmarshal(env.GetBody(), &body)
+	if err != nil {
+		t.Fatalf("unmarshal bad-checksum body: %v", err)
+	}
+	dr := body.GetDataReplication()
+	if dr == nil || len(dr.GetData()) == 0 {
+		t.Fatal("fixture bug: the encoded body carries no DataReplication payload")
+	}
+	dr.Data[0] ^= corruptByte
+	bodyBytes, err := proto.Marshal(&body)
+	if err != nil {
+		t.Fatalf("marshal flipped body: %v", err)
+	}
+	env.Body = bodyBytes
+	env.Crc32 = crc32.ChecksumIEEE(bodyBytes)
+	flipped, err := proto.Marshal(&env)
+	if err != nil {
+		t.Fatalf("marshal flipped envelope: %v", err)
+	}
+	if storage.RecordChecksum(key, rec.Version, dr.GetData(), rec.Deleted) == rec.Checksum {
+		t.Fatal("fixture bug: flipping a data byte left the record checksum valid")
+	}
+	return flipped
 }
 
 // negRecord builds one well-formed record fixture for key: a distinct

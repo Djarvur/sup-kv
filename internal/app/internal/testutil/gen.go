@@ -19,6 +19,14 @@ const (
 	dataMax     = 64  // random data length ceiling, bytes.
 	keySpace    = 32  // small key space so records collide.
 	recsMax     = 16  // records merged into one RandStore.
+
+	// RandNearVersion's window around the fixed test wall clock, in
+	// milliseconds: one hour behind (a past reading is always accepted —
+	// the hybrid logical clock absorbs it) through 90 s ahead, so the draw
+	// straddles the 60 s default MaxClockLead and produces both accepted
+	// and rejected future readings.
+	nearPastMs   = -3600 * 1000
+	nearFutureMs = 90 * 1000
 )
 
 // fixedNow returns a now func parked at the fixed test wall-clock
@@ -64,6 +72,42 @@ func RandRecord(rng *rand.Rand) storage.Record {
 // RandKey returns a random key from a small space so records collide.
 func RandKey(rng *rand.Rand) string {
 	return fmt.Sprintf("key-%d", rng.IntN(keySpace))
+}
+
+// RandNearVersion packs a valid version whose reading lies near the fixed
+// test wall clock: l drawn uniformly in [testNowMs−1h, testNowMs+90s], with
+// the counter and node ID drawn like RandVersion. The window deliberately
+// straddles the inbound 60 s future bound, so a model built on this
+// generator exercises both accepted and rejected version readings.
+func RandNearVersion(rng *rand.Rand) version.RecordVersion {
+	span := int64(nearFutureMs - nearPastMs + 1)
+	l := testNowMs + nearPastMs + rng.Int64N(span)
+	return version.PackVersion(
+		l,
+		uint16(rng.IntN(testCounterMax+1)), //nolint:gosec // G115: IntN(4096) <= 4095, the conversion cannot overflow
+		uint16(rng.IntN(maxNodeID+1)),      //nolint:gosec // G115: IntN(0x10000) <= 0xFFFF, the conversion cannot overflow
+	)
+}
+
+// RandRecordForKey returns a wire-shaped record for key: the RandRecord
+// shape (roughly one third tombstones with nil Data, the rest up to 63
+// random data bytes) over a near version, with the production checksum
+// domain — storage.RecordChecksum(key, version, data, deleted) — so a
+// record built here is exactly what a correct sender would put on the
+// wire. RandVersion and RandRecord stay unchanged for the storage-only
+// property tests, where the whole 48-bit reading domain is the point.
+func RandRecordForKey(rng *rand.Rand, key string) storage.Record {
+	rec := storage.Record{Version: RandNearVersion(rng)}
+	if rng.IntN(tombChance) == 0 {
+		rec.Deleted = true
+	} else {
+		rec.Data = make([]byte, rng.IntN(dataMax))
+		for i := range rec.Data {
+			rec.Data[i] = byte(rng.IntN(byteValues)) //nolint:gosec // G115: IntN(256) < 256, the conversion cannot overflow
+		}
+	}
+	rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
+	return rec
 }
 
 // RandStore returns a store pre-populated by Merge with RandRecord records

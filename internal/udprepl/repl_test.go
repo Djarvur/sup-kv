@@ -597,6 +597,10 @@ func TestWaitReplicated_superseded(t *testing.T) {
 	reports := startWait(t, adapter, ver)
 
 	newer := storage.Record{Version: version.PackVersion(testNowMs+1000, 0, nodeIDB), Data: []byte("newer")}
+	// The wire record carries the production checksum: the core's validation
+	// pipeline rejects a mismatched one as bad_checksum before the apply, and
+	// this test must observe the supersession the record is meant to trigger.
+	newer.Checksum = storage.RecordChecksum(mirrorKey, newer.Version, newer.Data, newer.Deleted)
 	datagram, err := udprepl.EncodeDatagramForTest(port.DataReplication{Key: mirrorKey, Record: newer}, nodeIDB, runIDB)
 	if err != nil {
 		t.Fatalf("encode DataReplication: %v", err)

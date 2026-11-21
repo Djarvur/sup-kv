@@ -11,15 +11,19 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // Discard-classification test constants: the adversarial round count of the
-// totality proof (D-02) and the second handle a claiming node announces from
-// (REPL-08's two-sources-one-identity signature).
+// totality proof (D-02), the second handle a claiming node announces from
+// (REPL-08's two-sources-one-identity signature), and the inbound version
+// bound the model mirrors (the core's 60 s default MaxClockLead).
 const (
-	discardRounds = 500
-	cloneHandle   = "n2-clone"
+	discardRounds       = 500
+	cloneHandle         = "n2-clone"
+	defaultMaxClockLead = 60 * time.Second
+	longKeyLen          = storage.MaxKeyBytes + 1
 )
 
 // newDiscardCore returns a fresh local-node core whose Config.Log appends to
@@ -250,8 +254,10 @@ type modelPeer struct {
 // classify mirrors the classifier's pinned decision for one datagram against
 // the model's current peer table, returning the discard class or "" when the
 // datagram must reach protocol processing — the expectedDrift model-function
-// precedent, applied to the classification order (D-02).
-func classify(in port.InboundDatagram, peers map[uint16]modelPeer) string {
+// precedent, applied to the classification order (D-02) followed by the
+// wire-validation pipeline the core runs before handleMessage (XPORT-10,
+// D-06). now is the handler's event time, the clock the version bound reads.
+func classify(in port.InboundDatagram, peers map[uint16]modelPeer, now time.Time) string {
 	switch in.Status {
 	case port.BadCRC:
 		return "BadCRC"
@@ -270,7 +276,68 @@ func classify(in port.InboundDatagram, peers map[uint16]modelPeer) string {
 	if known, ok := peers[in.NodeID]; ok && in.RunID == known.runID && in.Source != known.handle {
 		return "DuplicateNodeID"
 	}
+	return validateClass(in.Msg, now)
+}
+
+// validateClass mirrors the validation pipeline's pinned intra-message order
+// (the core's validate): DataReplication — key, tombstone-with-data,
+// checksum, version; DataRequest/Ack — key only; DataSync — per entry key
+// then version, the first failure discarding the whole datagram; Hello, a
+// standalone SyncEntry and a nil Msg — nothing.
+func validateClass(msg port.Message, now time.Time) string {
+	switch m := msg.(type) {
+	case port.DataReplication:
+		if class := keyViolation(m.Key); class != "" {
+			return class
+		}
+		if m.Record.Deleted && len(m.Record.Data) > 0 {
+			return "TombstoneWithData"
+		}
+		sum := storage.RecordChecksum(m.Key, m.Record.Version, m.Record.Data, m.Record.Deleted)
+		if sum != m.Record.Checksum {
+			return "BadChecksum"
+		}
+		if futureVersion(now, m.Record.Version) {
+			return "BadVersion"
+		}
+	case port.DataRequest:
+		if class := keyViolation(m.Key); class != "" {
+			return class
+		}
+	case port.Ack:
+		if class := keyViolation(m.Key); class != "" {
+			return class
+		}
+	case port.DataSync:
+		for _, entry := range m.Entries {
+			if class := keyViolation(entry.Key); class != "" {
+				return class
+			}
+			if futureVersion(now, entry.Version) {
+				return "BadVersion"
+			}
+		}
+	}
 	return ""
+}
+
+// keyViolation mirrors the key domain: empty first, then the
+// storage.MaxKeyBytes ceiling.
+func keyViolation(key string) string {
+	if key == "" {
+		return "EmptyKey"
+	}
+	if len(key) > storage.MaxKeyBytes {
+		return "KeyTooLong"
+	}
+	return ""
+}
+
+// futureVersion mirrors the version half through the version package's own
+// predicate: a layout fault or a reading beyond now+defaultMaxClockLead is
+// the bad_version class.
+func futureVersion(now time.Time, ver version.RecordVersion) bool {
+	return ver.Validate(now, defaultMaxClockLead) != nil
 }
 
 // bump adds one discard to stats' named class.
@@ -286,6 +353,16 @@ func bump(stats *repl.DiscardStats, class string) {
 		stats.OwnEcho++
 	case "DuplicateNodeID":
 		stats.DuplicateNodeID++
+	case "EmptyKey":
+		stats.EmptyKey++
+	case "KeyTooLong":
+		stats.KeyTooLong++
+	case "TombstoneWithData":
+		stats.TombstoneWithData++
+	case "BadChecksum":
+		stats.BadChecksum++
+	case "BadVersion":
+		stats.BadVersion++
 	}
 }
 
@@ -342,7 +419,10 @@ func randDatagram(rng *rand.Rand) port.InboundDatagram {
 // randBody draws one decoded message body from all five protocol messages
 // plus the two adversarial shapes: no body at all on a Decoded verdict
 // (violates the adapter contract; the dispatcher's no-op) and a standalone
-// SyncEntry that never travels alone.
+// SyncEntry that never travels alone. Keyed messages draw from the whole
+// validation domain (empty, just over the ceiling, ordinary) and
+// DataReplication records are wire-shaped with one adversarial mutation
+// half the time, so the totality proof exercises every validation class.
 func randBody(rng *rand.Rand) port.Message {
 	switch rng.IntN(7) {
 	case 0:
@@ -350,19 +430,49 @@ func randBody(rng *rand.Rand) port.Message {
 	case 1:
 		return port.Hello{}
 	case 2:
-		return port.DataReplication{Key: testutil.RandKey(rng), Record: testutil.RandRecord(rng)}
+		key := randWireKey(rng)
+		rec := testutil.RandRecordForKey(rng, key)
+		corruptRecord(rng, &rec)
+		return port.DataReplication{Key: key, Record: rec}
 	case 3:
-		return port.Ack{Key: testutil.RandKey(rng), Version: testutil.RandRawVersion(rng)}
+		return port.Ack{Key: randWireKey(rng), Version: testutil.RandRawVersion(rng)}
 	case 4:
-		return port.DataRequest{Key: testutil.RandKey(rng)}
+		return port.DataRequest{Key: randWireKey(rng)}
 	case 5:
 		entries := make([]port.SyncEntry, 1+rng.IntN(4))
 		for i := range entries {
-			entries[i] = port.SyncEntry{Key: testutil.RandKey(rng), Version: testutil.RandVersion(rng)}
+			entries[i] = port.SyncEntry{Key: randWireKey(rng), Version: testutil.RandNearVersion(rng)}
 		}
 		return port.DataSync{Entries: entries}
 	default:
-		return port.SyncEntry{Key: testutil.RandKey(rng), Version: testutil.RandVersion(rng)}
+		return port.SyncEntry{Key: randWireKey(rng), Version: testutil.RandNearVersion(rng)}
+	}
+}
+
+// randWireKey draws a key from the validation domain: mostly a small-space
+// key, sometimes empty and sometimes one byte over storage.MaxKeyBytes, so
+// the empty_key and key_too_long classes are reachable by the random draws
+// rather than only by the explicit table rows.
+func randWireKey(rng *rand.Rand) string {
+	switch rng.IntN(16) {
+	case 0:
+		return ""
+	case 1:
+		return strings.Repeat("k", longKeyLen)
+	default:
+		return testutil.RandKey(rng)
+	}
+}
+
+// corruptRecord applies one adversarial record shape: a flipped checksum bit
+// or a tombstone left carrying Data — the two record-shape classes the
+// validator owns. Most draws stay wire-valid, so both verdicts occur.
+func corruptRecord(rng *rand.Rand, rec *storage.Record) {
+	switch rng.IntN(8) {
+	case 0:
+		rec.Checksum ^= 1
+	case 1:
+		rec.Deleted = true
 	}
 }
 
@@ -395,7 +505,7 @@ func TestDiscard_totality(t *testing.T) {
 	var discarded uint64
 	for range discardRounds {
 		in := randDatagram(rng)
-		class := classify(in, peers)
+		class := classify(in, peers, now)
 		core.HandleDatagram(now, in, &out)
 		out.Drain()
 		if class == "" {
@@ -413,7 +523,9 @@ func TestDiscard_totality(t *testing.T) {
 		t.Errorf("after %d adversarial datagrams Discards() = %+v, want %+v — counter conservation broken",
 			discardRounds, got, want)
 	}
-	if sum := got.BadCRC + got.Undecodable + got.BadProtoVersion + got.OwnEcho + got.DuplicateNodeID; sum != discarded {
+	sum := got.BadCRC + got.Undecodable + got.BadProtoVersion + got.OwnEcho + got.DuplicateNodeID +
+		got.EmptyKey + got.KeyTooLong + got.TombstoneWithData + got.BadChecksum + got.BadVersion
+	if sum != discarded {
 		t.Errorf("counter sum %d != discarded datagrams %d — a datagram was counted twice or processed anyway", sum, discarded)
 	}
 	if table := core.PeerSnapshot(); len(table) != len(peers) {

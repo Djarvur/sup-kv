@@ -203,6 +203,11 @@ type Adapter struct {
 	badProtoVersion atomic.Uint64
 	ownEcho         atomic.Uint64
 	duplicateNodeID atomic.Uint64
+	emptyKey        atomic.Uint64
+	keyTooLong      atomic.Uint64
+	tombstoneData   atomic.Uint64
+	badChecksum     atomic.Uint64
+	badVersion      atomic.Uint64
 	peerCount       atomic.Uint64
 
 	// The OBS-01 mirror set: the pending-set gauge (unacked count and
@@ -661,14 +666,22 @@ func (a *Adapter) SocketBuffers() (recv, send int) {
 }
 
 // Discards returns the discard-class counters (D-02) mirrored after the
-// latest event-loop iteration — safe from any goroutine.
+// latest event-loop iteration — safe from any goroutine. The five
+// wire-validation classes (empty_key, key_too_long, tombstone_with_data,
+// bad_checksum, bad_version) are counted by the core's validation pipeline
+// and mirrored here exactly like the original classification classes.
 func (a *Adapter) Discards() repl.DiscardStats {
 	return repl.DiscardStats{
-		BadCRC:          a.badCRC.Load(),
-		Undecodable:     a.undecodable.Load(),
-		BadProtoVersion: a.badProtoVersion.Load(),
-		OwnEcho:         a.ownEcho.Load(),
-		DuplicateNodeID: a.duplicateNodeID.Load(),
+		BadCRC:            a.badCRC.Load(),
+		Undecodable:       a.undecodable.Load(),
+		BadProtoVersion:   a.badProtoVersion.Load(),
+		OwnEcho:           a.ownEcho.Load(),
+		DuplicateNodeID:   a.duplicateNodeID.Load(),
+		EmptyKey:          a.emptyKey.Load(),
+		KeyTooLong:        a.keyTooLong.Load(),
+		TombstoneWithData: a.tombstoneData.Load(),
+		BadChecksum:       a.badChecksum.Load(),
+		BadVersion:        a.badVersion.Load(),
 	}
 }
 
@@ -824,6 +837,11 @@ func (a *Adapter) mirrorStats() {
 	a.badProtoVersion.Store(d.BadProtoVersion)
 	a.ownEcho.Store(d.OwnEcho)
 	a.duplicateNodeID.Store(d.DuplicateNodeID)
+	a.emptyKey.Store(d.EmptyKey)
+	a.keyTooLong.Store(d.KeyTooLong)
+	a.tombstoneData.Store(d.TombstoneWithData)
+	a.badChecksum.Store(d.BadChecksum)
+	a.badVersion.Store(d.BadVersion)
 	// PeerCount returns the peer-table length, never a negative value.
 	//nolint:gosec // G115: PeerCount is len(c.peers), a non-negative map length.
 	a.peerCount.Store(uint64(a.core.PeerCount()))

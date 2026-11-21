@@ -4,8 +4,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
+
+// driftLead is the inbound version bound this test's cores run with: the
+// drift-warning scenario stamps a record one drift-warn window (60 s) plus a
+// second ahead, which is legitimately beyond the 60 s production default, so
+// the test widens the bound explicitly rather than weakening the default.
+const driftLead = 2 * time.Minute
 
 // TestMergeStats_counts proves the OBS-01 counter layer at the applyRemote
 // seam: a strictly greater remote version counts one conflict (the
@@ -17,7 +24,7 @@ import (
 // absent key conflicts nothing.
 func TestMergeStats_counts(t *testing.T) {
 	t.Parallel()
-	core, st := newTestCore()
+	core, st := newTestCoreWithConfig(repl.Config{MaxClockLead: driftLead})
 	now := at(0)
 	var out port.Outbox
 

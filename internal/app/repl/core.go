@@ -47,6 +47,17 @@ const (
 	DiscardBadProtoVersion = "bad_proto_version"
 	DiscardOwnBroadcast    = "own_broadcast"
 	DiscardDuplicateNodeID = "duplicate_node_id"
+
+	// DiscardEmptyKey and its four siblings below are the wire-validation
+	// classes (XPORT-03, XPORT-04, XPORT-10, D-06), in the pinned
+	// intra-message order [Core.validate] applies: a datagram carrying any
+	// one of them is discarded before [Core.handleMessage], so no store
+	// write, no clock call and no timer ever observes it.
+	DiscardEmptyKey          = "empty_key"
+	DiscardKeyTooLong        = "key_too_long"
+	DiscardTombstoneWithData = "tombstone_with_data"
+	DiscardBadChecksum       = "bad_checksum"
+	DiscardBadVersion        = "bad_version"
 )
 
 // Design defaults a zero or negative Config field is normalized to, from
@@ -60,6 +71,19 @@ const (
 	defaultSyncInterval       = 30 * time.Second
 	defaultSyncChunkBytes     = 1400
 	defaultSyncResponseRate   = 500
+
+	// defaultMaxClockLead is the inbound version bound's design default
+	// (XPORT-04, D-06): the documented drift tolerance, equal to
+	// drift_warn's default, so a peer inside the drift window stays
+	// accepted while a crafted far-future version is rejected before any
+	// store or clock call. A Config.MaxClockLead of zero or less is
+	// normalized to this value.
+	defaultMaxClockLead = 60 * time.Second
+
+	// discardWarnInterval is the per-class rate limit of the validation
+	// WARNs (T-3-25): one WARN per class per this much event-loop time.
+	// Driven by the handler's now, never a wall clock read.
+	discardWarnInterval = 10 * time.Second
 
 	// maxSyncResponseRate is the top of SyncResponseRate's valid domain.
 	// At any rate above it, one second divided by the rate as a
@@ -148,6 +172,17 @@ type Config struct {
 	SyncResponseRate   int
 	Log                func(msg string)
 
+	// MaxClockLead bounds how far ahead of the handler's now a received
+	// record version's unix_ts_ms reading may lie (XPORT-04, D-06): a
+	// version beyond now+MaxClockLead is discarded as DiscardBadVersion
+	// before any store or clock call, so a crafted far-future stamp can
+	// never poison the hybrid logical clock. A zero or negative value
+	// normalizes to defaultMaxClockLead (60 s, the documented drift
+	// tolerance) — a scenario that legitimately needs more (a far-ahead
+	// clock under test) sets its own explicit value; the production
+	// default is never widened for tests.
+	MaxClockLead time.Duration
+
 	// OnDiscard is invoked at every HandleDatagram discard site with the
 	// class token (DiscardBadCRC, ...) and a short metadata detail — the
 	// source handle, the offending node id (D-08). Additive to Log: the
@@ -186,6 +221,9 @@ func (c Config) normalized() Config {
 	}
 	if c.SyncResponseRate <= 0 || c.SyncResponseRate > maxSyncResponseRate {
 		c.SyncResponseRate = defaultSyncResponseRate
+	}
+	if c.MaxClockLead <= 0 {
+		c.MaxClockLead = defaultMaxClockLead
 	}
 	if c.Log == nil {
 		c.Log = func(_ string) {}
@@ -251,6 +289,18 @@ type DiscardStats struct {
 	BadProtoVersion uint64
 	OwnEcho         uint64
 	DuplicateNodeID uint64
+
+	// The wire-validation classes (XPORT-03, XPORT-04, XPORT-10): one
+	// counter per rejection [Core.validate] produces. EmptyKey and
+	// KeyTooLong cover the key domain of DataReplication, DataRequest, Ack
+	// and every DataSync entry; TombstoneWithData, BadChecksum and
+	// BadVersion apply to DataReplication records (and BadVersion to
+	// DataSync entry versions too).
+	EmptyKey          uint64
+	KeyTooLong        uint64
+	TombstoneWithData uint64
+	BadChecksum       uint64
+	BadVersion        uint64
 }
 
 // MergeStats counts the remote-merge observability signals (OBS-01, D-10):
@@ -531,6 +581,13 @@ type Core struct {
 
 	discards DiscardStats
 
+	// discardWarnAt is the per-class rate-limit state of the validation
+	// WARNs (T-3-25): the event-loop time of the last WARN per class. An
+	// absent entry (never warned) always fires; afterwards a class warns at
+	// most once per discardWarnInterval of event time. Map access is
+	// driver-goroutine-only, like every other core field (D-04).
+	discardWarnAt map[string]time.Time
+
 	// mergeStats counts the remote-merge signals (OBS-01); retransmitted
 	// counts the ladder's retransmission emissions — driver-goroutine-only
 	// mutations behind the copying accessors, the Discards precedent.
@@ -566,6 +623,7 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 		listingByDst:         make(map[string]*listingFIFO),
 		recordQueued:         make(map[pendingKey]struct{}),
 		egressIDs:            make(map[egressKey]struct{}),
+		discardWarnAt:        make(map[string]time.Time),
 		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
 }
@@ -590,7 +648,26 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // restart reaction — a restart is never counted as a duplicate. Every
 // discard site additionally fires cfg.OnDiscard with its class token and a
 // metadata detail (D-08) — additive to the duplicate-node_id Log calls,
-// never their replacement. Everything else reaches protocol processing:
+// never their replacement.
+//
+// The surviving datagram then passes the wire-validation pipeline
+// ([Core.validate], XPORT-03/04/10, D-06) BEFORE handleMessage — the
+// position is the contract: handleMessage is the only path to the store
+// (applyRemote is the sole ApplyRemote call, and therefore the sole
+// Clock.Update path), so a rejected datagram can touch neither the store
+// nor the clock, and no timer observes it either. The pinned
+// intra-message order: DataReplication — empty key, key longer than
+// storage.MaxKeyBytes, Deleted with non-empty Data, a record checksum that
+// does not match storage.RecordChecksum, a version beyond
+// now+cfg.MaxClockLead; DataRequest and Ack — empty key, key too long;
+// DataSync — every entry in received order: empty key, key too long,
+// version beyond the bound, with the first failing entry discarding the
+// whole datagram; Hello and a nil Msg — nothing. Every rejection counts its
+// own DiscardStats class, fires OnDiscard with the source handle as the
+// detail (never a key name, the T-6-05 metadata contract), and logs one
+// per-class rate-limited WARN on the event-loop's now (T-3-25).
+//
+// Everything else reaches protocol processing:
 // Hello upserts the peer
 // table and — when a known node's run_id changed — answers with the
 // targeted full listing toward the restarted peer (REPL-07),
@@ -638,7 +715,148 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		))
 		return
 	}
+	if class, detail, valid := c.validate(now, in); !valid {
+		c.discardValidated(now, class, detail)
+		return
+	}
 	c.handleMessage(now, in, out)
+}
+
+// validate is the wire-validation pipeline (XPORT-03, XPORT-04, XPORT-10,
+// D-06): it runs between HandleDatagram's framing/identity classification
+// and handleMessage, so a rejected datagram never reaches a handler — and
+// therefore never the store, the clock or a timer. The intra-message order
+// is pinned (probe XPORT-10, tests pin every step):
+//
+//   - DataReplication: empty key, key longer than storage.MaxKeyBytes,
+//     tombstone carrying Data, a checksum that does not match
+//     storage.RecordChecksum(key, version, data, deleted), then a version
+//     beyond now+cfg.MaxClockLead;
+//   - DataRequest and Ack: empty key, then key too long (an Ack carries no
+//     record, so no checksum or version validation applies);
+//   - DataSync: every entry in received order — empty key, key too long,
+//     version beyond the bound; the first failing entry discards the whole
+//     datagram;
+//   - Hello, a standalone SyncEntry and a nil Msg: nothing (a Hello carries
+//     no key or version, a standalone SyncEntry never travels, and a nil
+//     Msg on a Decoded verdict violates the adapter contract).
+//
+// The returned detail is the source handle alone — never a key name or a
+// record value (the T-6-05 metadata contract, T-3-27). valid reports
+// whether the datagram may proceed.
+func (c *Core) validate(now time.Time, in port.InboundDatagram) (class, detail string, valid bool) {
+	switch msg := in.Msg.(type) {
+	case port.DataReplication:
+		return c.validateReplication(now, in.Source, msg)
+	case port.DataRequest:
+		return keyVerdict(in.Source, msg.Key)
+	case port.Ack:
+		return keyVerdict(in.Source, msg.Key)
+	case port.DataSync:
+		return c.validateSync(now, in.Source, msg.Entries)
+	}
+	return "", "", true
+}
+
+// validateReplication applies the pinned record order: key domain,
+// tombstone shape, checksum, then version. The version check is last so a
+// datagram with several faults reports the earliest structural one, and —
+// the point of the whole pipeline — a forgeable checksum never gets a
+// version verdict instead.
+func (c *Core) validateReplication(now time.Time, source string, msg port.DataReplication) (class, detail string, valid bool) {
+	if violation := keyClass(msg.Key); violation != "" {
+		return violation, source, false
+	}
+	if msg.Record.Deleted && len(msg.Record.Data) > 0 {
+		return DiscardTombstoneWithData, source, false
+	}
+	sum := storage.RecordChecksum(msg.Key, msg.Record.Version, msg.Record.Data, msg.Record.Deleted)
+	if sum != msg.Record.Checksum {
+		return DiscardBadChecksum, source, false
+	}
+	if !c.versionAccepted(now, msg.Record.Version) {
+		return DiscardBadVersion, source, false
+	}
+	return "", "", true
+}
+
+// validateSync applies the per-entry order — key domain, then version — in
+// received order: the first failing entry discards the whole datagram, so a
+// listing cannot smuggle one bad entry past a per-chunk verdict.
+func (c *Core) validateSync(now time.Time, source string, entries []port.SyncEntry) (class, detail string, valid bool) {
+	for _, entry := range entries {
+		if violation := keyClass(entry.Key); violation != "" {
+			return violation, source, false
+		}
+		if !c.versionAccepted(now, entry.Version) {
+			return DiscardBadVersion, source, false
+		}
+	}
+	return "", "", true
+}
+
+// keyVerdict is the key-only half shared by DataRequest and Ack: both carry
+// a key and no record, so nothing else is applicable.
+func keyVerdict(source, key string) (class, detail string, valid bool) {
+	if violation := keyClass(key); violation != "" {
+		return violation, source, false
+	}
+	return "", "", true
+}
+
+// keyClass returns the discard class for key's domain violation — empty
+// first, then the storage.MaxKeyBytes ceiling (XPORT-03) — or "" when the
+// key is acceptable. Validation is receive-side only: the store keeps
+// serving pre-upgrade records under longer keys, so reads stay permissive.
+func keyClass(key string) string {
+	if key == "" {
+		return DiscardEmptyKey
+	}
+	if len(key) > storage.MaxKeyBytes {
+		return DiscardKeyTooLong
+	}
+	return ""
+}
+
+// versionAccepted reports whether ver is a valid inbound record version at
+// the handler's now under cfg.MaxClockLead — the layout and future-bound
+// check of version.RecordVersion.Validate, which reads no clock (the D-02
+// seam: now is the caller's) and never panics.
+func (c *Core) versionAccepted(now time.Time, ver version.RecordVersion) bool {
+	return ver.Validate(now, c.cfg.MaxClockLead) == nil
+}
+
+// discardValidated records one wire-validation rejection: it counts the
+// class's own counter, fires cfg.OnDiscard with the class and the source
+// detail, and logs a per-class rate-limited WARN naming only the class
+// (T-3-25, T-3-27). The rate limit is driven by the event-loop's now — the
+// lastWarn bookkeeping is a plain per-class timestamp, never a wall clock
+// read and never a global throttle. Counters stay the reliable signal; the
+// WARN is the operator's coarse hint, and per-datagram discard logging
+// stays the adapter's Debug-level OnDiscard bridge.
+func (c *Core) discardValidated(now time.Time, class, detail string) {
+	switch class {
+	case DiscardEmptyKey:
+		c.discards.EmptyKey++
+	case DiscardKeyTooLong:
+		c.discards.KeyTooLong++
+	case DiscardTombstoneWithData:
+		c.discards.TombstoneWithData++
+	case DiscardBadChecksum:
+		c.discards.BadChecksum++
+	case DiscardBadVersion:
+		c.discards.BadVersion++
+	}
+	c.cfg.OnDiscard(class, detail)
+	last, warned := c.discardWarnAt[class]
+	if warned && now.Sub(last) < discardWarnInterval {
+		return
+	}
+	c.discardWarnAt[class] = now
+	c.cfg.Log(fmt.Sprintf(
+		"sup-kv: discarded inbound datagram: class %s (one warning per class per %s)",
+		class, discardWarnInterval,
+	))
 }
 
 // handleMessage dispatches one classified datagram's decoded message to its

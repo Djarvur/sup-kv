@@ -91,9 +91,17 @@ func (s stateStore) Records() map[string]storage.Record { return s.store.Records
 // hello_interval 1s) — the exact timings the ladder and eviction tests
 // assert against. Peers are always synthetic datagram sources, never cores.
 func newTestCore() (*repl.Core, *stateStore) {
+	return newTestCoreWithConfig(repl.Config{})
+}
+
+// newTestCoreWithConfig is newTestCore over an explicit Config: the seam for
+// tests whose own scenario legitimately runs away from a default — the
+// far-ahead drift scenario's widened MaxClockLead — while the production
+// default stays untouched everywhere else.
+func newTestCoreWithConfig(cfg repl.Config) (*repl.Core, *stateStore) {
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
-	return repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{}), st
+	return repl.New(localID, testRunID(localID), handleFor(localID), st, cfg), st
 }
 
 // newLimitedTestCore returns the local node's core over a real store whose
@@ -120,8 +128,12 @@ func ackFrom(peerID uint16, key string, ver version.RecordVersion) port.InboundD
 }
 
 // replFrom builds a decoded DataReplication datagram from peerID carrying
-// rec under key.
+// rec under key. The record checksum is recomputed through the production
+// domain — what a correct sender's store already stamped — so the fixture
+// is wire-valid and the validation pipeline's checksum step passes; a test
+// that wants the bad_checksum class builds its own mutated record.
 func replFrom(peerID uint16, key string, rec storage.Record) port.InboundDatagram {
+	rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
 	return datagramFrom(peerID, port.DataReplication{Key: key, Record: rec})
 }
 

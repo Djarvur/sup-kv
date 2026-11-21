@@ -129,7 +129,11 @@ func TestScenario_clockJumps(t *testing.T) {
 	preTag, fwdTag, backTag := rng.IntN(1000), rng.IntN(1000), rng.IntN(1000)
 
 	sched := simnet.NewScheduler(at(0))
-	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{}, simFixedDelay(nil))
+	// The scenario's intent is HLC absorption of a live jump, not
+	// rejection: the forward jump is up to ~3 h, so the inbound version
+	// bound is widened to 4 h explicitly. The production 60 s default is
+	// not widened for this test's convenience anywhere else.
+	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{MaxClockLead: 4 * time.Hour}, simFixedDelay(nil))
 	quiesceDiscovery(t, sched, cluster)
 
 	// Phase 1 — pre-jump writes from every node; node 0's baseline record.
@@ -206,7 +210,11 @@ func TestScenario_farAhead(t *testing.T) {
 	farTag := rng.IntN(1000)
 
 	sched := simnet.NewScheduler(at(0))
-	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{}, simFixedDelay(nil))
+	// The scenario's intent is HLC absorption of a 24 h far-ahead clock,
+	// not rejection: the inbound version bound is widened to 25 h (the
+	// offset plus margin) explicitly. The production 60 s default stays
+	// untouched.
+	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{MaxClockLead: 25 * time.Hour}, simFixedDelay(nil))
 	cluster.SetClockOffset(1, 24*time.Hour) // before any event: node 1's whole run is a day ahead
 	quiesceDiscovery(t, sched, cluster)
 
