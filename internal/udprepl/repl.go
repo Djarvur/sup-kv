@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log/slog"
+	"math"
 	"net"
 	"slices"
 	"sync/atomic"
@@ -48,6 +49,21 @@ const (
 	// surfaces no MSG_TRUNC — so large records would arrive as quiet
 	// corruption surfacing only as bad-CRC discards (RESEARCH Pitfall 4).
 	datagramBufSize = 65507
+
+	// socketRecvBuffer and socketSendBuffer are the REQUESTED kernel
+	// socket-buffer sizes. The kernel doubles each request and clamps it to
+	// rmem_max/wmem_max, and getsockopt returns the doubled, clamped value
+	// (RESEARCH Pattern 7); the requested constants are therefore never the
+	// honest socket sizes and never reach the startup log — only the
+	// read-back values do. darwin's ~9 KiB datagram send limit
+	// (net.inet.udp.maxdgram) is documented by ADR 0010, not fixed here.
+	socketRecvBuffer = 4 << 20
+	socketSendBuffer = 1 << 20
+
+	// maxBufferRequestWidth bounds a requested socket-buffer width: the
+	// kernel doubles the request, so a larger request would overflow a
+	// 32-bit int on read-back (T-3-01).
+	maxBufferRequestWidth = math.MaxInt32 / 2
 
 	// inboundQueue bounds the datagrams waiting for the event loop; beyond
 	// it the read goroutine blocks and the socket receive buffer
@@ -80,6 +96,15 @@ const (
 // errNoStandaloneBody rejects a port message that has no datagram body of
 // its own on the wire schema.
 var errNoStandaloneBody = errors.New("udprepl: message has no standalone datagram body")
+
+// errBufferRequestRange and errSendBufferTooSmall are the socket-buffer
+// configuration sentinels: the request-width guard (T-3-01) and the
+// one-maximal-datagram send floor (T-3-03) wrap them with the compared
+// sizes, so callers can match the class without parsing the numbers.
+var (
+	errBufferRequestRange = errors.New("udprepl: socket buffer request out of range")
+	errSendBufferTooSmall = errors.New("udprepl: effective send buffer cannot hold one maximal datagram")
+)
 
 // ErrRunLoopExited is the NotifyLocalWrite verdict once the adapter's event
 // loop has returned: nothing drains the notify queue any more, so the
@@ -144,6 +169,14 @@ type Adapter struct {
 	inbound       chan inboundEvent
 	notify        chan localWrite
 	done          chan struct{}
+
+	// recvBuf and sendBuf are the kernel's effective SO_RCVBUF/SO_SNDBUF
+	// sizes read back in New — the doubled, clamped values, never the
+	// requested constants (RESEARCH Pattern 7). Written once during
+	// construction and immutable afterwards; SocketBuffers is the read
+	// accessor.
+	recvBuf int
+	sendBuf int
 
 	badCRC          atomic.Uint64
 	undecodable     atomic.Uint64
@@ -212,10 +245,19 @@ type Adapter struct {
 // example "127.255.255.255:7900"); the core's own opaque handle (D-03) is
 // taken from the bound socket's local address. The socket is created with
 // SO_REUSEADDR and SO_BROADCAST set before bind (RESEARCH Pattern 3):
-// same-host nodes share the port and broadcast sends are permitted. A nil
-// cfg.OnDiscard is replaced by the adapter's own slog bridge (logDiscard,
-// D-08): production discards surface as distinguishable structured events
-// with no wiring at the call site.
+// same-host nodes share the port and broadcast sends are permitted.
+//
+// After the bind the socket's SO_RCVBUF/SO_SNDBUF are configured and read
+// back: the values [Adapter.SocketBuffers] reports are the kernel's
+// EFFECTIVE (doubled and clamped) sizes, never the requested constants
+// (RESEARCH Pattern 7). A construction error is returned when the socket
+// options cannot be applied or read, and when the effective send buffer
+// cannot hold one maximal datagram — the node never starts in the
+// silently-degraded state where the largest record could never leave.
+//
+// A nil cfg.OnDiscard is replaced by the adapter's own slog bridge
+// (logDiscard, D-08): production discards surface as distinguishable
+// structured events with no wiring at the call site.
 func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, cfg repl.Config) (*Adapter, error) {
 	if cfg.OnDiscard == nil {
 		cfg.OnDiscard = logDiscard
@@ -235,6 +277,16 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 	}
 	runID := repl.NewRunID()
 	conn := packetConn.(*net.UDPConn)
+	recvBuf, sendBuf, err := configureSocketBuffers(conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("udprepl: configure socket buffers: %w", err)
+	}
+	err = checkSendBuffer(sendBuf)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	return &Adapter{
 		conn:          conn,
 		broadcastAddr: broadcast,
@@ -246,6 +298,8 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 		notify:        make(chan localWrite, notifyQueue),
 		done:          make(chan struct{}),
 		drained:       make(map[string]drainedRow),
+		recvBuf:       recvBuf,
+		sendBuf:       sendBuf,
 	}, nil
 }
 
@@ -288,6 +342,89 @@ func reuseAddrBroadcastListenPacket(bindAddr string) (net.PacketConn, error) {
 		},
 	}
 	return lc.ListenPacket(context.Background(), "udp4", bindAddr)
+}
+
+// configureSocketBuffers applies the adapter's requested SO_RCVBUF/SO_SNDBUF
+// sizes and returns the kernel's effective values read back through
+// getsockopt. The kernel doubles each request and clamps it to
+// rmem_max/wmem_max, so the returned values are the honest socket sizes and
+// the only ones safe to report (RESEARCH Pattern 7).
+//
+// The requested widths are validated before any setsockopt: their doubled
+// read-back must still fit a 32-bit int (T-3-01). Every failure is wrapped
+// with the operation and the requested size; a non-nil error means the
+// socket must not be used.
+func configureSocketBuffers(conn *net.UDPConn) (recv, send int, err error) {
+	err = validateBufferRequest(socketRecvBuffer)
+	if err != nil {
+		return 0, 0, err
+	}
+	err = validateBufferRequest(socketSendBuffer)
+	if err != nil {
+		return 0, 0, err
+	}
+	err = conn.SetReadBuffer(socketRecvBuffer)
+	if err != nil {
+		return 0, 0, fmt.Errorf("udprepl: set receive buffer %d: %w", socketRecvBuffer, err)
+	}
+	err = conn.SetWriteBuffer(socketSendBuffer)
+	if err != nil {
+		return 0, 0, fmt.Errorf("udprepl: set send buffer %d: %w", socketSendBuffer, err)
+	}
+	recv, err = socketOption(conn, syscall.SO_RCVBUF)
+	if err != nil {
+		return 0, 0, fmt.Errorf("udprepl: read receive buffer after requesting %d: %w", socketRecvBuffer, err)
+	}
+	send, err = socketOption(conn, syscall.SO_SNDBUF)
+	if err != nil {
+		return 0, 0, fmt.Errorf("udprepl: read send buffer after requesting %d: %w", socketSendBuffer, err)
+	}
+	return recv, send, nil
+}
+
+// validateBufferRequest rejects a requested buffer width the kernel read-back
+// cannot represent honestly: a non-positive request is meaningless, and a
+// request above MaxInt32/2 would overflow a 32-bit int once the kernel
+// doubles it (T-3-01). The doubled read-back itself is never computed in Go
+// code — the kernel returns it directly.
+func validateBufferRequest(requested int) error {
+	if requested <= 0 || requested > maxBufferRequestWidth {
+		return fmt.Errorf("%w: %d (valid 1..%d)", errBufferRequestRange, requested, maxBufferRequestWidth)
+	}
+	return nil
+}
+
+// socketOption reads one SOL_SOCKET integer option from conn's descriptor —
+// the getsockopt read-back behind configureSocketBuffers.
+func socketOption(conn *net.UDPConn, opt int) (int, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("udprepl: socket syscall conn: %w", err)
+	}
+	var value int
+	var opErr error
+	err = raw.Control(func(fd uintptr) {
+		value, opErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, opt)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("udprepl: socket control: %w", err)
+	}
+	if opErr != nil {
+		return 0, fmt.Errorf("udprepl: getsockopt option %d: %w", opt, opErr)
+	}
+	return value, nil
+}
+
+// checkSendBuffer enforces the startup floor (T-3-03): the effective send
+// buffer must hold one maximal datagram, or every largest record would be
+// rejected by the kernel while the node appeared healthy. The error names
+// both the actual and the required size so the operator can compare them
+// against wmem_max. A pure function — no socket involved.
+func checkSendBuffer(actual int) error {
+	if actual < datagramBufSize {
+		return fmt.Errorf("%w: effective %d bytes, need %d bytes", errSendBufferTooSmall, actual, datagramBufSize)
+	}
+	return nil
 }
 
 // Run is the single event-loop goroutine the caller launches (D-04). It
@@ -381,6 +518,14 @@ func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record) error {
 	case <-a.done:
 		return ErrRunLoopExited
 	}
+}
+
+// SocketBuffers returns the kernel's effective SO_RCVBUF/SO_SNDBUF sizes read
+// back during [New] — the doubled, clamped values, never the requested
+// constants (RESEARCH Pattern 7). The fields are written once at construction
+// and immutable afterwards, so the accessor is safe from any goroutine.
+func (a *Adapter) SocketBuffers() (recv, send int) {
+	return a.recvBuf, a.sendBuf
 }
 
 // Discards returns the discard-class counters (D-02) mirrored after the

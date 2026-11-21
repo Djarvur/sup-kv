@@ -475,6 +475,65 @@ func TestMain_lifecycle(t *testing.T) {
 	}
 }
 
+// TestMain_socketBuffersLogged pins XPORT-05's startup evidence end-to-end:
+// the real binary logs one static "Socket buffers" line carrying positive
+// recv_buf and send_buf attrs — the kernel's EFFECTIVE sizes, so the test
+// never asserts an exact number (the kernel doubles and clamps; RESEARCH
+// Pitfall 13).
+func TestMain_socketBuffersLogged(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+
+	node := startLoggedNode(t, bin, []string{"SUPKV_LOG_FORMAT=json", "SUPKV_LOG_LEVEL=info"},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+fmt.Sprintf("127.0.0.1:%d", grpcPort),
+		"--startup-gate=10ms",
+	)
+	waitFor(t, servingDeadline, "the static Socket buffers startup line with positive sizes", func() bool {
+		recv, send, ok := parseSocketBuffersLine(node.stderr.String())
+		return ok && recv > 0 && send > 0
+	})
+	recv, send, ok := parseSocketBuffersLine(node.stderr.String())
+	if !ok || recv <= 0 || send <= 0 {
+		t.Fatalf("Socket buffers line = (recv %d, send %d, ok %t), want both positive", recv, send, ok)
+	}
+	t.Logf("startup logged effective socket buffers: recv_buf=%d send_buf=%d", recv, send)
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the socket-buffers startup run")
+}
+
+// parseSocketBuffersLine extracts recv_buf and send_buf from the startup
+// "Socket buffers" JSON log line. ok reports the line appeared with both
+// integer attrs present; the caller asserts their positivity.
+func parseSocketBuffersLine(output string) (recv, send int, ok bool) {
+	for line := range strings.SplitSeq(output, "\n") {
+		if !strings.Contains(line, "Socket buffers") {
+			continue
+		}
+		var entry struct {
+			Msg     string `json:"msg"`
+			RecvBuf *int   `json:"recv_buf"`
+			SendBuf *int   `json:"send_buf"`
+		}
+		if json.Unmarshal([]byte(line), &entry) != nil || entry.Msg != "Socket buffers" {
+			continue
+		}
+		if entry.RecvBuf == nil || entry.SendBuf == nil {
+			continue
+		}
+		return *entry.RecvBuf, *entry.SendBuf, true
+	}
+	return 0, 0, false
+}
+
 // TestShutdown_secondSignal pins the P1-IN-01 contract end-to-end: signal
 // ownership stays armed across the whole D-19 shutdown, so a second SIGTERM
 // observed while the graceful drain is still in progress takes the force

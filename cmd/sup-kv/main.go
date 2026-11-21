@@ -442,6 +442,11 @@ func wire(cfg config) (*wired, net.Listener, error) {
 		engineCancel()
 		return nil, nil, fmt.Errorf("bind replication socket: %w", err)
 	}
+	// XPORT-05 startup evidence: the EFFECTIVE (kernel-doubled, clamped)
+	// buffer sizes, never the requested constants — the adapter read them
+	// back in New (RESEARCH Pattern 7).
+	recvBuf, sendBuf := adapter.SocketBuffers()
+	slog.Info("Socket buffers", "recv_buf", recvBuf, "send_buf", sendBuf)
 
 	replCtx, replCancel := context.WithCancel(context.Background())
 	replDone := make(chan struct{})
