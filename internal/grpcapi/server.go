@@ -102,6 +102,12 @@ func NewServer(engine *persist.Engine, notify LocalNotify, hub *WatchHub, opts S
 // or replication state — an absent or tombstoned key is the NotFound code,
 // never an empty success. An empty key is rejected with InvalidArgument
 // before any engine call (A7), like the write handlers.
+//
+// Get deliberately does not enforce the key-length ceiling: the write side
+// (Set, Delete) and the replication receive path do. Pre-upgrade records
+// under keys longer than storage.MaxKeyBytes must stay readable, and Phase
+// 5's load-time accounting decides what happens to them (RESEARCH Open
+// Question 2: write-side only, Get permissive).
 func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.GetResponse, error) {
 	if req.GetKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
@@ -121,7 +127,11 @@ func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.Get
 // before any validation, so even an empty key surfaces Unavailable, not
 // InvalidArgument, until the gate opens. An empty key is then rejected
 // with InvalidArgument before any engine call (A7: the store itself
-// permits empty keys, the API does not). wait_for_replication asks the
+// permits empty keys, the API does not), and a key longer than
+// storage.MaxKeyBytes is rejected with InvalidArgument before any engine
+// call too (XPORT-03: the one key-length ceiling, measured in bytes, also
+// enforced on receive and at startup) — create_if_absent rides the same
+// single validation path. wait_for_replication asks the
 // server to wait after the confirmed write for the replication Acks and
 // decorate the response with the D-08 aggregate report (wait.go): the wait
 // is bounded by the positive per-request wait_timeout_ms, else the
@@ -137,6 +147,9 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 	}
 	if req.GetKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
+	}
+	if len(req.GetKey()) > storage.MaxKeyBytes {
+		return nil, keyTooLongError(len(req.GetKey()))
 	}
 	var (
 		ver version.RecordVersion
@@ -165,7 +178,9 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 // delete is a write). A missing or already-tombstoned key surfaces the
 // engine's NotFound through the shared mapper — a delete of nothing
 // happened. An empty key is rejected with InvalidArgument before any
-// engine call, like Set. The wait fields carry the same meaning as on Set
+// engine call, like Set, as is a key longer than storage.MaxKeyBytes
+// (XPORT-03's single ceiling — a tombstone for an unwritable key would be
+// its own unsendable record). The wait fields carry the same meaning as on Set
 // (API-05: a delete is a write): wait_for_replication waits for the
 // tombstone's replication Acks and decorates the response with the D-08
 // aggregate report, bounded by the positive per-request wait_timeout_ms
@@ -177,6 +192,9 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 	}
 	if req.GetKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
+	}
+	if len(req.GetKey()) > storage.MaxKeyBytes {
+		return nil, keyTooLongError(len(req.GetKey()))
 	}
 	ver, _, err := s.engine.Delete(req.GetKey())
 	if err != nil {
@@ -276,6 +294,17 @@ func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []
 		Checksum: storage.RecordChecksum(key, ver, data, deleted),
 	}
 	_ = s.notify(key, rec, track)
+}
+
+// keyTooLongError builds the InvalidArgument for a write key over the
+// single key-length ceiling (XPORT-03). The message names the offending
+// length, the limit and the unit: the limit counts bytes, so a multi-byte
+// UTF-8 key can exceed it with fewer runes. Reads stay permissive (Get's
+// document explains why), so this error exists only on Set and Delete.
+func keyTooLongError(length int) error {
+	return status.Errorf(codes.InvalidArgument,
+		"key length %d exceeds the maximum of %d bytes (the limit is measured in bytes)",
+		length, storage.MaxKeyBytes)
 }
 
 // mapError translates one engine error into its pinned RPC code, matching

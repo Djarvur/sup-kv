@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -425,6 +426,107 @@ func TestServer_errorMapping(t *testing.T) {
 	ts.cancelEngine()
 	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "err/closed", Value: []byte("v")})
 	assertCode(t, "Set after engine close", err, codes.Unavailable)
+}
+
+// TestServer_keyLimit pins XPORT-03's API half: one key constant,
+// storage.MaxKeyBytes, inclusive at 1 024 bytes and exclusive at 1 025, on
+// Set (create_if_absent rides the same path) and Delete, before any engine
+// call. The empty-key message stays its own error — the length check never
+// shadows it — and Get stays permissive so pre-upgrade long-key records
+// remain readable. The multi-byte half proves the limit counts bytes, not
+// runes: 512 two-byte runes are at the limit, one extra ASCII byte is over.
+func TestServer_keyLimit(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	maxKey := strings.Repeat("k", storage.MaxKeyBytes)
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: maxKey, Value: []byte("v")})
+	if err != nil {
+		t.Fatalf("Set at the %d-byte key limit: want OK, got error: %v", storage.MaxKeyBytes, err)
+	}
+	resp, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: maxKey})
+	if err != nil {
+		t.Fatalf("Get the %d-byte key: want OK, got error: %v", storage.MaxKeyBytes, err)
+	}
+	if got := string(resp.GetRecord().GetValue()); got != "v" {
+		t.Fatalf("Get the %d-byte key: want value %q, got %q", storage.MaxKeyBytes, "v", got)
+	}
+
+	overKey := strings.Repeat("k", storage.MaxKeyBytes+1)
+	if len(overKey) != storage.MaxKeyBytes+1 {
+		t.Fatalf("over-limit key is %d bytes, want %d", len(overKey), storage.MaxKeyBytes+1)
+	}
+	overCalls := []struct {
+		name string
+		call func() error
+	}{
+		{"Set", func() error {
+			_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: overKey, Value: []byte("v")})
+			return err
+		}},
+		{"SetIfAbsent", func() error {
+			_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: overKey, Value: []byte("v"), CreateIfAbsent: true})
+			return err
+		}},
+		{"Delete", func() error {
+			_, err := ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: overKey})
+			return err
+		}},
+	}
+	for _, tc := range overCalls {
+		err := tc.call()
+		assertCode(t, tc.name+" one byte over the key limit", err, codes.InvalidArgument)
+		msg := status.Convert(err).Message()
+		for _, want := range []string{"1025", "1024", "bytes"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("%s over the key limit: message %q does not name %q", tc.name, msg, want)
+			}
+		}
+	}
+
+	// The empty key keeps its own message: the length check runs after the
+	// empty-key check, so an empty key is never reported as a length fault.
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "", Value: []byte("v")})
+	assertCode(t, "Set empty key", err, codes.InvalidArgument)
+	emptyMsg := status.Convert(err).Message()
+	if !strings.Contains(emptyMsg, "must not be empty") {
+		t.Fatalf("Set empty key: message %q is not the empty-key message", emptyMsg)
+	}
+	if strings.Contains(emptyMsg, "exceeds the maximum") {
+		t.Fatalf("Set empty key: message %q is the length message, want the empty-key message", emptyMsg)
+	}
+
+	// Bytes, not runes: 512 two-byte runes are exactly at the limit.
+	multiByteMax := strings.Repeat("é", storage.MaxKeyBytes/2)
+	if len(multiByteMax) != storage.MaxKeyBytes {
+		t.Fatalf("multi-byte key is %d bytes, want %d", len(multiByteMax), storage.MaxKeyBytes)
+	}
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: multiByteMax, Value: []byte("v")})
+	if err != nil {
+		t.Fatalf("Set the multi-byte key of exactly %d bytes: want OK, got error: %v", storage.MaxKeyBytes, err)
+	}
+	multiByteOver := multiByteMax + "x"
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: multiByteOver, Value: []byte("v")})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Set the multi-byte key of %d bytes: want InvalidArgument, got %v", len(multiByteOver), err)
+	}
+
+	// Reads stay permissive: a long key an older version could have stored
+	// is a NotFound, never InvalidArgument (RESEARCH OQ2).
+	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: overKey})
+	assertCode(t, "Get one byte over the key limit", err, codes.NotFound)
+	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: strings.Repeat("g", 70000)})
+	assertCode(t, "Get a 70 000-byte key", err, codes.NotFound)
+
+	// Delete accepts the boundary key; the tombstone is writable at 1 024.
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: maxKey})
+	if err != nil {
+		t.Fatalf("Delete at the %d-byte key limit: want OK, got error: %v", storage.MaxKeyBytes, err)
+	}
+	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: maxKey})
+	assertCode(t, "Get the deleted boundary key", err, codes.NotFound)
 }
 
 // TestServer_list proves D-12..D-15: List returns the sorted live keys
