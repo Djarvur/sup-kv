@@ -610,27 +610,38 @@ func (c *Cluster) Write(i int, key string, data []byte) storage.Record {
 | A9 | Deterministic hash jitter satisfies "timers jitter" without `math/rand` | Pattern 2/10 | Same-seed replay must remain identical; any rng would break Phase 2's determinism gate. |
 | A10 | Per-peer ledger memory (`O(peers × unacked)`) is acceptable at the documented scale (2–a handful of nodes) | Pattern 3 | For many nodes the ledger duplicates keys; still O(unacked) for fixed N. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Exact key limit (1 024 vs 4 096 vs unbounded with a per-record ceiling).**
    - What we know: measured DataReplication overhead 66–75 B at worst-case varint widths; with 1 024 B keys the default 61 440 value fits with ~3 KiB slack; with 4 096 B keys and 61 440 values the datagram is 65 611 B (over).
    - What's unclear: the review says "e.g. 1024"; the docs' earlier example used 4 096.
    - Recommendation: 1 024 B, one constant `storage.MaxKeyBytes`; document in `docs/OPERATIONS.md` and the SPEC-DEVIATIONS S-DM-03 row.
+   - **Resolved (D-06 / XPORT-03):** 1 024 B is the single limit — `storage.MaxKeyBytes` (03-02), enforced at the API (03-09), on receive (03-08) and in the startup datagram ceiling (03-09), and documented in `docs/OPERATIONS.md` with the S-DM-03 row closed. 4 096 B is rejected: it leaves no value headroom under 65 507.
 2. **Write-only vs all-RPC key validation.**
    - What we know: XPORT-03 only requires `Set`; receive-side validation is needed for the datagram property.
    - What's unclear: blocking `Get` on a pre-upgrade long key could obstruct migration.
    - Recommendation: validate `Set`/`Delete` + inbound datagrams; keep `Get` permissive; note in docs.
+   - **Resolved (D-06):** `Set`/`Delete` reject > 1 024 B with `InvalidArgument` (03-09) and every inbound record is checked (03-08); `Get`/`List` stay permissive with the migration rationale recorded in a code comment.
 3. **Timer jitter scope.**
    - What we know: jitter is in XPORT-09's title, not its acceptance text; retransmit-ladder jitter conflicts with the documented `loss ≤ ack_timeout_max` guarantee; `TestSync_triggers` asserts exact intervals.
    - What's unclear: whether the planner treats the title as binding.
    - Recommendation: implement deterministic positive-only jitter on Hello/sync deadlines and pacer spacing; do **not** jitter ladder deadlines; adapt `TestSync_triggers` to an upper bound. If descoped, record the justification.
+   - **Resolved (D-01/D-05, 03-07):** deterministic positive-only jitter on Hello/sync deadlines and ±10% on pacer spacing; retransmit ladder deadlines are never jittered (the `loss ≤ ack_timeout_max` bound is preserved); `TestSync_triggers` becomes a not-before/upper-bound assertion.
 4. **Jitter magnitude.** Recommendation: ±10% for pacer spacing (average = rate), 0–10% for Hello/sync deadlines (never earlier).
+   - **Resolved (03-07 Task 1):** exactly that — ±10% on pacer spacing (zero mean) and 0–10% on Hello/sync deadlines, all derived from a hash of `(runID, seq, salt)`; no `math/rand`.
 5. **20/20 R-01 evidence placement.** Dedicated nightly job vs an extension of `red-run`; and whether the local 8 000-key scale may carry the 20× at PR time.
+   - **Resolved (O5 / 03-13 Task 1):** a dedicated scheduled `red-r01-x20` job runs the exact test 20× at the documented 20 000-key scale with bounded test and job timeouts; local and per-scheduled-run single executions are supporting evidence only, never the 20/20 proof.
 6. **Whether to fix RPL-18 now** ("a failed send is counted as sent"). XPORT does not require it; OBSV-03 (Phase 7) does. Recommendation: leave it, but ensure the new pacing counter does not compound the lie by counting enqueues.
+   - **Resolved (O6 / 03-12 Task 1):** RPL-18 stays Phase 7's; the new `PacedSends` counter increments at emission (a test pins emissions-vs-enqueues), and the disposition is recorded in the summary rather than silently compounded.
 7. **WR-02 / WR-06 scope.** WR-02 (simnet `Write` swallows `Set`'s error) is a small, exactly-in-class fix that also removes a full-store copy per simulated write — worth doing here. WR-06 (add `internal/stand` to `race-soak`) is a one-line Makefile change; measure the ×20 cost first.
+   - **Resolved (O7):** WR-02 lands in 03-02 (simnet `Write`/`Delete` check the error and read through `Lookup`); WR-06 lands in 03-13 after measuring the ×20 cost and adding `./internal/stand/` to `race-soak`.
 8. **`SendStats` metric names.** CONTEXT says pacing counters land now, OBSV-03 finalizes semantics; treat names as provisional (`supkv_replication_read_errors_total`, `supkv_replication_datagrams_paced_total`, `supkv_replication_send_queue`, `supkv_replication_egress_dropped_total`).
+   - **Resolved (O8 / 03-12 Task 1):** all four provisional names are rendered now; OBSV-03/Phase 7 may finalize semantics, not whether the families exist.
 9. **Whether `version.Validate` should reject the 46 filler bits.** RFC 9562 permits random filler; rejecting it would break any future conforming implementation. Recommendation: no.
+   - **Resolved (O9 / 03-03 Task 1):** the 46 filler bits are accepted; validation rejects only the version/variant layout and an `l` beyond `now + max_clock_lead`.
 10. **`StateStore.Version` vs making `Lookup` return a borrowed slice.** Recommendation: keep the Data clone (safe contract, O(record)); the phase's memory goal is the *retained* pending record, which Pattern 3 removes.
+   - **Resolved (O10 / 03-02, 03-04, 03-05):** `Lookup` keeps its `Data` clone (safe contract); the phase removes the retained pending record in 03-05, not the borrowed-slice optimization.
+
 
 ## Environment Availability
 
