@@ -234,6 +234,10 @@ func main() {
 	// this handler for the process's whole life.
 	setupLogging(cfg)
 
+	// XPORT-09: a non-wildcard bind is loud before any service starts — the
+	// node would send broadcasts but never receive them.
+	warnOnNonWildcardBind(cfg.bindAddr)
+
 	node, listener, err := wire(cfg)
 	if err != nil {
 		log.Fatalf("sup-kv: %v", err)
@@ -271,6 +275,29 @@ func setupLogging(cfg config) {
 		h = slog.NewTextHandler(os.Stderr, opts)
 	}
 	slog.SetDefault(slog.New(h))
+}
+
+// warnOnNonWildcardBind emits XPORT-09's one startup WARN when --bind-addr
+// names a specific interface host instead of a wildcard: the segment's
+// broadcast datagrams are addressed to the broadcast address, and a socket
+// bound to one unicast address never receives them — the node would
+// replicate one way, sending itself but hearing no peer. Deliberately a WARN
+// and never a rejection (RESEARCH Pattern 10): a unicast-only deployment
+// stays usable, it just must not expect broadcast discovery. The wildcard
+// forms are "" (all interfaces), 0.0.0.0 and ::; the flag validation already
+// guaranteed host:port, so a SplitHostPort fault only reaches Debug.
+func warnOnNonWildcardBind(bindAddr string) {
+	host, _, err := net.SplitHostPort(bindAddr)
+	if err != nil {
+		slog.Debug("Bind address is not host:port", "bind_addr", bindAddr, "error", err)
+		return
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return
+	}
+	slog.Warn("Bind address is not a wildcard: broadcast datagrams are not received",
+		"host", host,
+		"detail", "broadcast replication is addressed to the segment broadcast address, which a non-wildcard bind never receives; unicast-only deployment assumed")
 }
 
 // registerConfig declares every knob as a flag whose default is its SUPKV_

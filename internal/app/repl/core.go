@@ -601,6 +601,15 @@ type Core struct {
 	// atomic after every loop iteration so cross-goroutine readers never
 	// touch core state.
 	syncArrived bool
+
+	// The no-Hello WARN state (XPORT-09, D-07): firstAdvance is the event
+	// time of the first Advance — the warning's clock origin — helloSeen
+	// flips on the first Hello received from any peer, and peerWarned
+	// latches the one-shot WARN. Driver-goroutine-only, like every other
+	// core field (D-04); the WARN never repeats per interval.
+	firstAdvance time.Time
+	helloSeen    bool
+	peerWarned   bool
 }
 
 // New returns a core for nodeID with the per-process runID. ownHandle is
@@ -930,6 +939,10 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // nothing (an evicted peer's return Hello, whatever its run_id, is the
 // unknown-node case).
 func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
+	// Any received Hello — a discovery, a refresh or a restart — proves the
+	// receive path hears peers, so the no-Hello WARN stands down for the
+	// process lifetime (XPORT-09).
+	c.helloSeen = true
 	discovery := len(c.peers) == 0
 	known, remembered := c.peers[in.NodeID]
 	restarted := remembered && known.runID != in.RunID
@@ -1274,8 +1287,10 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 // Eviction runs before the retransmit scan so a peer expiring at now is
 // already gone when the scanner asks whether any peer remains; the egress
 // drain runs last so a tick's reactive responses follow its proactive
-// emissions.
+// emissions. Before any timer work it fires the one-shot no-Hello WARN
+// ([Core.warnIfNoPeer]) — a diagnostic, never a behavior change.
 func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
+	c.warnIfNoPeer(now)
 	if !now.Before(c.nextHello) {
 		out.Broadcast(port.Hello{})
 		c.nextHello = now.Add(c.cfg.HelloInterval + c.helloJitter())
@@ -1287,6 +1302,32 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 	c.drainRecordSends(now, out)
 	c.drainEgress(now, out)
 	return c.nextDeadline(now)
+}
+
+// warnIfNoPeer surfaces a node that has heard no peer since it started
+// (XPORT-09, D-07): when no Hello has arrived by firstAdvance +
+// cfg.PeerTimeout, one WARN names the condition — the likely causes are a
+// bind address that receives no broadcasts, a wrong broadcast address, or a
+// silent segment. The warning fires at most once per process lifetime
+// (peerWarned latches it) because the deaf state persists and a per-interval
+// repeat would be noise, not signal; it never changes serving behavior.
+// Counting from the first Advance rather than from construction keeps the
+// deadline on the driver's own clock, so a core built long before its loop
+// runs does not warn before it ever had a chance to read a datagram.
+func (c *Core) warnIfNoPeer(now time.Time) {
+	if c.firstAdvance.IsZero() {
+		c.firstAdvance = now
+	}
+	if c.helloSeen || c.peerWarned {
+		return
+	}
+	if now.Before(c.firstAdvance.Add(c.cfg.PeerTimeout)) {
+		return
+	}
+	c.peerWarned = true
+	c.cfg.Log(fmt.Sprintf(
+		"sup-kv: no Hello received within peer_timeout (%s) of startup: no peer discovered — check the broadcast address and that the bind address receives broadcasts",
+		c.cfg.PeerTimeout))
 }
 
 // syncListing fires the DataSync full-listing emission (REPL-05): the

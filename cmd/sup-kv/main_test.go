@@ -573,6 +573,64 @@ func TestMain_valueMaxDatagram(t *testing.T) {
 	}
 }
 
+// bindAddrWarnMsg is the stable substring of XPORT-09's non-wildcard bind
+// WARN — the message, not its detail attr, so the assertion pins the one
+// startup line the operator sees.
+const bindAddrWarnMsg = "Bind address is not a wildcard"
+
+// TestMain_bindAddrWarn pins XPORT-09's bind-address visibility half at the
+// binary boundary: a --bind-addr naming a concrete interface starts serving
+// normally (a unicast-only deployment stays usable — never a rejection) but
+// emits exactly one explanatory WARN naming the broadcast-reception
+// limitation, while a wildcard bind emits none.
+func TestMain_bindAddrWarn(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	t.Run("a non-wildcard bind warns once and keeps serving", func(t *testing.T) {
+		t.Parallel()
+		udpPort := freeUDPPort(t)
+		grpcAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+		node := startLoggedNode(t, bin, nil,
+			"--node-id=1",
+			"--bind-addr=127.0.0.1:"+strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+			"--grpc-addr="+grpcAddr,
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			"--startup-gate=10ms",
+		)
+		awaitServing(t, grpcAddr, servingDeadline)
+		waitFor(t, servingDeadline, "the non-wildcard bind WARN", func() bool {
+			return strings.Contains(node.stderr.String(), bindAddrWarnMsg)
+		})
+		if got := strings.Count(node.stderr.String(), bindAddrWarnMsg); got != 1 {
+			t.Fatalf("a non-wildcard bind produced %d WARN(s), want exactly 1:\n%s", got, node.stderr.String())
+		}
+		signalAndWaitExit(t, node)
+	})
+
+	t.Run("a wildcard bind does not warn", func(t *testing.T) {
+		t.Parallel()
+		udpPort := freeUDPPort(t)
+		grpcAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+		node := startLoggedNode(t, bin, nil,
+			"--node-id=1",
+			"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+			"--grpc-addr="+grpcAddr,
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			"--startup-gate=10ms",
+		)
+		// The WARN is emitted synchronously before wire, so a serving node
+		// has already decided the question.
+		awaitServing(t, grpcAddr, servingDeadline)
+		if out := node.stderr.String(); strings.Contains(out, bindAddrWarnMsg) {
+			t.Fatalf("a wildcard bind produced the non-wildcard WARN:\n%s", out)
+		}
+		signalAndWaitExit(t, node)
+	})
+}
+
 // TestMain_duplicateBind pins XPORT-09's duplicate-instance half at the
 // binary boundary: with the UDP address already occupied by another socket,
 // the real process exits non-zero and its output carries the kernel's
@@ -582,10 +640,10 @@ func TestMain_duplicateBind(t *testing.T) {
 	t.Parallel()
 	bin := smokeBinary(t)
 
-	// Occupy one explicit loopback address. net.ListenPacket sets no
-	// SO_REUSEADDR for datagram sockets, so the binary's production bind —
-	// which sets none either — must be refused by the kernel.
-	occupier, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	// Occupy one explicit loopback address. A plain ListenConfig datagram
+	// bind sets no SO_REUSEADDR, so the binary's production bind — which
+	// sets none either — must be refused by the kernel.
+	occupier, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("occupy a loopback udp4 address: %v", err)
 	}
