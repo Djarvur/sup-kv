@@ -26,17 +26,17 @@
   - Acceptance: the R-03 acceptance tests (see PROTO-01) fail on the current code
 - [x] **TEST-05**: Real-socket tests are never silently skipped (T-05)
   - Acceptance: in Linux CI a skipped socket test is an error; the macOS cell either runs at least one two-node test or the docs state darwin replication is untested; the test binary is built with `-race`
-- [ ] **TEST-06**: Simulator blind spots are closed (T-06)
+- [x] **TEST-06**: Simulator blind spots are closed (T-06)
   - Acceptance: simulator gains per-node incoming-datagram budget, size checks by the real encoder, record announcement after a virtual dump delay, restart with state, deletions; nightly real-socket run at 10 000 keys × 1 KiB scale with the review's section-15 scenarios
 - [x] **TEST-07**: `persist.Open` clock seeding is proven for the real composition path (T-07)
   - Acceptance: `Open` with injected time earlier than the dump max — the first local write dominates all loaded versions
-- [ ] **TEST-08**: Datagram decoder has negative tests and fuzzing (T-08)
+- [x] **TEST-08**: Datagram decoder has negative tests and fuzzing (T-08)
   - Acceptance: table of corrupted datagrams with the expected discard class; `FuzzDecode` and `FuzzDumpDecode` with an in-repo corpus run on a schedule
 - [x] **TEST-09**: Convergence bounds hold under combined failures and long partitions (T-09)
   - Acceptance: three-node test with a partition longer than `peer_timeout` — convergence not before the first post-heal sync and not later than the bound; the bound is either documented with its no-fresh-loss qualifier or recalculated
 - [x] **TEST-10**: Benchmarks measure what they claim (T-10)
   - Acceptance: no benchmark paces itself; real `persistfile` and default parameters; p50 and p99 reported; smoke run `-benchtime=1x` in CI
-- [ ] **TEST-11**: Known flakiness classes are eliminated (T-11)
+- [x] **TEST-11**: Known flakiness classes are eliminated (T-11)
   - Acceptance: `go test -race -count=20` over `cmd/sup-kv`, `udprepl` and the affected package green three times in a row
 - [x] **TEST-12**: Metrics and configuration are tested by observed effect (T-12)
   - Acceptance: one test per parameter observing its effect; `/metrics` after a conflict+retransmit+discard scenario reports exact values
@@ -45,7 +45,7 @@
   - Acceptance: deterministic snapshot-then-live cut test; slow-subscriber disconnect and `Send` error branches covered
 - [x] **TEST-15**: Property tests minimize counterexamples and explore equal-`l` versions (T-15)
   - Acceptance: half the drawn versions from a small `(l, c, node)` space; the printed replay command works
-- [ ] **TEST-16**: Scheduled CI workflow exists (T-16)
+- [x] **TEST-16**: Scheduled CI workflow exists (T-16)
   - Acceptance: 1000 seeds, `-shuffle=on -count=3`, `-bench . -benchtime=1x` on a schedule
 
 ### Transport
@@ -215,17 +215,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-03 | Phase 2 | Complete |
 | TEST-04 | Phase 2 | Complete |
 | TEST-05 | Phase 2 | Complete |
-| TEST-06 | Phase 2 | Pending |
+| TEST-06 | Phase 2 | Complete |
 | TEST-07 | Phase 2 | Complete |
-| TEST-08 | Phase 2 | Pending |
+| TEST-08 | Phase 2 | Complete |
 | TEST-09 | Phase 2 | Complete |
 | TEST-10 | Phase 2 | Complete |
-| TEST-11 | Phase 2 | Pending |
+| TEST-11 | Phase 2 | Complete |
 | TEST-12 | Phase 2 | Complete |
 | TEST-13 | Phase 2 | Complete |
 | TEST-14 | Phase 2 | Complete |
 | TEST-15 | Phase 2 | Complete |
-| TEST-16 | Phase 2 | Pending |
+| TEST-16 | Phase 2 | Complete |
 | XPORT-01 | Phase 3 | Pending |
 | XPORT-02 | Phase 3 | Pending |
 | XPORT-03 | Phase 3 | Pending |

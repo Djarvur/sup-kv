@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
-status: executing
-stopped_at: Completed 02-13-PLAN.md
-last_updated: "2026-11-21T13:44:58.158Z"
+status: verifying
+stopped_at: Completed 02-11-PLAN.md
+last_updated: "2026-11-21T14:06:43.339Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 96409e355fbae862713d7bdd4e4defd0066b3249
+state_head: eaf5863d72abecb56c06a242db33709ff2212306
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 20
+  completed_plans: 21
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
 Plan: 17 of 17
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-11-19 — Phase 2 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -73,6 +73,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P12 | 720s | 2 tasks | 8 files |
 | Phase 02 P17 | 8min | 1 tasks | 22 files |
 | Phase 02 P13 | 40min | 2 tasks | 4 files |
+| Phase 02 P11 | 694s | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -141,6 +142,8 @@ Recent decisions affecting current work:
 - [Phase 02]: periodic-sync-disabled mutant advances nextSync then returns on the timer path: a bare return leaves the deadline in the past and livelocks the scheduler, so the runner also rejects go-test timeouts as non-kills
 - [Phase 02]: mutant kill seeds are per-mutant verified corpus lists (sync-without-tombstones: 1 seed; periodic-sync-disabled: 3 seeds) because an exhaustive 16-seed scan showed different sensitivity, and every probed seed must fail
 - [Phase 02]: TEST-09 no-fresh-loss qualifier is structural: all writes and fault windows end at the heal (loss via deterministic directed windows, only duplication continues), and every pre-heal record is asserted present byte-equal on every node
+- [Phase 02]: Nightly F9 runs the reviewer's documented default flags (hello 1s, sync 30s, rate 500) and both the recovery bound and the post-recovery write wait derive from the selected flags — the shrunken-timer wait was replaced after it timed out at the 30s cadence.
+- [Phase 02]: scheduled.yml's two stand jobs share SUPKV_STAND_NIGHTLY=1; red-run owns assert-red (the runner exports SUPKV_RED_TESTS itself) while nightly-stand leaves red tests skipped by construction.
 
 ### Pending Todos
 
@@ -161,7 +164,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T13:44:57.930Z
-Stopped at: Completed 02-13-PLAN.md
+Last session: 2026-11-21T14:06:43.252Z
+Stopped at: Completed 02-11-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
