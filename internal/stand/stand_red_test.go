@@ -44,9 +44,13 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
@@ -569,4 +573,298 @@ func TestRed_R02_burst(t *testing.T) { //nolint:paralleltest // wall-clock pacin
 	signalAndWaitExit(t, nodeB)
 	assertNoPanic(t, nodeA, "the burst node A")
 	assertNoPanic(t, nodeB, "the burst peer node B")
+}
+
+// The R-03 (PROTO-01, ADR 0005 / decision 14.5) scenario's shape. The
+// listing must span MANY DataSync datagrams so "the full listing" is a
+// real multi-datagram completeness question: the core's chunker budgets
+// 1400 B per chunk with a len(key)+24 per-entry estimate
+// (internal/app/repl/core.go's SyncChunkBytes and entryOverheadBytes), so
+// a 16-character key packs roughly 32 entries per chunk — the default 512
+// keys is ~16 chunks, the nightly 4096 ~128, every chunk one datagram.
+const (
+	// redR03KeysDefault is the local scale: many chunks, a viable local
+	// red run. redR03KeysNightly is the scheduled run's larger listing;
+	// both breach v1.0 for the SAME structural reason (the gate opens on
+	// the first chunk and reads never consult it), so the nightly scale
+	// only widens the listing.
+	redR03KeysDefault = 512
+	redR03KeysNightly = 4096
+	redR03KeyFmt      = "red/r03/key-%04d"
+
+	// The F14 keys: the peer-known user value the replaced node must not
+	// overwrite, the default it seeds, and the standalone key whose
+	// version is the listing's maximum.
+	redR03MarkerKey   = "cfg/color"
+	redR03MarkerValue = "user-value"
+	redR03SeedValue   = "default"
+	redR03MaxKey      = "red/r03/zz-max-version"
+	redR03ProbeKey    = "red/r03/closed-probe"
+
+	// redR03StartupGate pushes v1.0's one-second gate backstop far beyond
+	// the closed-interface assertion window: the replaced node must open
+	// on the COMPLETE listing, never on a timer. A node with data on disk
+	// opens via startup_gate under PROTO-02; an empty-disk node waits for
+	// its separate, longer parameter — either way the backstop cannot
+	// race the closed-side assertions here.
+	redR03StartupGate = 30 * time.Second
+)
+
+// redR03Keys returns R-03's listing scale: the nightly hook selects the
+// larger multi-chunk listing; both scales span many DataSync datagrams.
+func redR03Keys() int {
+	if standNightly {
+		return redR03KeysNightly
+	}
+	return redR03KeysDefault
+}
+
+// redVersion converts a wire version field to the typed RecordVersion,
+// failing loudly on any other length (the wire contract is 16 bytes).
+func redVersion(t *testing.T, raw []byte) version.RecordVersion {
+	t.Helper()
+	if len(raw) != len(version.RecordVersion{}) {
+		t.Fatalf("wire version is %d bytes, want %d", len(raw), len(version.RecordVersion{}))
+	}
+	var v version.RecordVersion
+	copy(v[:], raw)
+	return v
+}
+
+// redAssertCode fails unless err carries want — the code assertion the
+// closed-interface acceptance needs. The harness's standGet treats any
+// non-NotFound error as fatal, so the red tests read raw errors here.
+func redAssertCode(t *testing.T, what string, err error, want codes.Code) {
+	t.Helper()
+	if got := status.Code(err); got != want {
+		t.Fatalf("%s: want code %v, got %v (err=%v)", what, want, got, err)
+	}
+}
+
+// redGetRecord reads one record through the raw client, preserving the
+// error for the acceptance's code assertions (standGet would fatal on any
+// non-NotFound error, which is exactly what the closed-read assertion
+// expects instead).
+func redGetRecord(t *testing.T, client apiproto.SupKVServiceClient, key string) (*apiproto.Record, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	defer cancel()
+	resp, err := client.Get(ctx, &apiproto.GetRequest{Key: key})
+	if err != nil {
+		return nil, fmt.Errorf("Get(%q): %w", key, err)
+	}
+	return resp.GetRecord(), nil
+}
+
+// redHealthStatus polls the health endpoint once for its serving status;
+// ok is false while the server is not answering yet, so the caller's
+// waitFor deadline governs, never a fast failure.
+func redHealthStatus(t *testing.T, addr string) (healthpb.HealthCheckResponse_ServingStatus, bool) {
+	t.Helper()
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return healthpb.HealthCheckResponse_UNKNOWN, false
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
+	defer cancel()
+	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		return healthpb.HealthCheckResponse_UNKNOWN, false
+	}
+	return resp.GetStatus(), true
+}
+
+// awaitHealthAnswer waits until the health endpoint answers at all — any
+// status — the "gRPC is listening" signal. awaitServing is the wrong wait
+// here: under PROTO-01 the gate must stay closed before the full listing,
+// so waiting for SERVING would be exactly what the closed side denies.
+func awaitHealthAnswer(t *testing.T, addr string, timeout time.Duration) healthpb.HealthCheckResponse_ServingStatus {
+	t.Helper()
+	var serving healthpb.HealthCheckResponse_ServingStatus
+	waitFor(t, timeout, "the gRPC health endpoint answering on "+addr, func() bool {
+		got, ok := redHealthStatus(t, addr)
+		if !ok {
+			return false
+		}
+		serving = got
+		return true
+	})
+	return serving
+}
+
+// TestRed_R03_f14ReplacedNode pins review finding R-03 at stand level as
+// the FULL observable PROTO-01 acceptance (ADR 0005 / decision 14.5,
+// REVIEW.md §5 R-03; D-01 env gate). A replaced node — empty disk, the F14
+// shape — must keep the whole interface closed, reads and writes alike,
+// until the neighbor's COMPLETE key listing has arrived, and only then
+// serve. v1.0 fails by construction: its Get never consults the gate
+// (reads are served from the first moment) and its gate opens on ANY first
+// DataSync chunk. F14 measured the consequence — B's create_if_absent with
+// a default succeeded right after the premature opening and three seconds
+// later BOTH nodes held the default instead of the user value
+// (docs/reviews/2026-11-19-v1.0/evidence/stand/RESULTS.md F14; REVIEW.md
+// §5 R-03); the first closed-side read assertion below is the
+// deterministic red verdict.
+//
+// The closed window is shaped, not raced: node A is seeded (including the
+// user value and a multi-datagram listing) and stopped, the replaced node
+// B starts ALONE with a long startup-gate backstop, the closed side is
+// asserted while no listing can arrive at all, and only then is A
+// restarted so its full multi-chunk listing reaches B. Every assertion is
+// the documented acceptance expressed against the configured flags, so the
+// Phase 4 flip changes only the expectation-table row: reads and writes
+// answer Unavailable before the full listing, health stays NOT_SERVING
+// until it, create_if_absent answers AlreadyExists for a peer-known key
+// after it, the peer's user value survives the replaced node's seeding
+// attempt, and the first local write after the part carrying the max
+// version takes a greater version. SyncID/ChunkIndex wire-format
+// assertions are Phase 4's own tests — they are not externally observable
+// today. The P-01 value-limit red tests are plan 02-12's, not this
+// scenario's.
+func TestRed_R03_f14ReplacedNode(t *testing.T) { //nolint:paralleltest // a sequential node lifecycle with wall-clock windows: a parallel red scenario would corrupt the closed-side window (file doc).
+	if os.Getenv("SUPKV_RED_TESTS") != "1" {
+		t.Skip("red test: runs only with SUPKV_RED_TESTS=1 (D-01)")
+	}
+	p := newStandPair(t)
+	rate := "--sync-response-rate=" + strconv.Itoa(redSyncResponseRate)
+	keys := redR03Keys()
+
+	// Node A alone: the peer-known state — the F14 user value plus the
+	// multi-chunk listing — then a clean stop, so B's closed window has no
+	// live peer at all.
+	nodeA := startStandNode(t, p, standNodeAID, rate)
+	awaitServing(t, p.grpcA, servingDeadline)
+	clientA := standClient(t, p.grpcA)
+	standSetWith(t, clientA, redR03MarkerKey, redR03MarkerValue)
+	seedKeys := make([]string, keys)
+	for i := range seedKeys {
+		seedKeys[i] = fmt.Sprintf(redR03KeyFmt, i)
+	}
+	redSeedKeys(t, redSeedClients(t, p.grpcA), seedKeys)
+
+	// One synchronous write last: the store serializes writes and the HLC
+	// is monotonic, so this key carries A's maximum version — the version
+	// the listing part with the max version delivers.
+	standSetWith(t, clientA, redR03MaxKey, redR03SeedValue)
+	maxRec, err := redGetRecord(t, clientA, redR03MaxKey)
+	if err != nil {
+		t.Fatalf("Get(%q) on the seeded node A: want the record, got %v", redR03MaxKey, err)
+	}
+	maxVersion := redVersion(t, maxRec.GetVersion())
+	signalAndWaitExit(t, nodeA)
+
+	// Node B is the replaced node: empty disk, A down, long backstop.
+	nodeB := startStandNode(t, p, standNodeBID,
+		rate,
+		"--startup-gate="+redR03StartupGate.String(),
+	)
+	if serving := awaitHealthAnswer(t, p.grpcB, servingDeadline); serving != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("health on the replaced node B before any listing: want NOT_SERVING, got %v (PROTO-01: the interface is closed until the full listing)", serving)
+	}
+	clientB := standClient(t, p.grpcB)
+
+	// (a) Before the full listing — here, before any listing at all — the
+	// whole interface is closed, reads and writes alike. v1.0's Get serves
+	// the empty store and answers NotFound, never Unavailable.
+	_, err = redGetRecord(t, clientB, redR03MarkerKey)
+	redAssertCode(t, "Get on the replaced node B before any listing (PROTO-01: reads stay closed until the full list)", err, codes.Unavailable)
+
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	_, err = clientB.Set(ctx, &apiproto.SetRequest{Key: redR03ProbeKey, Value: []byte(redR03SeedValue)})
+	cancel()
+	redAssertCode(t, "Set on the replaced node B before any listing", err, codes.Unavailable)
+	ctx, cancel = context.WithTimeout(t.Context(), rpcTimeout)
+	_, err = clientB.Delete(ctx, &apiproto.DeleteRequest{Key: redR03ProbeKey})
+	cancel()
+	redAssertCode(t, "Delete on the replaced node B before any listing", err, codes.Unavailable)
+
+	// The F14 seeding attempt itself: the replaced node must not be able
+	// to seed its default over the peer-known key before the full listing.
+	ctx, cancel = context.WithTimeout(t.Context(), rpcTimeout)
+	_, err = clientB.Set(ctx, &apiproto.SetRequest{
+		Key:            redR03MarkerKey,
+		Value:          []byte(redR03SeedValue),
+		CreateIfAbsent: true,
+	})
+	cancel()
+	redAssertCode(t, "the replaced node's create_if_absent seeding of the peer-known key before any listing", err, codes.Unavailable)
+
+	// (c) Health still NOT_SERVING at the end of the closed-side window.
+	if serving, ok := redHealthStatus(t, p.grpcB); !ok || serving != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("health on the replaced node B after the closed-side assertions: want NOT_SERVING, got %v (ok=%t)", serving, ok)
+	}
+
+	// Node A returns with its dump: the multi-chunk listing starts. Under
+	// PROTO-01 the gate opens only on the COMPLETE listing — never on the
+	// first chunk.
+	nodeA = startStandNode(t, p, standNodeAID, rate)
+	awaitServing(t, p.grpcA, servingDeadline)
+	listBound := standStartupGate + 2*standSyncInterval + 2*standHelloInterval + 3*time.Second
+	waitFor(t, listBound, fmt.Sprintf(
+		"health SERVING on B once the %d-key listing (many DataSync datagrams) has fully arrived", keys,
+	), redThrottled(func() bool {
+		serving, ok := redHealthStatus(t, p.grpcB)
+		return ok && serving == healthpb.HealthCheckResponse_SERVING
+	}))
+
+	// (d) After the full listing, create_if_absent for the peer-known key
+	// answers AlreadyExists — before its value has necessarily arrived, the
+	// remembered listing alone carries the answer (PROTO-01 rule 3). v1.0
+	// answers OK exactly while the value has not arrived yet, which is the
+	// F14 seeding defect.
+	ctx, cancel = context.WithTimeout(t.Context(), rpcTimeout)
+	_, err = clientB.Set(ctx, &apiproto.SetRequest{
+		Key:            redR03MarkerKey,
+		Value:          []byte(redR03SeedValue),
+		CreateIfAbsent: true,
+	})
+	cancel()
+	redAssertCode(t, "create_if_absent for a peer-known key after the full listing (PROTO-01 rule 3)", err, codes.AlreadyExists)
+
+	// The user value converges to B within the documented paced bound —
+	// N records at one limiter-paced reply each — plus margin.
+	paced := time.Duration(keys) * (time.Second / time.Duration(redSyncResponseRate))
+	margin := standStartupGate + 2*standSyncInterval + 5*time.Second
+	waitFor(t, paced+margin, fmt.Sprintf(
+		"the replaced node B serving the peer's user value %q within the paced bound (N/rate %v + margin %v)",
+		redR03MarkerValue, paced, margin,
+	), redThrottled(func() bool {
+		rec, getErr := redGetRecord(t, clientB, redR03MarkerKey)
+		return getErr == nil && !rec.GetDeleted() && string(rec.GetValue()) == redR03MarkerValue
+	}))
+
+	// (b) The seeding attempt never changed the peer's user value, on
+	// either node — the F14 overwrite did not happen.
+	recA, err := redGetRecord(t, clientA, redR03MarkerKey)
+	if err != nil {
+		t.Fatalf("Get(%q) on node A after convergence: want the user value, got %v", redR03MarkerKey, err)
+	}
+	if got := string(recA.GetValue()); got != redR03MarkerValue {
+		t.Fatalf("node A's %q after the replaced node's create_if_absent attempt: want %q, got %q (the F14 overwrite)",
+			redR03MarkerKey, redR03MarkerValue, got)
+	}
+	recB, err := redGetRecord(t, clientB, redR03MarkerKey)
+	if err != nil || string(recB.GetValue()) != redR03MarkerValue {
+		t.Fatalf("node B's %q after convergence: want %q, got (%q, %v)", redR03MarkerKey, redR03MarkerValue, recB.GetValue(), err)
+	}
+
+	// (e) The first local write after the listing part carrying the max
+	// version takes a greater version — the HLC-update half of PROTO-01
+	// rule 4, asserted against the peer's maximum version.
+	ctx, cancel = context.WithTimeout(t.Context(), rpcTimeout)
+	setResp, err := clientB.Set(ctx, &apiproto.SetRequest{Key: redR03ProbeKey, Value: []byte(redR03MarkerValue)})
+	cancel()
+	if err != nil {
+		t.Fatalf("the first local write on the opened replaced node B: want OK, got %v", err)
+	}
+	if localVersion := redVersion(t, setResp.GetVersion()); localVersion.Compare(maxVersion) <= 0 {
+		t.Fatalf("B's first local write after the listing has version %x, want greater than the listing's max version %x (PROTO-01 rule 4)",
+			localVersion, maxVersion)
+	}
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the F14 seeded node A")
+	assertNoPanic(t, nodeB, "the replaced node B")
 }
