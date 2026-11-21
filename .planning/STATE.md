@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-05-PLAN.md
-last_updated: "2026-11-21T19:25:22.415Z"
+stopped_at: Completed 03-06-PLAN.md
+last_updated: "2026-11-21T19:55:28.499Z"
 last_activity: 2026-11-21
 last_activity_desc: Phase 3 execution started
-state_head: 4ec662abf9f94eb982ff584f3f35bf877251a675
+state_head: 06dbcd679becd0bb938678908f676651395439f6
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 26
+  completed_plans: 27
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 6 of 13
+Plan: 7 of 13
 Status: Ready to execute
 Last activity: 2026-11-21 — Phase 3 execution started
 
@@ -80,6 +80,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P03 | 148 | 2 tasks | 2 files |
 | Phase 03 P04 | 10min | 2 tasks | 9 files |
 | Phase 03 P05 | 15min | 3 tasks | 4 files |
+| Phase 03 P06 | 1252s | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -171,6 +172,13 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-05: PendingSnapshot reports the greatest version under a key when two coexist transiently, matching the store's LWW choice.
 - [Phase 03]: 03-05: mirrorState is untouched here (03-06 removes it); only the gauge half of mirrorStats changed to PeerCount().
 - [Phase 03]: 03-05: The flatness gate stays sequential with a justified //nolint:paralleltest because it is a wall-clock ratio gate.
+- [Phase 03]: 03-06: The Outbox result stream is the only waiter seam — Ack/Drained/Superseded/WaitSetEmpty cross as plain data; an Ack alone never resolves, and success requires resolved full coverage.
+- [Phase 03]: 03-06: Tracker creation is confined to Adapter.NotifyLocalWrite before the channel send (the sole production creation site); Run only looks trackers up and drops results for absent identities, never inserting.
+- [Phase 03]: 03-06: Every WaitReplicated return path deletes its tracker (resolution, zero-peer release, ctx cancel, timeout) and a failed notify deletes the one it created, bounding the map by concurrent waits (T-3-16).
+- [Phase 03]: 03-06: The zero-peer path releases through the total==0 WaitReplicated call, so D-11's immediate success cannot leak the notify-time tracker; wait.go discards that call's report.
+- [Phase 03]: 03-06: Eviction and supersession resolve an honest false; WaitSetEmpty is emitted only on the last-waiter transition during eviction, so an already-suspended entry is not re-announced.
+- [Phase 03]: 03-06: Tasks 2 and 3 share commit c1da11e because the LocalNotify/WaitReplicated signature change and PendingCopy removal are one compile unit; splitting would leave go build ./... broken.
+- [Phase 03]: 03-06: Tracker tests write the store record before notifying (the production author sequence): a notification for an unstored record is removed by the retransmit scan and would make the eviction wait time out.
 
 ### Pending Todos
 
@@ -191,7 +199,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T19:25:22.214Z
-Stopped at: Completed 03-05-PLAN.md
+Last session: 2026-11-21T19:55:28.322Z
+Stopped at: Completed 03-06-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`

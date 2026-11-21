@@ -112,7 +112,7 @@ Plans:
   3. Datagrams are bounded and validated end to end: key-length and `value_max_bytes` ceilings enforced (`InvalidArgument` on oversize, exit 2 when the largest record cannot fit a datagram, any accepted record encodes into ≤ 65 507 bytes); received versions validated before any clock call and counted as their own class; invalid combinations (empty key, tombstone with data, bad checksum) discarded with own counters; the read loop exits only on `net.ErrClosed` — a node never keeps saying `Hello` while deaf
   4. Socket reality is visible and misuse is loud: startup logs actual `SO_RCVBUF`/`SO_SNDBUF` and fails if the send buffer cannot hold a maximal datagram; 1, 20 and 60 KiB values deliver on Linux (darwin ~9 KiB limit documented, not fixed); a non-wildcard `--bind-addr` warns or is rejected; a second instance fails with "address already in use"; a silent node WARNs after `peer_timeout`
   5. The seams later phases build on exist: a cheap key→version view with tombstone visibility instead of store copies (also making `DataRequest`/sync-chunk handling independent of foreign records); "record acknowledged by peer X" traveling as an `Outbox` result to waiters (removing snapshot diffing and the 5 ms polling); a bounded, deduplicated sync-answer queue (1000 missing keys twice → 1000 answers, not 2000); dead code (`lastLocal`/`cover`, exported `persist.Parse`, `ownHandle`, `fsync_darwin.go`) gone or justified
-**Plans**: 5/13 plans executed (planned)
+**Plans**: 6/13 plans executed (planned)
 
 Plans:
 **Wave 1**
@@ -127,7 +127,7 @@ Plans:
 - [x] 03-05-PLAN.md — Record-free (key, version) ledger, per-peer unacked index, due-heap, O(1) gauges, 10 vs 10 000 gate (D-03, XPORT-02)
 
 **Wave 4** *(blocked on 03-05)*
-- [ ] 03-06-PLAN.md — Outbox result events, adapter tracker, thin honest wait; mirror/poll removal (D-04, XPORT-12)
+- [x] 03-06-PLAN.md — Outbox result events, adapter tracker, thin honest wait; mirror/poll removal (D-04, XPORT-12)
 
 **Wave 5** *(blocked on 03-06)*
 - [ ] 03-07-PLAN.md — Paced rotating listings, record pacer with ladder re-arm, deterministic jitter, bounded deduped queue (D-01/D-05/D-08, XPORT-01/02/07/09)
@@ -230,7 +230,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 |-------|-----------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
 | 2. Engine — HLC Versioning and LWW Store | v1.0 | 17/17 | Complete    | 2026-11-21 |
-| 3. Persistence — Dump and Write Confirmation | v1.0 | 5/13 | In Progress |  |
+| 3. Persistence — Dump and Write Confirmation | v1.0 | 6/13 | In Progress |  |
 | 4. Replication and Deterministic Simulator | v1.0 | 6/6 | Complete | 2026-11-07 |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete | 2026-11-16 |
