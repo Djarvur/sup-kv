@@ -861,6 +861,51 @@ func TestEngine_writeSurface(t *testing.T) {
 	})
 }
 
+// TestEngine_lookup_tombstoneVisible proves the engine forwards the
+// tombstone-visible view to its store while Get stays the live-only API
+// read: a deleted key is ErrNotFound for Get, yet Lookup returns the
+// tombstone with Deleted=true and the same version Version reports, and
+// Versions carries it. The writes go through ApplyRemote — the non-blocking
+// merge path — so no dumper goroutine is needed for a read-contract test.
+func TestEngine_lookup_tombstoneVisible(t *testing.T) {
+	t.Parallel()
+	const probeNowMs = int64(1730000000000)
+	eng, _ := newFakeEngine()
+	live := version.PackVersion(probeNowMs, 0, synctestNodeID)
+	_, _, err := eng.ApplyRemote("view/key", storage.Record{Version: live, Data: []byte("value")})
+	if err != nil {
+		t.Fatalf("ApplyRemote(live) error = %v, want nil", err)
+	}
+	tombstone := version.PackVersion(probeNowMs+1, 0, synctestNodeID)
+	_, _, err = eng.ApplyRemote("view/key", storage.Record{Version: tombstone, Deleted: true})
+	if err != nil {
+		t.Fatalf("ApplyRemote(tombstone) error = %v, want nil", err)
+	}
+
+	_, err = eng.Get("view/key")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Get(tombstoned) error = %v, want storage.ErrNotFound", err)
+	}
+	rec, ok := eng.Lookup("view/key")
+	if !ok {
+		t.Fatal("Lookup(tombstoned) ok = false, want true")
+	}
+	if !rec.Deleted {
+		t.Error("Lookup(tombstoned).Deleted = false, want true")
+	}
+	if rec.Version != tombstone {
+		t.Errorf("Lookup(tombstoned) version = %x, want %x", rec.Version[:], tombstone[:])
+	}
+	ver, found := eng.Version("view/key")
+	if !found || ver != tombstone {
+		t.Errorf("Version(tombstoned) = (%x, %t), want (%x, true)", ver[:], found, tombstone[:])
+	}
+	versions := eng.Versions()
+	if got, present := versions["view/key"]; !present || got != tombstone {
+		t.Errorf("Versions()[view/key] = (%x, %t), want (%x, true)", got[:], present, tombstone[:])
+	}
+}
+
 // TestEngine_restartDiscardsTornRecord proves the restart class separation
 // on the real filesystem (Pitfall 7): a torn record — a structurally valid
 // line whose checksum was corrupted on disk — is discarded and counted at

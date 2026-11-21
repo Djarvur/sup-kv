@@ -524,6 +524,28 @@ func (e *Engine) Get(key string) (storage.Record, error) {
 	return e.store.Get(key)
 }
 
+// Lookup returns a copy of the stored record for key, tombstones included:
+// the tombstone-visible replication view, unlike Get's live-only API read.
+// It consults no dump or confirmation state — a failed dump leaves every
+// record readable in memory (D-05).
+func (e *Engine) Lookup(key string) (storage.Record, bool) {
+	return e.store.Lookup(key)
+}
+
+// Version returns the stored version for key, tombstones included, and
+// false when the key holds no record — the cheap per-entry replication
+// probe, copying no Data and consulting no dump state.
+func (e *Engine) Version(key string) (version.RecordVersion, bool) {
+	return e.store.Version(key)
+}
+
+// Versions returns the caller-owned key→version snapshot, tombstones
+// included — the listing view that copies no record data and consults no
+// dump state.
+func (e *Engine) Versions() map[string]version.RecordVersion {
+	return e.store.Versions()
+}
+
 // Records returns a full snapshot of the map, tombstones included, with
 // Data defensively copied — the same pass-through contract as Get.
 func (e *Engine) Records() map[string]storage.Record {
