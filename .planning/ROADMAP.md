@@ -112,11 +112,11 @@ Plans:
   3. Datagrams are bounded and validated end to end: key-length and `value_max_bytes` ceilings enforced (`InvalidArgument` on oversize, exit 2 when the largest record cannot fit a datagram, any accepted record encodes into ≤ 65 507 bytes); received versions validated before any clock call and counted as their own class; invalid combinations (empty key, tombstone with data, bad checksum) discarded with own counters; the read loop exits only on `net.ErrClosed` — a node never keeps saying `Hello` while deaf
   4. Socket reality is visible and misuse is loud: startup logs actual `SO_RCVBUF`/`SO_SNDBUF` and fails if the send buffer cannot hold a maximal datagram; 1, 20 and 60 KiB values deliver on Linux (darwin ~9 KiB limit documented, not fixed); a non-wildcard `--bind-addr` warns or is rejected; a second instance fails with "address already in use"; a silent node WARNs after `peer_timeout`
   5. The seams later phases build on exist: a cheap key→version view with tombstone visibility instead of store copies (also making `DataRequest`/sync-chunk handling independent of foreign records); "record acknowledged by peer X" traveling as an `Outbox` result to waiters (removing snapshot diffing and the 5 ms polling); a bounded, deduplicated sync-answer queue (1000 missing keys twice → 1000 answers, not 2000); dead code (`lastLocal`/`cover`, exported `persist.Parse`, `ownHandle`, `fsync_darwin.go`) gone or justified
-**Plans**: 13/13 plans (planned)
+**Plans**: 1/13 plans executed (planned)
 
 Plans:
 **Wave 1**
-- [ ] 03-01-PLAN.md — Tracer: socket buffers set, read back, logged, send floor enforced; 1/20/60 KiB delivery (D-02, XPORT-05)
+- [x] 03-01-PLAN.md — Tracer: socket buffers set, read back, logged, send floor enforced; 1/20/60 KiB delivery (D-02, XPORT-05)
 - [ ] 03-02-PLAN.md — Store key→version view + tombstone-visible Lookup + MaxKeyBytes + WR-02 simnet fix (D-08, XPORT-11/XPORT-06)
 - [ ] 03-03-PLAN.md — version.Validate layout/future predicate with boundary and property tests (D-06, XPORT-04)
 
@@ -237,7 +237,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 7. v1.0 — Docs, Examples and Release | v1.0 | 5/5 | Complete | 2026-11-18 |
 | 1. Spec Reference and Decisions | v1.1 | 0/? | Not started | - |
 | 2. Stand and Simulator as Tests | v1.1 | 0/? | Not started | - |
-| 3. Transport | v1.1 | 0/13 | Planned | - |
+| 3. Transport | v1.1 | 1/13 | In Progress | - |
 | 4. Protocol | v1.1 | 0/? | Not started | - |
 | 5. Persistence | v1.1 | 0/? | Not started | - |
 | 6. API and Semantics | v1.1 | 0/? | Not started | - |

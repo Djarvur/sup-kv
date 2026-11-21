@@ -58,7 +58,7 @@
   - Acceptance: `Set` with a key longer than the documented limit returns `InvalidArgument`; a `value_max_bytes` under which the largest record does not fit a datagram exits with code 2 at startup; property: any accepted record encodes into a datagram ≤ 65 507 bytes
 - [ ] **XPORT-04**: Received versions are validated before touching the clock (R-07)
   - Acceptance: a version with invalid `ver`/`var` fields or `l` beyond now + a configurable bound is discarded before any clock call, counted as its own class and WARN-logged; the same for versions inside `DataSync`
-- [ ] **XPORT-05**: Socket buffers are configured and reported (R-08)
+- [x] **XPORT-05**: Socket buffers are configured and reported (R-08)
   - Acceptance: startup logs the actual sizes of both buffers; startup fails if the send buffer is smaller than the maximal datagram; values of 1, 20 and 60 KiB are delivered on Linux; the darwin ~9 KiB send limit is documented, not fixed (14.10)
 - [ ] **XPORT-06**: Handling of `DataRequest` and sync chunks does not depend on foreign records (R-09)
   - Acceptance: benchmark on 1000 and 50 000 keys within 2×
@@ -230,7 +230,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | XPORT-02 | Phase 3 | Pending |
 | XPORT-03 | Phase 3 | Pending |
 | XPORT-04 | Phase 3 | Pending |
-| XPORT-05 | Phase 3 | Pending |
+| XPORT-05 | Phase 3 | Complete |
 | XPORT-06 | Phase 3 | Pending |
 | XPORT-07 | Phase 3 | Pending |
 | XPORT-08 | Phase 3 | Pending |

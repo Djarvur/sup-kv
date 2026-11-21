@@ -16,7 +16,7 @@
     {
       "number": "3",
       "name": "Persistence — Dump and Write Confirmation",
-      "status": "complete"
+      "status": "in_progress"
     },
     {
       "number": "4",
@@ -51,7 +51,7 @@
     {
       "number": "3",
       "name": "Transport",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "4",
@@ -86,8 +86,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (verify)",
-    "reason": "Phase 3 of 9 · ready to verify"
+    "label": "Advance to the next step",
+    "reason": "Phase 3 of 9 · executing"
   },
-  "updated_at": "2026-11-21T15:05:22.561Z"
+  "updated_at": "2026-11-21T18:24:35.315Z"
 }

@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Phase 3 context gathered (--auto)
-last_updated: "2026-11-21T18:13:18.867Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-11-21T18:24:47.030Z"
 last_activity: 2026-11-21
-last_activity_desc: Phase 2 complete, transitioned to Phase 3
-state_head: 05f9bb86a7b0b4828a3a8bce5d9eafd6e55f95fd
+last_activity_desc: Phase 3 execution started
+state_head: 30cef98286b096e612f31528f3301d6ba8f2d911
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 21
+  completed_plans: 22
 ---
 
 # Project State
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-19)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 2 — Stand and Simulator as Tests
+**Current focus:** Phase 3 — Transport
 
 ## Current Position
 
-Phase: 3 (Transport) — READY TO EXECUTE
-Plan: 2
+Phase: 3 (Transport) — EXECUTING
+Plan: 2 of 13
 Status: Ready to execute
-Last activity: 2026-11-21 — Phase 2 complete, transitioned to Phase 3
+Last activity: 2026-11-21 — Phase 3 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -75,6 +75,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P17 | 8min | 1 tasks | 22 files |
 | Phase 02 P13 | 40min | 2 tasks | 4 files |
 | Phase 02 P11 | 694s | 3 tasks | 3 files |
+| Phase 3 P01 | 427s | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -145,6 +146,10 @@ Recent decisions affecting current work:
 - [Phase 02]: TEST-09 no-fresh-loss qualifier is structural: all writes and fault windows end at the heal (loss via deterministic directed windows, only duplication continues), and every pre-heal record is asserted present byte-equal on every node
 - [Phase 02]: Nightly F9 runs the reviewer's documented default flags (hello 1s, sync 30s, rate 500) and both the recovery bound and the post-recovery write wait derive from the selected flags — the shrunken-timer wait was replaced after it timed out at the 30s cadence.
 - [Phase 02]: scheduled.yml's two stand jobs share SUPKV_STAND_NIGHTLY=1; red-run owns assert-red (the runner exports SUPKV_RED_TESTS itself) while nightly-stand leaves red tests skipped by construction.
+- [Phase 03]: Effective socket buffer sizes come only from the kernel getsockopt read-back; the requested constants never reach the startup log or SocketBuffers (XPORT-05).
+- [Phase 03]: validateBufferRequest accepts exactly MaxInt32/2 and rejects anything above it: the kernel doubles the request, so the read-back must fit a 32-bit int (T-3-01); this resolves the plan Task 3 table contradiction in favor of the primary guard contract.
+- [Phase 03]: Every buffer-configuration failure (set, read-back, send floor) is a construction error that closes the socket before New returns; no degraded node starts.
+- [Phase 03]: The stand delivery test passes --sync-response-rate explicitly so its paced bound term derives from a flag the nodes actually run with; this also clears unparam on startStandLoggedNode.
 
 ### Pending Todos
 
@@ -165,7 +170,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T15:06:41.929Z
-Stopped at: Phase 3 context gathered (--auto)
+Last session: 2026-11-21T18:24:46.842Z
+Stopped at: Completed 03-01-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
