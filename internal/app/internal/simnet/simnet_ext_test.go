@@ -36,7 +36,19 @@ const (
 	simExtOneWay      = time.Millisecond
 	simExtAnnounce    = 20 * time.Millisecond
 	simExtSizeCeiling = 1200
+	// simOversizeValue is one byte over the store's design-default value
+	// limit (docs/IDEA.md §Parameters): the ErrValueTooLarge class the WR-02
+	// regression pin drives through Cluster.Write.
+	simOversizeValue = 61441
 )
+
+// simRecover runs f and returns the recovered panic value, nil when f
+// returned normally — the harness's panic assertions.
+func simRecover(f func()) (recovered any) {
+	defer func() { recovered = recover() }()
+	f()
+	return nil
+}
 
 // simExtFixedDelay returns the extension tests' loss-free network profile:
 // every datagram delivered after exactly simExtOneWay, no drops, no
@@ -181,6 +193,80 @@ func TestSim_Delete_replicatesTombstone(t *testing.T) {
 	}
 	if peer.Version != tombstone.Version {
 		t.Fatalf("peer tombstone version %x, want the replicated version %x", peer.Version, tombstone.Version)
+	}
+}
+
+// TestSim_write_refusesOversize is the WR-02 regression pin: an oversize
+// simulated write panics loudly — naming the operation, key and node — and
+// never appends a phantom entry to the write log the model consumes, where a
+// swallowed store error used to surface as an opaque convergence divergence.
+func TestSim_write_refusesOversize(t *testing.T) {
+	t.Parallel()
+	const seed = int64(13)
+	rng := simRNG(seed)
+	sched := simnet.NewScheduler(simAt(0))
+	cluster := simnet.NewCluster(sched, rng, 2, repl.Config{}, simExtFixedDelay())
+	sched.RunUntil(simAt(50 * time.Millisecond))
+
+	const key = "write/oversize"
+	logBefore := len(cluster.WriteLog())
+	recovered := simRecover(func() {
+		cluster.Write(0, key, make([]byte, simOversizeValue))
+	})
+	if recovered == nil {
+		t.Fatal("Cluster.Write(oversize) returned normally, want a panic naming the rejected write")
+	}
+	msg := fmt.Sprint(recovered)
+	for _, want := range []string{"Cluster.Write", key, "node 0", storage.ErrValueTooLarge.Error()} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("panic message %q does not name %q", msg, want)
+		}
+	}
+	if got := len(cluster.WriteLog()); got != logBefore {
+		t.Fatalf("write log grew from %d to %d entries on the rejected write", logBefore, got)
+	}
+}
+
+// TestSim_writeLogRecordMatchesStore proves the write log's ground truth:
+// after a normal write the captured LoggedWrite.Rec equals the record the
+// store reports through the point Lookup, and the returned record does too —
+// the same record, never a fabricated or stale whole-store copy.
+func TestSim_writeLogRecordMatchesStore(t *testing.T) {
+	t.Parallel()
+	const seed = int64(14)
+	rng := simRNG(seed)
+	sched := simnet.NewScheduler(simAt(0))
+	cluster := simnet.NewCluster(sched, rng, 2, repl.Config{}, simExtFixedDelay())
+	sched.RunUntil(simAt(50 * time.Millisecond))
+
+	const key = "write/log-match"
+	written := cluster.Write(0, key, []byte("value"))
+	stored, ok := cluster.Store(0).Lookup(key)
+	if !ok {
+		t.Fatalf("Lookup(%q) ok = false after Write, want true", key)
+	}
+	log := cluster.WriteLog()
+	if len(log) != 1 {
+		t.Fatalf("write log length = %d, want the single write", len(log))
+	}
+	entry := log[0]
+	if entry.Key != key {
+		t.Errorf("logged key = %q, want %q", entry.Key, key)
+	}
+	if entry.Rec.Version != stored.Version || entry.Rec.Deleted != stored.Deleted ||
+		entry.Rec.Checksum != stored.Checksum || !bytes.Equal(entry.Rec.Data, stored.Data) {
+		t.Errorf("logged record = (%x, %t, %q, %#x), want the store's (%x, %t, %q, %#x)",
+			entry.Rec.Version[:], entry.Rec.Deleted, entry.Rec.Data, entry.Rec.Checksum,
+			stored.Version[:], stored.Deleted, stored.Data, stored.Checksum)
+	}
+	if written.Version != stored.Version || written.Deleted != stored.Deleted ||
+		written.Checksum != stored.Checksum || !bytes.Equal(written.Data, stored.Data) {
+		t.Errorf("Write returned (%x, %t, %q, %#x), want the store's (%x, %t, %q, %#x)",
+			written.Version[:], written.Deleted, written.Data, written.Checksum,
+			stored.Version[:], stored.Deleted, stored.Data, stored.Checksum)
+	}
+	if got := storage.RecordChecksum(key, stored.Version, stored.Data, stored.Deleted); got != stored.Checksum {
+		t.Errorf("stored checksum = %#x, want %#x", stored.Checksum, got)
 	}
 }
 

@@ -711,10 +711,24 @@ func (c *Cluster) route(i int, outbound []port.Outbound) {
 // current virtual time (D-05): the store Set, then the core NotifyLocalWrite
 // carrying the written record, capturing the (key, record) pair into the
 // write log. Call RunUntil first to place the write in virtual time.
+//
+// A rejected Set — an oversize value, the ErrValueTooLarge class — is a
+// driving test's mistake, not a protocol condition: it panics naming the
+// operation, key and node, because a silently dropped write would make every
+// model comparison against the write log lie (02-REVIEW WR-02). An
+// out-of-range node index is the same class of mistake and panics through
+// checkIndex.
 func (c *Cluster) Write(i int, key string, data []byte) storage.Record {
+	c.checkIndex(i, "Write")
 	now := c.sched.Now()
-	_, _, _ = c.nodes[i].store.Set(key, data)
-	rec := c.nodes[i].store.Records()[key]
+	_, _, err := c.nodes[i].store.Set(key, data)
+	if err != nil {
+		panic(fmt.Sprintf("simnet: Cluster.Write: Set %q on node %d: %v", key, i, err))
+	}
+	rec, ok := c.nodes[i].store.Lookup(key)
+	if !ok {
+		panic(fmt.Sprintf("simnet: Cluster.Write: Lookup %q on node %d after a successful Set: record missing", key, i))
+	}
 	var out port.Outbox
 	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
 	c.route(i, out.Drain())
@@ -732,19 +746,26 @@ func (c *Cluster) Write(i int, key string, data []byte) storage.Record {
 // true, the pointwise-supremum model needs no separate flag. A missing or
 // already-tombstoned key is storage.ErrNotFound and changes nothing: a
 // no-op delete writes nothing and burns no version (the store.Delete
-// contract). Call RunUntil first to place the delete in virtual time.
+// contract). Call RunUntil first to place the delete in virtual time. The
+// written tombstone is read back with the store's point Lookup — never a
+// whole-store Records() copy — and an out-of-range node index panics through
+// checkIndex, the same harness convention as Write.
 //
 // Determinism contract: as Write — the delete runs at the current virtual
 // time and every emission routes through the network's seeded rng; the seam
 // adds no randomness source, so the event stream stays a pure function of
 // the seed.
 func (c *Cluster) Delete(i int, key string) (storage.Record, error) {
+	c.checkIndex(i, "Delete")
 	now := c.sched.Now()
 	_, _, err := c.nodes[i].store.Delete(key)
 	if err != nil {
 		return storage.Record{}, err
 	}
-	rec := c.nodes[i].store.Records()[key]
+	rec, ok := c.nodes[i].store.Lookup(key)
+	if !ok {
+		panic(fmt.Sprintf("simnet: Cluster.Delete: Lookup %q on node %d after a successful delete: record missing", key, i))
+	}
 	var out port.Outbox
 	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
 	c.route(i, out.Drain())
