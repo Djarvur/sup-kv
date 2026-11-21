@@ -383,6 +383,10 @@ func startDumper(t *testing.T, eng *persist.Engine) (stop func()) {
 // waiter, the debounced dumper waits out the full 50 ms quiet window, the
 // single save lands at virtual t=50 ms, and Set returns only then — with
 // the saved bytes decoding to the written record.
+//
+// Decision 14.3 (ADR 0003): the dump write policy stays as-is — the debounce
+// window and the single save per quiet period are the accepted disk-protection
+// bias, not an implementation accident this timing test may optimize away.
 func TestEngine_confirmDebounceTiming(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -925,6 +929,11 @@ func TestEngine_restartDiscardsTornRecord(t *testing.T) {
 // a current live value, and a key absent from the snapshot keeps its state
 // untouched (D-09) — while a fresh engine with only the carried-over
 // snapshot directory restores every snapshot key (recovery from scratch).
+//
+// Decision 14.1 (ADR 0001): the snapshot family rides the accepted rule that
+// a snapshot load is a full rollback, so the named snapshot is an exact copy
+// of the current confirmed state and Restore replays its keys under the same
+// install discipline — never a partial merge into whatever the target holds.
 func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	t.Parallel()
 	dumpPath := filepath.Join(t.TempDir(), "dump.json")
@@ -1414,6 +1423,11 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 // a direct Set surfaces storage.ErrValueTooLarge unchanged with no waiter
 // registered (PERS-02/PERS-05 — the codec's 61440 envelope does not shrink
 // with the config, so these are the belt-and-braces skips).
+//
+// Decision 14.11 (ADR 0011): the ~60 KiB single-value limit stays — this
+// test narrows only the configurable envelope under it, so the accepted
+// ceiling is what a shrunk config is measured against, never a probe that the
+// decision would raise or remove.
 func TestEngine_configShrunkValueLimits(t *testing.T) {
 	t.Parallel()
 	dumpPath := filepath.Join(t.TempDir(), "dump.json")

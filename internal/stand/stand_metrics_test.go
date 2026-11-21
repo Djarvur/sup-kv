@@ -1,10 +1,10 @@
 //go:build linux
 
 // TEST-12 metrics and configuration by observed effect. The phase's metric
-// definitions (decision 14.4: no conflict journal — the counter IS the
-// record) and its opt-in metrics endpoint (decision 14.8: no listener
-// without --metrics-addr — this test opts in explicitly) are pinned by
-// what a live node actually renders, never by reading package state: the
+// definitions (decision 14.4 / ADR 0004: no conflict journal — the counter IS
+// the record) and its opt-in metrics endpoint (decision 14.8 / ADR 0008: no
+// listener without --metrics-addr — this test opts in explicitly) are pinned
+// by what a live node actually renders, never by reading package state: the
 // scenario constructs exactly one conflict and exactly one bad-CRC discard
 // and scrapes the node's /metrics over HTTP, asserting the EXACT rendered
 // values those constructions fix.

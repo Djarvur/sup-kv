@@ -293,6 +293,11 @@ func awaitGateOpen(t *testing.T, h *testHarness) {
 // shape), and Get returns the identical value and version. The Set returning
 // at all is the write-confirmation contract (PERS-04): the engine released
 // the write only after a dump containing it completed through the fake.
+//
+// Decision 14.7 (ADR 0007): the public proto package is the consumer zone's
+// boundary — this Set/Get surface is what a consumer integrates through, and
+// the client-side last-read-value file stays in the consumer's own client
+// library; sup-kv ships no such file (the boundary the round trip pins).
 func TestServer_setGetRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -389,7 +394,9 @@ func TestServer_errorMapping(t *testing.T) {
 	assertCode(t, "Get deleted key", err, codes.NotFound)
 
 	// AlreadyExists for create_if_absent over a tombstoned key — a
-	// Delete-then-SetIfAbsent cannot resurrect the key.
+	// Delete-then-SetIfAbsent cannot resurrect the key. Decision 14.2
+	// (ADR 0002): a deleted key stays blocked by its tombstone, so the
+	// tombstone is a state, never a hole a create-if-absent may fill.
 	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "err/live", Value: []byte("v3"), CreateIfAbsent: true})
 	assertCode(t, "SetIfAbsent over tombstoned key", err, codes.AlreadyExists)
 

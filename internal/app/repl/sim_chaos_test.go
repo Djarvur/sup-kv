@@ -495,6 +495,11 @@ func chaosModelStore(log []simnet.LoggedWrite) *storage.Store {
 // corpus as a named subtest plus SUPKV_SIM_FRESH_SEEDS fresh wall-clock runs.
 // The seed prints on every run; a failing run replays exactly with the
 // printed command.
+//
+// Decision 14.9 (ADR 0009): three-or-more-node support is completed — the
+// 2..5-node chaos runs (chaosMaxNodes) are the current multi-node evidence;
+// the real-socket 3+-node scenarios are PROTO-09's Phase 4 deliverable, and
+// this simulation check is what keeps the decision exercised until then.
 func TestChaos_convergence(t *testing.T) {
 	t.Parallel()
 	if os.Getenv(simSeedEnv) != "" {

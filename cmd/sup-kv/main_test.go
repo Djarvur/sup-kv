@@ -914,6 +914,10 @@ func TestMetrics_optIn(t *testing.T) {
 // bind aborts its startup and its awaitServing times out. The mechanism is
 // pure loopback TCP with per-node ports: portable to every matrix cell,
 // deliberately not /proc or socket enumeration.
+//
+// Decision 14.8 (ADR 0008): metrics stay off by default — this is the
+// binary-level pin of that decision (no listener without --metrics-addr or
+// SUPKV_METRICS_ADDR); the rendering half is TestStand_metricsByEffect.
 func TestMetrics_noDefaultListener(t *testing.T) {
 	t.Parallel()
 	bin := smokeBinary(t)

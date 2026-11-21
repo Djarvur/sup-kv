@@ -138,6 +138,11 @@ func TestGate_opensOnSync(t *testing.T) {
 // parallel load (a naive "Set before" assertion races the very 50ms
 // deadline under test); after the release the fake answers false forever,
 // so SERVING and the succeeding Set can only be the backstop's work.
+//
+// Decision 14.6 (ADR 0006): an empty-disk node waits longer for a peer —
+// startup_gate_empty is the Phase 4 (PROTO-02) extension of this decision;
+// the uniform backstop asserted here is the current shape the extension
+// lengthens for the empty case.
 func TestGate_opensOnTimeout(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
