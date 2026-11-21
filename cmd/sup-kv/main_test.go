@@ -573,6 +573,41 @@ func TestMain_valueMaxDatagram(t *testing.T) {
 	}
 }
 
+// TestMain_duplicateBind pins XPORT-09's duplicate-instance half at the
+// binary boundary: with the UDP address already occupied by another socket,
+// the real process exits non-zero and its output carries the kernel's
+// "address already in use" — a second instance can never start silently and
+// split the node's unicast traffic between two sockets.
+func TestMain_duplicateBind(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	// Occupy one explicit loopback address. net.ListenPacket sets no
+	// SO_REUSEADDR for datagram sockets, so the binary's production bind —
+	// which sets none either — must be refused by the kernel.
+	occupier, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a loopback udp4 address: %v", err)
+	}
+	t.Cleanup(func() { _ = occupier.Close() })
+	occupied := occupier.LocalAddr().(*net.UDPAddr)
+	bindAddr := occupied.String()
+	udpPort := strconv.Itoa(occupied.Port)
+
+	out, err := runToCompletion(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr="+bindAddr,
+		"--broadcast-addr=127.255.255.255:"+udpPort,
+		"--grpc-addr=127.0.0.1:"+strconv.Itoa(freeTCPPort(t)),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--startup-gate=10ms",
+	)
+	assertExitCode(t, err, 1)
+	if !strings.Contains(out, "address already in use") {
+		t.Fatalf("a second instance on occupied %s exited without %q in its output:\n%s", bindAddr, "address already in use", out)
+	}
+}
+
 // TestMain_lifecycle drives the whole node lifecycle through the real
 // binary: the startup gate opens (SERVING over real TCP — the timeout path,
 // since a lone node receives no DataSync), a SupKV client Sets and Gets one

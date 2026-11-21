@@ -287,6 +287,11 @@ func probeBroadcastAddr(t *testing.T, port int, loopback *net.UDPAddr) *net.UDPA
 // peer (research Pitfall 3 — loopback broadcast fan-out is a Linux-only
 // kernel behavior; macOS lo0 lacks the BROADCAST flag).
 //
+// Both adapters opt in through [udprepl.WithAddressReuse]: the two nodes
+// share one wildcard port, which production construction deliberately
+// forbids (XPORT-09) because a shared port splits unicast between the two
+// sockets by the kernel's choice.
+//
 // The test deliberately NEVER asserts Ack or DataRequest or any unicast
 // delivery between the two same-host nodes: unicast to a port shared by
 // SO_REUSEADDR sockets is delivered to exactly ONE socket, the kernel's
@@ -304,11 +309,11 @@ func TestSmoke_twoNodesUDP(t *testing.T) {
 	cfg := repl.Config{Log: func(msg string) { t.Logf("%s", msg) }}
 	storeA := storage.NewStore(smokeNodeA, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
 	storeB := storage.NewStore(smokeNodeB, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
-	adapterA, err := udprepl.New(bind, broadcast.String(), smokeNodeA, smokeStore{storeA}, cfg)
+	adapterA, err := udprepl.New(bind, broadcast.String(), smokeNodeA, smokeStore{storeA}, cfg, udprepl.WithAddressReuse())
 	if err != nil {
 		t.Fatalf("node A adapter: %v", err)
 	}
-	adapterB, err := udprepl.New(bind, broadcast.String(), smokeNodeB, smokeStore{storeB}, cfg)
+	adapterB, err := udprepl.New(bind, broadcast.String(), smokeNodeB, smokeStore{storeB}, cfg, udprepl.WithAddressReuse())
 	if err != nil {
 		t.Fatalf("node B adapter: %v", err)
 	}

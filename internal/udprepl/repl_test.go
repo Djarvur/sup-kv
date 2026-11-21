@@ -8,7 +8,9 @@ import (
 	"hash/crc32"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -888,4 +890,74 @@ func TestMirror_unackedSent(t *testing.T) {
 		t.Fatalf("node B serves (%x, %q, %v) for %q, want the replicated record (%x, %q)",
 			served.Version[:], served.Data, err, mirrorKey, ver[:], "unacked me")
 	}
+}
+
+// runAdapter starts adapter's event loop and registers a cleanup that
+// cancels it and waits for the return — Run's deferred socket close is the
+// only way an adapter releases its port, so tests that bind without ever
+// driving the core must still run the loop.
+func runAdapter(t *testing.T, adapter *udprepl.Adapter) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = adapter.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
+// TestListen_noAddressReuse pins XPORT-09's socket policy at the adapter
+// boundary: production construction sets no SO_REUSEADDR, so a second
+// adapter binding the same address fails with EADDRINUSE — no second process
+// can silently split the node's unicast traffic between two sockets the
+// kernel chooses between — while the explicit test-only option restores the
+// same-host shared-port topology the smoke test needs. Both sockets of a
+// shared port must set the option: Linux grants a UDP double-bind only when
+// every socket on the address has SO_REUSEADDR, which is exactly the
+// asymmetry the policy relies on.
+func TestListen_noAddressReuse(t *testing.T) {
+	t.Run("a second production bind fails with EADDRINUSE", func(t *testing.T) {
+		udpPort := freeUDPPort(t)
+		bind := fmt.Sprintf("0.0.0.0:%d", udpPort)
+		broadcast := fmt.Sprintf("127.255.255.255:%d", udpPort)
+
+		plain, err := udprepl.New(bind, broadcast, nodeIDA, newTestStore(nodeIDA), repl.Config{})
+		if err != nil {
+			t.Fatalf("first production bind on %s: %v", bind, err)
+		}
+		runAdapter(t, plain)
+
+		// The second production bind must fail with the kernel's EADDRINUSE.
+		_, err = udprepl.New(bind, broadcast, nodeIDB, newTestStore(nodeIDB), repl.Config{})
+		if err == nil {
+			t.Fatalf("second bind on %s without WithAddressReuse succeeded, want EADDRINUSE", bind)
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatalf("second bind error = %v, want syscall.EADDRINUSE in the chain — a second instance must fail visibly", err)
+		}
+		if !strings.Contains(err.Error(), "address already in use") {
+			t.Fatalf("second bind error = %v, want the kernel's %q text", err, "address already in use")
+		}
+	})
+
+	t.Run("the explicit option restores same-port binding", func(t *testing.T) {
+		udpPort := freeUDPPort(t)
+		bind := fmt.Sprintf("0.0.0.0:%d", udpPort)
+		broadcast := fmt.Sprintf("127.255.255.255:%d", udpPort)
+
+		first, err := udprepl.New(bind, broadcast, nodeIDA, newTestStore(nodeIDA), repl.Config{}, udprepl.WithAddressReuse())
+		if err != nil {
+			t.Fatalf("first opt-in bind on %s: %v", bind, err)
+		}
+		runAdapter(t, first)
+		second, err := udprepl.New(bind, broadcast, nodeIDB, newTestStore(nodeIDB), repl.Config{}, udprepl.WithAddressReuse())
+		if err != nil {
+			t.Fatalf("second opt-in bind on %s with WithAddressReuse: %v", bind, err)
+		}
+		runAdapter(t, second)
+	})
 }
