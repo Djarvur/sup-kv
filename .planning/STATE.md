@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
-status: executing
-stopped_at: 03-12-PLAN.md executed and halted on the red-gate flip — see 03-12-SUMMARY.md
-last_updated: "2026-11-21T22:34:00.000Z"
+status: verifying
+stopped_at: Completed 03-13-PLAN.md — Phase 3 plans complete, ready for verification
+last_updated: "2026-11-21T23:10:38.000Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 3 plan 12 executed — metrics and per-mutant runner landed; flip halted (R-01/R-02 burst red)
-state_head: bdf48f9bba282a21aa033147f3a2348213578423
+last_activity_desc: Phase 3 plan 13 complete — scheduled 20x R-01 evidence and the full phase gate
+state_head: 8960b455f5e7bbf8df8281c22b50dcaa557dcf70
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 33
+  completed_plans: 34
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 12 of 13
-Status: HALTED — R-01 and R-02 burst red gates did not meet their bounds on this host; the rows were reverted per plan (see 03-12-SUMMARY.md). 03-13 is blocked pending a full-speed re-run or the scheduled job's evidence.
-Last activity: 2026-11-22 — Executed 03-12 (metrics + runner generalization; partial flip)
+Plan: 13 of 13
+Status: Phase complete — ready for verification. All 13 plans executed; XPORT-01 and XPORT-02 flipped green, the remaining red rows are Phase 4/5 work.
+Last activity: 2026-11-22 — Completed 03-13 (scheduled 20x evidence + full phase gate)
 
-Progress: [██████████] 97%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -87,6 +87,7 @@ Progress: [██████████] 97%
 | Phase 03 P10 | 925s | 3 tasks | 8 files |
 | Phase 03 P11 | 649s | 2 tasks | 19 files |
 | Phase 03 P12 | 1382s | 3 tasks | 17 files |
+| Phase 03 P13 | 1048s | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -218,6 +219,11 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-12: The red-runner's tombstone mutant moved from `core.go`'s old `listingChunks` shape to `storage.Versions` (the 03-07 rewrite left `Versions` with no `Deleted` flag); across all 16 corpus seeds the control passes, `sync-without-tombstones` is killed only by 848612892191557850, and `periodic-sync-disabled` by the same three seeds.
 - [Phase 03]: 03-12: The flip halted at one of three rows — `TestRed_R02_unackedDrain` is green, while R-01 (7 453-7 734/8 000 keys at the 20.6 s bound) and R-02 burst (979.6-985.7 vs 990 writes/s) stayed red after three full runs and two standalone retries; the rows were reverted per the plan, and the failed-attempt evidence is committed beside the accepted runs.
 - [Phase 03]: 03-12: The bound misses are host-speed findings, not regressions — pre-fix evidence on this host measured 1 504/8 000 keys and 25.1 writes/s, the host runs `powersave` at ~1.64 GHz, and no system power setting was changed; 03-13 is blocked until a full-speed re-run or the scheduled job re-evaluates the two rows.
+- [Phase 03]: 03-13: The 20/20 acceptance lives in a dedicated `red-r01-x20` scheduled job — `-count=20` at the documented 20 000-key scale, `-timeout 110m`, `timeout-minutes: 120`, both env gates set, no skip/tolerance flag; a failure after the flip is a transport verdict and fails CI.
+- [Phase 03]: 03-13: The job's `always()` evidence step tests its glob with `compgen -G` instead of red-run's `ls … || true`, because the plan's prohibition bans `|| true` in this job; the no-evidence branch states the direct-`go test` contract instead of fabricating a directory.
+- [Phase 03]: 03-13: `make race-soak` gained `./internal/stand/` only after measuring it — 6.53 s single run, ~2.2 min projected at COUNT=20; the whole target is 81.22 s at COUNT=1, so ~27 min at the default 20 and the 120-minute race-flake budget stands.
+- [Phase 03]: 03-13: The documented-scale R-01 run measured 110.26 s, projecting 20 runs to ~37 min — inside the 120-minute job budget and consistent with RESEARCH A5; the first scheduled run is the observation, and a budget miss is recorded rather than paying with the count.
+- [Phase 03]: 03-13: The full gate ran with real exit statuses (tidy, lint, test, red-runner with mutants, darwin cross build/vet, bench smoke, one nightly-scale R-01 run, clean tree); the four remaining red rows (R-03 x2, P-01 x2) are Phase 4/5 work and no bound, row or test was weakened.
 
 ### Pending Todos
 
@@ -227,7 +233,8 @@ None yet.
 
 - Carried from v1.0: server-side branch-protection ruleset still deferred (org-plan 403); re-apply path recorded in docs/setup/branch-protection.md — revisit at the v1.0.1+/ruleset window noted in PROJECT.md
 - Carried from v1.0: macOS quickstart is option-b (Linux CI-verified + marked darwin loud-skip); v1.1 DOCS-09 must keep the pair working and DOCS-10 demotes darwin to development-only (14.10)
-- **03-12 halt:** `TestRed_R01_pacedSync20k` and `TestRed_R02_burst` remain red; the full red gate is green only with those rows reverted. Re-run `bash scripts/red-runner` on a host that sustains the documented throughput (this host's `powersave` governor holds ~1.64 GHz and misses by 3.5% and 0.5-1%). Do not start 03-13 until the two rows pass and 03-12 is re-summarized with the full three-row flip.
+- **03-12 halt resolved (2026-11-22):** the `powersave`-governor miss was cleared at `performance` — the burst measurement window was aligned with the documented acceptance (commit `6c17db3`), the full runner is 7/7 OK with mutants killed (`red-evidence/20261121T225048Z`), and R-01/R-02 burst/drain are green. 03-13 executed and closed the phase; no blocker remains.
+- **Nightly 20/20 observation:** XPORT-01's 20x evidence is the first scheduled `red-r01-x20` run. If it exceeds the 120-minute job budget, the finding is recorded and the budget raised — the count stays 20.
 
 ## Deferred Items
 
@@ -239,7 +246,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T22:34:00.000Z
-Stopped at: 03-12-PLAN.md executed and halted on the red-gate flip (see .planning/phases/03-transport/03-12-SUMMARY.md)
-Resume file: .planning/phases/03-transport/03-13-PLAN.md
-Next action: re-run `bash scripts/red-runner` on a full-speed host; if R-01 and R-02 burst pass, flip those two rows and re-summarize 03-12 before `/gsd:execute-phase 3` (03-13)
+Last session: 2026-11-21T23:10:38.000Z
+Stopped at: Completed 03-13-PLAN.md — Phase 3 plans complete (13/13), ready for verification
+Resume file: None
+Next action: `/gsd:verify-work 3` (or `/gsd:execute-phase 4` after the phase gate is verified) — Phase 4 (Protocol) is unblocked

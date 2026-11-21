@@ -50,9 +50,9 @@
 
 ### Transport
 
-- [ ] **XPORT-01**: Sync listing is paced and robust to buffer loss (R-01)
+- [x] **XPORT-01**: Sync listing is paced and robust to buffer loss (R-01)
   - Acceptance: two nodes on real Linux sockets with default buffers, 20 000 keys × 1 KiB, empty receiver — full convergence no later than 2 × `sync_interval` + N / `sync_response_rate`, 20 runs out of 20; test in CI; sending start chunk rotates across rounds; `SO_RCVBUF`/`SO_SNDBUF` set with actual values logged; the core gets a cheap key→version view instead of a store copy
-- [ ] **XPORT-02**: Event-loop cost does not grow with the unacked set; retransmits are paced with jitter (R-02)
+- [x] **XPORT-02**: Event-loop cost does not grow with the unacked set; retransmits are paced with jitter (R-02)
   - Acceptance: (1) benchmark — iteration time at 10 and at 10 000 unacked records differs by at most 2×; (2) stand — a peer returning to a node holding 10 000 unacked 1 KiB records: set empty within N / `sync_response_rate` + 10 s, at most 3N retransmits; (3) open loop 1000 writes/s × 15 s over 10 000 distinct keys — at least 990 writes/s achieved, set empty 5 s after the end
 - [x] **XPORT-03**: Key length and the `value_max_bytes` ceiling are validated (R-06)
   - Acceptance: `Set` with a key longer than the documented limit returns `InvalidArgument`; a `value_max_bytes` under which the largest record does not fit a datagram exits with code 2 at startup; property: any accepted record encodes into a datagram ≤ 65 507 bytes
@@ -226,8 +226,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-14 | Phase 2 | Complete |
 | TEST-15 | Phase 2 | Complete |
 | TEST-16 | Phase 2 | Complete |
-| XPORT-01 | Phase 3 | Pending |
-| XPORT-02 | Phase 3 | Pending |
+| XPORT-01 | Phase 3 | Complete |
+| XPORT-02 | Phase 3 | Complete |
 | XPORT-03 | Phase 3 | Complete |
 | XPORT-04 | Phase 3 | Complete |
 | XPORT-05 | Phase 3 | Complete |

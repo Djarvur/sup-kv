@@ -30,7 +30,7 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
 
 - [x] **Phase 1: Spec Reference and Decisions** - Deviation registry mapping every Spec statement to a decision and link; 11 ADRs for owner decisions 14.1-14.11; docs/IDEA.md marked historical (completed 2026-11-19)
 - [x] **Phase 2: Stand and Simulator as Tests** - F9/F9b/F14/burst/F2c automated on real sockets; simulator blind spots closed; chaos stabilized; red tests for the four Criticals (R-01, R-02, R-03, P-01) (completed 2026-11-21)
-- [ ] **Phase 3: Transport** - Paced sync/retransmit sending, socket buffer setup and reporting, datagram validation, bounded queues; key→version view and Outbox seams
+- [x] **Phase 3: Transport** - Paced sync/retransmit sending, socket buffer setup and reporting, datagram validation, bounded queues; key→version view and Outbox seams (completed 2026-11-22)
 - [ ] **Phase 4: Protocol** - Interface closed until the full key list arrives, `startup_gate_empty`, DataSync headers, stale-record answer, immediate sync for new/returning peers, 3+-node tests
 - [ ] **Phase 5: Persistence** - Single value limit, visible dump-load outcomes, generation integrity, decaying retries, streaming encode, blocking deadlines, engine split
 - [ ] **Phase 6: API and Semantics** - Honest `wait_for_replication`, snapshot load as full rollback, total error mapping, paginated `List`, public proto + Go client example in CI
@@ -112,7 +112,7 @@ Plans:
   3. Datagrams are bounded and validated end to end: key-length and `value_max_bytes` ceilings enforced (`InvalidArgument` on oversize, exit 2 when the largest record cannot fit a datagram, any accepted record encodes into ≤ 65 507 bytes); received versions validated before any clock call and counted as their own class; invalid combinations (empty key, tombstone with data, bad checksum) discarded with own counters; the read loop exits only on `net.ErrClosed` — a node never keeps saying `Hello` while deaf
   4. Socket reality is visible and misuse is loud: startup logs actual `SO_RCVBUF`/`SO_SNDBUF` and fails if the send buffer cannot hold a maximal datagram; 1, 20 and 60 KiB values deliver on Linux (darwin ~9 KiB limit documented, not fixed); a non-wildcard `--bind-addr` warns or is rejected; a second instance fails with "address already in use"; a silent node WARNs after `peer_timeout`
   5. The seams later phases build on exist: a cheap key→version view with tombstone visibility instead of store copies (also making `DataRequest`/sync-chunk handling independent of foreign records); "record acknowledged by peer X" traveling as an `Outbox` result to waiters (removing snapshot diffing and the 5 ms polling); a bounded, deduplicated sync-answer queue (1000 missing keys twice → 1000 answers, not 2000); dead code (`lastLocal`/`cover`, exported `persist.Parse`, `ownHandle`, `fsync_darwin.go`) gone or justified
-**Plans**: 12/13 plans executed (planned; 03-12 halted on its flip gate)
+**Plans**: 13/13 plans complete
 
 Plans:
 **Wave 1**
@@ -147,8 +147,8 @@ Plans:
 **Wave 10** *(blocked on 03-11)*
 - [x] 03-12-PLAN.md — New metric families + discard classes; red-runner per-mutant source and re-pointed tombstone mutant; executed 2026-11-22 — HALTED on the flip: R-02 drain green, R-01/R-02 burst red (see 03-12-SUMMARY.md) (XPORT-01..13 gate)
 
-**Wave 11** *(blocked on 03-12; 03-13 remains blocked until the 03-12 halt is resolved)*
-- [ ] 03-13-PLAN.md — Scheduled 20× R-01 evidence job, measured race-soak WR-06, full phase gate (XPORT-01/02/05/08/09)
+**Wave 11** *(blocked on 03-12; halt resolved 2026-11-22)*
+- [x] 03-13-PLAN.md — Scheduled 20× R-01 evidence job, measured race-soak WR-06, full phase gate (XPORT-01/02/05/08/09)
 
 ### Phase 4: Protocol
 **Goal**: The replication protocol implements the Spec's reconciliation semantics — a joining or restarting node's interface stays closed until it has the complete picture, and every peer interaction (stale records, new peers, duplicate identities, version mismatch) has defined, tested behavior.
@@ -230,14 +230,14 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 |-------|-----------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
 | 2. Engine — HLC Versioning and LWW Store | v1.0 | 17/17 | Complete    | 2026-11-21 |
-| 3. Persistence — Dump and Write Confirmation | v1.0 | 6/13 | In Progress |  |
+| 3. Persistence — Dump and Write Confirmation | v1.0 | 2/2 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 6/6 | Complete | 2026-11-07 |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete | 2026-11-16 |
 | 7. v1.0 — Docs, Examples and Release | v1.0 | 5/5 | Complete | 2026-11-18 |
-| 1. Spec Reference and Decisions | v1.1 | 0/? | Not started | - |
-| 2. Stand and Simulator as Tests | v1.1 | 0/? | Not started | - |
-| 3. Transport | v1.1 | 12/13 | In Progress (03-12 halted) | - |
+| 1. Spec Reference and Decisions | v1.1 | 4/4 | Complete | 2026-11-19 |
+| 2. Stand and Simulator as Tests | v1.1 | 17/17 | Complete | 2026-11-21 |
+| 3. Transport | v1.1 | 13/13 | Complete | 2026-11-22 |
 | 4. Protocol | v1.1 | 0/? | Not started | - |
 | 5. Persistence | v1.1 | 0/? | Not started | - |
 | 6. API and Semantics | v1.1 | 0/? | Not started | - |

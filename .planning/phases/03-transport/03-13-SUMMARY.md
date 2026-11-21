@@ -156,6 +156,8 @@ The red-runner's green set is R-01, R-02 drain and R-02 burst; R-03's two rows a
 **Modified**
 - `.github/workflows/scheduled.yml` — job-inventory comment line; the `red-r01-x20` job (timeouts, env, pinned actions, the exact 20x command, the `always()` evidence step).
 - `Makefile` — `./internal/stand/` appended to `race-soak`; the measured-cost/projection comment (6.53 s single run, ~2.2 min stand at COUNT=20, 81 s / ~27 min whole target, why reds do not inflate it).
+- `.planning/WINDOWS.md` — entry 12 (the 03-12 halt) marked fixed with the resolution evidence; counts re-balanced to 6 open / 5 fixed / 1 waived.
+- `.planning/STATE.md`, `.planning/ROADMAP.md`, `.planning/REQUIREMENTS.md` — close-out records (plan 13/13, phase complete, XPORT-01/02 complete).
 
 **Created**
 - `.planning/phases/02-stand-and-simulator-as-tests/red-evidence/20261121T225950Z/` — the gate run's `go-test.json` + `summary.txt` (7/7 OK, mutation stage green).
@@ -180,14 +182,23 @@ The red-runner's green set is R-01, R-02 drain and R-02 burst; R-03's two rows a
 - **Verification:** `git status --porcelain` empty after the commit; the `225048Z` summary still shows 7/7 OK and the mutant kills.
 - **Committed in:** `d368add`
 
+**2. [Rule 1 - Bug] Repaired cross-milestone corruption in the ROADMAP progress table**
+- **Found during:** the close-out ROADMAP update (`gsd_run` is unavailable in this executor shell, so the table was edited directly — the fallback is itself recorded here)
+- **Issue:** the progress-table updater matches rows by phase number, and the table carries both v1.0 and v1.1 phases numbered 1-7. Successive 03-xx close-outs had therefore been rewriting the **v1.0** "3. Persistence" row (it read `6/13 | In Progress`) while the v1.1 Phase 3 row lagged at `12/13 | In Progress (03-12 halted)`; the v1.1 Phase 1/2 rows still read `0/? | Not started` although both phases are complete.
+- **Fix:** restored v1.0 Phase 3 to its recorded `2/2 | Complete | 2026-11-03`; set v1.1 Phase 1 `4/4`, Phase 2 `17/17`, Phase 3 `13/13`, all Complete with their dates. No plan count was invented — 4 + 17 + 13 = 34 matches STATE's `total_plans`/`completed_plans`.
+- **Files modified:** `.planning/ROADMAP.md`
+- **Verification:** the phase checklist, the Phase-3 "Plans" line and the table now agree (13/13, completed 2026-11-22); the v1.0 row matches the earlier recorded value.
+- **Committed in:** the close-out metadata commit
+
 ### Plan-scope notes
 
 - Task 2's commit is evidence-only: the gate executes commands rather than editing code, so its durable product is the recorded run (mirroring 01-04's zero-change gate precedent, which committed nothing because no evidence artifact was produced).
+- **`gsd_run` unavailable:** the executor shell had no `gsd_run`, so the plan ledger was read from `.git/gsd-plan-head-before-03-13` and STATE/ROADMAP/REQUIREMENTS/WINDOWS were edited directly. The measured commit count is `git rev-list --count 22f8caa..8960b45` = 3, and the ledger's JSON/table were checked for internal consistency (6 open / 5 fixed / 1 waived over 12 entries).
 
 ---
 
-**Total deviations:** 1 auto-fixed (Rule 3)
-**Impact on plan:** none on scope — the fix made the plan's own clean-tree criterion meaningful; no production file, bound, row or test was touched.
+**Total deviations:** 2 auto-fixed (Rule 3 evidence commit, Rule 1 roadmap table repair)
+**Impact on plan:** none on scope — both fixes make the plan's own clean-tree criterion and the roadmap record honest; no production file, bound, row or test was touched.
 
 ## Issues Encountered
 
