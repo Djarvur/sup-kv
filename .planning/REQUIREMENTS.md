@@ -28,7 +28,7 @@
   - Acceptance: in Linux CI a skipped socket test is an error; the macOS cell either runs at least one two-node test or the docs state darwin replication is untested; the test binary is built with `-race`
 - [ ] **TEST-06**: Simulator blind spots are closed (T-06)
   - Acceptance: simulator gains per-node incoming-datagram budget, size checks by the real encoder, record announcement after a virtual dump delay, restart with state, deletions; nightly real-socket run at 10 000 keys × 1 KiB scale with the review's section-15 scenarios
-- [ ] **TEST-07**: `persist.Open` clock seeding is proven for the real composition path (T-07)
+- [x] **TEST-07**: `persist.Open` clock seeding is proven for the real composition path (T-07)
   - Acceptance: `Open` with injected time earlier than the dump max — the first local write dominates all loaded versions
 - [ ] **TEST-08**: Datagram decoder has negative tests and fuzzing (T-08)
   - Acceptance: table of corrupted datagrams with the expected discard class; `FuzzDecode` and `FuzzDumpDecode` with an in-repo corpus run on a schedule
@@ -216,7 +216,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-04 | Phase 2 | Pending |
 | TEST-05 | Phase 2 | Complete |
 | TEST-06 | Phase 2 | Pending |
-| TEST-07 | Phase 2 | Pending |
+| TEST-07 | Phase 2 | Complete |
 | TEST-08 | Phase 2 | Pending |
 | TEST-09 | Phase 2 | Pending |
 | TEST-10 | Phase 2 | Complete |
