@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 3
 current_phase_name: Transport
 status: executing
-stopped_at: Completed 03-10-PLAN.md
-last_updated: "2026-11-21T21:38:23.000Z"
+stopped_at: Completed 03-11-PLAN.md
+last_updated: "2026-11-21T22:05:57.000Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 3 plan 10 complete — read loop and socket policy
-state_head: 6d7d703a832a347955521799ef1121f06490543c
+last_activity_desc: Phase 3 plan 11 complete — dead-code removal
+state_head: 14c0cc6f740f0fd3671b25855cb54e54626227d5
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 34
-  completed_plans: 31
+  completed_plans: 32
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 3 (Transport) — EXECUTING
-Plan: 11 of 13
+Plan: 12 of 13
 Status: Ready to execute
-Last activity: 2026-11-22 — Completed 03-10 (read loop and socket policy)
+Last activity: 2026-11-22 — Completed 03-11 (dead-code removal)
 
-Progress: [█████████░] 91%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -85,6 +85,7 @@ Progress: [█████████░] 91%
 | Phase 03 P08 | 21min | 3 tasks | 11 files |
 | Phase 03 P09 | 602s | 3 tasks | 9 files |
 | Phase 03 P10 | 925s | 3 tasks | 8 files |
+| Phase 03 P11 | 649s | 2 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -207,6 +208,11 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-10: The read loop exits only on `net.ErrClosed`; every other receive error increments `Adapter.ReadErrors`, logs at most once per second and sleeps the 100 ms backoff. The fake-`packetConn` test pins continuation (datagram processed, one backoff observed) and the no-spin bound, so 03-12 can publish the counter as-is.
 - [Phase 03]: 03-10: The `packetConn` seam carries `LocalAddr` because construction derives the core's own handle from the bound address (D-03) and the white-box test reads it; production binds set no `SO_REUSEADDR` (`WithAddressReuse` is test-only), and both sockets of a shared port must opt in — Linux only grants the double-bind when every socket set the option.
 - [Phase 03]: 03-10: The no-Hello WARN counts from the first `Advance` (not construction) and latches for the process lifetime; `helloSeen` ignores the node's own broadcast echo, so a lone node that hears only itself still warns. The non-wildcard bind WARN is emitted in `main` between `setupLogging` and `wire`, never a rejection.
+- [Phase 03]: 03-11: Dump confirmation is proven by lock/capture order, not a watermark — `await` appends after the store write under the engine mutex, and `runDump` captures the waiter list before `Encode(e.store.Records())`, so every captured waiter's record is in the saved snapshot; the proof is documented in all three sites.
+- [Phase 03]: 03-11: `waiter.ver` and `await`'s version parameter were deleted with the cover branch (nothing read them); the write paths call `e.await()` and `confirmWaiters` keeps a blank `(*Engine)` receiver to satisfy revive's unused-receiver check.
+- [Phase 03]: 03-11: `persist.Parse` was literally `Decode`'s error channel, so the codec table's Parse/Decode columns were merged into one `Decode` assertion per row — no expectation lost; `Open` already carried its own Decode closure.
+- [Phase 03]: 03-11: `fsops` now calls `os.File.Sync` directly; the darwin F_FULLFSYNC/EINTR/ENOTSUP path is the standard library's internal/poll `Fsync`, and S-PERS-03 records that as-built path. ADR 0010 was checked and left untouched (no fsync reference).
+- [Phase 03]: 03-11: The ownHandle inventory was file-counted, not call-counted — five listed files construct through `udprepl.New` and needed no edit, while `internal/app/repl/egress_internal_test.go`'s unqualified `New(...)` was found by `go vet`. Realized footprint: 16 modified + 3 deleted = 19 files.
 
 ### Pending Todos
 
@@ -227,7 +233,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T21:38:23.000Z
-Stopped at: Completed 03-10-PLAN.md
+Last session: 2026-11-21T22:05:57.000Z
+Stopped at: Completed 03-11-PLAN.md
 Resume file: None
-Next action: `/gsd:plan-phase 1`
+Next action: `/gsd:execute-phase 3` (03-12-PLAN.md)

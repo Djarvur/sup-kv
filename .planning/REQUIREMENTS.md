@@ -72,7 +72,7 @@
   - Acceptance: empty key, tombstone with data, unverified `Checksum` discarded with their own counters; envelope CRC coverage defined in docs
 - [ ] **XPORT-11**: The store exposes a key→version view and point reads with tombstone visibility (Q-01; backs R-09, P-06, A-02)
 - [x] **XPORT-12**: "Record acknowledged by peer X" travels as an `Outbox` result to the adapter and to waiters (Q-02; removes snapshot diffing and the 5 ms polling in `wait.go`, feeds A-01)
-- [ ] **XPORT-13**: Dead code is removed (Q-09)
+- [x] **XPORT-13**: Dead code is removed (Q-09)
   - Acceptance: `lastLocal`/`cover` branch, exported `persist.Parse`, `ownHandle` field and `fsync_darwin.go` are gone or justified
 
 ### Protocol
@@ -238,7 +238,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | XPORT-10 | Phase 3 | Pending |
 | XPORT-11 | Phase 3 | Pending |
 | XPORT-12 | Phase 3 | Complete |
-| XPORT-13 | Phase 3 | Pending |
+| XPORT-13 | Phase 3 | Complete |
 | PROTO-01 | Phase 4 | Pending |
 | PROTO-02 | Phase 4 | Pending |
 | PROTO-03 | Phase 4 | Pending |
