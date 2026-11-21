@@ -41,13 +41,13 @@ TABLE="$ROOT/scripts/red-expectations.tsv"
 EVIDENCE_ROOT="$ROOT/.planning/phases/02-stand-and-simulator-as-tests/red-evidence"
 
 # Packages that contain red tests. Extend as later plans land more red
-# tests (02-02 adds ./internal/stand/ with R-01/R-02; the P-01 red tests
-# add ./internal/persistfile/ and ./internal/app/persist/).
+# tests (02-05 added ./internal/stand/ with R-01/R-02/R-03; 02-12 adds
+# ./internal/persistfile/ with the P-01 engine test). The table carries no
+# package column, so the list stays here with this comment.
 PACKAGES=(
 	./internal/grpcapi/
-	# ./internal/stand/
-	# ./internal/persistfile/
-	# ./internal/app/persist/
+	./internal/stand/
+	./internal/persistfile/
 )
 
 if [ ! -f "$TABLE" ]; then
@@ -66,10 +66,15 @@ JSON_OUT="$TMP/go-test.json"
 GO_TEST_ERR="$TMP/go-test.stderr"
 SUMMARY_OUT="$TMP/summary.txt"
 
-echo "red-runner: SUPKV_RED_TESTS=1 go test -race -count=1 -json ${PACKAGES[*]}"
+echo "red-runner: SUPKV_RED_TESTS=1 go test -p 1 -race -count=1 -json ${PACKAGES[*]}"
 # The red run's own exit code is NOT trusted (D-01): red tests are expected
 # to fail, so nonzero is normal. The expectation check below decides.
-go test -race -count=1 -json "${PACKAGES[@]}" >"$JSON_OUT" 2>"$GO_TEST_ERR" || true
+#
+# -p 1 serializes the packages: the stand red scenarios assert wall-clock
+# pacing and throughput bounds and must own the machine (stand_red_test.go's
+# file doc) — a sibling package's race-instrumented build and test load
+# would corrupt the measurement the red verdict reads.
+go test -p 1 -race -count=1 -json "${PACKAGES[@]}" >"$JSON_OUT" 2>"$GO_TEST_ERR" || true
 if [ -s "$GO_TEST_ERR" ]; then
 	echo "red-runner: go test stderr (diagnostic):" >&2
 	cat "$GO_TEST_ERR" >&2
