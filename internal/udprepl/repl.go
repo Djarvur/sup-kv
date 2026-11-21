@@ -4,11 +4,14 @@
 // any body decode, owns the socket, and feeds the pure core
 // (internal/app/repl) from one event-loop goroutine (D-04) — mirroring
 // persistfile's adapter role. It owns no protocol decision: discards,
-// the peer table and every timer live in the core. Same-host caveat: two
-// nodes sharing one UDP port with SO_REUSEADDR receive each other's
-// broadcasts, but unicast to the shared port is delivered to exactly one
-// socket, the kernel's choice — the real-socket smoke test (plan 04-06)
-// therefore asserts only broadcast-delivered behavior.
+// the peer table and every timer live in the core. Production binds never
+// set SO_REUSEADDR, so a second process on the node's address fails with
+// EADDRINUSE instead of silently splitting unicast traffic (XPORT-09); only
+// the explicit test-only [WithAddressReuse] option restores same-host port
+// sharing. Same-host caveat under that option: two nodes sharing one UDP
+// port receive each other's broadcasts, but unicast to the shared port is
+// delivered to exactly one socket, the kernel's choice — the real-socket
+// smoke test therefore asserts only broadcast-delivered behavior.
 package udprepl
 
 import (
@@ -77,6 +80,18 @@ const (
 	// wedged loop eventually fills the queue and blocks authors, a
 	// bounded backpressure that never silently drops a write.
 	notifyQueue = 1024
+
+	// readErrorBackoff is the pause after a non-terminal receive error
+	// (XPORT-08): a persistent kernel error must never turn the read loop
+	// into a busy spin — the counter and the WARN are the signals, and the
+	// loop keeps reading the next datagram after the pause.
+	readErrorBackoff = 100 * time.Millisecond
+
+	// readErrorLogInterval is the read-error rate limit: at most one log
+	// line per interval keeps a flood of receive errors from flooding the
+	// log (T-3-36) while the counter carries the reliable signal. Adapter
+	// side, so the wall clock is the sanctioned time source here.
+	readErrorLogInterval = time.Second
 )
 
 // errNoStandaloneBody rejects a port message that has no datagram body of
@@ -171,6 +186,46 @@ func insertPeer(peers []uint16, id uint16) []uint16 {
 	return slices.Insert(peers, pos, id)
 }
 
+// packetConn is the adapter's socket seam: the datagram operations the
+// replication adapter uses, exactly as *net.UDPConn provides them. The
+// interface exists so the receive path can be driven by a fake in the
+// white-box read-loop test (XPORT-08) — a non-closed read error must be
+// provably survivable, and no real socket produces one on demand. LocalAddr
+// joins the read/write/buffer/raw/close set because construction derives the
+// core's own opaque handle from it (D-03).
+type packetConn interface {
+	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
+	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
+	SetReadBuffer(bytes int) error
+	SetWriteBuffer(bytes int) error
+	SyscallConn() (syscall.RawConn, error)
+	LocalAddr() net.Addr
+	Close() error
+}
+
+// options is the resolved construction option set — the values [New]
+// threads into its socket construction.
+type options struct {
+	// addressReuse requests SO_REUSEADDR before bind. Test-only: production
+	// never sets it (XPORT-09, T-3-34).
+	addressReuse bool
+}
+
+// Option adjusts one aspect of [New]'s socket construction. The only
+// production-relevant shape is the default: no options at all.
+type Option func(*options)
+
+// WithAddressReuse makes [New] set SO_REUSEADDR before bind, restoring the
+// same-host shared-port topology the real-socket smoke test needs. It is
+// explicitly test-only: in production a second process binding the node's
+// address must fail with EADDRINUSE rather than silently split unicast
+// traffic between two sockets the kernel chooses between (XPORT-09).
+func WithAddressReuse() Option {
+	return func(o *options) {
+		o.addressReuse = true
+	}
+}
+
 // Adapter is the UDP replication adapter for one node: it owns the bound
 // socket and drives one repl.Core. Exactly one goroutine — the caller's
 // Run — mutates core state (D-04); the read goroutine only queues inbound
@@ -180,7 +235,7 @@ func insertPeer(peers []uint16, id uint16) []uint16 {
 // mutex- or atomic-guarded so cross-goroutine readers never touch core
 // state.
 type Adapter struct {
-	conn          *net.UDPConn
+	conn          packetConn
 	broadcastAddr *net.UDPAddr
 	nodeID        uint16
 	runID         [16]byte
@@ -209,6 +264,19 @@ type Adapter struct {
 	badChecksum     atomic.Uint64
 	badVersion      atomic.Uint64
 	peerCount       atomic.Uint64
+
+	// readErrors counts every receive-path error the read loop survived
+	// (XPORT-08, T-3-33): the reliable deafness signal — an error that ends
+	// the loop would let Hello broadcasts continue while nothing is read.
+	// ReadErrors is the cross-goroutine read seam.
+	readErrors atomic.Uint64
+
+	// readErrMu guards readErrLogAt, the read-error rate limiter's last-log
+	// wall clock (readErrorLogInterval). Read-goroutine-only mutation, but
+	// the mutex keeps the field race-free if a second readLoop were ever
+	// launched.
+	readErrMu    sync.Mutex
+	readErrLogAt time.Time
 
 	// The OBS-01 mirror set: the pending-set gauge (unacked count and
 	// oldest age), the remote-merge counters and the retransmissions
@@ -247,9 +315,11 @@ type Adapter struct {
 // it. bindAddr is the local bind address (for example "0.0.0.0:7900") and
 // broadcastAddr the segment broadcast address datagrams are sent to (for
 // example "127.255.255.255:7900"); the core's own opaque handle (D-03) is
-// taken from the bound socket's local address. The socket is created with
-// SO_REUSEADDR and SO_BROADCAST set before bind (RESEARCH Pattern 3):
-// same-host nodes share the port and broadcast sends are permitted.
+// taken from the bound socket's local address. Production binds set no
+// address-reuse option at all (XPORT-09, T-3-34): a second process binding
+// the same address fails with EADDRINUSE instead of silently splitting
+// traffic. SO_BROADCAST needs no call — Go sets it on every datagram socket
+// (RESEARCH Pattern 7). The only option, [WithAddressReuse], is test-only.
 //
 // After the bind the socket's SO_RCVBUF/SO_SNDBUF are configured and read
 // back: the values [Adapter.SocketBuffers] reports are the kernel's
@@ -262,17 +332,22 @@ type Adapter struct {
 // A nil cfg.OnDiscard is replaced by the adapter's own slog bridge
 // (logDiscard, D-08): production discards surface as distinguishable
 // structured events with no wiring at the call site.
-func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, cfg repl.Config) (*Adapter, error) {
+func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, cfg repl.Config, opts ...Option) (*Adapter, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if cfg.OnDiscard == nil {
 		cfg.OnDiscard = logDiscard
 	}
-	packetConn, err := reuseAddrBroadcastListenPacket(bindAddr)
+	bound, err := listenDatagram(bindAddr, o.addressReuse)
 	if err != nil {
 		return nil, fmt.Errorf("udprepl: bind udp4 %s: %w", bindAddr, err)
 	}
+	conn := bound
 	broadcast, err := net.ResolveUDPAddr("udp4", broadcastAddr)
 	if err != nil {
-		_ = packetConn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("udprepl: resolve broadcast %s: %w", broadcastAddr, err)
 	}
 	logFn := cfg.Log
@@ -280,7 +355,6 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 		logFn = func(_ string) {}
 	}
 	runID := repl.NewRunID()
-	conn := packetConn.(*net.UDPConn)
 	recvBuf, sendBuf, err := configureSocketBuffers(conn)
 	if err != nil {
 		_ = conn.Close()
@@ -321,20 +395,20 @@ func logDiscard(class, detail string) {
 	slog.Debug("Discarded datagram", "class", class, "detail", detail)
 }
 
-// reuseAddrBroadcastListenPacket binds the udp4 socket with SO_REUSEADDR
-// and SO_BROADCAST set before bind (RESEARCH Pattern 3, probe-verified):
-// the only combination that lets same-host nodes share the port while
-// still receiving broadcasts and permitting broadcast sends.
-func reuseAddrBroadcastListenPacket(bindAddr string) (net.PacketConn, error) {
-	var opErr error
-	lc := net.ListenConfig{
-		Control: func(_, _ string, c syscall.RawConn) error {
+// listenDatagram binds the udp4 socket. Only when reuse is true does it set
+// SO_REUSEADDR through a pre-bind Control hook; production passes false, so
+// a second process binding the same address fails with EADDRINUSE and can
+// never silently split the node's unicast traffic between two sockets
+// (XPORT-09, T-3-34). SO_BROADCAST is deliberately absent: Go sets it on
+// every datagram socket (RESEARCH Pattern 7), and setting it here would only
+// disguise that the reuse option is the sole socket-option concern.
+func listenDatagram(bindAddr string, reuse bool) (*net.UDPConn, error) {
+	var lc net.ListenConfig
+	if reuse {
+		var opErr error
+		lc.Control = func(_, _ string, c syscall.RawConn) error {
 			err := c.Control(func(fd uintptr) {
 				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-				if opErr != nil {
-					return
-				}
-				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
 			})
 			if err != nil {
 				return fmt.Errorf("socket control: %w", err)
@@ -343,9 +417,18 @@ func reuseAddrBroadcastListenPacket(bindAddr string) (net.PacketConn, error) {
 				return fmt.Errorf("socket options: %w", opErr)
 			}
 			return nil
-		},
+		}
 	}
-	return lc.ListenPacket(context.Background(), "udp4", bindAddr)
+	packetConn, err := lc.ListenPacket(context.Background(), "udp4", bindAddr)
+	if err != nil {
+		return nil, err
+	}
+	conn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		_ = packetConn.Close()
+		return nil, fmt.Errorf("udp4 listen returned %T, want *net.UDPConn", packetConn)
+	}
+	return conn, nil
 }
 
 // configureSocketBuffers applies the adapter's requested SO_RCVBUF/SO_SNDBUF
@@ -750,16 +833,52 @@ func (a *Adapter) SyncArrived() bool {
 	return a.syncArrived.Load()
 }
 
+// ReadErrors returns the number of receive-path errors the read loop has
+// survived (XPORT-08, T-3-33) — the reliable deafness signal, safe from any
+// goroutine. A non-zero, growing value means the socket is delivering
+// errors; the loop keeps running and the node stays honest about it.
+func (a *Adapter) ReadErrors() uint64 {
+	return a.readErrors.Load()
+}
+
+// newAdapterWithConn returns the bare adapter the receive-path white-box
+// tests drive: the socket seam, the log sink and the read loop's two
+// channels, with no core and no socket configuration. Production
+// construction is [New]; this constructor exists only so a fake [packetConn]
+// can prove a non-closed read error is survivable (XPORT-08).
+func newAdapterWithConn(conn packetConn) *Adapter {
+	return &Adapter{
+		conn:    conn,
+		log:     func(_ string) {},
+		inbound: make(chan inboundEvent, inboundQueue),
+		done:    make(chan struct{}),
+	}
+}
+
 // readLoop is the one read goroutine feeding the event loop's inbound queue
 // (D-04): it owns the socket's single 65 507-byte receive buffer for the
 // socket's lifetime and defensively copies every read's bytes before
 // handing them over, because the buffer is reused on the next read.
+//
+// XPORT-08's contract is the error branch: ONLY a read error matching
+// [net.ErrClosed] exits — the socket closed, which is Run's own exit path.
+// Every other error is counted, logged at most once per
+// [readErrorLogInterval], paused for [readErrorBackoff] so a persistent
+// kernel error cannot spin, and the loop reads the next datagram. A dead
+// receive path while Hello broadcasts continue would be a silently deaf
+// node; the counter and the log are what make that state visible instead.
 func (a *Adapter) readLoop() {
 	buf := make([]byte, datagramBufSize)
 	for {
 		n, src, err := a.conn.ReadFromUDP(buf)
 		if err != nil {
-			return // the socket closed — Run's exit path.
+			if errors.Is(err, net.ErrClosed) {
+				return // the socket closed — Run's exit path, the only exit.
+			}
+			a.readErrors.Add(1)
+			a.logReadError(err)
+			time.Sleep(readErrorBackoff)
+			continue
 		}
 		ev := inboundEvent{datagram: bytes.Clone(buf[:n]), source: src.String()}
 		select {
@@ -768,6 +887,21 @@ func (a *Adapter) readLoop() {
 			return
 		}
 	}
+}
+
+// logReadError surfaces one survived receive error, rate-limited to at most
+// one line per [readErrorLogInterval] so an error flood cannot flood the log
+// (T-3-36). The wall clock is the sanctioned time source on the adapter
+// side; the core's event-time discipline does not apply to this goroutine.
+func (a *Adapter) logReadError(err error) {
+	a.readErrMu.Lock()
+	defer a.readErrMu.Unlock()
+	now := time.Now()
+	if !a.readErrLogAt.IsZero() && now.Sub(a.readErrLogAt) < readErrorLogInterval {
+		return
+	}
+	a.readErrLogAt = now
+	a.log(fmt.Sprintf("udprepl: receive error (read loop continues): %v", err))
 }
 
 // flush encodes and sends every outbound message the core emitted for the
