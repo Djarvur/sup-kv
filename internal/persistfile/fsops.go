@@ -16,6 +16,14 @@ import "os"
 // implementation value: FileStore's store mutex serializes Save against
 // CreateSnapshot and against concurrent Saves, so one implementation value
 // is never mid-save twice.
+//
+// The platform durability detail deliberately lives in the standard
+// library, not here: [os.File.Sync] on darwin goes through internal/poll's
+// darwin Fsync, which issues F_FULLFSYNC with EINTR retry and an ENOTSUP
+// fallback to plain fsync — a strict superset of the [syscall.Fsync] path a
+// hand-rolled helper would reach. The seam therefore calls [os.File.Sync]
+// directly and carries no platform file of its own (REVIEW ENG-18, P-09;
+// Phase 5's P-09 absorbs the remaining orphan-temp/parent-dir work).
 type fsops interface {
 	// write creates the temp file in dir and writes data into it — TEST-03
 	// order step 1, the open-temp-and-write half (the same os.CreateTemp
@@ -27,9 +35,9 @@ type fsops interface {
 
 	// fsync durably syncs the held temp handle and closes it — TEST-03
 	// order step 2, the data-is-durable-before-any-rename half, through
-	// syncDurable (F_FULLFSYNC on darwin, File.Sync everywhere else). On
-	// failure — a failed Sync or a failed Close — the implementation closes
-	// the handle and removes the temp.
+	// [os.File.Sync] (the standard library's darwin path issues F_FULLFSYNC
+	// with EINTR/ENOTSUP handling). On failure — a failed Sync or a failed
+	// Close — the implementation closes the handle and removes the temp.
 	fsync() error
 
 	// rotate moves the current main generation to prev — TEST-03 order
@@ -56,11 +64,11 @@ type fsops interface {
 
 // fileFSOps is the default fsops implementation — the exact real operations
 // the save path performed before the extraction (threat T-2-07): CreateTemp
-// in dir, Write, syncDurable, the rotate rename guarded by targetExists,
-// the replace rename, and the directory fsync. A swapped or shortened
-// default fails the existing dumpfile suite and the TEST-03 order test.
-// The temp handle and path are the per-save state; FileStore serializes its
-// saves, so the shared value is safe.
+// in dir, Write, [os.File.Sync], the rotate rename guarded by targetExists,
+// the replace rename, and the directory fsync. A swapped or shortened default
+// fails the existing dumpfile suite and the TEST-03 order test. The temp
+// handle and path are the per-save state; FileStore serializes its saves,
+// so the shared value is safe.
 type fileFSOps struct {
 	tmp     *os.File // the open temp handle write holds for fsync
 	tmpName string   // the temp path, for rename and the failure hygiene
@@ -88,13 +96,13 @@ func (o *fileFSOps) write(dir string, data []byte) error {
 	return nil
 }
 
-// fsync implements TEST-03 order step 2 (see fsops): syncDurable on the
+// fsync implements TEST-03 order step 2 (see fsops): [os.File.Sync] on the
 // held handle, then Close. Any failure closes the handle and removes the
 // temp — exactly the hygiene syncedTemp performed on its Sync/Close
 // failures before the extraction; on success the handle is consumed and
 // only the path survives, for rename.
 func (o *fileFSOps) fsync() error {
-	err := syncDurable(o.tmp)
+	err := o.tmp.Sync()
 	if err == nil {
 		err = o.tmp.Close()
 	}
@@ -138,8 +146,8 @@ func (o *fileFSOps) rename(main string) error {
 }
 
 // syncDir implements TEST-03 order step 5 (see fsops): the parent
-// directory's entry is fsynced through syncDurable, so the rename under it
-// becomes durable too; the file's own data was synced before the rename.
+// directory's entry is fsynced through [os.File.Sync], so the rename under
+// it becomes durable too; the file's own data was synced before the rename.
 // The failure path cleans nothing — the temp is already the main
 // generation.
 func (*fileFSOps) syncDir(dir string) error {
@@ -148,7 +156,7 @@ func (*fileFSOps) syncDir(dir string) error {
 		return err
 	}
 	defer func() { _ = d.Close() }()
-	return syncDurable(d)
+	return d.Sync()
 }
 
 // closeRemoveTemp is the failure hygiene of the temp-holding steps (write,

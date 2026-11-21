@@ -119,7 +119,7 @@ func New(store *storage.Store, dumps port.DumpStore, cfg Config) *Engine {
 // argument: the generation Load accepts is exactly the one whose Decode
 // succeeded, so Open holds no Decode-error fallback at all — the former
 // guard after Load was dead code for every contract-honoring DumpStore
-// (Parse is Decode's own error channel over the same bytes, codec.go) and
+// (Decode is the readability oracle over the same bytes, codec.go) and
 // is gone (03 IN-01, D-15).
 func Open(
 	nodeID uint16,
@@ -342,7 +342,7 @@ func (e *Engine) DumpStats() DumpStats {
 // containment, never elapsed time (PERS-04, RESEARCH Pitfall 15). A write
 // that loses the race to the capture is not in captured; it stays
 // registered and the next dump — or Run's exit sweep — resolves it.
-func (e *Engine) confirmWaiters(captured []*waiter) {
+func (*Engine) confirmWaiters(captured []*waiter) {
 	for _, w := range captured {
 		w.err = nil
 	}

@@ -156,7 +156,7 @@ line numbers in the Spec edition the review audited.
 |---|---|---|---|
 | S-PERS-01 | The dump is a JSON Lines file — one format-version line, then one record per line with hex versions; the amendment rewrote the dump-format requirement to match | superseded-by-amendment | `internal/app/persist/codec.go:39-85`; REVIEW §13 |
 | S-PERS-02 | Dump files are readable by a human in a standard editor | implemented | `internal/app/persist/codec.go:62-85` (files 0600, directories 0700) |
-| S-PERS-03 | Dumps write atomically — temp file, fsync, rename — keeping the previous generation as .prev | implemented | `internal/persistfile/dumpfile.go:97-157` (also fsyncs the parent directory; F_FULLFSYNC on darwin) |
+| S-PERS-03 | Dumps write atomically — temp file, fsync, rename — keeping the previous generation as .prev | implemented | `internal/persistfile/fsops.go:85-163` (also fsyncs the parent directory; the darwin F_FULLFSYNC durability path, with EINTR retry and ENOTSUP fallback, is the standard library's `os.File.Sync`) |
 | S-PERS-04 | Dump scheduling is a trailing quiet window plus a hard cap (dump_max_wait), not a minimal pause between dumps; the amendment adopted this policy | superseded-by-amendment | `internal/app/persist/engine.go:180-245`; REVIEW §13 (decision 14.3) |
 | S-PERS-05 | A client response only lands after a dump containing the record completed, so confirmed writes are always on disk | implemented | `internal/app/persist/engine.go:292-368`; `internal/persistfile/dumpfile.go:136-176` (exception with a raised value limit: see S-PAR-05) |
 | S-PERS-06 | Crash durability is promised only for dump-confirmed records; anything not yet dumped may vanish locally | implemented | — |

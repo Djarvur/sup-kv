@@ -150,16 +150,6 @@ func decodeRecord(line recordLine) (storage.Record, bool) {
 	}, true
 }
 
-// Parse is the readability oracle the engine hands Load: it accepts a
-// generation whose structure reads, reporting only generation-level faults.
-// A checksum-faulty record does NOT fail Parse — it discards silently in
-// Decode — so a torn record never collapses its whole generation
-// (Pitfall 7's class separation, D-02).
-func Parse(dump []byte) error {
-	_, _, err := Decode(dump)
-	return err
-}
-
 // Watermark returns the FULL dump watermark (VERS-04): the maximum l over
 // the records plus the maximum counter at that l — not max l alone — so a
 // post-restart clock seeded with it emits versions strictly dominating

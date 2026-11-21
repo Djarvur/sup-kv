@@ -305,11 +305,11 @@ func TestCodec_byteStability(t *testing.T) {
 
 // TestCodec_discardClasses proves the class separation of Pitfall 7 and the
 // hostile-input classes of Pitfall 8: checksum-faulty, malformed-version
-// and oversized records discard alone while their generation keeps loading,
-// Parse accepts a generation whose only fault is a bad record checksum, a
-// duplicate key is last-wins, an empty input is a generation-level fault,
-// and an unknown format_version makes the whole generation unreadable to
-// both Decode and Parse.
+// and oversized records discard alone while their generation keeps loading
+// (Decode's error stays nil for a generation whose only fault is a bad
+// record checksum), a duplicate key is last-wins, an empty input is a
+// generation-level fault, and an unknown format_version makes the whole
+// generation unreadable to Decode.
 func TestCodec_discardClasses(t *testing.T) {
 	t.Parallel()
 	victim := sealed("victim", storage.Record{Version: version.PackVersion(1002, 3, 1), Data: []byte("c-value")})
@@ -326,7 +326,6 @@ func TestCodec_discardClasses(t *testing.T) {
 		name          string
 		dump          []byte
 		wantDiscarded int
-		wantParseErr  bool
 		wantDecodeErr bool
 	}{
 		{
@@ -347,17 +346,12 @@ func TestCodec_discardClasses(t *testing.T) {
 		{
 			name:          "an unknown format_version is a generation-level fault",
 			dump:          []byte("{\"format_version\":999}\n"),
-			wantParseErr:  true,
 			wantDecodeErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := persist.Parse(tt.dump)
-			if (err != nil) != tt.wantParseErr {
-				t.Errorf("Parse() error = %v, want error=%t", err, tt.wantParseErr)
-			}
 			decoded, discarded, err := persist.Decode(tt.dump)
 			if (err != nil) != tt.wantDecodeErr {
 				t.Errorf("Decode() error = %v, want error=%t", err, tt.wantDecodeErr)
@@ -400,9 +394,9 @@ func TestCodec_discardClasses(t *testing.T) {
 	})
 	t.Run("an empty input is a generation-level fault, not a valid empty dump", func(t *testing.T) {
 		t.Parallel()
-		err := persist.Parse(nil)
+		_, _, err := persist.Decode(nil)
 		if err == nil {
-			t.Error("Parse(nil) = nil, want a generation-level error")
+			t.Error("Decode(nil) error = nil, want a generation-level error")
 		}
 	})
 	t.Run("a valid empty map encodes to a header-only dump that reloads empty", func(t *testing.T) {
@@ -499,26 +493,21 @@ func TestWatermark_equalCounterDomain(t *testing.T) {
 
 // TestCodec_truncatedGenerationUnreadable pins the generation-level fault
 // class for a torn tail (PERS-02, D-02): a dump truncated mid-record is
-// unreadable as a whole generation — Parse rejects it, so Load's fallback
-// chain advances to .prev instead of serving the torn bytes, and Decode
-// errors rather than silently returning the records that preceded the tear.
-// The intact generation stays the control.
+// unreadable as a whole generation — Decode rejects it, so Load's fallback
+// chain advances to .prev instead of serving the torn bytes — and the
+// intact generation stays the control.
 func TestCodec_truncatedGenerationUnreadable(t *testing.T) {
 	t.Parallel()
 	dump := encodeRecords(t, map[string]storage.Record{
 		"tail": sealed("tail", storage.Record{Version: version.PackVersion(1006, 6, 1), Data: []byte("tail-value")}),
 	})
 	torn := dump[:len(dump)-tornTailCut]
-	err := persist.Parse(torn)
-	if err == nil {
-		t.Error("Parse(torn) = nil, want a generation-level error")
-	}
-	_, _, err = persist.Decode(torn)
+	_, _, err := persist.Decode(torn)
 	if err == nil {
 		t.Error("Decode(torn) error = nil, want a generation-level error, not the records before the tear")
 	}
-	err = persist.Parse(dump)
+	_, _, err = persist.Decode(dump)
 	if err != nil {
-		t.Errorf("Parse(intact) error = %v, want nil", err)
+		t.Errorf("Decode(intact) error = %v, want nil", err)
 	}
 }
