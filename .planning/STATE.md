@@ -5,16 +5,16 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 2
 current_phase_name: Stand and Simulator as Tests
 status: executing
-stopped_at: Completed 02-07-PLAN.md
-last_updated: "2026-11-21T11:12:33.953Z"
+stopped_at: Completed 02-08-PLAN.md
+last_updated: "2026-11-21T11:36:22.420Z"
 last_activity: 2026-11-19
 last_activity_desc: Phase 2 execution started
-state_head: 56da2fc9b22262fa37e15d6607bfcfd93acd93dd
+state_head: 8e9dae81b747493a421f7e8edc95f709aeff8e8e
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 21
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 2 (Stand and Simulator as Tests) — EXECUTING
-Plan: 9 of 17
+Plan: 10 of 17
 Status: Ready to execute
 Last activity: 2026-11-19 — Phase 2 execution started
 
@@ -65,6 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P05 | 1044 | 2 tasks | 1 files |
 | Phase 02 P06 | 574 | 2 tasks | 2 files |
 | Phase 02 P07 | 350 | 2 tasks | 2 files |
+| Phase 02 P08 | 983s | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -110,6 +111,11 @@ Recent decisions affecting current work:
 - [Phase 02]: Wrong-proto_version is Decoded at decode() and BadProtoVersion at the core: the negative table asserts the codec verdict and the counter separately, pinning D-02's split
 - [Phase 02]: Empty-key, tombstone-with-data and oversize rows pin CURRENT behavior with explicit XPORT-10/XPORT-03 forward references (processed evidence = the apply Ack where no counter exists) and flip in Phase 3
 - [Phase 02]: DELETE-twice is codes.NotFound (the store no-op, no version burned) plus exactly one dump record line; node-down-during-delete bound derives from explicitly pinned flags, never production defaults
+- [Phase 02]: Watch Send-error branch pinned twice (02-08): fake server streams assert the handler returns the transport error unchanged from both Send sites (snapshot loop and relayEvent) while a real bufconn transport pins the cleanup/isolation contract — a real client cancel races the handler's ctx.Done branch, so a fake is the only deterministic Send failure
+- [Phase 02]: Conflict exactness rides ordered writes (02-08): B serves A's version before writing so its HLC has absorbed it and its write strictly dominates; both nodes run --sync-interval=10s so no stale proactive listing adds a rejected-older-version conflict on A
+- [Phase 02]: sync-response-rate effect needs a restarted seeded node (02-08): handleHello's discovery flush broadcasts the sender's pending records immediately and bypasses the egress limiter; a dump-loaded restart leaves pending empty, so the empty node's paced DataRequests are the only recovery path
+- [Phase 02]: Retransmit asserted as a named lower bound (02-08): >=1 plus a pre-kill baseline climb because cycle count depends on scheduler-dependent Ack timing on real sockets; conflict and discard are constructed single events and assert ==1
+- [Phase 02]: Per-parameter effects are named subtests (02-08): one per stand-observable parameter (startup-gate, hello-interval, sync-response-rate, value-max-bytes, peer-timeout), each with its own topology/surface; remaining flags map to existing unit/exec tests in the SUMMARY parameter table
 
 ### Pending Todos
 
@@ -130,7 +136,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-21T11:12:33.706Z
-Stopped at: Completed 02-07-PLAN.md
+Last session: 2026-11-21T11:36:22.293Z
+Stopped at: Completed 02-08-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 1`
