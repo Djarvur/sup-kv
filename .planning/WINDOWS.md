@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 7
 waived_count: 1
 fixed_count: 4
-total_count: 11
-last_updated: 2026-11-19T15:49:20.556Z
+total_count: 12
+last_updated: 2026-11-21T22:33:59.283Z
 ---
 
 # Broken Windows Ledger
@@ -26,6 +26,7 @@ last_updated: 2026-11-19T15:49:20.556Z
 | 9 | 07 | unrun-verify | .github/workflows/release.yml |  | 07-04 optional pre-tag gh workflow dispatch proof not run — workflow_dispatch requires release.yml on the default branch and gsd/v1.0-milestone is unmerged; 07-05 observes the real tag run post-merge | fixed |  | 2026-11-17T13:52:09.591Z | 2026-11-17T18:59:46.444Z |
 | 10 | 01 | deviation | .planning/phases/01-spec-reference-and-decisions/01-01-PLAN.md |  | Task 1 negative-verify awk /internal/ patterns false-positive on evidence/repro/**/internal/** payload; executor scoped gates to the non-public prefix docs/reviews/2026-11-19-v1.0/internal/ (Rule 1 fix, publication asserts all clean) | open |  | 2026-11-19T14:46:56.007Z |  |
 | 11 | 01 | deviation | .planning/phases/01-spec-reference-and-decisions/01-04-SUMMARY.md |  | Task 2 literal /internal/ tracked-path guard false-positives on 22 legitimate evidence/repro module paths; gate evaluated with the plan's own scoped prefix (docs/reviews/2026-11-19-v1.0/internal/) - wave-1 Rule 1 scoping re-affirmed at the phase gate (01-04-SUMMARY deviation 1) | open |  | 2026-11-19T15:49:20.556Z |  |
+| 12 | 3 | deviation | .planning/phases/03-transport/03-12-SUMMARY.md |  | 03-12 halted: R-01 (7453-7734/8000 keys at the 20.6s bound) and R-02 burst (979.6-985.7 vs 990 writes/s) stayed red on the power-save host; rows reverted per plan, 03-13 blocked until a full-speed red-runner re-run | open |  | 2026-11-21T22:33:59.283Z |  |
 
 ````json
 [
@@ -169,6 +170,19 @@ last_updated: 2026-11-19T15:49:20.556Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-11-19T15:49:20.556Z",
+    "resolved_at": null,
+    "milestone": "v1.1"
+  },
+  {
+    "id": 12,
+    "kind": "deviation",
+    "phase": "3",
+    "file": ".planning/phases/03-transport/03-12-SUMMARY.md",
+    "line": null,
+    "description": "03-12 halted: R-01 (7453-7734/8000 keys at the 20.6s bound) and R-02 burst (979.6-985.7 vs 990 writes/s) stayed red on the power-save host; rows reverted per plan, 03-13 blocked until a full-speed red-runner re-run",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-21T22:33:59.283Z",
     "resolved_at": null,
     "milestone": "v1.1"
   }
