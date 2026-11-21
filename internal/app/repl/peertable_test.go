@@ -213,10 +213,15 @@ func TestPeerTable_solePeer(t *testing.T) {
 		assertPending(t, core.PendingSnapshot(), keyAlpha, ver, nil)
 
 		// The peer returns: the Hello ends the empty table, so the same event
-		// flushes the entry, re-adds the waiter and restarts the ladder; the
-		// peer's Ack then drains the entry.
+		// enqueues the flush send, re-adds the waiter and restarts the ladder;
+		// the next Advance drains the queued send, and the peer's Ack then
+		// drains the entry.
 		backAt := at(peerTimeout + 2*time.Second)
 		core.HandleDatagram(backAt, helloFrom(peerID1), &out)
+		if got := len(out.Drain()); got != 0 {
+			t.Fatalf("the returning Hello emitted %d messages inside the handler, want 0 — it only enqueues", got)
+		}
+		core.Advance(backAt, &out)
 		if got := broadcastRepls(out.Drain()); len(got) != 1 || got[0].Key != keyAlpha || got[0].Record.Version != ver {
 			t.Fatalf("returning sole peer's Hello flushed %v, want exactly one DataReplication for (%s, %x)",
 				got, keyAlpha, ver[:])

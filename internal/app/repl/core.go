@@ -18,7 +18,9 @@ import (
 	"container/heap"
 	"container/list"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"slices"
 	"strings"
@@ -68,6 +70,17 @@ const (
 	// at every configuration, and the limiter is never silently off.
 	maxSyncResponseRate = 1e9
 
+	// broadcastDst is the listing queue's destination key for the periodic
+	// broadcast round; every other key is a peer's opaque address handle.
+	broadcastDst = ""
+
+	// Deterministic jitter salts: one per call site, so the three independent
+	// jitter streams never alias and a same-seed replay stays byte-identical
+	// (T-3-22).
+	helloJitterSalt   = 0x9e37_79b9_7f4a_7c15
+	syncJitterSalt    = 0xbf58_476d_1ce4_e5b9
+	spacingJitterSalt = 0x94d0_49bb_1331_11eb
+
 	// backoffGrowth is the retransmission ladder's doubling factor: each
 	// retry doubles the previous delay from ack_timeout up to the
 	// ack_timeout_max saturation cap (REPL-02, docs/IDEA.md §Parameters).
@@ -106,9 +119,11 @@ const (
 // reading of IDEA.md's parameter list, research A5); the per-key backoff
 // ladder itself doubles from AckTimeout and saturates at AckTimeoutMax —
 // documented with every step at Core.scanRetransmit. SyncResponseRate paces
-// the egress queue: responses are spaced floor(1s/SyncResponseRate)
-// nanoseconds apart by integer division (probe #16), the first response
-// immediate. Rates outside the domain (0, 1e9] clamp to the 500/s default —
+// the three outbound streams: the egress queue, the listing queue and the
+// record-send queue are each spaced floor(1s/SyncResponseRate)
+// nanoseconds apart by integer division (probe #16); the first response
+// after an idle queue is immediate. Rates outside the domain (0, 1e9] clamp
+// to the 500/s default —
 // above 1e9 the integer division truncates to a zero interval and would
 // silently disable the limiter (D-15 P4-WR-02, the maxSyncResponseRate cap).
 type Config struct {
@@ -250,23 +265,49 @@ type PeerInfo struct {
 }
 
 // peer is the core's internal peer-table row, keyed by NodeID (D-03).
+// rotation is the per-peer listing round counter: it rotates the start chunk
+// of every targeted (restart) listing toward this peer, so repeated rounds
+// cover the whole key space under buffer loss (D-01's targeted half). The
+// counter lives in the row across restarts, which keeps the rotation
+// advancing without any disk state.
 type peer struct {
 	handle    string
 	runID     [16]byte
 	lastHello time.Time
+	rotation  uint64
 }
 
-// queuedUnicast is one reactive unicast response waiting in the egress
-// queue (REPL-05's rate limiter): the destination's opaque address handle
-// (D-03) and the message. Exactly three producer sites exist — DataRequest
+// queuedUnicast is one reactive unicast response waiting in the egress queue
+// (REPL-05's rate limiter): the destination's opaque address handle (D-03)
+// and the message. Exactly three producer sites exist — DataRequest
 // emissions, DataRequest replies and DataSync-newer responses (the
 // egress-limiter scope pin) — and nothing else ever queues: proactive
-// traffic (Hello, retransmits, the timer/startup DataSync itself) bypasses
-// the limiter, which is what bounds an empty node's recovery instead of
-// letting it become a flood (T-04-07).
+// traffic (Hello, listings, retransmits) bypasses the limiter, which is what
+// bounds an empty node's recovery instead of letting it become a flood
+// (T-04-07).
 type queuedUnicast struct {
 	handle string
 	msg    port.Message
+}
+
+// listingFIFO is one destination's in-flight DataSync listing: the chunks not
+// yet emitted, in rotated order. Exactly one FIFO exists per destination
+// (broadcastDst for the periodic round, a peer handle for a restart listing),
+// so a trigger that arrives while a listing is in flight finds the map entry
+// and is dropped after nextSync advances — the queue holds at most one round
+// of chunks (T-3-23).
+type listingFIFO struct {
+	dst     string
+	entries [][]port.SyncEntry
+}
+
+// recordSend is one queued record emission: the tracked pair and whether the
+// send is a ladder retransmission (retry) or the discovery flush's first
+// send. The record itself is never retained — drainRecordSends re-reads it
+// through StateStore.Lookup at emission time (RESEARCH Pattern 2).
+type recordSend struct {
+	pk    pendingKey
+	retry bool
 }
 
 // pendingKey identifies one tracked local write in the pending set: the key
@@ -401,8 +442,38 @@ type Core struct {
 
 	// nextSync is the next sync-timer deadline; the zero time until the
 	// first Advance, whose startup trigger fires the initial full listing
-	// alongside the startup Hello (IDEA §Node lifecycle).
+	// alongside the startup Hello (IDEA §Node lifecycle). Each firing arms
+	// now + SyncInterval + a positive-only deterministic jitter, so the
+	// deadline never fires before the configured interval.
 	nextSync time.Time
+
+	// listingByDst holds the in-flight listing FIFOs keyed by destination
+	// (broadcastDst for the periodic round, a peer handle for a restart
+	// listing); listingOrder is their enqueue order — the deterministic drain
+	// order — and listingCount the total queued chunk count. nextListingAt is
+	// the shared listing pacer slot, and syncRotation the broadcast round
+	// counter that rotates each round's start chunk (D-01, RESEARCH Pattern
+	// 1).
+	listingByDst  map[string]*listingFIFO
+	listingOrder  []string
+	listingCount  int
+	nextListingAt time.Time
+	syncRotation  uint64
+
+	// recordQueue is the paced record-send FIFO fed by the discovery flush and
+	// the retransmit scanner; recordQueued is its (key, version) dedupe set and
+	// nextRecordAt the shared pacer slot (D-05, RESEARCH Pattern 2).
+	recordQueue  []recordSend
+	recordQueued map[pendingKey]struct{}
+	nextRecordAt time.Time
+
+	// Per-site monotone counters: the deterministic jitter sequence for the
+	// Hello and sync timers and for the listing and record pacer spacings
+	// (T-3-22 — no math/rand, same-seed replay stays byte-identical).
+	helloJitterSeq   uint64
+	syncJitterSeq    uint64
+	listingJitterSeq uint64
+	recordJitterSeq  uint64
 
 	egress []queuedUnicast
 
@@ -411,11 +482,13 @@ type Core struct {
 	// (enqueueResponse arms it, the drain advances it).
 	nextSendAt time.Time
 
-	// syncResponseInterval is the egress queue's per-response spacing,
-	// derived once at construction by the pinned deterministic integer
-	// arithmetic: floor(1s/SyncResponseRate) nanoseconds by integer
-	// division — exactly 2ms at the 500/s default and 3333333ns at 300/s
-	// (probe #16, echoed in docs/IDEA.md §Parameters).
+	// syncResponseInterval is the shared pacer spacing — the egress queue's
+	// per-response and the listing and record pacers' base — derived once
+	// at construction by the pinned deterministic integer arithmetic:
+	// floor(1s/SyncResponseRate) nanoseconds by integer division — exactly
+	// 2ms at the 500/s default and 3333333ns at 300/s (probe #16, echoed in
+	// docs/IDEA.md §Parameters). The pacers never recompute it from a raw
+	// config value (RESEARCH Pitfall 22).
 	syncResponseInterval time.Duration
 
 	discards DiscardStats
@@ -452,6 +525,8 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 		peerUnacked:          make(map[uint16]map[pendingKey]struct{}),
 		pendingOrder:         list.New(),
 		retry:                retryHeap{index: make(map[pendingKey]int)},
+		listingByDst:         make(map[string]*listingFIFO),
+		recordQueued:         make(map[pendingKey]struct{}),
 		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
 }
@@ -532,7 +607,7 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	switch msg := in.Msg.(type) {
 	case port.Hello:
-		c.handleHello(now, in, out)
+		c.handleHello(now, in)
 	case port.DataReplication:
 		c.applyRemote(in.Source, msg, out)
 	case port.Ack:
@@ -561,9 +636,10 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // requires run_id equality with the remembered row) — the entry updates in place
 // (handle, runID, lastHello; the table stays keyed by node_id, one row per
 // node — a change never forks a second row, which would fork ack tracking
-// and liveness) and the full current DataSync listing goes out UNICAST to
-// the peer's handle, every chunk in chunk order through the same plan-04-03
-// listing/chunking machinery the sync timer uses. Inequality with the
+// and liveness; the row's listing rotation survives) and the full current
+// DataSync listing is enqueued UNICAST toward the peer's handle, rotated by
+// that peer's rotation counter, and drained through the shared listing pacer
+// at one datagram per interval. Inequality with the
 // remembered run_id is the only trigger: run_ids are 16 random bytes per
 // process start, so they carry no temporal order — a stale run_id returning
 // after a newer one was seen is indistinguishable from a fresh restart and
@@ -571,10 +647,11 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // re-sync; reconciliation no-ops on equal state). In-flight protocol
 // datagrams from the old run — Ack, DataReplication, DataSync — process
 // normally on their (key, version) merits, run_id-agnostic outside this
-// handler. The restart listing is proactive traffic and does NOT pass
-// through the sync_response_rate egress queue (the plan-04-03 egress-scope
-// pin): it is bounded by chunk framing and fires once per detected change,
-// while the heavy replay traffic it solicits IS limiter-gated — that flows
+// handler. The restart listing is proactive traffic on the shared listing
+// pacer, never the sync_response_rate egress queue (the plan-04-03
+// egress-scope pin): it is bounded by one in-flight listing per destination
+// and fires once per detected change, while the heavy replay traffic it
+// solicits IS limiter-gated — that flows
 // as DataRequest replies on the restarted node's side and newer-responses
 // on ours. A detected restart never re-adds the peer to any pending
 // wait-set and never touches the backoff ladder (the REPL-02 interplay):
@@ -584,26 +661,27 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // story. Only a Hello refreshes lastHello — the field's name is the
 // liveness contract, and no other datagram type ever touches it. A Hello
 // that ends an empty table is discovery: in this same event the core
-// flushes every pending entry — one broadcast DataReplication per entry in
-// sorted key order, the new peer added to every wait-set, every ladder
-// restarted at cfg.AckTimeout — so a brand-new peer receives the pending
-// set promptly, not at the next backoff expiry (research A6). A Hello that
+// enqueues the pending set on the paced record-send queue — one broadcast
+// DataReplication per entry in sorted key order, the new peer added to every
+// wait-set, every ladder restarted at cfg.AckTimeout — so a brand-new peer
+// receives the pending set promptly, not at the next backoff expiry
+// (research A6), while the pacer prevents the whole-set burst R-01/R-02
+// measured. A Hello that
 // does not end an empty table modifies no wait-set: only discovery adds
 // waiters. Discovery and restart are mutually exclusive by construction —
 // a restart requires a remembered row, and an empty table remembers
 // nothing (an evicted peer's return Hello, whatever its run_id, is the
 // unknown-node case).
-func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Outbox) {
+func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	discovery := len(c.peers) == 0
-	restarted := false
-	if known, ok := c.peers[in.NodeID]; ok && known.runID != in.RunID {
-		restarted = true
-	}
-	c.peers[in.NodeID] = peer{handle: in.Source, runID: in.RunID, lastHello: now}
+	known, remembered := c.peers[in.NodeID]
+	restarted := remembered && known.runID != in.RunID
+	known.handle = in.Source
+	known.runID = in.RunID
+	known.lastHello = now
+	c.peers[in.NodeID] = known
 	if restarted {
-		for _, chunk := range c.listingChunks() {
-			out.Unicast(in.Source, port.DataSync{Entries: chunk})
-		}
+		c.enqueueRestartListing(now, in.NodeID, in.Source)
 		return
 	}
 	if !discovery {
@@ -617,16 +695,7 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 		c.pending[pk] = entry
 		c.fixRetry(pk, entry.nextRetry)
 		c.ledgerAdd(in.NodeID, pk)
-		rec, ok := c.store.Lookup(pk.key)
-		if !ok || rec.Version != pk.version {
-			// The store no longer holds the tracked version: nothing truthful
-			// can be flushed. The entry stays tracked (the retransmit scan
-			// removes it at its next due time), and the new peer is still
-			// recorded as a waiter — the flush's wait-set half is
-			// unconditional.
-			continue
-		}
-		out.Broadcast(port.DataReplication{Key: pk.key, Record: rec})
+		c.enqueueRecordSend(now, pk, false)
 	}
 }
 
@@ -811,6 +880,7 @@ func (c *Core) enqueueResponse(now time.Time, handle string, msg port.Message) {
 func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
 	for len(c.egress) > 0 && !now.Before(c.nextSendAt) {
 		q := c.egress[0]
+		c.egress[0] = queuedUnicast{}
 		c.egress = c.egress[1:]
 		out.Unicast(q.handle, q.msg)
 		if now.After(c.nextSendAt) {
@@ -867,12 +937,15 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 }
 
 // Advance fires the due timers — the hello timer, the DataSync startup and
-// interval triggers, the peer-timeout eviction scan, the retransmission
-// scan and the rate-limited egress drain at this stage — and returns the
+// interval triggers, the paced listing drain, the peer-timeout eviction scan,
+// the retransmission scan and its paced record-send drain, and the
+// rate-limited egress drain — and returns the
 // next deadline for the driver to sleep on: the minimum of the following
 // hello deadline, the next sync deadline, the earliest peer expiry, while
 // any pending entry exists the retransmit scan deadline (the
-// scan-granularity reading of retransmit_interval, research A5), and while
+// scan-granularity reading of retransmit_interval, research A5), while any
+// listing chunk is queued the next listing slot, while any record send is
+// queued the next record slot, and while
 // any response is queued the next egress slot. The returned deadline is
 // always strictly future: work due at now fires inside this same call.
 // Eviction runs before the retransmit scan so a peer expiring at now is
@@ -882,11 +955,13 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 	if !now.Before(c.nextHello) {
 		out.Broadcast(port.Hello{})
-		c.nextHello = now.Add(c.cfg.HelloInterval)
+		c.nextHello = now.Add(c.cfg.HelloInterval + c.helloJitter())
 	}
-	c.syncListing(now, out)
+	c.syncListing(now)
+	c.drainListings(now, out)
 	c.evictPeers(now, out)
-	c.scanRetransmit(now, out)
+	c.scanRetransmit(now)
+	c.drainRecordSends(now, out)
 	c.drainEgress(now, out)
 	return c.nextDeadline(now)
 }
@@ -895,25 +970,162 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 // startup trigger on the first Advance — immediately after the startup
 // Hello, Hello first, both broadcast, the IDEA §Node lifecycle order
 // pinned by TestSync_triggers — and the timer trigger on every subsequent
-// Advance at or after lastSync+cfg.SyncInterval. The listing is built from
+// Advance at or after lastSync+cfg.SyncInterval plus a positive-only jitter
+// of at most a tenth of the interval. The listing is built from
 // the store's shallow Versions view into entries for every record,
 // tombstones included (deletes reconcile through the same listing), sorted
-// by key in byte order and chunked by the conservative estimate; one
-// broadcast datagram per chunk leaves in chunk order. A store with zero
+// by key in byte order and chunked by the conservative estimate; the chunks
+// are ENQUEUED in rotated order — round r starts at chunk r % len(chunks) —
+// and the shared listing pacer drains one datagram per
+// floor(1s/SyncResponseRate) interval (D-01), so a burst can never overflow
+// the receiver's buffer. A store with zero
 // records still emits one DataSync with an empty entry list — an empty
 // listing is a valid sync round that invites newer-flooding from receivers
 // (probe #7). The neighbor-restart trigger — a Hello carrying a new run_id
-// from a known node — emits the same chunk sequence UNICAST toward the
+// from a known node — enqueues the same chunk sequence UNICAST toward the
 // restarted peer in handleHello (REPL-07, plan 04-04), through the shared
-// listingChunks build.
-func (c *Core) syncListing(now time.Time, out *port.Outbox) {
+// listingChunks build. The timer advances even when the enqueue is skipped:
+// a trigger arriving while a broadcast listing is in flight must never
+// leave nextSync in the past, or every Advance would retrigger and the
+// driver would never sleep (RESEARCH Pitfall 3).
+func (c *Core) syncListing(now time.Time) {
 	if !c.nextSync.IsZero() && now.Before(c.nextSync) {
 		return
 	}
-	c.nextSync = now.Add(c.cfg.SyncInterval)
-	for _, chunk := range c.listingChunks() {
-		out.Broadcast(port.DataSync{Entries: chunk})
+	c.nextSync = now.Add(c.cfg.SyncInterval + c.syncJitter())
+	if _, busy := c.listingByDst[broadcastDst]; busy {
+		return
 	}
+	chunks := c.listingChunks()
+	start := int(c.syncRotation % uint64(len(chunks)))
+	for i := range chunks {
+		c.enqueueListingChunk(now, broadcastDst, chunks[(start+i)%len(chunks)])
+	}
+	c.syncRotation++
+}
+
+// enqueueRestartListing enqueues the rotated full listing toward one
+// restarted peer (REPL-07): the peer row's rotation counter picks the start
+// chunk and advances, so repeated restart rounds cover the whole key space
+// under buffer loss (D-01's targeted half). A handle that already has a
+// listing in flight is left alone — one in-flight listing per destination
+// (T-3-23).
+func (c *Core) enqueueRestartListing(now time.Time, peerID uint16, handle string) {
+	if _, busy := c.listingByDst[handle]; busy {
+		return
+	}
+	chunks := c.listingChunks()
+	row := c.peers[peerID]
+	start := int(row.rotation % uint64(len(chunks)))
+	row.rotation++
+	c.peers[peerID] = row
+	for i := range chunks {
+		c.enqueueListingChunk(now, handle, chunks[(start+i)%len(chunks)])
+	}
+}
+
+// enqueueListingChunk appends one DataSync chunk to a destination's FIFO.
+// The first chunk after an idle listing queue clamps nextListingAt to now,
+// so the first datagram of a round emits in the same Advance — the startup
+// one-chunk expectation and the R-01 first-send immediacy.
+func (c *Core) enqueueListingChunk(now time.Time, dst string, chunk []port.SyncEntry) {
+	if c.listingCount == 0 {
+		c.nextListingAt = now
+	}
+	q := c.listingByDst[dst]
+	if q == nil {
+		q = &listingFIFO{dst: dst}
+		c.listingByDst[dst] = q
+		c.listingOrder = append(c.listingOrder, dst)
+	}
+	q.entries = append(q.entries, chunk)
+	c.listingCount++
+}
+
+// drainListings emits queued listing chunks at the shared pacer cadence
+// (D-01): while a listing slot is due, the FIFO at the head of the
+// destination order emits one datagram — broadcast for broadcastDst, unicast
+// for a peer handle — and the slot advances by the jittered interval. The
+// clamp shape is drainEgress': an Advance that arrives late emits one
+// datagram, never a backlog burst, and the next slot is measured from the
+// actual emission time. A destination whose FIFO empties leaves the order,
+// so its in-flight mark clears exactly when its listing completes (T-3-23).
+func (c *Core) drainListings(now time.Time, out *port.Outbox) {
+	for c.listingCount > 0 && !now.Before(c.nextListingAt) {
+		dst := c.listingOrder[0]
+		q := c.listingByDst[dst]
+		chunk := q.entries[0]
+		q.entries[0] = nil
+		q.entries = q.entries[1:]
+		if dst == broadcastDst {
+			out.Broadcast(port.DataSync{Entries: chunk})
+		} else {
+			out.Unicast(dst, port.DataSync{Entries: chunk})
+		}
+		c.listingCount--
+		if len(q.entries) == 0 {
+			delete(c.listingByDst, dst)
+			c.listingOrder = c.listingOrder[1:]
+		}
+		if now.After(c.nextListingAt) {
+			c.nextListingAt = now
+		}
+		c.listingJitterSeq++
+		c.nextListingAt = c.nextListingAt.Add(c.jitteredSpacing(c.syncResponseInterval, c.listingJitterSeq))
+	}
+}
+
+// jitterOffset returns a deterministic offset in [0, span) derived from the
+// core's runID, the site's monotone sequence number and the site salt:
+// FNV-1a over the run identity, so identical seeds replay identically and no
+// math/rand state enters the core (T-3-22). A non-positive span returns zero.
+func (c *Core) jitterOffset(seq, salt uint64, span time.Duration) time.Duration {
+	if span <= 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(c.runID[:])
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], seq)
+	_, _ = h.Write(buf[:])
+	binary.BigEndian.PutUint64(buf[:], salt)
+	_, _ = h.Write(buf[:])
+	return time.Duration(h.Sum64() % uint64(span))
+}
+
+// helloJitter returns the Hello timer's positive-only jitter in
+// [0, HelloInterval/10): the deadline never fires before the configured
+// interval.
+func (c *Core) helloJitter() time.Duration {
+	c.helloJitterSeq++
+	return c.jitterOffset(c.helloJitterSeq, helloJitterSalt, c.cfg.HelloInterval/10)
+}
+
+// syncJitter returns the sync timer's positive-only jitter in
+// [0, SyncInterval/10): the periodic listing never fires before the
+// configured interval.
+func (c *Core) syncJitter() time.Duration {
+	c.syncJitterSeq++
+	return c.jitterOffset(c.syncJitterSeq, syncJitterSalt, c.cfg.SyncInterval/10)
+}
+
+// jitteredSpacing returns base with a deterministic +-10% offset —
+// [-base/10, +base/10] — for the listing and record pacers (D-01/D-05,
+// RESEARCH Pattern 10's jitter scope). A computed spacing below one
+// nanosecond floors to 1ns, so a pacer can never be silently disabled; the
+// retransmit ladder's deadlines never pass through this helper (the loss
+// bound depends on them).
+func (c *Core) jitteredSpacing(base time.Duration, seq uint64) time.Duration {
+	span := base / 10
+	if span <= 0 {
+		return base
+	}
+	offset := c.jitterOffset(seq, spacingJitterSalt, 2*span+1) - span
+	spacing := base + offset
+	if spacing < time.Nanosecond {
+		spacing = time.Nanosecond
+	}
+	return spacing
 }
 
 // listingChunks builds the full DataSync listing chunk sequence from one
@@ -1019,7 +1231,8 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 	}
 }
 
-// scanRetransmit fires every due pending entry's retransmission (REPL-02).
+// scanRetransmit enqueues every due pending entry's retransmission on the
+// paced record-send queue (REPL-02, D-05).
 // An entry is due when now is at or after its nextRetry AND the peer table
 // is non-empty; while the table is empty the scanner is suspended — it
 // fires nothing and advances no nextRetry or backoff, so entries and their
@@ -1034,7 +1247,12 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 // then 5000ms repeated forever — cumulative retries at t0+200, +600,
 // +1400, +3000, +6200ms and every 5000ms after that, until the entry drains
 // on full Ack coverage or leaves on supersession (REPL-02's "until").
-// Firing is one broadcast DataReplication per entry: every peer shares each
+// The ladder is armed at EMISSION, never at enqueue: the scan only queues a
+// send, and drainRecordSends re-arms the entry when the pacer actually
+// emits it (RESEARCH Pitfall 4) — arming at enqueue would make every
+// backed-up entry overdue the moment the pacer reached it, restoring the
+// R-02 storm. Firing is one broadcast DataReplication per entry: every peer
+// shares each
 // send, and peers that already Acked re-merge idempotently and re-Ack (the
 // always-Ack-on-duplicate truth of plan 04-01). retransmit_interval is the
 // scan granularity — while any entry is pending, Advance's returned
@@ -1045,16 +1263,16 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 // else, so the scan cost is flat in the pending-set size (XPORT-02). Due
 // emissions are ordered by (key, version) — no map-iteration or heap-order
 // leak reaches an emit path (REPL-02, research Pitfall 1 / probe #9). Every
-// emission counts in the retransmissions counter (OBS-01) — the adapter
-// mirrors it post-event.
-func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
+// retry emission counts in the retransmissions counter (OBS-01) — the
+// adapter mirrors it post-event.
+func (c *Core) scanRetransmit(now time.Time) {
 	if len(c.peers) == 0 || len(c.pending) == 0 {
 		return
 	}
 	due := c.popDueRetries(now)
 	slices.SortFunc(due, compareRetryItems)
 	for _, item := range due {
-		c.retransmitOne(now, item, out)
+		c.enqueueRecordSend(now, item.pk, true)
 	}
 }
 
@@ -1064,45 +1282,103 @@ func compareRetryItems(a, b retryItem) int {
 	return comparePendingKeys(a.pk, b.pk)
 }
 
-// retransmitOne emits one due entry's record, re-read from the store (the
-// entry retains no Data): an absent or version-mismatched record leaves the
-// entry untrustworthy, so it is removed instead of sent (RESEARCH Pitfall 5);
-// a match is broadcast, counted, and the ladder re-arms from the emission
-// time — never from the enqueue time (RESEARCH Pitfall 4).
-func (c *Core) retransmitOne(now time.Time, item retryItem, out *port.Outbox) {
-	pk := item.pk
-	entry, ok := c.pending[pk]
+// enqueueRecordSend appends one record emission to the paced queue unless
+// the exact (key, version) identity is already queued (XPORT-02's dedupe):
+// the discovery flush's first send and a ladder retry for the same tracked
+// pair collapse into one datagram, so a slow pacer can never multiply the
+// storm. The first send after an idle queue clamps nextRecordAt to now —
+// the first send is immediate when nothing is ahead of it.
+func (c *Core) enqueueRecordSend(now time.Time, pk pendingKey, retry bool) {
+	if _, dup := c.recordQueued[pk]; dup {
+		return
+	}
+	if len(c.recordQueue) == 0 {
+		c.nextRecordAt = now
+	}
+	c.recordQueue = append(c.recordQueue, recordSend{pk: pk, retry: retry})
+	c.recordQueued[pk] = struct{}{}
+}
+
+// drainRecordSends emits queued record sends at the shared pacer cadence
+// (D-05): while a record slot is due, the FIFO's head resolves and emits —
+// at most one datagram per call, measured from the actual emission time —
+// and the slot advances by the jittered interval. The emitted entry's
+// ladder is re-armed here, from this emission time (RESEARCH Pitfall 4);
+// the queue never pins a record, because the lookup happens now.
+func (c *Core) drainRecordSends(now time.Time, out *port.Outbox) {
+	for len(c.recordQueue) > 0 && !now.Before(c.nextRecordAt) {
+		rs := c.recordQueue[0]
+		c.recordQueue[0] = recordSend{}
+		c.recordQueue = c.recordQueue[1:]
+		delete(c.recordQueued, rs.pk)
+		if !c.emitRecordSend(now, rs, out) {
+			continue
+		}
+		if now.After(c.nextRecordAt) {
+			c.nextRecordAt = now
+		}
+		c.recordJitterSeq++
+		c.nextRecordAt = c.nextRecordAt.Add(c.jitteredSpacing(c.syncResponseInterval, c.recordJitterSeq))
+	}
+}
+
+// emitRecordSend resolves and emits one queued record send, reporting
+// whether a datagram left. A pending entry that drained or was superseded
+// after enqueue emits nothing (RESEARCH Pitfall 5). A store miss or a
+// version mismatch emits nothing either: a retry removes the untrustworthy
+// entry (the stale-entry cleanup the retransmit scan owns); the discovery
+// flush's first send leaves the entry tracked, so the next ladder due time
+// performs the removal — the flush's wait-set half is unconditional. A
+// resolved send broadcasts the current record, counts a retry, doubles the
+// entry's backoff up to AckTimeoutMax, and arms nextRetry from this
+// emission time ([armRetry]).
+func (c *Core) emitRecordSend(now time.Time, rs recordSend, out *port.Outbox) bool {
+	entry, ok := c.pending[rs.pk]
 	if !ok {
-		return
+		return false
 	}
-	rec, ok := c.store.Lookup(pk.key)
-	if !ok || rec.Version != pk.version {
-		c.removePending(pk)
-		return
+	rec, ok := c.store.Lookup(rs.pk.key)
+	if !ok || rec.Version != rs.pk.version {
+		if rs.retry {
+			c.removePending(rs.pk)
+		}
+		return false
 	}
-	out.Broadcast(port.DataReplication{Key: pk.key, Record: rec})
-	c.retransmitted++
-	entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
+	out.Broadcast(port.DataReplication{Key: rs.pk.key, Record: rec})
+	if rs.retry {
+		c.retransmitted++
+		entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
+	}
 	entry.nextRetry = now.Add(entry.backoff)
-	c.pending[pk] = entry
-	c.pushRetry(pk, entry.nextRetry)
+	c.pending[rs.pk] = entry
+	c.armRetry(rs.pk, entry.nextRetry)
+	return true
 }
 
 // nextDeadline returns the earliest strictly-future deadline over the armed
 // timers: the hello timer, the sync timer, the earliest peer expiry, while
-// any pending entry exists the retransmit scan deadline, and while any
-// response is queued the next egress slot. After syncListing, evictPeers,
-// scanRetransmit and drainEgress have fired everything due, every
+// any pending entry exists the retransmit scan deadline, while any listing
+// chunk is queued the next listing slot, while any record send is queued the
+// next record slot, and while
+// any response is queued the next egress slot. After syncListing,
+// drainListings, evictPeers, scanRetransmit, drainRecordSends and
+// drainEgress have fired everything due, every
 // contribution is strictly future.
 func (c *Core) nextDeadline(now time.Time) time.Time {
 	deadline := c.nextHello
 	if !c.nextSync.IsZero() && c.nextSync.Before(deadline) {
 		deadline = c.nextSync
 	}
+	if c.listingCount > 0 && c.nextListingAt.Before(deadline) {
+		deadline = c.nextListingAt
+	}
 	if len(c.pending) > 0 {
 		if scan := c.retransmitDeadline(now); scan.Before(deadline) {
 			deadline = scan
 		}
+	}
+	if len(c.recordQueue) > 0 && c.nextRecordAt.Before(deadline) {
+		deadline = c.nextRecordAt
 	}
 	if expiry := c.earliestPeerExpiry(); !expiry.IsZero() && expiry.Before(deadline) {
 		deadline = expiry
@@ -1239,9 +1515,21 @@ type UnackedStats struct {
 // QueuedResponses returns the number of reactive unicast responses waiting
 // in the egress queue (REPL-05's rate limiter) — the simulator and
 // observability seam plan 04-05's quiescence check reads: a node whose
-// queue is empty has finished answering its sync round.
+// queue is empty has finished answering its sync round. The meaning is the
+// egress queue ONLY; QueuedSends is the total-queue accessor quiescence
+// needs now that listings and record sends have their own pacers
+// (RESEARCH Pitfall 23).
 func (c *Core) QueuedResponses() int {
 	return len(c.egress)
+}
+
+// QueuedSends returns the total number of datagrams waiting in every core
+// queue — listing chunks, record sends and egress responses — the
+// total-queue accessor the simulator's quiescence predicate consults: a
+// scenario must never declare quiescence while an unsent datagram is
+// queued (RESEARCH Pitfall 23, T-3-20).
+func (c *Core) QueuedSends() int {
+	return c.listingCount + len(c.recordQueue) + len(c.egress)
 }
 
 // PeerCount returns the number of known peers — the O(1) peer-table gauge
@@ -1381,6 +1669,20 @@ func (c *Core) fixRetry(pk pendingKey, nextRetry time.Time) {
 	}
 	c.retry.items[idx].nextRetry = nextRetry
 	heap.Fix(&c.retry, idx)
+}
+
+// armRetry sets pk's retry deadline, pushing when the pair has no heap item
+// and fixing it in place otherwise. The distinction matters for the record
+// queue: a retry send was popped from the heap by the scan and must be
+// re-pushed at emission, while a discovery-flush send still owns its heap
+// item and must only be re-timed (a second push would leave a duplicate
+// item behind).
+func (c *Core) armRetry(pk pendingKey, nextRetry time.Time) {
+	if _, ok := c.retry.index[pk]; ok {
+		c.fixRetry(pk, nextRetry)
+		return
+	}
+	c.pushRetry(pk, nextRetry)
 }
 
 // removeRetry deletes pk's due-heap item (O(log n)), leaving no stale entry

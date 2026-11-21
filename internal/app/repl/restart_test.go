@@ -73,18 +73,33 @@ func seedGraduatedKeys(t *testing.T, st *stateStore) {
 
 // freshListing returns the startup DataSync chunk sequence a brand-new core
 // over st builds — the independent plan-04-03 listing build the restart
-// reaction must reproduce exactly (same chunks, same order): the reaction
-// reuses the same machinery, never a second implementation.
+// reaction must reproduce (same chunks, same start order in round 0): the
+// reaction reuses the same machinery, never a second implementation. The
+// listing pacer drains one chunk per interval, so the helper finishes the
+// round across Advances.
 func freshListing(t *testing.T, st *stateStore) []port.DataSync {
 	t.Helper()
 	fresh := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{})
 	var out port.Outbox
-	fresh.Advance(at(0), &out)
-	syncs := dataSyncs(out.Drain())
+	syncs := dataSyncs(advanceDrain(fresh, &out, at(0)))
 	if len(syncs) != 2 {
 		t.Fatalf("the fresh listing build emitted %d chunks, want the 2-chunk graduated shape", len(syncs))
 	}
 	return syncs
+}
+
+// rotateChunks returns syncs rotated left by one chunk — the start order the
+// next targeted round produces (start = round % len(chunks)): the fixed tail
+// of one round becomes the head of the next, which is what covers the whole
+// key space under systematic buffer loss.
+func rotateChunks(syncs []port.DataSync) []port.DataSync {
+	if len(syncs) < 2 {
+		return syncs
+	}
+	out := make([]port.DataSync, 0, len(syncs))
+	out = append(out, syncs[1:]...)
+	out = append(out, syncs[0])
+	return out
 }
 
 // TestRestart_runIDChangeTriggersFullSync proves REPL-07's reaction and its
@@ -112,7 +127,7 @@ func TestRestart_runIDChangeTriggersFullSync(t *testing.T) {
 	}
 
 	core.HandleDatagram(now, helloFromRun(r2), &out)
-	drained := out.Drain()
+	drained := advanceDrain(core, &out, now)
 	got := targetedSyncs(t, drained, handleFor(peerID1))
 	if len(drained) != len(got) {
 		t.Fatalf("the restart Hello drained %d messages of which %d are targeted DataSync chunks, want exactly the chunk sequence and nothing else", len(drained), len(got))
@@ -204,19 +219,20 @@ func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 		core.HandleDatagram(now, helloFromRun(r1), &out)
 		out.Drain() // learn only
 		core.HandleDatagram(now, helloFromRun(r2), &out)
-		first := targetedSyncs(t, out.Drain(), handleFor(peerID1))
+		first := targetedSyncs(t, advanceDrain(core, &out, now), handleFor(peerID1))
 		if !dataSyncsEqual(first, want) {
 			t.Fatalf("the R1→R2 reaction = %v, want the full fresh listing %v", first, want)
 		}
 
 		// A delayed Hello from the old run's R1 arrives: inequality with the
 		// remembered R2 is indistinguishable from a fresh restart, so the
-		// entry flips back and one more full listing fires — idempotent,
+		// entry flips back and one more full listing fires — rotated one chunk
+		// by the per-peer round counter — idempotent,
 		// safe (reconciliation no-ops on equal state).
 		core.HandleDatagram(now, helloFromRun(r1), &out)
-		second := targetedSyncs(t, out.Drain(), handleFor(peerID1))
-		if !dataSyncsEqual(second, want) {
-			t.Fatalf("the stale-return reaction = %v, want the same full fresh listing %v again", second, want)
+		second := targetedSyncs(t, advanceDrain(core, &out, now), handleFor(peerID1))
+		if !dataSyncsEqual(second, rotateChunks(want)) {
+			t.Fatalf("the stale-return reaction = %v, want the next round's rotation %v of the fresh listing %v", second, rotateChunks(want), want)
 		}
 		if got := len(first) + len(second); got != 2*len(want) {
 			t.Fatalf("the two changes emitted %d targeted chunks in total, want exactly two full listings (%d)", got, 2*len(want))
@@ -243,7 +259,8 @@ func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 		ver := localWrite(t, core, st, now, keyAlpha, "one")
 		assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1})
 		core.HandleDatagram(now, helloFromRun(runIDFor(2)), &out)
-		out.Drain() // the targeted listing; this sequence is about what follows it
+		core.Advance(now, &out) // drains the targeted listing's single chunk
+		out.Drain()             // the targeted listing; this sequence is about what follows it
 
 		// An in-flight Ack from the old run for the still-pending version
 		// drains its waiter normally — the Ack path never looks at run_id.
@@ -301,13 +318,13 @@ func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 			t.Fatalf("the Advance after the learn emitted %d messages, want 0", got)
 		}
 		core.HandleDatagram(at(200*time.Millisecond), helloFromRun(r2), &out)
-		first := targetedSyncs(t, out.Drain(), handleFor(peerID1))
+		first := targetedSyncs(t, advanceDrain(core, &out, at(200*time.Millisecond)), handleFor(peerID1))
 		core.Advance(at(300*time.Millisecond), &out)
 		if got := len(out.Drain()); got != 0 {
 			t.Fatalf("the Advance between the restarts emitted %d messages, want 0", got)
 		}
 		core.HandleDatagram(at(400*time.Millisecond), helloFromRun(r3), &out)
-		second := targetedSyncs(t, out.Drain(), handleFor(peerID1))
+		second := targetedSyncs(t, advanceDrain(core, &out, at(400*time.Millisecond)), handleFor(peerID1))
 		core.Advance(at(500*time.Millisecond), &out)
 		if got := len(out.Drain()); got != 0 {
 			t.Fatalf("the Advance after the second restart emitted %d messages, want 0", got)
@@ -316,8 +333,8 @@ func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 		if len(first) != len(want) || !dataSyncsEqual(first, want) {
 			t.Fatalf("the R1→R2 reaction = %v, want exactly one full fresh listing %v", first, want)
 		}
-		if len(second) != len(want) || !dataSyncsEqual(second, want) {
-			t.Fatalf("the R2→R3 reaction = %v, want exactly one full fresh listing %v", second, want)
+		if len(second) != len(want) || !dataSyncsEqual(second, rotateChunks(want)) {
+			t.Fatalf("the R2→R3 reaction = %v, want the next round's rotation %v", second, rotateChunks(want))
 		}
 		snap := core.PeerSnapshot()
 		if len(snap) != 1 {

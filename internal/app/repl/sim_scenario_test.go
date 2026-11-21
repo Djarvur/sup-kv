@@ -430,17 +430,20 @@ func TestScenario_partitionDays(t *testing.T) {
 	}
 
 	// D-10 evidence: the conflicts counter covers the displaced versions.
-	// Every shared key's loser is reported exactly once as a displacement
-	// on its own node and once as a rejection on the winner's node (Merge's
-	// Conflict contract); CORE-07 re-reports can only add. Counted only —
+	// A displaced version is reported as a displacement on the side that
+	// applied the winner (Merge's Conflict contract). Under the paced
+	// discovery flush the winner can land before the loser's flush send
+	// leaves — the loser is then superseded out of tracking and never
+	// crosses the wire — so the rejection half on the winner's node is not
+	// guaranteed; the counted-at-least-once half always is. Counted only —
 	// no journal, no per-conflict events.
 	var conflicts uint64
 	for i := range cluster.Nodes() {
 		conflicts += cluster.Core(i).MergeStats().Conflicts
 	}
-	if conflicts < 2*sharedKeys {
+	if conflicts < sharedKeys {
 		t.Fatalf("the cluster counted %d merge conflicts for %d displaced same-key versions, want >= %d %s",
-			conflicts, sharedKeys, 2*sharedKeys, scnReplay(seed, test))
+			conflicts, sharedKeys, sharedKeys, scnReplay(seed, test))
 	}
 }
 
@@ -1113,14 +1116,17 @@ func TestScenario_burst(t *testing.T) {
 // documented pacing margin. The bound's arithmetic, from the mechanism:
 // the joiner learns state only from the peers' periodic DataSync listings
 // (a new node id is never targeted), so the fill starts at their next
-// sync_interval tick — at most one sync_interval after the join — and then
-// rides the egress limiter: BOTH peers' listings (their sync timers share
-// the cluster's start, so both fire in the same virtual millisecond)
-// enqueue up to 2N DataRequests on the joiner's single FIFO, spaced
+// sync_interval tick — at most one sync_interval plus the positive-only sync
+// jitter (a tenth of the interval) after the join — and then
+// rides the egress limiter: both peers' listings (each node's periodic timer
+// carries its own deterministic jitter, so the two may fire up to the jitter
+// envelope apart) enqueue up to 2N DataRequests on the joiner's single FIFO,
+// spaced
 // floor(1s/rate) with the first immediate, so the last departs at
 // (2N-1)*spacing and its reply lands one spacing later; the measurement
 // step is one spacing wide, adding at most one more. Bound:
-// sync_interval + 2N*spacing + 2*spacing, all stated terms.
+// sync_interval + sync_interval/10 + 2N*spacing + 2*spacing, all stated
+// terms.
 func TestScenario_emptyDisk(t *testing.T) {
 	t.Parallel()
 	seed := chaosSeed(t)
@@ -1130,7 +1136,7 @@ func TestScenario_emptyDisk(t *testing.T) {
 
 	const nKeys = 50
 	pace := time.Second / time.Duration(simDefaultResponseRate)
-	bound := syncInterval + time.Duration(2*nKeys+2)*pace
+	bound := syncInterval + syncInterval/10 + time.Duration(2*nKeys+2)*pace
 
 	sched := simnet.NewScheduler(at(0))
 	cluster := simnet.NewCluster(sched, rng, 2, repl.Config{}, simFixedDelay(nil))

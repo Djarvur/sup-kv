@@ -55,6 +55,7 @@ func TestDiscard_classes(t *testing.T) {
 		wantPeerID  uint16
 		wantPeer    *repl.PeerInfo
 		wantEmits   int
+		wantQueued  int
 	}{
 		{
 			// What udprepl.decode hands over for an empty read: the bare
@@ -166,7 +167,12 @@ func TestDiscard_classes(t *testing.T) {
 			want:       repl.DiscardStats{},
 			wantPeerID: peerID1,
 			wantPeer:   &repl.PeerInfo{Handle: cloneHandle, RunID: testRunID(strangerID), LastHello: now},
-			wantEmits:  1, // the targeted full listing toward the restarted peer
+			// The targeted listing is enqueued on the listing pacer, not
+			// emitted by the handler: one queued chunk proves the restart
+			// reaction ran while the empty handler outbox proves the
+			// duplicate classifier did not discard it.
+			wantEmits:  0,
+			wantQueued: 1,
 		},
 	}
 	for _, row := range rows {
@@ -189,6 +195,10 @@ func TestDiscard_classes(t *testing.T) {
 			if got := len(out.Drain()); got != row.wantEmits {
 				t.Errorf("handler emitted %d messages, want %d — a discarded datagram is never also processed",
 					got, row.wantEmits)
+			}
+			if got := core.QueuedSends(); got != row.wantQueued {
+				t.Errorf("QueuedSends() = %d, want %d — the restart reaction enqueues its listing on the pacer",
+					got, row.wantQueued)
 			}
 			snap := core.PeerSnapshot()
 			if row.wantPeerID != 0 || row.wantPeer != nil {

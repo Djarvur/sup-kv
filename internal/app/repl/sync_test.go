@@ -283,6 +283,37 @@ func dataSyncs(drained []port.Outbound) []port.DataSync {
 	return syncs
 }
 
+// listingDrainStep is the drain loop's virtual step: comfortably above the
+// jittered listing spacing at the 500/s default (2ms + 10% = 2.2ms), so each
+// Advance crosses exactly one pacer slot. It is also far below every other
+// timer (Hello 1s, sync 30s), so the loops never trip an unrelated firing.
+const listingDrainStep = 3 * time.Millisecond
+
+// advanceDrain advances core at now — firing any due timer — and then keeps
+// advancing in listingDrainStep increments until every core queue is empty,
+// returning every drained outbound message. The listing pacer emits one
+// datagram per interval (D-01), so a multi-chunk round completes across
+// several Advances; the caller sees the whole round's emissions in order.
+func advanceDrain(core *repl.Core, out *port.Outbox, now time.Time) []port.Outbound {
+	core.Advance(now, out)
+	drained := out.Drain()
+	for core.QueuedSends() > 0 {
+		now = now.Add(listingDrainStep)
+		core.Advance(now, out)
+		drained = append(drained, out.Drain()...)
+	}
+	return drained
+}
+
+// oversizedKeyN returns a distinct key whose own estimate (len+24 = 1424)
+// already exceeds the 1400-byte chunk budget, so it ships alone as one
+// oversized chunk; n orders the keys in byte order. The multi-chunk listing
+// fixtures (pacing and rotation) are built from it.
+func oversizedKeyN(n int) string {
+	prefix := fmt.Sprintf("z%03d", n)
+	return prefix + strings.Repeat("y", oversizedKeyLen-len(prefix))
+}
+
 // allSyncEntries concatenates the chunks' entries in chunk order.
 func allSyncEntries(syncs []port.DataSync) []port.SyncEntry {
 	var entries []port.SyncEntry
@@ -290,6 +321,18 @@ func allSyncEntries(syncs []port.DataSync) []port.SyncEntry {
 		entries = append(entries, sync.Entries...)
 	}
 	return entries
+}
+
+// syncEntryKeySequence returns every chunk's entries' keys in chunk order —
+// the rotated-round probe: an all-oversized fixture yields one key per
+// chunk, so the sequence is the round's start-chunk order.
+func syncEntryKeySequence(syncs []port.DataSync) []string {
+	entries := allSyncEntries(syncs)
+	keys := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		keys = append(keys, entry.Key)
+	}
+	return keys
 }
 
 // syncEntryKeys returns the chunk's keys in order.
@@ -363,8 +406,7 @@ func TestSync_chunking(t *testing.T) {
 		}
 		want := listingFrom(st.Records())
 
-		core.Advance(now0, &out)
-		syncs := dataSyncs(out.Drain())
+		syncs := dataSyncs(advanceDrain(core, &out, now0))
 		if len(syncs) != 3 {
 			t.Fatalf("startup sync emitted %d chunks, want 3 (at-budget, follow-up, oversized)", len(syncs))
 		}
@@ -399,20 +441,19 @@ func TestSync_chunking(t *testing.T) {
 			}
 		}
 
-		core1.Advance(now0, &out)
-		first := dataSyncs(out.Drain())
+		first := dataSyncs(advanceDrain(core1, &out, now0))
 		if len(first) != 1 {
 			t.Fatalf("the first build emitted %d chunks, want 1 over the eight graduated keys", len(first))
 		}
-		core2.Advance(now0, &out)
-		second := dataSyncs(out.Drain())
+		second := dataSyncs(advanceDrain(core2, &out, now0))
 		if !dataSyncsEqual(first, second) {
 			t.Fatalf("two fresh-snapshot builds diverged: %v vs %v — a map-iteration order leaked into the chunk sequence", first, second)
 		}
 		// The timer rebuild over the same core takes another fresh snapshot
-		// sync_interval later and must reproduce the same sequence.
-		core1.Advance(now0.Add(syncInterval), &out)
-		third := dataSyncs(out.Drain())
+		// one sync_interval plus the positive-only jitter envelope later and
+		// must reproduce the same chunk sequence (one chunk here, so the
+		// round rotation is trivial).
+		third := dataSyncs(advanceDrain(core1, &out, now0.Add(syncInterval+syncInterval/10)))
 		if !dataSyncsEqual(first, third) {
 			t.Fatalf("the timer rebuild diverged from the startup build: %v vs %v", first, third)
 		}
@@ -465,10 +506,162 @@ func TestSync_triggers(t *testing.T) {
 			t.Fatalf("Advance at t0+%v emitted %d DataSync messages before the sync interval elapsed, want 0", off, len(syncs))
 		}
 	}
-	// The at-boundary tick — lastSync+sync_interval exactly — fires it.
-	core.Advance(now0.Add(syncInterval), &out)
+	// The timer never fires before the configured interval (the positive-only
+	// jitter half): one nanosecond before the boundary emits nothing.
+	core.Advance(now0.Add(syncInterval-time.Nanosecond), &out)
+	if syncs := dataSyncs(out.Drain()); len(syncs) != 0 {
+		t.Fatalf("Advance one nanosecond before t0+%v emitted %d DataSync messages, want 0", syncInterval, len(syncs))
+	}
+	// And the positive jitter is at most a tenth of the interval, so the
+	// boundary tick plus that envelope fires exactly one listing round.
+	atBound := now0.Add(syncInterval + syncInterval/10)
+	core.Advance(atBound, &out)
 	if syncs := dataSyncs(out.Drain()); len(syncs) != 1 {
-		t.Fatalf("the at-boundary Advance at t0+%v emitted %d DataSync messages, want exactly 1", syncInterval, len(syncs))
+		t.Fatalf("the at-boundary Advance at t0+%v emitted %d DataSync messages, want exactly 1", syncInterval+syncInterval/10, len(syncs))
+	}
+}
+
+// TestSync_pacing proves the listing pacer (D-01/R-01): a 40-chunk listing
+// drains one datagram per Advance at the floor(1s/rate) interval inside the
+// deterministic +-10% jitter envelope — never a whole-set burst — and the
+// first chunk of an idle queue is immediate (the nextListingAt clamp). The
+// fixture is 40 oversized keys, so the store really produces 40 chunks.
+func TestSync_pacing(t *testing.T) {
+	t.Parallel()
+	const (
+		rate   = 500
+		chunks = 40
+	)
+	now0 := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	for i := range chunks {
+		if _, _, err := st.store.Set(oversizedKeyN(i), []byte("v")); err != nil {
+			t.Fatalf("store Set(oversized key %d): %v", i, err)
+		}
+	}
+	core.Advance(now0, &out)
+	if got := len(dataSyncs(out.Drain())); got != 1 {
+		t.Fatalf("the startup Advance emitted %d listing chunks, want exactly 1 — one datagram per interval, the first immediate", got)
+	}
+	interval := time.Second / rate
+	minSpacing := interval - interval/10
+	maxSpacing := interval + interval/10
+	emittedAt := []time.Duration{0}
+	now := now0
+	for len(emittedAt) < chunks {
+		next := core.Advance(now, &out)
+		got := dataSyncs(out.Drain())
+		if len(got) > 1 {
+			t.Fatalf("Advance at t0+%v emitted %d listing chunks, want at most one datagram per call", now.Sub(now0), len(got))
+		}
+		if len(got) == 1 {
+			emittedAt = append(emittedAt, now.Sub(now0))
+		}
+		if core.QueuedSends() == 0 {
+			break
+		}
+		if !next.After(now) {
+			t.Fatalf("Advance at t0+%v returned deadline %v, want strictly future", now.Sub(now0), next.Sub(now0))
+		}
+		now = next
+	}
+	if len(emittedAt) != chunks {
+		t.Fatalf("the round emitted %d chunks, want %d", len(emittedAt), chunks)
+	}
+	for i := 1; i < len(emittedAt); i++ {
+		spacing := emittedAt[i] - emittedAt[i-1]
+		if spacing < minSpacing || spacing > maxSpacing {
+			t.Fatalf("chunk %d emitted %v after chunk %d, want within [%v, %v] — the jittered floor(1s/%d) interval",
+				i, spacing, i-1, minSpacing, maxSpacing, rate)
+		}
+	}
+}
+
+// TestSync_rotation proves the broadcast round rotation (D-01, research
+// Pattern 1): round r starts at chunk r % len(chunks), so two rounds over a
+// 4-chunk store emit rotated start orders and the same multiset — a fixed
+// tail in one round is at the head the next, which is what covers the whole
+// key space under systematic buffer loss. The fixture is four oversized
+// keys: one key per chunk, so the chunk sequence IS the key sequence.
+func TestSync_rotation(t *testing.T) {
+	t.Parallel()
+	const chunks = 4
+	now0 := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	want := make([]string, 0, chunks)
+	for i := range chunks {
+		key := oversizedKeyN(i)
+		if _, _, err := st.store.Set(key, []byte("v")); err != nil {
+			t.Fatalf("store Set(oversized key %d): %v", i, err)
+		}
+		want = append(want, key)
+	}
+
+	first := dataSyncs(advanceDrain(core, &out, now0))
+	if got := syncEntryKeySequence(first); !slices.Equal(got, want) {
+		t.Fatalf("round 0 emitted chunk start order %v, want the sorted chunk order %v", got, want)
+	}
+	second := dataSyncs(advanceDrain(core, &out, now0.Add(syncInterval+syncInterval/10)))
+	wantRotated := append(slices.Clone(want[1:]), want[0])
+	if got := syncEntryKeySequence(second); !slices.Equal(got, wantRotated) {
+		t.Fatalf("round 1 emitted chunk start order %v, want the one-chunk rotation %v (start = round %% len)", got, wantRotated)
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(syncEntryKeySequence(first))), slices.Sorted(slices.Values(syncEntryKeySequence(second)))) {
+		t.Fatalf("the two rounds cover different key multisets: %v vs %v — a rotation must reorder, never drop",
+			syncEntryKeySequence(first), syncEntryKeySequence(second))
+	}
+}
+
+// TestSync_listingBusy proves the one-in-flight rule (D-01, RESEARCH Pitfall
+// 3): a timer trigger that arrives while the previous broadcast listing is
+// still queued enqueues nothing, yet advances nextSync — Advance returns a
+// strictly future deadline (no livelock), and the queued chunk count falls by
+// exactly the one pacer slot this Advance drains. A re-enqueued round would
+// grow the queue by the round's chunk count instead.
+func TestSync_listingBusy(t *testing.T) {
+	t.Parallel()
+	const chunks = 40
+	core, st := newSyncCore(repl.Config{SyncInterval: 200 * time.Millisecond})
+	var out port.Outbox
+	for i := range chunks {
+		if _, _, err := st.store.Set(oversizedKeyN(i), []byte("v")); err != nil {
+			t.Fatalf("store Set(oversized key %d): %v", i, err)
+		}
+	}
+	core.Advance(at(0), &out)
+	out.Drain()
+	queued := core.QueuedSends()
+	if queued != chunks-1 {
+		t.Fatalf("after the startup Advance QueuedSends() = %d, want %d (one chunk pacer-drained)", queued, chunks-1)
+	}
+
+	now := at(250 * time.Millisecond)
+	next := core.Advance(now, &out)
+	if got := len(dataSyncs(out.Drain())); got != 1 {
+		t.Fatalf("the busy-trigger Advance emitted %d listing chunks, want exactly the 1 pacer slot", got)
+	}
+	if !next.After(now) {
+		t.Fatalf("the busy-trigger Advance returned deadline %v, want strictly future — a skipped enqueue must still advance nextSync", next.Sub(at(0)))
+	}
+	if got := core.QueuedSends(); got != queued-1 {
+		t.Fatalf("after the busy trigger QueuedSends() = %d, want %d — the skip enqueued a second round", got, queued-1)
+	}
+}
+
+// TestSync_emptyListing proves the empty-store edge (probe #7): a store with
+// no records still announces itself with exactly one zero-entry DataSync on
+// the startup trigger, and the pacer adds no second datagram.
+func TestSync_emptyListing(t *testing.T) {
+	t.Parallel()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	syncs := dataSyncs(out.Drain())
+	if len(syncs) != 1 || len(syncs[0].Entries) != 0 {
+		t.Fatalf("an empty store emitted %d DataSync chunks with entry counts %v, want exactly one zero-entry listing",
+			len(syncs), len(allSyncEntries(syncs)))
 	}
 }
 

@@ -443,15 +443,19 @@ func drainChaosLiveKeys(cluster *simnet.Cluster) int {
 	}
 }
 
-// chaosQuiescent reports the three-seam quiescence condition: no
+// chaosQuiescent reports the four-seam quiescence condition: no
 // scheduled-but-undelivered network events, no unacked entries on any core,
-// no queued rate-limited responses on any core.
+// no queued rate-limited responses on any core, and no listing or
+// record-send datagram still waiting in the core's other two queues
+// (QueuedSends is the total-queue accessor; QueuedResponses keeps its egress
+// meaning, RESEARCH Pitfall 23).
 func chaosQuiescent(cluster *simnet.Cluster, now time.Time) bool {
 	if cluster.Network().PendingDeliveries() != 0 {
 		return false
 	}
 	for i := range cluster.Nodes() {
-		if cluster.Core(i).UnackedStats(now).Count != 0 || cluster.Core(i).QueuedResponses() != 0 {
+		core := cluster.Core(i)
+		if core.UnackedStats(now).Count != 0 || core.QueuedResponses() != 0 || core.QueuedSends() != 0 {
 			return false
 		}
 	}

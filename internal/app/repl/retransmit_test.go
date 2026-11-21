@@ -368,17 +368,24 @@ func TestRetransmit_backoffLadder(t *testing.T) {
 		localWrite(t, core, st, now0, keyBeta, "b")
 
 		core.Advance(at(200*time.Millisecond), &out)
-		if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha, keyBeta, keyGamma}) {
-			t.Fatalf("first ladder step emitted keys %v, want ascending [cfg/alpha cfg/beta cfg/gamma]", got)
+		first := replKeys(broadcastRepls(advanceDrain(core, &out, at(200*time.Millisecond))))
+		if !slices.Equal(first, []string{keyAlpha, keyBeta, keyGamma}) {
+			t.Fatalf("first ladder step emitted keys %v, want ascending [cfg/alpha cfg/beta cfg/gamma]", first)
 		}
 
 		// keyBeta Acks between the steps; the next fire point emits only the
-		// not-yet-drained keys, still ascending.
+		// not-yet-drained keys, still ascending. Each entry's second step is
+		// due at its own emission time plus the doubled backoff, so the test
+		// drives the paced window rather than one exact instant.
 		core.HandleDatagram(at(250*time.Millisecond), ackFrom(peerID1, keyBeta, pendingVersion(t, core, keyBeta)), &out)
 		out.Drain()
-		core.Advance(at(600*time.Millisecond), &out)
-		if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha, keyGamma}) {
-			t.Fatalf("second ladder step emitted keys %v, want ascending [cfg/alpha cfg/gamma]", got)
+		var secondStep []string
+		for off := 600 * time.Millisecond; off <= 620*time.Millisecond; off += listingDrainStep {
+			core.Advance(at(off), &out)
+			secondStep = append(secondStep, replKeys(broadcastRepls(out.Drain()))...)
+		}
+		if !slices.Equal(secondStep, []string{keyAlpha, keyGamma}) {
+			t.Fatalf("second ladder step emitted keys %v, want ascending [cfg/alpha cfg/gamma]", secondStep)
 		}
 	})
 }
@@ -424,10 +431,15 @@ func TestRetransmit_suspendAndFlush(t *testing.T) {
 	}
 
 	// The first Hello ends the empty table: the same HandleDatagram call
-	// broadcasts the pending record, gains the peer as its only waiter and
-	// restarts the ladder at ack_timeout.
+	// enqueues the pending record on the paced queue (it emits no datagram
+	// itself), gains the peer as its only waiter and restarts the ladder at
+	// ack_timeout; the next Advance drains the queued send.
 	helloAt := at(suspendWindow + time.Second)
 	core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
+	if got := len(out.Drain()); got != 0 {
+		t.Fatalf("the discovery flush emitted %d messages inside the Hello handler, want 0 — it only enqueues", got)
+	}
+	core.Advance(helloAt, &out)
 	repls := broadcastRepls(out.Drain())
 	if len(repls) != 1 || repls[0].Key != keyAlpha || repls[0].Record.Version != ver {
 		t.Fatalf("discovery flush emitted %v, want exactly one DataReplication for (%s, %x)", repls, keyAlpha, ver[:])
@@ -800,17 +812,34 @@ func TestRetransmit_heapInvariant(t *testing.T) {
 	out.Drain()
 
 	// Equal-deadline insertions in ascending key order: emission order must
-	// be the insertion order (which is also the standing sorted-key pin).
+	// be the insertion order (which is also the standing sorted-key pin). The
+	// pacer emits one datagram per interval, so the three first-step sends
+	// drain across successive Advances; each entry's next ladder step is armed
+	// from ITS emission time (never the common enqueue tick).
 	localWrite(t, core, st, at(0), keyAlpha, "a")
 	localWrite(t, core, st, at(0), keyBeta, "b")
 	localWrite(t, core, st, at(0), keyGamma, "g")
 	core.Advance(at(200*time.Millisecond), &out)
-	if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha, keyBeta, keyGamma}) {
-		t.Fatalf("equal-deadline emission order = %v, want the insertion order [cfg/alpha cfg/beta cfg/gamma]", got)
+	var firstStep []string
+	emittedAt := make(map[string]time.Time, 3)
+	for _, msg := range broadcastRepls(out.Drain()) {
+		firstStep = append(firstStep, msg.Key)
+		emittedAt[msg.Key] = at(200 * time.Millisecond)
 	}
-	for _, key := range []string{keyAlpha, keyBeta, keyGamma} {
-		if got := core.PendingSnapshot()[key].NextRetry; !got.Equal(at(600 * time.Millisecond)) {
-			t.Fatalf("after the first ladder step %q NextRetry = %v, want the common 600ms deadline", key, got)
+	for off := 200*time.Millisecond + listingDrainStep; len(firstStep) < 3; off += listingDrainStep {
+		core.Advance(at(off), &out)
+		for _, msg := range broadcastRepls(out.Drain()) {
+			firstStep = append(firstStep, msg.Key)
+			emittedAt[msg.Key] = at(off)
+		}
+	}
+	if !slices.Equal(firstStep, []string{keyAlpha, keyBeta, keyGamma}) {
+		t.Fatalf("equal-deadline emission order = %v, want the insertion order [cfg/alpha cfg/beta cfg/gamma]", firstStep)
+	}
+	for _, key := range firstStep {
+		wantNext := emittedAt[key].Add(2 * ackTimeout)
+		if got := core.PendingSnapshot()[key].NextRetry; !got.Equal(wantNext) {
+			t.Fatalf("after the first ladder step %q NextRetry = %v, want emission+backoff %v", key, got.Sub(at(0)), wantNext.Sub(at(0)))
 		}
 	}
 
@@ -865,9 +894,11 @@ func TestRetransmit_heapInvariant(t *testing.T) {
 		t.Fatalf("suspension moved NextRetry to %v, want it retained at 1700ms", got)
 	}
 
-	// The returning Hello is discovery: it flushes the pending entry, re-adds
-	// the peer and restarts the ladder at 2.1s+200ms.
+	// The returning Hello is discovery: it enqueues the pending entry, re-adds
+	// the peer and restarts the ladder at 2.1s+200ms; the same-tick Advance
+	// drains the queued send.
 	core.HandleDatagram(at(2100*time.Millisecond), helloFrom(peerID1), &out)
+	core.Advance(at(2100*time.Millisecond), &out)
 	if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha}) {
 		t.Fatalf("the discovery flush emitted %v, want exactly the pending alpha", got)
 	}
@@ -1028,6 +1059,185 @@ func TestOutboxResults_resolutionEvents(t *testing.T) {
 		}
 		if _, tracked := core.PendingSnapshot()[keyAlpha]; !tracked {
 			t.Fatal("eviction dropped the suspended entry, want it retained")
+		}
+	})
+}
+
+// TestRetransmit_ladderFromEmission pins the emission-time arming contract
+// (D-05, RESEARCH Pitfall 4): with a slow 10/s pacer, three entries that
+// become due together are emitted one per paced slot, and each entry's next
+// retry deadline is its own emission time plus the doubled backoff — never
+// the common enqueue tick plus that backoff. Arming at enqueue would make
+// every backed-up entry overdue the moment the pacer reached it, restoring
+// the R-02 storm.
+func TestRetransmit_ladderFromEmission(t *testing.T) {
+	t.Parallel()
+	now0 := at(0)
+	core, st := newSyncCore(repl.Config{SyncResponseRate: 10})
+	var out port.Outbox
+	core.Advance(now0, &out)
+	out.Drain()
+	core.HandleDatagram(now0, helloFrom(peerID1), &out)
+	out.Drain()
+	for _, key := range []string{keyAlpha, keyBeta, keyGamma} {
+		localWrite(t, core, st, now0, key, "v")
+	}
+
+	core.Advance(now0.Add(ackTimeout), &out)
+	emittedAt := make(map[string]time.Time, 3)
+	for _, msg := range broadcastRepls(out.Drain()) {
+		emittedAt[msg.Key] = now0.Add(ackTimeout)
+	}
+	now := now0.Add(ackTimeout)
+	for len(emittedAt) < 3 {
+		now = now.Add(listingDrainStep)
+		core.Advance(now, &out)
+		for _, msg := range broadcastRepls(out.Drain()) {
+			emittedAt[msg.Key] = now
+		}
+	}
+
+	snap := core.PendingSnapshot()
+	enqueueArmed := now0.Add(3 * ackTimeout)
+	for _, key := range []string{keyAlpha, keyBeta, keyGamma} {
+		emitted, ok := emittedAt[key]
+		if !ok {
+			t.Fatalf("key %q never emitted its first retry", key)
+		}
+		want := emitted.Add(2 * ackTimeout)
+		if got := snap[key].NextRetry; !got.Equal(want) {
+			t.Fatalf("%q NextRetry = emission+%v, want emission+backoff %v (enqueue+backoff would be %v)",
+				key, got.Sub(emitted), want.Sub(emitted), enqueueArmed.Sub(now0))
+		}
+	}
+	if snap[keyGamma].NextRetry.Equal(enqueueArmed) {
+		t.Fatal("no entry was emitted after the enqueue tick — the paced-arm assertion would be vacuous")
+	}
+}
+
+// TestRetransmit_pacedStormBound proves the anti-storm bound (D-05): a
+// discovery flush of 1 000 pending entries — the whole-set event that
+// produced the measured 949 552-retry storm — emits at most one datagram per
+// pacer interval, so a fixed virtual window sees at most window/interval + 1
+// record sends, never one per entry. The queue is still draining at the
+// window's end, so the fixture really exercises the backlog.
+func TestRetransmit_pacedStormBound(t *testing.T) {
+	t.Parallel()
+	const (
+		stormPending = 1000
+		stormWindow  = time.Second
+		stormRate    = 500
+	)
+	now0 := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now0, &out)
+	out.Drain()
+	for i := range stormPending {
+		localWrite(t, core, st, now0, fmt.Sprintf("storm/%04d", i), "v")
+	}
+	helloAt := now0.Add(time.Millisecond)
+	core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
+	out.Drain()
+	if got := core.QueuedSends(); got != stormPending {
+		t.Fatalf("the discovery flush queued %d record sends, want %d — one per pending entry", got, stormPending)
+	}
+
+	interval := time.Second / stormRate
+	emitted := 0
+	end := helloAt.Add(stormWindow)
+	for now := helloAt; !now.After(end); now = now.Add(time.Millisecond) {
+		core.Advance(now, &out)
+		got := len(broadcastRepls(out.Drain()))
+		if got > 1 {
+			t.Fatalf("Advance at +%v emitted %d record sends, want at most one per call", now.Sub(now0), got)
+		}
+		emitted += got
+	}
+	if maxEmissions := int(stormWindow/interval) + 1; emitted > maxEmissions {
+		t.Fatalf("the flush emitted %d record sends in %v, want <= %d (window/interval + 1) — an unpaced storm returned",
+			emitted, stormWindow, maxEmissions)
+	}
+	if core.QueuedSends() == 0 {
+		t.Fatalf("the queue emptied within %v — the fixture is too small to prove the bound", stormWindow)
+	}
+}
+
+// TestRetransmit_skipDrainedAndSuperseded pins the queued-send skip rules
+// (RESEARCH Pitfall 5): a send whose entry Acked away after enqueue emits
+// nothing, and a send whose stored version changed emits nothing either — the
+// retry path removes the untrustworthy entry instead of resurrecting a stale
+// record.
+func TestRetransmit_skipDrainedAndSuperseded(t *testing.T) {
+	t.Parallel()
+	t.Run("a queued send whose entry Acked away emits nothing", func(t *testing.T) {
+		t.Parallel()
+		core, st := newSyncCore(repl.Config{SyncResponseRate: 10})
+		var out port.Outbox
+		core.Advance(at(0), &out)
+		out.Drain()
+		localWrite(t, core, st, at(0), keyAlpha, "a")
+		localWrite(t, core, st, at(0), keyBeta, "b")
+		localWrite(t, core, st, at(0), keyGamma, "g")
+		helloAt := at(time.Millisecond)
+		core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
+		out.Drain()
+		core.Advance(helloAt, &out)
+		if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha}) {
+			t.Fatalf("the flush head emitted %v, want the sorted head alpha", got)
+		}
+
+		core.HandleDatagram(helloAt, ackFrom(peerID1, keyBeta, pendingVersion(t, core, keyBeta)), &out)
+		out.Drain()
+		core.Advance(helloAt.Add(200*time.Millisecond), &out)
+		got := replKeys(broadcastRepls(out.Drain()))
+		if slices.Contains(got, keyBeta) {
+			t.Fatalf("the drained beta was still broadcast: %v", got)
+		}
+		if !slices.Equal(got, []string{keyGamma}) {
+			t.Fatalf("the slot emitted %v, want exactly gamma after beta's skip", got)
+		}
+	})
+
+	t.Run("a queued send whose stored version changed emits nothing", func(t *testing.T) {
+		t.Parallel()
+		core, st := newSyncCore(repl.Config{SyncResponseRate: 10})
+		var out port.Outbox
+		core.Advance(at(0), &out)
+		out.Drain()
+		localWrite(t, core, st, at(0), keyAlpha, "a")
+		localWrite(t, core, st, at(0), keyBeta, "b")
+		helloAt := at(time.Millisecond)
+		core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
+		out.Drain()
+		core.Advance(helloAt, &out)
+		if got := replKeys(broadcastRepls(out.Drain())); !slices.Equal(got, []string{keyAlpha}) {
+			t.Fatalf("the flush head emitted %v, want alpha", got)
+		}
+
+		// The store record changes under the queued beta send without a core
+		// notification: the queued version is stale.
+		if _, _, err := st.store.Set(keyBeta, []byte("changed")); err != nil {
+			t.Fatalf("store Set(%q): %v", keyBeta, err)
+		}
+		core.Advance(helloAt.Add(150*time.Millisecond), &out)
+		if got := broadcastRepls(out.Drain()); len(got) != 0 {
+			t.Fatalf("the stale queued send emitted %v, want nothing", got)
+		}
+		if _, tracked := core.PendingSnapshot()[keyBeta]; !tracked {
+			t.Fatal("the flush skip dropped the pending entry, want it retained until the ladder due time")
+		}
+
+		// At beta's ladder due time the scan queues a retry, and the retry
+		// path removes the untrustworthy entry instead of resurrecting it.
+		core.Advance(helloAt.Add(500*time.Millisecond), &out)
+		out.Drain() // alpha's due retry
+		core.Advance(helloAt.Add(700*time.Millisecond), &out)
+		if got := replKeys(broadcastRepls(out.Drain())); len(got) != 0 {
+			t.Fatalf("the stale retry emitted %v, want nothing", got)
+		}
+		if _, tracked := core.PendingSnapshot()[keyBeta]; tracked {
+			t.Fatal("the stale retry did not remove the untrustworthy entry")
 		}
 	})
 }
