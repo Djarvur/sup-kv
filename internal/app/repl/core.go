@@ -168,8 +168,12 @@ func (c Config) normalized() Config {
 }
 
 // StateStore is the record source the replication core consumes: remote
-// records join the store through ApplyRemote and the sync paths read the
-// full snapshot through Records. The concrete engine (internal/app/persist
+// records join the store through ApplyRemote, and the sync paths read the
+// tombstone-visible view — one version probe per listing entry, one point
+// read per reply, and the shallow version map for building listings. The
+// old whole-store snapshot method is deliberately absent: no sync path has a
+// legitimate use for it, and its removal makes the O(store)-per-datagram
+// cost compile-impossible (XPORT-06). The concrete engine (internal/app/persist
 // wrapping storage.Store — its ApplyRemote is the remote-apply seam plan
 // 04-06 shipped) and tests adapting storage.Store through a Merge-delegating
 // wrapper both satisfy it. Declared
@@ -181,9 +185,19 @@ type StateStore interface {
 	// write's bookkeeping but triggered by replication.
 	ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error)
 
-	// Records returns a full snapshot of the map, tombstones included,
-	// with Data defensively copied — the DataSync compare source.
-	Records() map[string]storage.Record
+	// Version returns the stored version for key — tombstones included — and
+	// false when the key holds no record. One lock-protected map lookup and
+	// no Data copy: the per-entry probe a DataSync comparison takes.
+	Version(key string) (version.RecordVersion, bool)
+
+	// Lookup returns a copy of the stored record for key, tombstones
+	// included. This is the exact-record reply source for DataRequest and
+	// for the strictly-newer DataSync response.
+	Lookup(key string) (storage.Record, bool)
+
+	// Versions returns a fresh map from every key — tombstones included — to
+	// its stored version, copying no Data: the DataSync listing source.
+	Versions() map[string]version.RecordVersion
 }
 
 // NewRunID returns a fresh per-process-start run identifier: 16 random
@@ -369,9 +383,9 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // targeted full listing toward the restarted peer (REPL-07),
 // DataReplication applies the record and Acks it, Ack drains
 // the pending-set wait-set (REPL-02), DataRequest answers through the
-// rate-limited egress queue (REPL-04), and DataSync compares against the
-// store snapshot and queues DataRequest / unicast DataReplication
-// responses on the same queue (REPL-05).
+// rate-limited egress queue (REPL-04), and DataSync compares per entry
+// against the store's tombstone-visible version view and queues DataRequest
+// / unicast DataReplication responses on the same queue (REPL-05).
 func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	switch in.Status {
 	case port.BadCRC:
@@ -590,20 +604,19 @@ func ackedInsert(acked []uint16, id uint16) []uint16 {
 	return slices.Insert(acked, pos, id)
 }
 
-// handleDataRequest answers one DataRequest (REPL-04): a single Records()
-// snapshot serves the whole handler call — the snapshot discipline every
-// sync path of this plan reuses, never one snapshot per response — and a
-// key present in the snapshot (tombstones included, so deletes heal
-// through the same LWW path as writes) enqueues one unicast
-// DataReplication carrying the exact snapshot record on the egress queue,
-// which Advance drains at the sync_response_rate cadence. A key absent
-// from the snapshot produces nothing at all — no error reply, no nack,
+// handleDataRequest answers one DataRequest (REPL-04): one point Lookup
+// serves the whole handler call — the view discipline, never a whole-store
+// snapshot — and a key the store holds (tombstones included, so deletes
+// heal through the same LWW path as writes) enqueues one unicast
+// DataReplication carrying the exact stored record on the egress queue,
+// which Advance drains at the sync_response_rate cadence. A key the store
+// does not hold produces nothing at all — no error reply, no nack,
 // nothing enqueued, ever. The reply addresses the datagram's source handle
 // regardless of peer-table membership: a stranger's DataRequest is still
 // protocol traffic from a live node, and replies are unicast only — a
 // broadcast reply would amplify one request into N datagrams.
 func (c *Core) handleDataRequest(now time.Time, source, key string) {
-	rec, ok := c.store.Records()[key]
+	rec, ok := c.store.Lookup(key)
 	if !ok {
 		return
 	}
@@ -611,34 +624,40 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 }
 
 // handleDataSync compares one received DataSync listing against the local
-// store (REPL-05): a single Records() snapshot serves the whole handler
-// call, and each listing entry compares per key by the full record-version
-// order — version.Compare, the same order storage.Merge joins by. The
-// first received DataSync datagram — any chunk, an empty listing included —
-// sets the core's syncArrived flag (the startup gate's sync half, API-04,
-// the A1 reading: the protocol deliberately carries no chunk-completeness
-// state because chunks are self-sufficient, so the first received chunk is
-// the honest first-sync-round signal and the startup_gate timeout is the
-// backstop). A locally absent key or a strictly newer listing version
-// enqueues a unicast DataRequest to the sender's handle; a strictly newer
-// local record — tombstones included, so a local delete heals the sender's
-// live copy through the reply — enqueues a unicast exact-record
-// DataReplication; equal versions produce silence. Entries are processed
-// in received order (senders emit sorted, but the compare is per key and
+// store (REPL-05): each listing entry probes the store through the
+// tombstone-visible per-entry Version — never a whole-store snapshot and
+// never the Versions map, either of which would make the handler O(store)
+// per chunk (XPORT-06) — and compares by the full record-version order,
+// version.Compare, the same order storage.Merge joins by. The first received
+// DataSync datagram — any chunk, an empty listing included — sets the core's
+// syncArrived flag (the startup gate's sync half, API-04, the A1 reading:
+// the protocol deliberately carries no chunk-completeness state because
+// chunks are self-sufficient, so the first received chunk is the honest
+// first-sync-round signal and the startup_gate timeout is the backstop). A
+// locally absent key or a strictly newer listing version enqueues a unicast
+// DataRequest to the sender's handle; a strictly newer local record — read
+// through one point Lookup, tombstones included, so a local delete heals the
+// sender's live copy through the reply — enqueues a unicast exact-record
+// DataReplication; equal versions produce silence. Entries are processed in
+// received order (senders emit sorted, but the compare is per key and
 // order-independent by construction) and every response flows through the
-// single rate-limited egress queue — the scope pin; no reactive unicast
-// has a bypass path, which is what survives empty-node recovery (T-04-07).
+// single rate-limited egress queue — the scope pin; no reactive unicast has
+// a bypass path, which is what survives empty-node recovery (T-04-07).
 func (c *Core) handleDataSync(now time.Time, source string, entries []port.SyncEntry) {
 	c.syncArrived = true
-	snapshot := c.store.Records()
 	for _, entry := range entries {
-		local, present := snapshot[entry.Key]
-		cmp := local.Version.Compare(entry.Version)
+		local, present := c.store.Version(entry.Key)
 		switch {
-		case !present || cmp < 0:
+		case !present || local.Compare(entry.Version) < 0:
 			c.enqueueResponse(now, source, port.DataRequest{Key: entry.Key})
-		case cmp > 0:
-			c.enqueueResponse(now, source, port.DataReplication{Key: entry.Key, Record: local})
+		case local.Compare(entry.Version) > 0:
+			rec, ok := c.store.Lookup(entry.Key)
+			if !ok {
+				// The store changed between the probe and the read: the entry
+				// is gone, so there is nothing newer to send.
+				continue
+			}
+			c.enqueueResponse(now, source, port.DataReplication{Key: entry.Key, Record: rec})
 		}
 	}
 }
@@ -737,15 +756,15 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 // startup trigger on the first Advance — immediately after the startup
 // Hello, Hello first, both broadcast, the IDEA §Node lifecycle order
 // pinned by TestSync_triggers — and the timer trigger on every subsequent
-// Advance at or after lastSync+cfg.SyncInterval. The listing is one
-// Records() snapshot turned into entries for every record, tombstones
-// included (deletes reconcile through the same listing), sorted by key in
-// byte order and chunked by the conservative estimate; one broadcast
-// datagram per chunk leaves in chunk order. A store with zero records
-// still emits one DataSync with an empty entry list — an empty listing is
-// a valid sync round that invites newer-flooding from receivers (probe
-// #7). The neighbor-restart trigger — a Hello carrying a new run_id from
-// a known node — emits the same chunk sequence UNICAST toward the
+// Advance at or after lastSync+cfg.SyncInterval. The listing is built from
+// the store's shallow Versions view into entries for every record,
+// tombstones included (deletes reconcile through the same listing), sorted
+// by key in byte order and chunked by the conservative estimate; one
+// broadcast datagram per chunk leaves in chunk order. A store with zero
+// records still emits one DataSync with an empty entry list — an empty
+// listing is a valid sync round that invites newer-flooding from receivers
+// (probe #7). The neighbor-restart trigger — a Hello carrying a new run_id
+// from a known node — emits the same chunk sequence UNICAST toward the
 // restarted peer in handleHello (REPL-07, plan 04-04), through the shared
 // listingChunks build.
 func (c *Core) syncListing(now time.Time, out *port.Outbox) {
@@ -759,7 +778,7 @@ func (c *Core) syncListing(now time.Time, out *port.Outbox) {
 }
 
 // listingChunks builds the full DataSync listing chunk sequence from one
-// Records() snapshot (REPL-05): every record, tombstones included (deletes
+// shallow Versions view (REPL-05): every record, tombstones included (deletes
 // reconcile through the same listing), sorted by key in byte order and
 // packed by the conservative-estimate chunker. One build serves both
 // emission triggers — the sync timer's broadcast (syncListing) and the
@@ -767,12 +786,12 @@ func (c *Core) syncListing(now time.Time, out *port.Outbox) {
 // reaction reuses the plan-04-03 machinery verbatim, never a second
 // listing implementation. Identical store state produces the identical
 // chunk sequence: the walk is over the sorted listing, never a map (probe
-// #11), and an empty snapshot yields one empty chunk (probe #7).
+// #11), and an empty listing yields one empty chunk (probe #7).
 func (c *Core) listingChunks() [][]port.SyncEntry {
-	snapshot := c.store.Records()
-	entries := make([]port.SyncEntry, 0, len(snapshot))
-	for _, key := range slices.Sorted(maps.Keys(snapshot)) {
-		entries = append(entries, port.SyncEntry{Key: key, Version: snapshot[key].Version})
+	versions := c.store.Versions()
+	entries := make([]port.SyncEntry, 0, len(versions))
+	for _, key := range slices.Sorted(maps.Keys(versions)) {
+		entries = append(entries, port.SyncEntry{Key: key, Version: versions[key]})
 	}
 	return chunkSyncEntries(entries, c.cfg.SyncChunkBytes)
 }

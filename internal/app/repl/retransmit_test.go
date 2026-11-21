@@ -61,8 +61,10 @@ func at(off time.Duration) time.Time {
 }
 
 // stateStore adapts *storage.Store to repl.StateStore — the Phase 4 consumer
-// seam — by delegating both methods (the production applier is the persist
-// engine's ApplyRemote, plan 04-06).
+// seam — by delegating the core's four methods (the production applier is the
+// persist engine's ApplyRemote, plan 04-06). Records stays as a test-only
+// convenience for expected-value construction; the core interface no longer
+// declares it.
 type stateStore struct{ store *storage.Store }
 
 // ApplyRemote joins one replicated record through the store's LWW merge.
@@ -70,7 +72,16 @@ func (s stateStore) ApplyRemote(key string, rec storage.Record) ([]storage.Confl
 	return s.store.Merge(key, rec)
 }
 
-// Records returns the full snapshot, tombstones included.
+// Version returns the stored version for key, tombstones included.
+func (s stateStore) Version(key string) (version.RecordVersion, bool) { return s.store.Version(key) }
+
+// Lookup returns the stored record for key, tombstones included.
+func (s stateStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s stateStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
+
+// Records returns the full snapshot, tombstones included — test expectations only.
 func (s stateStore) Records() map[string]storage.Record { return s.store.Records() }
 
 // newTestCore returns the local node's core over a real store whose clock

@@ -13,6 +13,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -187,8 +188,14 @@ func (s smokeStore) ApplyRemote(key string, rec storage.Record) ([]storage.Confl
 	return s.store.Merge(key, rec)
 }
 
-// Records returns the full snapshot, tombstones included.
-func (s smokeStore) Records() map[string]storage.Record { return s.store.Records() }
+// Version returns the stored version for key, tombstones included.
+func (s smokeStore) Version(key string) (version.RecordVersion, bool) { return s.store.Version(key) }
+
+// Lookup returns the stored record for key, tombstones included.
+func (s smokeStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s smokeStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
 // waitFor polls cond every pollInterval until it holds or the deadline —
 // the earlier of timeout and the test's own hard deadline minus a margin —

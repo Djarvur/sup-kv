@@ -149,7 +149,8 @@ func probeLoopbackBroadcast(tb testing.TB, port int) {
 
 // peerStore adapts *storage.Store to repl.StateStore for the peer node (the
 // udprepl smokeStore precedent): remote merges join through Merge, and the
-// store keeps the corroborating copy this test reads back.
+// store keeps the corroborating copy this test reads back through the
+// tombstone-visible point read.
 type peerStore struct{ store *storage.Store }
 
 // ApplyRemote joins one replicated record through the store's LWW merge.
@@ -157,8 +158,14 @@ func (s peerStore) ApplyRemote(key string, rec storage.Record) ([]storage.Confli
 	return s.store.Merge(key, rec)
 }
 
-// Records returns the full snapshot, tombstones included.
-func (s peerStore) Records() map[string]storage.Record { return s.store.Records() }
+// Version returns the stored version for key, tombstones included.
+func (s peerStore) Version(key string) (version.RecordVersion, bool) { return s.store.Version(key) }
+
+// Lookup returns the stored record for key, tombstones included.
+func (s peerStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s peerStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
 // TestWaitIntegration_ackedThroughRealAdapterMirror drives 05-REVIEW CR-01's
 // exact production scenario end to end: one known peer, a Set with

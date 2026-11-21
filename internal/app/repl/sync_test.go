@@ -70,8 +70,8 @@ func recordsEqual(a, b storage.Record) bool {
 // emits nothing, ever. The requester is never Hello'd first: a stranger's
 // DataRequest is still protocol traffic from a live node, so the reply goes
 // to the datagram's source handle regardless of peer-table membership. One
-// Records() snapshot serves each handler call — the discipline the Task 2/3
-// sync paths reuse.
+// point Lookup serves each handler call — the tombstone-visible view
+// discipline the sync paths share.
 func TestDataRequest_replyAndSilence(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -545,7 +545,8 @@ func newSyncCore(cfg repl.Config) (*repl.Core, *stateStore) {
 }
 
 // TestSync_compare proves the DataSync receive path's per-key compare
-// (REPL-05): against ONE store snapshot, every listing entry compares by
+// (REPL-05): through the store's tombstone-visible per-entry version probe,
+// every listing entry compares by
 // the full record-version order — a key missing locally or a strictly
 // newer listing version queues a DataRequest, a strictly newer local
 // record queues a unicast exact-record DataReplication, equal versions

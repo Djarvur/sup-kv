@@ -30,6 +30,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -426,9 +427,11 @@ type LoggedWrite struct {
 	Rec storage.Record
 }
 
-// nodeStore adapts *storage.Store to repl.StateStore by delegating both
+// nodeStore adapts *storage.Store to repl.StateStore by delegating its four
 // methods — the plan 04-01 test precedent (the persist engine's ApplyRemote
-// seam lands with plan 04-06).
+// seam lands with plan 04-06). The three read methods are the store's
+// tombstone-visible view: the core's sync paths consume it instead of a
+// whole-store snapshot (XPORT-06).
 type nodeStore struct{ store *storage.Store }
 
 // ApplyRemote joins one replicated record through the store's LWW merge.
@@ -436,8 +439,14 @@ func (s nodeStore) ApplyRemote(key string, rec storage.Record) ([]storage.Confli
 	return s.store.Merge(key, rec)
 }
 
-// Records returns the full snapshot, tombstones included.
-func (s nodeStore) Records() map[string]storage.Record { return s.store.Records() }
+// Version returns the stored version for key, tombstones included.
+func (s nodeStore) Version(key string) (version.RecordVersion, bool) { return s.store.Version(key) }
+
+// Lookup returns the stored record for key, tombstones included.
+func (s nodeStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s nodeStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
 // simRunID returns nodeID's run identifier: fresh per node (no two cluster
 // members share one) and derived deterministically — the simulator admits no
