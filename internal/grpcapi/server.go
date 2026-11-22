@@ -173,7 +173,10 @@ func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.Get
 // can turn a confirmed write into an error. Without the flag the report
 // fields keep their zero values. The replication notification is
 // best-effort (D-05): a dropped notification never fails the RPC, because
-// the durable write is already engine-confirmed.
+// the durable write is already engine-confirmed. A write the engine
+// installed but whose confirming dump failed is still notified before the
+// Unavailable answer (PROTO-08): the record is in memory and must replicate,
+// and only a closed engine's abandoned work is not notified.
 func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.SetResponse, error) {
 	if s.gated() {
 		return nil, gateUnavailable()
@@ -197,6 +200,14 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 		ver, _, err = s.engine.Set(req.GetKey(), req.GetValue())
 	}
 	if err != nil {
+		// PROTO-08 totality (D-08, T-4-18): a write the engine installed but
+		// whose confirming dump failed is in memory and must reach peers, so
+		// it is notified before the error answers Unavailable. track is false:
+		// the RPC errors, so no wait_for_replication report exists. ErrClosed
+		// is shutdown work the process is abandoning — never notified.
+		if errors.Is(err, persist.ErrDumpFailed) {
+			s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false, false)
+		}
 		return nil, mapError(err)
 	}
 	s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false, req.GetWaitForReplication())
@@ -221,7 +232,10 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 // tombstone's replication Acks and decorates the response with the D-08
 // aggregate report, bounded by the positive per-request wait_timeout_ms
 // else the operator default (D-09), never changing the write outcome;
-// without the flag the report fields keep their zero values.
+// without the flag the report fields keep their zero values. Like Set, an
+// unconfirmed tombstone whose dump failed is notified before the
+// Unavailable answer (PROTO-08 totality), while a closed engine's
+// abandoned work is not.
 func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apiproto.DeleteResponse, error) {
 	if s.gated() {
 		return nil, gateUnavailable()
@@ -234,6 +248,12 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 	}
 	ver, _, err := s.engine.Delete(req.GetKey())
 	if err != nil {
+		// PROTO-08 totality (D-08, T-4-18): the unconfirmed tombstone is
+		// already installed in memory and must reach peers before the RPC
+		// answers Unavailable; track is false and ErrClosed never notifies.
+		if errors.Is(err, persist.ErrDumpFailed) {
+			s.notifyLocalWrite(req.GetKey(), ver, nil, true, false)
+		}
 		return nil, mapError(err)
 	}
 	s.notifyLocalWrite(req.GetKey(), ver, nil, true, req.GetWaitForReplication())
@@ -301,12 +321,26 @@ func (s *Server) SnapshotCreate(_ context.Context, req *apiproto.SnapshotCreateR
 // SnapshotCreate (A5: a load replays writes through the store). The name
 // crosses to persistfile untouched, for the same T-05-07 reason as the
 // create path, and the call returns only after one final dump covering the
-// whole replay — the PERS-04 confirmation contract, batched.
+// whole replay — the PERS-04 confirmation contract, batched. The handler
+// notifies every record the replay installed with track=false (PROTO-08):
+// a snapshot load replicates its result even when the confirming dump
+// failed, because the replayed state is in memory; a no-op load notifies
+// nothing, and a closed engine's abandoned work is not notified.
 func (s *Server) SnapshotLoad(_ context.Context, req *apiproto.SnapshotLoadRequest) (*apiproto.SnapshotLoadResponse, error) {
 	if s.gated() {
 		return nil, gateUnavailable()
 	}
-	_, err := s.engine.Restore(req.GetName())
+	records, err := s.engine.Restore(req.GetName())
+	// PROTO-08 totality (D-08, T-4-19): every record the replay installed
+	// reaches peers, track=false because a load has no waiter report. The
+	// notify runs even when the confirming dump failed — the state is in
+	// memory — but never on a closed engine, which is abandoning its work:
+	// records installed before the close are exactly the abandoned ones.
+	if !errors.Is(err, persist.ErrClosed) {
+		for _, rec := range records {
+			s.notifyLocalWrite(rec.Key, rec.Version, rec.Data, rec.Deleted, false)
+		}
+	}
 	if err != nil {
 		return nil, mapError(err)
 	}
