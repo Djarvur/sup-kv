@@ -159,20 +159,32 @@ type trackerKey struct {
 // resolved and ok; done is closed exactly once, on the first resolution,
 // while the mutex is held, so a waiter waking on it observes the final
 // state. The acked set is sorted ascending and idempotent (a re-Ack adds no
-// second entry): full coverage means len(acked) reaches the write-time
-// peer total.
+// second entry), and it only ever holds peers from the captured write-time
+// set: total is that set's length and wants its membership, both stored when
+// the tracker is created in NotifyLocalWrite and immutable afterwards, so
+// the report can count only the promise the write actually made (A-01,
+// T-06-04).
 type tracker struct {
 	mu       sync.Mutex
+	total    uint32
+	wants    map[uint16]struct{}
 	acked    []uint16
 	resolved bool
 	ok       bool
 	done     chan struct{}
 }
 
-// newTracker returns a tracker with its done channel armed and no
+// newTracker returns a tracker scoped to the captured write-time peers: the
+// total is the slice length and wants its membership set, so an Ack from any
+// peer outside the capture is inert. The done channel is armed with no
 // resolution yet.
-func newTracker() *tracker {
-	return &tracker{done: make(chan struct{})}
+func newTracker(peers []uint16) *tracker {
+	wants := make(map[uint16]struct{}, len(peers))
+	for _, id := range peers {
+		wants[id] = struct{}{}
+	}
+	//nolint:gosec // G115: peers holds 16-bit node ids, so at most 65536 entries — the conversion cannot truncate.
+	return &tracker{total: uint32(len(peers)), wants: wants, done: make(chan struct{})}
 }
 
 // resolveLocked records the first resolution and closes done; later results
@@ -644,7 +656,7 @@ func (a *Adapter) Run(ctx context.Context) error {
 func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record, track bool, peers []uint16) error {
 	keyID := trackerKey{key: key, version: rec.Version}
 	if track {
-		a.ensureTracker(keyID)
+		a.ensureTracker(keyID, peers)
 	}
 	err := a.enqueueLocalWrite(localWrite{key: key, rec: cloneLocalRecord(rec), peers: slices.Clone(peers)})
 	if err != nil {
@@ -709,17 +721,18 @@ func (a *Adapter) enqueueLocalWrite(lw localWrite) error {
 	}
 }
 
-// ensureTracker returns the tracker for k, creating it when absent. Only
-// NotifyLocalWrite calls this — the sole production creation site; a
-// tracker already present for the same identity is reused (a repeated
-// tracked notification of one write shares its resolution).
-func (a *Adapter) ensureTracker(k trackerKey) *tracker {
+// ensureTracker returns the tracker for k, creating it when absent — scoped
+// to the captured write-time peers (A-01). Only NotifyLocalWrite calls this
+// — the sole production creation site; a tracker already present for the
+// same identity is reused (a repeated tracked notification of one write
+// shares its resolution and its original promise set).
+func (a *Adapter) ensureTracker(k trackerKey, peers []uint16) *tracker {
 	a.trackersMu.Lock()
 	defer a.trackersMu.Unlock()
 	if tr := a.trackers[k]; tr != nil {
 		return tr
 	}
-	tr := newTracker()
+	tr := newTracker(peers)
 	a.trackers[k] = tr
 	return tr
 }
@@ -744,9 +757,11 @@ func (a *Adapter) deleteTracker(k trackerKey) {
 
 // applyResults consumes the core's result stream after one handler
 // (XPORT-12): every result resolves or accumulates on the tracker for its
-// exact (key, version) identity. ResultAck inserts the peer into acked
-// without resolving (an Ack alone is not full coverage); ResultDrained
-// resolves ok=true (full write-time coverage); ResultSuperseded and
+// exact (key, version) identity. ResultAck inserts the peer into acked only
+// when it is a member of the tracker's captured write-time set (A-01,
+// T-06-04: an Ack from a node outside the promise is inert), without
+// resolving — an Ack alone is not full coverage; ResultDrained resolves
+// ok=true (full write-time coverage); ResultSuperseded and
 // ResultWaitSetEmpty resolve ok=false (honest false — the tracked version
 // lost, or its last waiter was evicted). A result for an absent tracker is
 // DROPPED, never a map insert: NotifyLocalWrite is the sole creation site,
@@ -763,7 +778,9 @@ func (a *Adapter) applyResults(out *port.Outbox) {
 		tr.mu.Lock()
 		switch res.Kind {
 		case port.ResultAck:
-			tr.acked = insertPeer(tr.acked, res.Peer)
+			if _, promised := tr.wants[res.Peer]; promised {
+				tr.acked = insertPeer(tr.acked, res.Peer)
+			}
 		case port.ResultDrained:
 			tr.resolveLocked(true)
 		case port.ResultSuperseded, port.ResultWaitSetEmpty:
@@ -776,12 +793,14 @@ func (a *Adapter) applyResults(out *port.Outbox) {
 // WaitReplicated waits for one wait-requesting local write's replication
 // outcome — the adapter half of the wait_for_replication seam (XPORT-12,
 // D-04). total is the write-time peer snapshot the caller captured; the
-// return is the observed report: acked is true only on full write-time
-// coverage, and ackedCount is the observed Ack count clamped to total
-// (WR-01: a matching Ack from a node outside the write-time snapshot still
-// counts in the core, so the raw length can exceed total).
+// tracker created at notify time owns the same set as its total and
+// membership, and that captured copy is authoritative here: acked is true
+// only on full captured-set coverage, and ackedCount is the number of
+// captured peers observed in the acked set — never the raw acked length, so
+// an Ack from a node outside the capture can neither increment the count nor
+// flip acked (A-01, T-06-04).
 //
-// The success rule is resolved && ok && clamped == total: full write-time
+// The success rule is resolved && ok && count == tr.total: full write-time
 // coverage is the only success. Eviction (ResultWaitSetEmpty) and
 // supersession (ResultSuperseded) are honest false reports, and a timeout
 // or ctx cancellation returns the last observed count with acked=false —
@@ -789,9 +808,10 @@ func (a *Adapter) applyResults(out *port.Outbox) {
 //
 // total == 0 is the D-11 single-node release case: the adapter creates the
 // tracker at notify time even for a zero-peer write, so this call is its
-// RELEASE point. It reports (true, 0) — a benign release verdict — while the
-// gRPC handler, which owns the public report, answers the honest
-// (false, 0, 0) for a write no peer acknowledged (A-01). An absent tracker
+// RELEASE point. It reports (false, 0) — no peer was captured, so nothing
+// was acknowledged — and deletes the tracker. A tracker whose captured total
+// is zero is released the same way even when the caller passes a non-zero
+// total, because the captured set is authoritative. An absent tracker
 // reports an immediate (false, 0) without polling: two paths reach it — a
 // write notified with track=false, and a white-box test driving the core
 // directly — and neither has a waiter to resolve.
@@ -806,10 +826,17 @@ func (a *Adapter) WaitReplicated(ctx context.Context, key string, ver version.Re
 	k := trackerKey{key: key, version: ver}
 	if total == 0 {
 		a.deleteTracker(k)
-		return true, 0
+		return false, 0
 	}
 	tr := a.lookupTracker(k)
 	if tr == nil {
+		return false, 0
+	}
+	if tr.total == 0 {
+		// The tracker's captured set is empty: nobody can ever complete this
+		// promise, so the wait is the release point regardless of the caller's
+		// view (the handler normally passes total 0 for this same reason).
+		a.deleteTracker(k)
 		return false, 0
 	}
 	timer := time.NewTimer(timeout)
@@ -820,9 +847,16 @@ func (a *Adapter) WaitReplicated(ctx context.Context, key string, ver version.Re
 	case <-timer.C:
 	}
 	tr.mu.Lock()
-	// The acked set holds uint16 peer ids, so its length cannot truncate.
-	count := min(uint32(len(tr.acked)), total) //nolint:gosec // G115: len(acked) <= 65536 by the uint16 peer-id domain.
-	ok := tr.resolved && tr.ok && count == total
+	// Count only Acks the tracker's captured set contains: an outside peer's
+	// matching Ack is inert by construction (T-06-04), and the count can never
+	// exceed the captured total.
+	var count uint32
+	for _, id := range tr.acked {
+		if _, promised := tr.wants[id]; promised {
+			count++
+		}
+	}
+	ok := tr.resolved && tr.ok && count == tr.total
 	tr.mu.Unlock()
 	a.deleteTracker(k)
 	return ok, count

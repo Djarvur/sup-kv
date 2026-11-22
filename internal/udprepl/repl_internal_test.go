@@ -256,8 +256,8 @@ func TestNotify_createsTrackerBeforeCore(t *testing.T) {
 	}
 	reports := make(chan replicationResult, 1)
 	go func() {
-		acked, count := adapter.WaitReplicated(t.Context(), postKey, postVer, 1, 2*time.Second)
-		reports <- replicationResult{acked: acked, count: count}
+		waitAcked, waitCount := adapter.WaitReplicated(t.Context(), postKey, postVer, 1, 2*time.Second)
+		reports <- replicationResult{acked: waitAcked, count: waitCount}
 	}()
 	sendTrackerDatagram(t, sender, port.Ack{Key: postKey, Version: postVer}, trackerNodeB, trackerRunIDB)
 	select {

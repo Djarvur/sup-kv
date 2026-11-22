@@ -657,7 +657,9 @@ type pendingRef struct {
 // resolves the record through StateStore.Lookup, skipping when the stored
 // version no longer matches the tracked pair (the memory half of R-02 and
 // the stale-send guard). The entry holds the exact tracked version, the
-// wait-set of known peers that have not yet Acked that version, the set of
+// wait-set of captured write-time peers that have not yet Acked that version
+// (seeded once, from the notification's captured slice — discovery never
+// grows it, A-01/IN-05), the set of
 // peers that have (sorted ascending, idempotent — handleAck inserts;
 // eviction never touches it, which is what keeps an Ack distinguishable from
 // a peer_timeout eviction in PendingSnapshot, T-05-04), the retransmission
@@ -1339,12 +1341,14 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // the field's name is the liveness contract, and no other datagram type ever
 // touches it. A Hello that ends an empty table is discovery: in this same
 // event the core enqueues the pending set on the paced record-send queue —
-// one broadcast DataReplication per entry in sorted key order, the new peer
-// added to every wait-set, every ladder restarted at cfg.AckTimeout — so a
-// brand-new peer receives the pending set promptly, not at the next backoff
-// expiry (research A6), while the pacer prevents the whole-set burst R-01/R-02
-// measured. A Hello that does not end an empty table modifies no wait-set:
-// only discovery adds waiters.
+// one broadcast DataReplication per entry in sorted key order, every ladder
+// restarted at cfg.AckTimeout — so a brand-new peer receives the pending set
+// promptly, not at the next backoff expiry (research A6), while the pacer
+// prevents the whole-set burst R-01/R-02 measured. The flush deliberately
+// does NOT add the new peer to any wait-set or ledger: the promise is exactly
+// the entry's write-time capture (A-01, IN-05, RESEARCH Pitfall 4), so a
+// discovered peer is broadcast to, never awaited. No Hello of any shape
+// modifies a wait-set.
 func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	// Any received Hello — a discovery, a refresh or a restart — proves the
 	// receive path hears peers, so the no-Hello WARN stands down for the
@@ -1408,12 +1412,16 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 	}
 	for _, pk := range sortedPendingKeys(c.pending) {
 		entry := c.pending[pk]
-		entry.waitSet[in.NodeID] = struct{}{}
+		// The flush re-arms the ladder and queues the record send so the new
+		// peer receives the pending set, but it deliberately does NOT add the
+		// peer to the wait-set or the per-peer ledger: the promise is exactly
+		// the write-time capture the entry was created with (A-01, IN-05,
+		// RESEARCH Pitfall 4). A peer discovered after acceptance can be
+		// broadcast to; it can never be awaited.
 		entry.backoff = c.cfg.AckTimeout
 		entry.nextRetry = now.Add(c.cfg.AckTimeout)
 		c.pending[pk] = entry
 		c.fixRetry(pk, entry.nextRetry)
-		c.ledgerAdd(in.NodeID, pk)
 		c.enqueueRecordSend(now, pk, false)
 	}
 }
@@ -1565,9 +1573,10 @@ func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplicatio
 // joins the acked set whether or not the sender was in the wait-set (the
 // counting behavior — WR-01): the wait-set gate does not exist, so a peer
 // may appear in acked without ever having been waited on, and the acked
-// length can exceed the write-time peer snapshot; the D-08 report keeps
-// its peer set fixed at write time (D-10) by reading the count clamped to
-// the write-time total (grpcapi's waitForReplication). The empty-table
+// length can exceed the write-time peer snapshot. The core's acked set is
+// therefore a superset; the adapter's tracker counts only the peers in its
+// captured write-time set (A-01, T-06-04), so the D-08 report can never be
+// inflated by a stranger's Ack. The empty-table
 // guard is load-bearing: an entry whose every waiter was evicted stays
 // retained in suspension, and an Ack can only drain when peers actually
 // exist. The peer is identified by the datagram's NodeID alone; nothing
@@ -2152,8 +2161,9 @@ func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
 // store write (D-05: no store subscriptions, no observers, no callbacks —
 // tests now, the gRPC handler in Phase 5). The store is the single record
 // source (the write is already installed there), so the core keeps only the
-// (key, version) tracking entry — wait-set seeded with every currently-known
-// peer, ladder armed at cfg.AckTimeout — and broadcasts the record as a
+// (key, version) tracking entry — wait-set seeded with exactly the captured
+// write-time peers, ladder armed at cfg.AckTimeout — and broadcasts the
+// record as a
 // DataReplication datagram from a defensive copy (the author may reuse its
 // buffer once the call returns).
 //
@@ -2722,8 +2732,10 @@ func chunkSyncEntries(entries []port.SyncEntry, budget int) [][]port.SyncEntry {
 // at-or-after boundary, probe #18 — and eviction removes the peer from the
 // table AND from every pending entry's wait-set in the same event. It never
 // drains an entry by itself: with the drain rule, an entry whose every
-// waiter was evicted is retained in suspension until a future Hello
-// re-adds waiters via the flush rule. Eviction deliberately never touches a
+// waiter was evicted is retained in suspension, and a future Hello only
+// re-arms its ladder and re-broadcasts the record — the promise stays the
+// write-time capture and is never re-seeded from the table (A-01, IN-05).
+// Eviction deliberately never touches a
 // pending entry's acked set: an Ack that never arrived stays un-Acked, so
 // PendingSnapshot keeps eviction distinguishable from an Ack (T-05-04,
 // RESEARCH Pitfall 3). Only a Hello ever refreshed lastHello
@@ -2873,8 +2885,9 @@ func (c *Core) drainRecordSends(now time.Time, out *port.Outbox) {
 // after enqueue emits nothing (RESEARCH Pitfall 5). A store miss or a
 // version mismatch emits nothing either: a retry removes the untrustworthy
 // entry (the stale-entry cleanup the retransmit scan owns); the discovery
-// flush's first send leaves the entry tracked, so the next ladder due time
-// performs the removal — the flush's wait-set half is unconditional. A
+// flush's first send leaves the entry tracked — the flush owns only the
+// broadcast and ladder re-arm, never the promise set — so a stale first send
+// emits nothing and the later retry path performs the removal. A
 // resolved send broadcasts the current record, counts a retry, doubles the
 // entry's backoff up to AckTimeoutMax, and arms nextRetry from this
 // emission time ([armRetry]).

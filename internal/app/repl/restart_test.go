@@ -330,7 +330,10 @@ func TestRestart_returningAfterEvictionGetsListing(t *testing.T) {
 // TestRestart_firstHelloStillFlushesPending proves the two first-Hello
 // behaviors are not mutually exclusive (Pitfall 5): a Hello that ends an empty
 // table both enqueues the targeted listing AND flushes every pending write, so
-// the discovery flush's R-02 drain bound survives the first-seen listing.
+// the discovery flush's R-02 drain bound survives the first-seen listing. The
+// flush re-arms the ladder and broadcasts the record, but it does not add the
+// announcing peer to the wait-set: the write's promise is its write-time
+// capture, which was empty (A-01, IN-05).
 func TestRestart_firstHelloStillFlushesPending(t *testing.T) {
 	t.Parallel()
 	now := at(0)
@@ -354,7 +357,7 @@ func TestRestart_firstHelloStillFlushesPending(t *testing.T) {
 		t.Fatalf("the first Hello flushed %v, want exactly one DataReplication for (%s, %x) — the discovery flush was dropped",
 			replKeys(repls), keyAlpha, ver[:])
 	}
-	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1})
+	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, nil)
 }
 
 // TestRestart_helloDoesNotLeakListingsToStranger proves the two-destination
