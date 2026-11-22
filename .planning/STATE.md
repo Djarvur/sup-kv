@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 8
+current_plan: 9
 status: executing
-stopped_at: Completed 04-07-PLAN.md
-last_updated: "2026-11-22T04:50:27.827Z"
+stopped_at: Completed 04-08-PLAN.md
+last_updated: "2026-11-22T05:31:54.896Z"
 last_activity: 2026-11-22
 last_activity_desc: Completed 04-07-PLAN.md (three-node broadcast convergence)
-state_head: 21046ff01c4a6940fd692cdd73658ece1e7467f3
+state_head: 70ff0dd648235fbc4f34e798f5644bc98bdd1514
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 41
+  completed_plans: 42
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 8
+Current Plan: 9
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Completed 04-07-PLAN.md
@@ -98,6 +98,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P05 | 791s | 2 tasks | 5 files |
 | Phase 04 P06 | 294 | 2 tasks | 5 files |
 | Phase 04 P07 | 287s | 1 tasks | 1 files |
+| Phase 04 P08 | 1800s | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -262,6 +263,10 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-07: The test-only task's tdd=true produced unexpected GREEN because the asserted production behavior already existed; the test commit is the deliverable and the gate outcome is disclosed instead of fabricating a RED record or an unnecessary production change.
 - [Phase 04]: 04-07: waitServing mirrors waitFor's visibilityDeadline, pollEvery cadence and hard-deadline clamp but names the last observed record on timeout, so an N=3 convergence failure reports per-store state rather than only the expectation.
 - [Phase 04]: 04-07: The same-key LWW row waits for all three stores to hold A's version before B writes, so B's clock has observed it and B's store-stamped version strictly dominates; convergence on B's version therefore proves LWW, not wall-clock luck.
+- [Phase 04]: Listing destinations are (node_id, run_id) identities, never datagram source handles; the zero identity is the broadcast round and the drain resolves the handle from the peer row (CR-01/T-4-25).
+- [Phase 04]: One immutable listingBuild is shared by every FIFO while it is younger than sync_interval and StateStore.Generation is unchanged; any store mutation forces exactly one rebuild before the next listing (T-4-24).
+- [Phase 04]: Only a restart advances the per-peer listing rotation; the first-seen round starts at chunk 0, preserving the pinned rotation contracts while restarts keep covering the key space.
+- [Phase 04]: The first-seen Hello enqueues one targeted listing and falls through to the discovery flush instead of returning early, so R-02's pending-write drain bound survives PROTO-04.
 
 ### Pending Todos
 
@@ -284,7 +289,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T04:50:27.538Z
-Stopped at: Completed 04-07-PLAN.md
+Last session: 2026-11-22T05:31:54.586Z
+Stopped at: Completed 04-08-PLAN.md
 Resume file: None
 Next action: continue Phase 4 with `/gsd:execute-phase 4` (04-08-PLAN.md is next)
