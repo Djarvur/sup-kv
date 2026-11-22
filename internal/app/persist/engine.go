@@ -528,6 +528,28 @@ func (e *Engine) Versions() map[string]version.RecordVersion {
 	return e.store.Versions()
 }
 
+// Observe absorbs one received version into the store's clock without
+// touching any record: the per-DataSync-part HLC update (PROTO-01). It
+// consults no dump or confirmation state.
+func (e *Engine) Observe(ver version.RecordVersion) time.Duration {
+	return e.store.Observe(ver)
+}
+
+// KeyCount returns the number of stored records — tombstones included — in
+// constant time: the startup empty-vs-data selection (PROTO-02). It clones
+// no record data and consults no dump or confirmation state.
+func (e *Engine) KeyCount() int {
+	return e.store.Len()
+}
+
+// Generation returns the store's monotone content generation — moved only
+// when a stored record actually changed — which the listing build records
+// and reuses only while unchanged (04-08, T-4-43). It consults no dump or
+// confirmation state.
+func (e *Engine) Generation() uint64 {
+	return e.store.Generation()
+}
+
 // Records returns a full snapshot of the map, tombstones included, with
 // Data defensively copied — the same pass-through contract as Get.
 func (e *Engine) Records() map[string]storage.Record {

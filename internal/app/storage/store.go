@@ -281,6 +281,35 @@ func (s *Store) Merge(key string, rec Record) (conflicts []Conflict, drift time.
 	return conflicts, drift, nil
 }
 
+// Observe absorbs one received version into the store's clock without
+// touching any record: the per-DataSync-part HLC update (PROTO-01), so the
+// next local write strictly beats that version. It reads and writes no
+// record, so it takes no store lock; the clock owns its own synchronization
+// (the same seam Merge's trailing Update uses). The returned drift is the
+// clock's own signal, exactly like Merge's.
+func (s *Store) Observe(ver version.RecordVersion) time.Duration {
+	return 0
+}
+
+// Len returns the number of stored records — tombstones included — in
+// constant time: one read-locked map length, cloning nothing. It is the
+// startup empty-vs-data selection probe (PROTO-02, T-4-11); Records() would
+// clone every value.
+func (s *Store) Len() int {
+	return 0
+}
+
+// Generation returns the store's monotone content generation: it moves by
+// exactly one whenever a stored record actually changed, because every
+// change source converges on install — local Set/SetIfAbsent/Delete writes,
+// winning remote merges and snapshot-restore replay. A rejected
+// SetIfAbsent, a Delete of a missing key, an equal-or-older Merge, the
+// clock-only Observe and every read path therefore leave it unchanged: a
+// content generation, never a call count (T-4-43).
+func (s *Store) Generation() uint64 {
+	return 0
+}
+
 // join compares rec against the stored record by the full 16-byte version
 // and installs it when strictly greater; the caller must hold the write
 // lock. It returns the displaced or rejected versions as conflicts.

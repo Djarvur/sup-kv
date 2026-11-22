@@ -1680,3 +1680,80 @@ func TestDumpStats_records(t *testing.T) {
 		t.Fatalf("after the failed dump DumpStats() = %+v, want Total 2, Errors 1, a positive duration", got)
 	}
 }
+
+// TestEngine_keyCountAndObserveGeneration pins the three engine
+// pass-throughs (PROTO-01, PROTO-02, T-4-43): KeyCount counts records
+// without consulting dump state — 0 before any write, 1 once a confirmed
+// Set has completed its dump — Generation moves only with the store's
+// content and not for reads, and Observe feeds the store clock so the next
+// Set strictly dominates the absorbed version.
+func TestEngine_keyCountAndObserveGeneration(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	eng, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	if discarded != 0 {
+		t.Errorf("Open() discarded = %d, want 0", discarded)
+	}
+	runEngine(t, eng)
+
+	if got := eng.KeyCount(); got != 0 {
+		t.Fatalf("KeyCount() on an empty engine = %d, want 0", got)
+	}
+	if got := eng.Generation(); got != 0 {
+		t.Fatalf("Generation() on an empty engine = %d, want 0", got)
+	}
+
+	// Set blocks until a covering dump completed, so the count is read after
+	// the record is both in memory and on disk.
+	if _, _, err := eng.Set("alpha", []byte("alpha-value")); err != nil {
+		t.Fatalf("Set(alpha) error = %v, want nil", err)
+	}
+	if got := eng.KeyCount(); got != 1 {
+		t.Fatalf("KeyCount() after a confirmed Set = %d, want 1", got)
+	}
+	if got := eng.Generation(); got != 1 {
+		t.Fatalf("Generation() after a confirmed Set = %d, want 1", got)
+	}
+
+	// Read paths move neither counter, dump state or not.
+	if _, err := eng.Get("alpha"); err != nil {
+		t.Fatalf("Get(alpha) error = %v, want nil", err)
+	}
+	_, _ = eng.Lookup("alpha")
+	_, _ = eng.Version("alpha")
+	_ = eng.Versions()
+	_ = eng.Records()
+	if got := eng.KeyCount(); got != 1 {
+		t.Fatalf("KeyCount() after reads = %d, want the unchanged 1", got)
+	}
+	if got := eng.Generation(); got != 1 {
+		t.Fatalf("Generation() after reads = %d, want the unchanged 1", got)
+	}
+
+	// Observe is clock-only: no record, no generation move, and the next
+	// Set strictly dominates the absorbed version.
+	absorbed := version.PackVersion(time.Now().Add(time.Hour).UnixMilli(), 5, tracerNodeID+1)
+	eng.Observe(absorbed)
+	if got := eng.KeyCount(); got != 1 {
+		t.Fatalf("KeyCount() after Observe = %d, want the unchanged 1", got)
+	}
+	if got := eng.Generation(); got != 1 {
+		t.Fatalf("Generation() after Observe = %d, want the unchanged 1", got)
+	}
+	ver, _, err := eng.Set("beta", []byte("beta-value"))
+	if err != nil {
+		t.Fatalf("Set(beta) error = %v, want nil", err)
+	}
+	if got := ver.Compare(absorbed); got <= 0 {
+		t.Fatalf("next Set version %x does not strictly beat the absorbed %x", ver[:], absorbed[:])
+	}
+	if got := eng.KeyCount(); got != 2 {
+		t.Fatalf("KeyCount() after the second Set = %d, want 2", got)
+	}
+	if got := eng.Generation(); got != 2 {
+		t.Fatalf("Generation() after the second Set = %d, want 2", got)
+	}
+}
