@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 06-04-PLAN.md
-last_updated: "2026-11-22T23:24:00.342Z"
+stopped_at: Completed 06-11-PLAN.md
+last_updated: "2026-11-22T23:53:40.700Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: e93bc0427d9ef77a49e47df2494452f9e395b72c
+state_head: 034814e6f27e813fa65125a150eef11c93bab6bb
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 63
+  completed_plans: 64
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
@@ -122,6 +122,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P02 | 8min | 1 tasks | 19 files |
 | Phase 06 P03 | 7min | 3 tasks | 7 files |
 | Phase 06 P04 | 7min | 3 tasks | 6 files |
+| Phase 06 P11 | 30min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -373,6 +374,11 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-04: The RPC path-shape matrix builds one DumpStore fake per errno variant whose save/create/read seams all return a path-bearing *fs.PathError; SnapshotCreate's forced flush fails on the save seam before CreateSnapshot, so that row proves the ErrDumpFailed constant while the class mapping is proven by the adapter test and the total table.
 - [Phase 06]: 06-04: Task 2's test-only tdd=true task was an investigated unexpected GREEN — Task 1's files implement exactly the rows it pins, so the test commit is the deliverable (04-07 precedent) and no RED was fabricated.
 - [Phase 06]: 06-04: APIS-03's checkbox stays pending because requirements ready-ids reports it blocked (the #2388 shared-ID gate); the stale plan-head ledger was reset to dabd55e before measuring, so actuals.commits: 4 is measured.
+- [Phase 06]: APIS-01: the adapter tracker's captured total and wants set are authoritative; WaitReplicated reports the acked-set intersection with that membership and requires count == captured total, so a stranger Ack is inert even on a Drained result.
+- [Phase 06]: APIS-01: the adapter's zero-peer release answers (false, 0) (retiring 06-02's (true, 0) benign verdict) while still deleting the notify-time tracker; the handler's public (false, 0, 0) is unchanged.
+- [Phase 06]: APIS-01: the discovery flush is broadcast-only — it re-arms the ladder and queues the record send but never inserts the discovered peer into a wait-set or the per-peer ledger (IN-05 closes).
+- [Phase 06]: APIS-01: the 20 ms displacement target is proven structurally by the displacing handler call's ResultSuperseded Outbox event; the real-socket regression keeps a generous 250 ms CI-safe bound (RESEARCH Pitfall 2).
+- [Phase 06]: APIS-01: plan 06-11 Task 2 is regression pinning — its tests pass on the Task 1 tree, so no second RED commit exists; the behavior change and its RED evidence live in Task 1 (plan frontmatter is type: execute).
 
 ### Pending Todos
 
@@ -395,7 +401,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T23:23:59.555Z
-Stopped at: Completed 06-04-PLAN.md
+Last session: 2026-11-22T23:53:40.067Z
+Stopped at: Completed 06-11-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
