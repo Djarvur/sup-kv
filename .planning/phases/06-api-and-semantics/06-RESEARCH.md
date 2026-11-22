@@ -1665,7 +1665,9 @@ version (`internal/app/storage/store.go:293-304` comment) `[VERIFIED: internal/a
 **If this table is not empty:** the planner should treat A1-A5 as discretion choices to pin
 in the plans; A2 and A3 are the two a reviewer could reasonably decide differently.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All ten questions were resolved during plan revision; each resolution line is binding for the plan set.
 
 1. **Value-bearing List pages vs keys-only?**
    - What we know: D-02 says "Values ride only for the entries of the page"; A-02 only
@@ -1676,6 +1678,7 @@ in the plans; A2 and A3 are the two a reviewer could reasonably decide different
      keep `keys` populated for shape compatibility. If the planner wants the minimal wire
      change, keys-only still passes A-02 but should be recorded as a deliberate reading of
      D-02.
+   - **RESOLVED:** value-bearing `records` with `keys` kept; plans 06-05/06-07 implement it and budget the full serialized page (key twice, version, per-record overhead).
 
 2. **How strictly to assert the 20 ms superseded bound?**
    - What we know: `ResultSuperseded` is emitted synchronously in the displacing handler;
@@ -1683,6 +1686,7 @@ in the plans; A2 and A3 are the two a reviewer could reasonably decide different
    - What's unclear: whether CI can hold a 20 ms wall-clock bound under `-race`.
    - Recommendation: deterministic core assertion + real-adapter < 250 ms, with the 20 ms
      target in the test comment (Pitfall 2). Do not add a retry loop.
+   - **RESOLVED:** plan 06-11 Task 2 proves the 20 ms target structurally with the deterministic Outbox test and keeps the real-adapter bound at < 250 ms.
 
 3. **Keep the `FILE_SAME_GO_PACKAGE` waiver forever?**
    - What we know: the move cannot pass buf breaking without it; a pure move passes.
@@ -1690,6 +1694,7 @@ in the plans; A2 and A3 are the two a reviewer could reasonably decide different
    - Recommendation: keep it scoped to the one file with an explanatory comment; removing it
      after the move merges is safe but not required. A future change to the public
      `go_package` would then be silently accepted — call that out in the comment.
+   - **RESOLVED:** plan 06-01 Task 1 keeps the one-file waiver with the explanatory comment and runs `make buf-breaking` against origin/master in Task 3.
 
 4. **Does Watch need a confirmed-only snapshot?**
    - What we know: the live feed will be durable-only; `Get` and the snapshot show current
@@ -1698,27 +1703,32 @@ in the plans; A2 and A3 are the two a reviewer could reasonably decide different
    - Recommendation: document the asymmetry (snapshot = current state; live events =
      durable changes). A confirmed-only snapshot needs a subscribe-time pending filter and
      an overflow story; not worth it for v1.1's acceptance.
+   - **RESOLVED:** the subscribe snapshot stays current in-memory state; plans 06-09/06-12 document the asymmetry and add no subscribe-time filter.
 
 5. **Remove `ServerOptions.KnownPeers`?**
    - What we know: it is only used by `waitForReplication`; metrics use
      `adapter.KnownPeers` directly.
    - Recommendation: remove it from `ServerOptions` (and main/test wiring), replace with
      `WritePeers`; keep `Adapter.KnownPeers()` for metrics.
+   - **RESOLVED:** plan 06-02 replaces it with `WritePeers func() []uint16` and keeps the adapter's `KnownPeers` for metrics only.
 
 6. **Public package name and path?**
    - What we know: `api/supkvapi/v1` keeps the proto's source-relative path unchanged and
      the module root simple; the package name can be `supkvapi` with internal aliases.
    - Recommendation: `api/supkvapi/v1`, package `supkvapi`, internal alias `apiproto`.
+   - **RESOLVED:** plan 06-01 uses `api/supkvapi/v1` with package `supkvapi`, an `apiproto` alias at every importer, and an external `supkvapi_test` descriptor test.
 
 7. **Separate Go module for the public API?**
    - What we know: a submodule isolates consumers from the server's tool graph but needs
      prefixed tags and release machinery.
    - Recommendation: no; one module plus the `examples/client` module with `replace`.
+   - **RESOLVED:** plan 06-03 ships `examples/client` as the only nested module, with `replace github.com/Djarvur/sup-kv => ../..`.
 
 8. **When to flip registry row S-PERS-12?**
    - What we know: Phase 5's precedent flips rows in-phase; Phase 9 closes the registry.
    - Recommendation: flip S-PERS-12 in this phase with the new evidence; leave S-PERS-13
      (PROTO-08) to Phase 9's audit unless the phase touches it.
+   - **RESOLVED:** plan 06-10 flips S-PERS-12 to `implemented` and leaves S-PERS-13 untouched.
 
 9. **`docs/API.md` now or Phase 9?**
    - What we know: D-04 says the contract text lands in the API docs; DOCS-05 owns the final
@@ -1726,12 +1736,14 @@ in the plans; A2 and A3 are the two a reviewer could reasonably decide different
    - Recommendation: create `docs/API.md` with the phase-owned sections (wait, errors,
      List, Watch, snapshots, transport settings, last-read-value pattern) and mark the
      remaining per-RPC/failure-table/latency sections for Phase 9.
+   - **RESOLVED:** plan 06-09 authors the phase-owned sections with an anchor test and names the Phase 9 remainder explicitly.
 
 10. **Do we need a real-socket two-node full-rollback test?**
     - What we know: the handler's replay seam is the broadcast contract, and PROTO-08 tests
       already prove the replication of replayed records.
     - Recommendation: the RPC-level notify-capture test plus the existing PROTO-08 suite is
       enough for acceptance; a stand two-node test is a nice-to-have if budget allows.
+    - **RESOLVED:** plan 06-08 uses the RPC-level notify-capture test plus PROTO-08; no new real-socket two-node test is added.
 
 ## Environment Availability
 
