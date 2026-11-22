@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 )
 
 const (

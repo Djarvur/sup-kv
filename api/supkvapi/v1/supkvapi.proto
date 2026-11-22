@@ -1,0 +1,153 @@
+// sup-kv gRPC API wire schema: the client-facing surface over a sup-kv node.
+// Every RPC of the service is declared here in one codegen pass; the generated
+// Go code lives beside this file and is the supported client entry point
+// (package supkvapi). The full record travels in every state-carrying message:
+// a subscriber or writer never needs a second round trip to act on a change.
+// Field names and numbers are pinned once clients exist — treat this file as a
+// published contract and change it only deliberately.
+syntax = "proto3";
+
+package supkvapi.v1;
+
+option go_package = "github.com/Djarvur/sup-kv/api/supkvapi/v1;supkvapi";
+
+// Record carries one key's full state: the key, the 16-byte RFC 9562
+// RecordVersion, the value bytes and the deleted tombstone flag. Deletes
+// arrive in the same shape with deleted=true. The record carries no checksum
+// field: the engine recomputes it on install, so the wire never trusts a
+// transported checksum.
+message Record {
+  string key = 1;
+  bytes version = 2;
+  bytes value = 3;
+  bool deleted = 4;
+}
+
+// SupKVService is the whole RPC surface. Watch is server-streaming; every other
+// RPC is unary.
+service SupKVService {
+  // Get returns the live record for one key.
+  rpc Get(GetRequest) returns (GetResponse);
+  // Set writes a value (or a create-if-absent variant of it).
+  rpc Set(SetRequest) returns (SetResponse);
+  // Delete writes a fresh-version tombstone for one key.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  // List returns the sorted live records under a prefix.
+  rpc List(ListRequest) returns (ListResponse);
+  // Watch streams snapshot-then-live change events.
+  rpc Watch(WatchRequest) returns (stream WatchResponse);
+  // SnapshotCreate copies the confirmed dump under a name.
+  rpc SnapshotCreate(SnapshotCreateRequest) returns (SnapshotCreateResponse);
+  // SnapshotLoad replays a named snapshot as ordinary writes.
+  rpc SnapshotLoad(SnapshotLoadRequest) returns (SnapshotLoadResponse);
+}
+
+// GetRequest names one key to read.
+message GetRequest {
+  string key = 1;
+}
+
+// GetResponse carries the live record; an absent or tombstoned key is the
+// NotFound error, never an empty response.
+message GetResponse {
+  Record record = 1;
+}
+
+// SetRequest writes value under key. create_if_absent turns the write into the
+// create-if-absent variant (AlreadyExists for any existing record, including a
+// tombstone). wait_for_replication asks the server to wait after the confirmed
+// write for the replication Acks; wait_timeout_ms bounds that wait per request
+// (0 = the operator-tunable default). The wait never changes the write
+// outcome.
+message SetRequest {
+  string key = 1;
+  bytes value = 2;
+  bool create_if_absent = 3;
+  bool wait_for_replication = 4;
+  int64 wait_timeout_ms = 5;
+}
+
+// SetResponse carries the stored record's 16-byte version and the aggregate
+// replication report: acked plus acked_count/total_peers counts — no per-peer
+// breakdown. The report fields carry zero values when the write did not
+// request a wait (wait_for_replication=false).
+message SetResponse {
+  bytes version = 1;
+  bool acked = 2;
+  uint32 acked_count = 3;
+  uint32 total_peers = 4;
+}
+
+// DeleteRequest tombstones one key; the optional wait fields carry the same
+// meaning as on SetRequest (a delete is a write).
+message DeleteRequest {
+  string key = 1;
+  bool wait_for_replication = 2;
+  int64 wait_timeout_ms = 3;
+}
+
+// DeleteResponse carries the tombstone's version plus the aggregate report
+// fields, zero-valued under the same conditions as SetResponse.
+message DeleteResponse {
+  bytes version = 1;
+  bool acked = 2;
+  uint32 acked_count = 3;
+  uint32 total_peers = 4;
+}
+
+// ListRequest filters by prefix; the empty prefix means all keys. With
+// page_size unset (0) the server returns every matching key, keys only — the
+// legacy single-response listing. A positive page_size requests a bounded page
+// of records: the server honors at most 256 entries (a larger value is
+// clamped), and next_page_token resumes the listing after the last examined
+// key. The empty page_token starts at the first key; a page token requires a
+// positive page_size.
+message ListRequest {
+  string prefix = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+// ListResponse carries the sorted live (non-tombstoned) keys under the
+// request's prefix, in byte-wise lexicographic order. keys is the page's keys
+// and is always filled. Under a positive page_size, records carries the same
+// page's full records in the same order as keys, and next_page_token is the
+// opaque position of the last examined key — an empty token means the listing
+// is exhausted. Without a page size, records and next_page_token stay empty.
+message ListResponse {
+  repeated string keys = 1;
+  string next_page_token = 2;
+  repeated Record records = 3;
+}
+
+// WatchRequest subscribes to changes under a prefix; the empty prefix means
+// all keys.
+message WatchRequest {
+  string prefix = 1;
+}
+
+// WatchResponse is one change notification carrying the full record —
+// snapshot and live events share this one shape, tombstones arrive with
+// deleted=true.
+message WatchResponse {
+  Record record = 1;
+}
+
+// SnapshotCreateRequest names the recovery point to copy the confirmed dump
+// under (names are validated by the persistfile adapter).
+message SnapshotCreateRequest {
+  string name = 1;
+}
+
+// SnapshotCreateResponse confirms the copy; the snapshot is read back by
+// name.
+message SnapshotCreateResponse {}
+
+// SnapshotLoadRequest names the snapshot to replay as ordinary writes with
+// fresh versions.
+message SnapshotLoadRequest {
+  string name = 1;
+}
+
+// SnapshotLoadResponse confirms the replay completed and is dump-confirmed.
+message SnapshotLoadResponse {}

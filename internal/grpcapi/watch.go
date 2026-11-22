@@ -9,10 +9,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 const (

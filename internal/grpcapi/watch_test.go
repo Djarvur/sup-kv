@@ -12,9 +12,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 // watchTestTimeout bounds every wait for a delivery the pipeline owes the

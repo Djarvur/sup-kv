@@ -1,13 +1,13 @@
-# Buf codegen for the client-facing gRPC schema — same shape as
-# buf.gen.repl.yaml, pinned to the apiproto tree. protoc-gen-go-grpc skips
-# service-less files (the replication schema), so both plugins ride one
-# pass here.
+# Buf codegen for the public client-facing gRPC schema — same shape as
+# buf.gen.repl.yaml, pinned to the api module tree. protoc-gen-go-grpc skips
+# service-less files (the replication schema), so both plugins ride one pass
+# here.
 version: v2
 
 plugins:
   - local: ["go", "tool", "protoc-gen-go"]
-    out: internal/grpcapi/apiproto
+    out: api
     opt: paths=source_relative
   - local: ["go", "tool", "protoc-gen-go-grpc"]
-    out: internal/grpcapi/apiproto
+    out: api
     opt: paths=source_relative

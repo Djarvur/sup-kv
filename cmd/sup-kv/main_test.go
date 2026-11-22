@@ -43,7 +43,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 )
 
 // Smoke-test constants: the wait deadlines with their poll cadence, the

@@ -29,7 +29,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 )
 
 // The deletion scenarios' constants: the two keys, the tombstone marker

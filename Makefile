@@ -97,7 +97,7 @@ build:
 ## module-relative paths at the repo root instead.
 proto:
 	go tool buf generate internal/udprepl/replproto --template buf.gen.repl.yaml
-	go tool buf generate internal/grpcapi/apiproto --template buf.gen.api.yaml
+	go tool buf generate api --template buf.gen.api.yaml
 
 ## buf-lint: lint the proto workspace with the STANDARD (DEFAULT) rule set —
 ## zero waivers (buf.yaml).

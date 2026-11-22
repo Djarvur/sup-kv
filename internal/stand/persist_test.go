@@ -27,7 +27,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 )
 
 // The persistence-load scenario constants: one key every seeded generation
