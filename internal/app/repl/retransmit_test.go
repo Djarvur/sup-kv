@@ -1372,6 +1372,100 @@ func TestReplication_equalVersionAcked(t *testing.T) {
 	}
 }
 
+// TestReplication_equalVersionContentLaw proves the (version, content)
+// tie-break reaches the wire (PERSIST-07, ADR 0012, D-12): an equal version
+// with identical content keeps the old Ack-and-no-reply outcome; an incoming
+// tie-break win installs and Acks with no reply; and a stored tie-break win
+// answers with exactly one unicast DataReplication carrying the stored record
+// and sends no Ack. Both tie-break directions count exactly one merge
+// conflict.
+func TestReplication_equalVersionContentLaw(t *testing.T) {
+	t.Parallel()
+	v5 := version.PackVersion(testNowMs, 5, peerID1)
+
+	t.Run("an incoming tie-break win installs and Acks with no reply", func(t *testing.T) {
+		t.Parallel()
+		now := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+		seedVersion(t, st, keyAlpha, storage.Record{Version: v5, Data: []byte("five")})
+
+		incoming := storage.Record{Version: v5, Data: []byte("six")}
+		core.HandleDatagram(now, replFrom(peerID1, keyAlpha, incoming), &out)
+		assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, v5)
+		if got := core.QueuedResponses(); got != 0 {
+			t.Fatalf("QueuedResponses() = %d after an incoming tie-break win, want 0 — a win Acks and never replies", got)
+		}
+		if stats := core.MergeStats(); stats.Conflicts != 1 {
+			t.Fatalf("MergeStats().Conflicts = %d after the tie-break win, want 1", stats.Conflicts)
+		}
+		got, err := st.store.Get(keyAlpha)
+		if err != nil || got.Version != v5 || !bytes.Equal(got.Data, []byte("six")) {
+			t.Fatalf("store Get(%q) after the tie-break win = (%x, %q, %v), want the incoming six", keyAlpha, got.Version[:], got.Data, err)
+		}
+	})
+
+	t.Run("a stored tie-break win answers with the stored record and no Ack", func(t *testing.T) {
+		t.Parallel()
+		now := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+		seedVersion(t, st, keyAlpha, storage.Record{Version: v5, Data: []byte("five")})
+
+		incoming := storage.Record{Version: v5, Data: []byte("abc")}
+		core.HandleDatagram(now, replFrom(peerID1, keyAlpha, incoming), &out)
+		if got := len(out.Drain()); got != 0 {
+			t.Fatalf("the stored-win DataReplication emitted %d messages directly, want 0 — the answer queues", got)
+		}
+		if got := core.QueuedResponses(); got != 1 {
+			t.Fatalf("QueuedResponses() = %d after a stored tie-break win, want exactly 1", got)
+		}
+		if stats := core.MergeStats(); stats.Conflicts != 1 {
+			t.Fatalf("MergeStats().Conflicts = %d after the tie-break loss, want 1", stats.Conflicts)
+		}
+
+		drained := advanceDrain(core, &out, now)
+		answered := unicasts(drained)
+		if len(answered) != 1 || answered[0].To != handleFor(peerID1) {
+			t.Fatalf("the drain emitted %v, want exactly one unicast answer to %q and no Ack", answered, handleFor(peerID1))
+		}
+		reply, ok := answered[0].Msg.(port.DataReplication)
+		if !ok {
+			t.Fatalf("the answer is a %T, want port.DataReplication — a stored tie-break win must never be Acked", answered[0].Msg)
+		}
+		if reply.Key != keyAlpha || reply.Record.Version != v5 || !bytes.Equal(reply.Record.Data, []byte("five")) {
+			t.Fatalf("the answer = (%q, %+v), want the stored five@v5 record", reply.Key, reply.Record)
+		}
+		got, err := st.store.Get(keyAlpha)
+		if err != nil || got.Version != v5 || !bytes.Equal(got.Data, []byte("five")) {
+			t.Fatalf("store Get(%q) after the tie-break loss = (%x, %q, %v), want the unchanged five", keyAlpha, got.Version[:], got.Data, err)
+		}
+	})
+
+	t.Run("identical content Acks and emits no reply", func(t *testing.T) {
+		t.Parallel()
+		now := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+		held := seedVersion(t, st, keyAlpha, storage.Record{Version: v5, Data: []byte("five")})
+
+		core.HandleDatagram(now, replFrom(peerID1, keyAlpha, held), &out)
+		assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, v5)
+		if got := core.QueuedResponses(); got != 0 {
+			t.Fatalf("QueuedResponses() = %d after an identical equal-version record, want 0", got)
+		}
+		if stats := core.MergeStats(); stats.Conflicts != 0 || stats.DriftWarnings != 0 {
+			t.Fatalf("the identical equal version counted merge stats %+v, want none", stats)
+		}
+	})
+}
+
 // TestReplication_newerApplied proves the strictly-newer outcome: a held
 // k@v5 that receives k@v6 applies it through ApplyRemote (one displaced-
 // version conflict) and Acks v6, emitting no reply.

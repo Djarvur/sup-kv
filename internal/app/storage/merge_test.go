@@ -10,6 +10,7 @@ import (
 
 	"github.com/Djarvur/sup-kv/internal/app/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
 // cloneStore returns a fresh store at the fixed wall clock holding exactly the
@@ -217,6 +218,76 @@ func TestMerge_duplicateDelivery(t *testing.T) {
 			t.Fatalf("step %d second Merge() changed Records() (replay with the property seed above)", step)
 		}
 	}
+}
+
+// TestMerge_equalVersionContentLaw pins the deterministic (version, content)
+// tie-break (PERSIST-07, ADR 0012) through the three-result Merge wrapper: at
+// an equal version, greater Data bytes win and install, lesser Data bytes lose
+// and leave the stored record, and identical content is the idempotent
+// redelivery no-op. A tie-break win or loss reports exactly one Conflict whose
+// Winner and Loser are the same 16 version bytes — the version cannot name the
+// winner, so the stored record is the only observable evidence.
+func TestMerge_equalVersionContentLaw(t *testing.T) {
+	t.Parallel()
+	ver := version.PackVersion(mergeL, 0, nodeA)
+	stored := storage.Record{Version: ver, Data: []byte("a")}
+	for _, tt := range []struct {
+		name     string
+		incoming storage.Record
+		wantData string
+	}{
+		{
+			name:     "greater content wins and installs",
+			incoming: storage.Record{Version: ver, Data: []byte("x")},
+			wantData: "x",
+		},
+		{
+			name:     "lesser content loses and leaves the stored record",
+			incoming: storage.Record{Version: ver, Data: []byte("A")},
+			wantData: "a",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := newStore()
+			_, _, err := store.Merge("k", stored)
+			if err != nil {
+				t.Fatalf("seed Merge() error = %v, want nil", err)
+			}
+			conflicts, _, err := store.Merge("k", tt.incoming)
+			if err != nil {
+				t.Fatalf("Merge() error = %v, want nil", err)
+			}
+			want := []storage.Conflict{{Key: "k", Winner: ver, Loser: ver}}
+			if !conflictsEqual(conflicts, want) {
+				t.Fatalf("Merge() conflicts = %v, want exactly one pairing the equal versions %x", conflicts, ver[:])
+			}
+			rec, ok := store.Lookup("k")
+			if !ok || rec.Version != ver || rec.Deleted || !bytes.Equal(rec.Data, []byte(tt.wantData)) {
+				t.Fatalf("Lookup() = (%x, %q, deleted=%t, ok=%t), want the content winner %q",
+					rec.Version[:], rec.Data, rec.Deleted, ok, tt.wantData)
+			}
+		})
+	}
+	t.Run("identical content is a full no-op", func(t *testing.T) {
+		t.Parallel()
+		store := newStore()
+		_, _, err := store.Merge("k", stored)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		before := store.Records()
+		conflicts, _, err := store.Merge("k", stored)
+		if err != nil {
+			t.Fatalf("redelivery Merge() error = %v, want nil", err)
+		}
+		if conflicts != nil {
+			t.Fatalf("redelivery Merge() conflicts = %v, want nil for identical content", conflicts)
+		}
+		if !recordsEqual(store.Records(), before) {
+			t.Fatal("identical redelivery changed Records()")
+		}
+	})
 }
 
 // TestMerge_losersProperty proves exact loser accounting over seeded random

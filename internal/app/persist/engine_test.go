@@ -1840,6 +1840,69 @@ func TestEngine_redundantDirty(t *testing.T) {
 	})
 }
 
+// TestEngine_applyRemoteEqualVersionContent proves the dirty decision follows
+// the store's `changed` result, never a version comparison (PERSIST-07, ADR
+// 0012, research Pitfall 5): an equal-version record that wins the content
+// tie-break changes the stored record and arms exactly one dump, while an
+// identical redelivery leaves the clean engine clean. The conflict returned
+// is the one tie-break conflict the store reports in both directions.
+func TestEngine_applyRemoteEqualVersionContent(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		base := version.PackVersion(1730000000000, 0, redundantRemoteNode)
+		settled := storage.Record{Version: base, Data: []byte("base value")}
+		_, _, err := eng.ApplyRemote("cfg/tie", settled)
+		if err != nil {
+			t.Fatalf("establishing ApplyRemote() error = %v, want nil", err)
+		}
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("the establishing remote merge ran %d saves, want 1", got)
+		}
+
+		// Equal version, greater content: the tie-break installs the incoming
+		// record, so the engine must dirty and dump exactly once more.
+		winner := storage.Record{Version: base, Data: []byte("tie-break winner")}
+		conflicts, _, err := eng.ApplyRemote("cfg/tie", winner)
+		if err != nil {
+			t.Fatalf("tie-break ApplyRemote() error = %v, want nil", err)
+		}
+		if len(conflicts) != 1 || conflicts[0].Key != "cfg/tie" || conflicts[0].Winner != base || conflicts[0].Loser != base {
+			t.Fatalf("tie-break ApplyRemote() conflicts = %v, want exactly one pairing the equal version", conflicts)
+		}
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 2 {
+			t.Fatalf("the tie-break install ran %d total saves, want 2 — a content change must dirty", got)
+		}
+		records, stats, err := persist.Decode(dumps.save(1).dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 {
+			t.Fatalf("Decode(tie-break dump) = (%d discarded, %v), want (0, nil)", stats.Total(), err)
+		}
+		if r, ok := records["cfg/tie"]; !ok || r.Version != base || string(r.Data) != "tie-break winner" {
+			t.Fatalf("tie-break dump holds cfg/tie = (%x, %q, %t), want the content winner", r.Version[:], r.Data, ok)
+		}
+
+		// Identical redelivery over the live record: a full no-op, no dump.
+		conflicts, _, err = eng.ApplyRemote("cfg/tie", winner)
+		if err != nil {
+			t.Fatalf("identical-redelivery ApplyRemote() error = %v, want nil", err)
+		}
+		if conflicts != nil {
+			t.Fatalf("identical-redelivery ApplyRemote() conflicts = %v, want none", conflicts)
+		}
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 2 {
+			t.Fatalf("the identical redelivery ran %d total saves, want 2 — no change means no dump", got)
+		}
+	})
+}
+
 // TestDumpStats_records proves the dump-cycle gauge (OBS-01): one forced
 // successful dump records a strictly positive duration with total 1 and
 // errors 0, and one failed Save through the fake port's injected failure
