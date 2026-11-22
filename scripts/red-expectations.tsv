@@ -26,5 +26,5 @@ TestRed_R01_pacedSync20k	green
 TestRed_R02_unackedDrain	green
 TestRed_R02_burst	green
 TestRed_R03_f14ReplacedNode	green
-TestRed_P01_valueLimit	red
-TestRed_P01_valueLimitEngine	red
+TestRed_P01_valueLimit	green
+TestRed_P01_valueLimitEngine	green
