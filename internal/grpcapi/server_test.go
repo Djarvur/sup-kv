@@ -61,11 +61,13 @@ var errFakeSnapshot = errors.New("fakeDumpStore: no snapshot generations in this
 // fakeDumpStore is the hand-written in-memory port.DumpStore fake the port
 // seam's doc sanctions (internal/port/dump.go): it records every saved
 // generation in memory and injects failures — no filesystem, no cleanup,
-// fully parallel-safe per harness instance.
+// fully parallel-safe per harness instance. A non-nil snapshot backs the
+// ReadSnapshot seam the snapshot-load totality tests drive.
 type fakeDumpStore struct {
 	mu       sync.Mutex
 	failSave bool
 	saved    [][]byte
+	snapshot []byte
 }
 
 // Save durably records the generation in memory, or fails while failSave
@@ -87,16 +89,55 @@ func (*fakeDumpStore) Load(_ func([]byte) error) ([]byte, bool) {
 }
 
 // CreateSnapshot and ReadSnapshot complete the port.DumpStore interface;
-// the engine is the only caller and snapshot paths are not exercised by
-// this plan's tests.
+// the engine is the only caller. CreateSnapshot always fails (snapshot
+// creation is not exercised by this harness), while ReadSnapshot serves the
+// configured snapshot bytes — a hand-built persist.Encode fixture — or the
+// pinned no-generations error when the test supplies none.
 func (*fakeDumpStore) CreateSnapshot(_ string) error {
 	return errFakeSnapshot
 }
 
-// ReadSnapshot completes the port.DumpStore interface alongside
-// CreateSnapshot.
-func (*fakeDumpStore) ReadSnapshot(_ string) ([]byte, error) {
-	return nil, errFakeSnapshot
+// ReadSnapshot serves the snapshot fixture a test installed, or the pinned
+// no-generations error.
+func (f *fakeDumpStore) ReadSnapshot(_ string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.snapshot == nil {
+		return nil, errFakeSnapshot
+	}
+	return bytes.Clone(f.snapshot), nil
+}
+
+// notifyCall is one LocalNotify invocation the tests observe: the key, the
+// record the handler built (version, data, tombstone flag, checksum) and the
+// wait_for_replication flag it carried.
+type notifyCall struct {
+	key   string
+	rec   storage.Record
+	track bool
+}
+
+// notifyCapture records LocalNotify calls under a mutex: the handlers run on
+// gRPC goroutines, so an unguarded slice would race.
+type notifyCapture struct {
+	mu    sync.Mutex
+	calls []notifyCall
+}
+
+// notify is the LocalNotify seam the harness installs; it records and
+// accepts every call.
+func (c *notifyCapture) notify(key string, rec storage.Record, track bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, notifyCall{key: key, rec: rec, track: track})
+	return nil
+}
+
+// snapshot returns a copy of the calls recorded so far, in call order.
+func (c *notifyCapture) snapshot() []notifyCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.calls)
 }
 
 // testHarness bundles one running engine, its watch hub, the
@@ -131,6 +172,11 @@ type testServerConfig struct {
 	// listing knowledge, the single-node configuration.
 	listedKey func(key string) bool
 
+	// notify is the LocalNotify seam the server is constructed with; nil is
+	// the single-node configuration (D-11). The totality tests install a
+	// capturing seam to observe which writes and replays reach replication.
+	notify func(key string, rec storage.Record, track bool) error
+
 	// waitTimeout, knownPeers and waitReplicated are the
 	// wait_for_replication seams (API-05, plan 05-05), merged into the same
 	// ServerOptions the gate wiring rides on. waitTimeout zero means
@@ -157,6 +203,19 @@ func newTestServer(t *testing.T) *testHarness {
 	return h
 }
 
+// newNotifyServer builds the open-gate harness with a notify capture wired
+// to the server's LocalNotify seam — the totality tests' observation point.
+func newNotifyServer(t *testing.T) (*testHarness, *notifyCapture) {
+	t.Helper()
+	capture := &notifyCapture{}
+	h := buildTestServer(t, testServerConfig{
+		gate:   openGateOptions(),
+		notify: capture.notify,
+	})
+	awaitGateOpen(t, h)
+	return h, capture
+}
+
 // newTestServerWithWatchBuffer builds the harness with the watch hub's
 // per-subscriber buffer set to subscriberBuffer (0 = the package default
 // through NewWatchHub) — the shrink-to-2 knob the overflow tests need to
@@ -176,17 +235,17 @@ func newTestServerWithWatchBuffer(t *testing.T, subscriberBuffer int) *testHarne
 // storage.Config (OnChange: hub.Ingest, no persist change) — then the
 // engine, then go hub.Run under its own context, cancelled via t.Cleanup:
 // a slow or wedged Watch hub must never hold the harness's writes hostage.
-// The api server is constructed with the config's gate wiring, its health
-// server registered alongside SupKV on the same grpc.Server (API-06's
-// registration contract, the one main must copy in 05-06), and the gate
-// resolver launched under its own context. Everything else as the tracer
-// built it: a real persist engine (test node id, wall-clock now, shrunken
-// value limit, dump timings tuned down to 1ms/50ms of real time — bufconn
-// and synctest bubbles do not mix), the grpcapi Server with a nil notify
-// (the legal single-node configuration, D-11), and a gRPC client dialed
-// over bufconn with insecure credentials — mandatory on modern gRPC
-// clients even for an in-memory transport. Everything stops via
-// t.Cleanup, so every test using the harness can run t.Parallel().
+// The api server is constructed with the config's gate wiring and LocalNotify
+// seam (nil unless a test installs a capture), its health server registered
+// alongside SupKV on the same grpc.Server (API-06's registration contract,
+// the one main must copy in 05-06), and the gate resolver launched under its
+// own context. Everything else as the tracer built it: a real persist engine
+// (test node id, wall-clock now, shrunken value limit, dump timings tuned
+// down to 1ms/50ms of real time — bufconn and synctest bubbles do not mix),
+// and a gRPC client dialed over bufconn with insecure credentials —
+// mandatory on modern gRPC clients even for an in-memory transport.
+// Everything stops via t.Cleanup, so every test using the harness can run
+// t.Parallel().
 func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	t.Helper()
 
@@ -230,7 +289,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	opts.KnownPeers = cfg.knownPeers
 	opts.WaitReplicated = cfg.waitReplicated
 
-	api := grpcapi.NewServer(eng, nil, hub, opts)
+	api := grpcapi.NewServer(eng, cfg.notify, hub, opts)
 	gateCtx, cancelGate := context.WithCancel(t.Context())
 	t.Cleanup(cancelGate)
 	go api.RunGate(gateCtx)
@@ -727,4 +786,222 @@ func TestServer_createIfAbsentListed(t *testing.T) {
 		Key: "listed/unlisted", Value: []byte("other"), CreateIfAbsent: true,
 	})
 	assertCode(t, "create_if_absent on an existing unlisted key", err, codes.AlreadyExists)
+}
+
+// TestServer_dumpFailedWriteNotifies proves PROTO-08's write half (D-08
+// totality, T-4-18): a Set the engine installed in memory but whose
+// confirming dump failed still reaches the replication notify seam before
+// the RPC answers Unavailable, so the write broadcasts and appears in the
+// unacked ledger like any unconfirmed write. track is false even though the
+// request asked for a replication report: the RPC errors, so no report
+// exists.
+func TestServer_dumpFailedWriteNotifies(t *testing.T) {
+	t.Parallel()
+
+	ts, capture := newNotifyServer(t)
+	ctx := t.Context()
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = true
+	ts.dumps.mu.Unlock()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "notify/set", Value: []byte("set-value"), WaitForReplication: true,
+	})
+	assertCode(t, "Set with failing dump", err, codes.Unavailable)
+
+	calls := capture.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("notify calls = %d, want exactly 1 for the unconfirmed write: %+v", len(calls), calls)
+	}
+	call := calls[0]
+	if call.key != "notify/set" || !bytes.Equal(call.rec.Data, []byte("set-value")) || call.rec.Deleted {
+		t.Errorf("notified record = (key %q, data %q, deleted %t), want the request's live record",
+			call.key, call.rec.Data, call.rec.Deleted)
+	}
+	if call.track {
+		t.Error("dump-failed write notified with track=true, want false (the RPC reports an error)")
+	}
+	ver, present := ts.engine.Version("notify/set")
+	if !present || call.rec.Version != ver {
+		t.Errorf("notified version %x = engine version %x (present=%t), want the store-stamped version",
+			call.rec.Version[:], ver[:], present)
+	}
+}
+
+// TestServer_dumpFailedDeleteNotifies proves the tombstone half: a Delete
+// the engine installed but whose dump failed notifies exactly one tombstone
+// with track=false before Unavailable.
+func TestServer_dumpFailedDeleteNotifies(t *testing.T) {
+	t.Parallel()
+
+	ts, capture := newNotifyServer(t)
+	ctx := t.Context()
+	_, _, seedErr := ts.engine.Set("notify/delete", []byte("doomed"))
+	if seedErr != nil {
+		t.Fatalf("seed Set(notify/delete) error = %v, want nil", seedErr)
+	}
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = true
+	ts.dumps.mu.Unlock()
+
+	_, err := ts.client.Delete(ctx, &apiproto.DeleteRequest{
+		Key: "notify/delete", WaitForReplication: true,
+	})
+	assertCode(t, "Delete with failing dump", err, codes.Unavailable)
+
+	calls := capture.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("notify calls = %d, want exactly 1 for the unconfirmed tombstone: %+v", len(calls), calls)
+	}
+	call := calls[0]
+	if call.key != "notify/delete" || !call.rec.Deleted || len(call.rec.Data) != 0 {
+		t.Errorf("notified record = (key %q, deleted %t, data %q), want the request's tombstone",
+			call.key, call.rec.Deleted, call.rec.Data)
+	}
+	if call.track {
+		t.Error("dump-failed delete notified with track=true, want false")
+	}
+}
+
+// TestServer_dumpFailedCreateIfAbsentNotifies proves SetIfAbsent rides the
+// same unconfirmed-write path: one notify with the request's live record and
+// track=false, then Unavailable.
+func TestServer_dumpFailedCreateIfAbsentNotifies(t *testing.T) {
+	t.Parallel()
+
+	ts, capture := newNotifyServer(t)
+	ctx := t.Context()
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = true
+	ts.dumps.mu.Unlock()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "notify/create", Value: []byte("create-value"), CreateIfAbsent: true,
+	})
+	assertCode(t, "SetIfAbsent with failing dump", err, codes.Unavailable)
+
+	calls := capture.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("notify calls = %d, want exactly 1 for the unconfirmed create: %+v", len(calls), calls)
+	}
+	call := calls[0]
+	if call.key != "notify/create" || !bytes.Equal(call.rec.Data, []byte("create-value")) ||
+		call.rec.Deleted || call.track {
+		t.Errorf("notified record = (key %q, data %q, deleted %t, track %t), want the unconfirmed live record with track=false",
+			call.key, call.rec.Data, call.rec.Deleted, call.track)
+	}
+}
+
+// TestServer_closedWriteDoesNotNotify proves the shutdown half: a write the
+// closing engine rejects with ErrClosed is work the process is abandoning, so
+// replication is never told about it. The empty capture is asserted, not
+// merely an absent branch.
+func TestServer_closedWriteDoesNotNotify(t *testing.T) {
+	t.Parallel()
+
+	ts, capture := newNotifyServer(t)
+	ctx := t.Context()
+	_, _, seedErr := ts.engine.Set("notify/live", []byte("live"))
+	if seedErr != nil {
+		t.Fatalf("seed Set(notify/live) error = %v, want nil", seedErr)
+	}
+	ts.cancelEngine()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "notify/set", Value: []byte("v")})
+	assertCode(t, "Set after engine close", err, codes.Unavailable)
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "notify/live"})
+	assertCode(t, "Delete after engine close", err, codes.Unavailable)
+
+	if calls := capture.snapshot(); len(calls) != 0 {
+		t.Fatalf("notify calls after closed writes = %d, want 0: %+v", len(calls), calls)
+	}
+}
+
+// TestServer_snapshotLoadNotifies proves PROTO-08's snapshot half (T-4-19):
+// a load replays the snapshot's records into memory and notifies every
+// replayed record — sorted by key, track=false — even when the confirming
+// dump failed and the RPC reports Unavailable. Notifying what is already in
+// memory is what makes the load replicate; the error still reports the dump
+// honestly.
+func TestServer_snapshotLoadNotifies(t *testing.T) {
+	t.Parallel()
+
+	ts, capture := newNotifyServer(t)
+	ctx := t.Context()
+
+	snapVersion := version.PackVersion(1_700_000_000_000, 3, 7)
+	fixture := map[string]storage.Record{
+		"snap/alpha": {Version: snapVersion, Data: []byte("alpha-value")},
+		"snap/beta":  {Version: snapVersion, Data: []byte("beta-value")},
+		"snap/gamma": {Version: snapVersion, Data: []byte("gamma-value")},
+	}
+	for key, rec := range fixture {
+		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
+		fixture[key] = rec
+	}
+	dump, err := persist.Encode(fixture)
+	if err != nil {
+		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
+	}
+	ts.dumps.mu.Lock()
+	ts.dumps.snapshot = dump
+	ts.dumps.failSave = true
+	ts.dumps.mu.Unlock()
+
+	_, err = ts.client.SnapshotLoad(ctx, &apiproto.SnapshotLoadRequest{Name: "snap"})
+	assertCode(t, "SnapshotLoad with failing final dump", err, codes.Unavailable)
+
+	calls := capture.snapshot()
+	gotKeys := make([]string, len(calls))
+	for i, call := range calls {
+		gotKeys[i] = call.key
+	}
+	wantKeys := []string{"snap/alpha", "snap/beta", "snap/gamma"}
+	if !slices.Equal(gotKeys, wantKeys) {
+		t.Fatalf("notify keys = %v, want %v in sorted replay order", gotKeys, wantKeys)
+	}
+	for _, call := range calls {
+		if call.track {
+			t.Errorf("snapshot-load notify for %q has track=true, want false", call.key)
+		}
+		want := fixture[call.key]
+		if !bytes.Equal(call.rec.Data, want.Data) || call.rec.Deleted {
+			t.Errorf("notified %q = (data %q, deleted %t), want the snapshot's live record",
+				call.key, call.rec.Data, call.rec.Deleted)
+		}
+		if call.rec.Version == (version.RecordVersion{}) || call.rec.Version.Compare(snapVersion) != 1 {
+			t.Errorf("notified %q version %x does not dominate the snapshot's %x",
+				call.key, call.rec.Version[:], snapVersion[:])
+		}
+	}
+}
+
+// TestServer_snapshotLoadNoOpDoesNotNotify proves the no-op half: a load
+// whose snapshot already equals the current state answers OK and notifies
+// nothing — an unchanged load has nothing to replicate.
+func TestServer_snapshotLoadNoOpDoesNotNotify(t *testing.T) {
+	t.Parallel()
+
+	ts, capture := newNotifyServer(t)
+	ctx := t.Context()
+
+	_, _, seedErr := ts.engine.Set("same/key", []byte("same-value"))
+	if seedErr != nil {
+		t.Fatalf("seed Set(same/key) error = %v, want nil", seedErr)
+	}
+	ts.dumps.mu.Lock()
+	if len(ts.dumps.saved) == 0 {
+		ts.dumps.mu.Unlock()
+		t.Fatal("seed write left no saved generation")
+	}
+	ts.dumps.snapshot = bytes.Clone(ts.dumps.saved[len(ts.dumps.saved)-1])
+	ts.dumps.mu.Unlock()
+
+	_, err := ts.client.SnapshotLoad(ctx, &apiproto.SnapshotLoadRequest{Name: "same"})
+	if err != nil {
+		t.Fatalf("SnapshotLoad(same) error = %v, want nil", err)
+	}
+	if calls := capture.snapshot(); len(calls) != 0 {
+		t.Fatalf("notify calls after the no-op load = %d, want 0: %+v", len(calls), calls)
+	}
 }

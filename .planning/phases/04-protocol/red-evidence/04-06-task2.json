@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/grpcapi/ -v -run '^TestServer_dumpFailedWriteNotifies$'",
+  "exitCode": 1,
+  "output": "=== RUN   TestServer_dumpFailedWriteNotifies\n=== PAUSE TestServer_dumpFailedWriteNotifies\n=== CONT  TestServer_dumpFailedWriteNotifies\n    server_test.go:814: notify calls = 0, want exactly 1 for the unconfirmed write: []\n--- FAIL: TestServer_dumpFailedWriteNotifies (0.03s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/grpcapi\t0.040s\nFAIL",
+  "targetTest": "TestServer_dumpFailedWriteNotifies",
+  "targetFile": "internal/grpcapi/server_test.go",
+  "expected": "A Set the engine installed but whose confirming dump failed notifies the replication seam once with the request key, value, deleted=false, track=false and a nonzero version before the RPC answers Unavailable.",
+  "actual": "The notify capture stayed empty: the handler's error branch returns mapError without ever reaching notifyLocalWrite.",
+  "semanticAssessment": "The target test executed and failed on its planned assertion (0 notify calls versus exactly 1). The sibling rows failed the same way: dumpFailedDeleteNotifies and dumpFailedCreateIfAbsentNotifies each saw 0 calls, and snapshotLoadNotifies saw an empty key list instead of the three replayed keys. TestServer_closedWriteDoesNotNotify and TestServer_snapshotLoadNoOpDoesNotNotify pass by construction — they pin the required zero-notify behavior the implementation must preserve. No build, fixture or discovery failure; no unrelated test failure."
+}
