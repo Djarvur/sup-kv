@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 11
+current_plan: 12
 status: executing
-stopped_at: Completed 04-10-PLAN.md
-last_updated: "2026-11-22T06:12:55.071Z"
+stopped_at: Completed 04-11-PLAN.md
+last_updated: "2026-11-22T06:30:09.082Z"
 last_activity: 2026-11-22
 last_activity_desc: Completed 04-07-PLAN.md (three-node broadcast convergence)
-state_head: 14b69580caade663982db7da5d535a57969a097b
+state_head: 4a352e84990e1e7ea835dd98f1660c206c80d97a
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 44
+  completed_plans: 45
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 11
+Current Plan: 12
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Completed 04-07-PLAN.md
@@ -101,6 +101,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P08 | 1800s | 3 tasks | 9 files |
 | Phase 04 P09 | 847 | 2 tasks | 5 files |
 | Phase 04 P10 | 397s | 2 tasks | 3 files |
+| Phase 04 P11 | 780 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -278,6 +279,9 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-10: ReplaceNodeWithState onto a stale snapshot opens no gate — both completeness reads stay false at the restart instant and node A's newer value survives (F14 at simulator level).
 - [Phase 04]: 04-10: 14.9's decision index names TestScenario_threeNode; the real-socket three-node test is recorded as the wiring proof.
 - [Phase 04]: 04-10: First-seen listing traffic moved no simnet extension bound or determinism expectation; the audit is recorded in comments (same-seed equality, budget armed after discovery listings).
+- [Phase 04]: 04-11: listing drift is pinned as clock-only — MergeStats stays zero while the next local write strictly beats the listed max version, so an Observe-skipping implementation fails (OQ6).
+- [Phase 04]: 04-11: the WARN limiter is pinned per (node_id, class) by counting class+node pairs in the captured Log — two classes from one peer and a second peer's first occurrence each warn once.
+- [Phase 04]: 04-11: the 12 declared residual files needed no edit — every one was already adapted by its owning semantic plan or compiles unchanged through shared fakes; task 2's deliverable is the recorded all-green run and the adaptation table.
 
 ### Pending Todos
 
@@ -300,7 +304,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T06:12:54.760Z
-Stopped at: Completed 04-10-PLAN.md
+Last session: 2026-11-22T06:30:08.743Z
+Stopped at: Completed 04-11-PLAN.md
 Resume file: None
 Next action: continue Phase 4 with `/gsd:execute-phase 4` (04-08-PLAN.md is next)
