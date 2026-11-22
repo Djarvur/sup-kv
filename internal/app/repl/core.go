@@ -866,14 +866,6 @@ type Core struct {
 	// it (no adapter mirror this phase).
 	notificationsRegressed uint64
 
-	// syncArrived flips true on the first received DataSync datagram and
-	// never resets — the startup gate's sync half (API-04). Set by
-	// handleDataSync on the driver goroutine; read through the copying
-	// SyncArrived accessor, which the production adapter mirrors into an
-	// atomic after every loop iteration so cross-goroutine readers never
-	// touch core state.
-	syncArrived bool
-
 	// The listing accumulator (PROTO-01): one syncStream per
 	// (peer, run, sync_id) round, bounded by maxSyncStreams,
 	// maxSyncEntriesPerStream and maxSyncEntriesTotal; syncEntries is the
@@ -905,15 +897,16 @@ type Core struct {
 	// when the union membership or the complete flag actually changes, so an
 	// identical repeated complete listing republishes nothing downstream.
 	// listingComplete flips true on the first complete listing and never
-	// resets; nextSyncID allocates one fresh sync_id per listing BUILD (never
-	// per trigger — the shared build carries it, so two destinations reusing
-	// one build share the round identity, T-4-24; build-time counter, never
-	// crypto/rand — same-seed replay stays byte-identical).
+	// resets — the startup gate's sync half reads it through the copying
+	// SyncArrived accessor (one fact, one field: the former second flag could
+	// never differ, IN-06); nextSyncID allocates one fresh sync_id per listing
+	// BUILD (never per trigger — the shared build carries it, so two
+	// destinations reusing one build share the round identity, T-4-24;
+	// build-time counter, never crypto/rand — same-seed replay stays
+	// byte-identical).
 	listingGen      uint64
 	listingComplete bool
 	nextSyncID      uint64
-
-	// The no-Hello WARN state (XPORT-09, D-07): firstAdvance is the event
 	// time of the first Advance — the warning's clock origin — helloSeen
 	// flips on the first Hello received from any peer, and peerWarned
 	// latches the one-shot WARN. Driver-goroutine-only, like every other
@@ -1604,7 +1597,7 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 // already advance the HLC. An empty part has no version to absorb. Only a
 // complete round publishes its key set through retainListedKeys, sets
 // listingComplete once, moves the listing generation when the published
-// content actually changed, and opens the gate (syncArrived) — all in this
+// content actually changed, and opens the gate — all in this
 // same handler, so no partial listing can open it. The part's entries then
 // compare per key against the store exactly as before: a locally absent key
 // or a strictly newer listing version enqueues a unicast DataRequest
@@ -1753,7 +1746,6 @@ func (c *Core) accumulateSync(now time.Time, in port.InboundDatagram, msg port.D
 	if changed {
 		c.listingGen++
 	}
-	c.syncArrived = true
 	c.discardSyncStream(key)
 }
 
@@ -2943,15 +2935,16 @@ func (c *Core) NotificationsRegressed() uint64 {
 
 // SyncArrived reports whether a COMPLETE listing has been processed — every
 // chunk of some peer's round received, not merely the first arrival (the
-// startup gate's sync half, API-04, PROTO-01). The flag flips in
-// handleDataSync's all-chunks branch and never resets; ListingComplete is the
-// same fact read from the listing state. Set on the driver goroutine only;
-// like Discards this is a value read sanctioned for the adapter's post-event
+// startup gate's sync half, API-04, PROTO-01). It is the same fact as
+// ListingComplete: one field backs both reads, because no observable state
+// could ever make them differ (IN-06). The flag flips in handleDataSync's
+// all-chunks branch and never resets. Set on the driver goroutine only; like
+// Discards this is a value read sanctioned for the adapter's post-event
 // mirroring, so cross-goroutine readers (Phase 5's gate resolver) see the
 // state through the adapter's one atomic listing pointer, never by calling
 // into a core the driver owns.
 func (c *Core) SyncArrived() bool {
-	return c.syncArrived
+	return c.listingComplete
 }
 
 // ListingGeneration returns the listing content version the adapter's mirror
