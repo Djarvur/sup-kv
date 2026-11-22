@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 04-06-PLAN.md
-last_updated: "2026-11-22T04:43:45.920Z"
+stopped_at: Completed 04-07-PLAN.md
+last_updated: "2026-11-22T04:50:27.827Z"
 last_activity: 2026-11-22
-last_activity_desc: Completed 04-06-PLAN.md (dump-failed and snapshot-load replication)
-state_head: cacabdbbc4317f5b3616e10529b13f3bc386becd
+last_activity_desc: Completed 04-07-PLAN.md (three-node broadcast convergence)
+state_head: 21046ff01c4a6940fd692cdd73658ece1e7467f3
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 40
+  completed_plans: 41
 ---
 
 # Project State
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 13
 Status: Ready to execute
-Last activity: 2026-11-22 — Completed 04-06-PLAN.md
+Last activity: 2026-11-22 — Completed 04-07-PLAN.md
 
 Progress: [███░░░░░░░] 33%
 
@@ -97,6 +97,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P04 | 10min | 2 tasks | 9 files |
 | Phase 04 P05 | 791s | 2 tasks | 5 files |
 | Phase 04 P06 | 294 | 2 tasks | 5 files |
+| Phase 04 P07 | 287s | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -258,6 +259,9 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-06: replayRecord's bool is the explicit install/skip signal, separate from the tombstone flag: ErrNotFound on a tombstone replay and ErrValueTooLarge on a live replay return the zero version, replayed=false and nil; skipped records are absent from RestoredRecord and never notified.
 - [Phase 04]: 04-06: Dump-failed Set/SetIfAbsent/Delete notify the stamped record with track=false before mapError answers Unavailable; SnapshotLoad notifies Restore's list before mapping the error and skips the loop entirely on ErrClosed, so abandoned shutdown work is never announced.
 - [Phase 04]: 04-06: The snapshot-load notify order is the replay's sorted-key order and the tests assert the exact key sequence, not a count, so a map-order regression fails; the no-op load notifies nothing and returns OK.
+- [Phase 04]: 04-07: The test-only task's tdd=true produced unexpected GREEN because the asserted production behavior already existed; the test commit is the deliverable and the gate outcome is disclosed instead of fabricating a RED record or an unnecessary production change.
+- [Phase 04]: 04-07: waitServing mirrors waitFor's visibilityDeadline, pollEvery cadence and hard-deadline clamp but names the last observed record on timeout, so an N=3 convergence failure reports per-store state rather than only the expectation.
+- [Phase 04]: 04-07: The same-key LWW row waits for all three stores to hold A's version before B writes, so B's clock has observed it and B's store-stamped version strictly dominates; convergence on B's version therefore proves LWW, not wall-clock luck.
 
 ### Pending Todos
 
@@ -280,7 +284,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T04:43:45.627Z
-Stopped at: Completed 04-06-PLAN.md
+Last session: 2026-11-22T04:50:27.538Z
+Stopped at: Completed 04-07-PLAN.md
 Resume file: None
-Next action: `/gsd:verify-work 3` (or `/gsd:execute-phase 4` after the phase gate is verified) — Phase 4 (Protocol) is unblocked
+Next action: continue Phase 4 with `/gsd:execute-phase 4` (04-08-PLAN.md is next)
