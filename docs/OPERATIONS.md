@@ -115,9 +115,12 @@ At startup the node walks the fallback chain — the main dump file, then its
 
 A generation written before this format's `record_count` field carries no
 completeness census, so a truncation that lands exactly on a line boundary of
-such a legacy dump is undetectable and loads as authoritative — take a
-snapshot (or let one confirmed write rotate the main generation) after
-upgrading, after which the next generation carries the census.
+such a legacy dump is undetectable and loads as authoritative. A snapshot
+taken right after a clean `Main` load copies that legacy generation
+byte-for-byte and therefore carries no census either; only a confirmed write
+(or a flush of a dirty engine, which rewrites the main generation) produces a
+censused main. After upgrading, let one confirmed write rotate the main
+generation before relying on the census.
 
 Discarded records are counted by class in
 `supkv_dump_records_discarded_total`: `checksum`, `version`, `malformed`
