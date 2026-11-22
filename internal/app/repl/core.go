@@ -1289,25 +1289,34 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 // names one peer's listing round; parts accumulate by
 // (node_id, run_id, sync_id) and the round is complete exactly when every
 // chunk index 1..chunk_count has arrived — the first part alone is never the
-// listing (the R-03 defect this shape removes). Only a complete round
-// publishes its key set through retainListedKeys, sets listingComplete once,
-// moves the listing generation when the published content actually changed,
-// and opens the gate (syncArrived) — all in this same handler, so no partial
-// listing can open it. The part's entries then compare per key against the
-// store exactly as before: a locally absent key or a strictly newer listing
-// version enqueues a unicast DataRequest; a strictly newer local record —
-// read through one point Lookup, tombstones included, so a local delete
-// heals the sender's live copy — enqueues a unicast exact-record
-// DataReplication; equal versions produce silence. Entries are processed in
-// received order (the compare is per key and order-independent by
-// construction) and every response flows through the single rate-limited
-// egress queue — the scope pin; no reactive unicast has a bypass path, which
-// is what survives empty-node recovery (T-04-07). A directly-driven core
-// receives no header validation (the wired path classifies that before this
-// handler), so an impossible header returns without touching any state.
+// listing (the R-03 defect this shape removes). Before accumulation, a
+// non-empty part absorbs its maximum entry version into the store clock
+// exactly once (PROTO-01): the call sits after header validation — so a
+// datagram the validation pipeline discarded never reaches the clock (T-4-10)
+// — and is independent of stream completion, so a partial round's versions
+// already advance the HLC. An empty part has no version to absorb. Only a
+// complete round publishes its key set through retainListedKeys, sets
+// listingComplete once, moves the listing generation when the published
+// content actually changed, and opens the gate (syncArrived) — all in this
+// same handler, so no partial listing can open it. The part's entries then
+// compare per key against the store exactly as before: a locally absent key
+// or a strictly newer listing version enqueues a unicast DataRequest; a
+// strictly newer local record — read through one point Lookup, tombstones
+// included, so a local delete heals the sender's live copy — enqueues a
+// unicast exact-record DataReplication; equal versions produce silence.
+// Entries are processed in received order (the compare is per key and
+// order-independent by construction) and every response flows through the
+// single rate-limited egress queue — the scope pin; no reactive unicast has a
+// bypass path, which is what survives empty-node recovery (T-04-07). A
+// directly-driven core receives no header validation (the wired path
+// classifies that before this handler), so an impossible header returns
+// without touching any state.
 func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.DataSync, _ *port.Outbox) {
 	if !validSyncHeader(msg) {
 		return
+	}
+	if len(msg.Entries) > 0 {
+		c.store.Observe(maxEntryVersion(msg.Entries))
 	}
 	c.accumulateSync(in, msg)
 	for _, entry := range msg.Entries {
@@ -1325,6 +1334,20 @@ func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.D
 			c.enqueueResponse(now, in.Source, port.DataReplication{Key: entry.Key, Record: rec})
 		}
 	}
+}
+
+// maxEntryVersion returns the greatest version among entries by the full
+// 16-byte comparison; entries must be non-empty. The absorbed reading is the
+// exact maximum of the part's validated versions — no averaging, rounding or
+// truncation (PROTO-01 precision).
+func maxEntryVersion(entries []port.SyncEntry) version.RecordVersion {
+	maxVer := entries[0].Version
+	for _, entry := range entries[1:] {
+		if entry.Version.Compare(maxVer) > 0 {
+			maxVer = entry.Version
+		}
+	}
+	return maxVer
 }
 
 // validSyncHeader reports whether msg's completeness header is inside its
