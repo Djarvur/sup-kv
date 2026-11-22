@@ -125,6 +125,12 @@ func encodeRecordsAt(t *testing.T, limit int, extras map[string]storage.Record) 
 	return dump
 }
 
+// censusHeader renders a dump header line announcing count record lines —
+// the hand-built fixtures' control over the completeness census (PERSIST-03).
+func censusHeader(count int) string {
+	return fmt.Sprintf("{\"format_version\":1,\"record_count\":%d}\n", count)
+}
+
 // smallSpaceVersion returns a version drawn from TEST-15's tiny space: l in
 // {base, base+1, base+2}, counter 0..2, node 1..3.
 func smallSpaceVersion(rng *rand.Rand) version.RecordVersion {
@@ -224,14 +230,14 @@ func assertCodecRoundTrip(t *testing.T, step int, records map[string]storage.Rec
 	if err != nil {
 		t.Fatalf("step %d Encode() error = %v, want nil", step, err)
 	}
-	decoded, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
+	decoded, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("step %d Decode() error = %v, want nil (replay with the property seed above)",
 			step, err)
 	}
-	if discarded != 0 {
+	if stats.Total() != 0 {
 		t.Fatalf("step %d Decode() discarded = %d, want 0 (replay with the property seed above)",
-			step, discarded)
+			step, stats.Total())
 	}
 	if !recordsEqual(decoded, records) {
 		t.Fatalf("step %d round trip changed the records (replay with the property seed above)", step)
@@ -362,15 +368,15 @@ func TestCodec_discardClasses(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			decoded, discarded, err := persist.Decode(tt.dump, storage.ValueMaxBytes)
+			decoded, stats, err := persist.Decode(tt.dump, storage.ValueMaxBytes)
 			if (err != nil) != tt.wantDecodeErr {
 				t.Errorf("Decode() error = %v, want error=%t", err, tt.wantDecodeErr)
 			}
 			if tt.wantDecodeErr {
 				return
 			}
-			if discarded != tt.wantDiscarded {
-				t.Errorf("Decode() discarded = %d, want %d", discarded, tt.wantDiscarded)
+			if stats.Total() != tt.wantDiscarded {
+				t.Errorf("Decode() discarded = %d, want %d", stats.Total(), tt.wantDiscarded)
 			}
 			if !recordsEqual(decoded, baseRecords()) {
 				t.Errorf("Decode() records = %v, want the surviving base records", decoded)
@@ -387,13 +393,18 @@ func TestCodec_discardClasses(t *testing.T) {
 		})
 		firstLines := strings.Split(strings.TrimSuffix(string(first), "\n"), "\n")
 		secondLines := strings.Split(strings.TrimSuffix(string(second), "\n"), "\n")
-		joined := []byte(strings.Join([]string{firstLines[0], firstLines[1], secondLines[1]}, "\n") + "\n")
-		decoded, discarded, err := persist.Decode(joined, storage.ValueMaxBytes)
+		// The joined dump has two record lines, so its header announces two —
+		// a mismatch kept at the joined shape would be the census's
+		// incomplete-generation fault instead of the last-wins case.
+		joined := []byte(strings.Join([]string{
+			strings.TrimSuffix(censusHeader(2), "\n"), firstLines[1], secondLines[1],
+		}, "\n") + "\n")
+		decoded, stats, err := persist.Decode(joined, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Decode(joined) error = %v, want nil", err)
 		}
-		if discarded != 0 {
-			t.Errorf("Decode(joined) discarded = %d, want 0", discarded)
+		if stats.Total() != 0 {
+			t.Errorf("Decode(joined) discarded = %d, want 0", stats.Total())
 		}
 		want := map[string]storage.Record{
 			"dup": sealed("dup", storage.Record{Version: version.PackVersion(1005, 1, 1), Data: []byte("second")}),
@@ -415,10 +426,10 @@ func TestCodec_discardClasses(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Encode(empty) error = %v, want nil", err)
 		}
-		decoded, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
-		if err != nil || discarded != 0 || len(decoded) != 0 {
+		decoded, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 || len(decoded) != 0 {
 			t.Errorf("Decode(empty dump) = (%d records, %d discarded, %v), want empty, 0, nil",
-				len(decoded), discarded, err)
+				len(decoded), stats.Total(), err)
 		}
 	})
 }
@@ -516,12 +527,12 @@ func TestCodec_corruptLineIsolated(t *testing.T) {
 	// a line whose first byte cannot open a JSON object.
 	lines[2] = "!" + lines[2][1:]
 	corrupt := []byte(strings.Join(lines, "\n") + "\n")
-	decoded, discarded, err := persist.Decode(corrupt, storage.ValueMaxBytes)
+	decoded, stats, err := persist.Decode(corrupt, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("Decode(corrupt line) error = %v, want nil — one bad line must not collapse the generation", err)
 	}
-	if discarded != 1 {
-		t.Errorf("Decode(corrupt line) discarded = %d, want 1 (the malformed line)", discarded)
+	if stats.Malformed != 1 {
+		t.Errorf("Decode(corrupt line) Malformed = %d, want 1 (the malformed line)", stats.Malformed)
 	}
 	want := map[string]storage.Record{
 		"keep-a": sealed("keep-a", storage.Record{Version: version.PackVersion(1000, 1, 1), Data: []byte("a-value")}),

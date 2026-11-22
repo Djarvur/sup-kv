@@ -69,22 +69,22 @@ func FuzzDumpDecode(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, dump []byte) {
-		records, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
+		records, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
 		if err != nil {
 			if records != nil {
 				t.Fatalf("Decode returned %d records alongside the generation-level fault: %v", len(records), err)
 			}
-			if discarded != 0 {
-				t.Fatalf("Decode returned discarded=%d alongside the generation-level fault: %v", discarded, err)
+			if stats.Total() != 0 {
+				t.Fatalf("Decode returned discarded=%d alongside the generation-level fault: %v", stats.Total(), err)
 			}
 			return
 		}
 		lines, deletionsWithData := fuzzDumpScan(dump)
-		if discarded < 0 || discarded > lines {
-			t.Fatalf("discarded=%d outside 0..%d parsed record lines", discarded, lines)
+		if stats.Total() < 0 || stats.Total() > lines {
+			t.Fatalf("discarded=%d outside 0..%d parsed record lines", stats.Total(), lines)
 		}
-		if len(records)+discarded > lines {
-			t.Fatalf("accepted %d records + %d discarded > %d parsed record lines", len(records), discarded, lines)
+		if len(records)+stats.Total() > lines {
+			t.Fatalf("accepted %d records + %d discarded > %d parsed record lines", len(records), stats.Total(), lines)
 		}
 		for key, rec := range records {
 			if storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted) != rec.Checksum {
@@ -108,12 +108,12 @@ func fuzzDumpAssertEcho(t *testing.T, records map[string]storage.Record) {
 	if err != nil {
 		t.Fatalf("re-Encode of %d accepted records: %v", len(records), err)
 	}
-	back, backDiscarded, err := persist.Decode(again, storage.ValueMaxBytes)
+	back, backStats, err := persist.Decode(again, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("re-Decode of the re-encoded dump: %v", err)
 	}
-	if backDiscarded != 0 {
-		t.Fatalf("re-Decode of the re-encoded dump discarded %d records, want none", backDiscarded)
+	if backStats.Total() != 0 {
+		t.Fatalf("re-Decode of the re-encoded dump discarded %d records, want none", backStats.Total())
 	}
 	if len(back) != len(records) {
 		t.Fatalf("round trip kept %d of %d accepted records", len(back), len(records))
