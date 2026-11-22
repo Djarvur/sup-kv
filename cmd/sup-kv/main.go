@@ -958,18 +958,24 @@ func shutdown(node *wired, sig <-chan os.Signal) error {
 	}
 
 	node.engineCancel()
+	awaitEngineStop(node.engineDone, shutdownGrace)
+	return nil
+}
+
+// awaitEngineStop waits up to grace for the engine's Run to return. A dumper
+// that outlives the grace — most likely a kernel fsync that never returned —
+// is abandoned: the process is exiting, and waiting here would defeat the
+// bounded shutdown (PERSIST-08). A Run error other than cancellation is
+// reported; a clean cancellation is silent.
+func awaitEngineStop(done <-chan error, grace time.Duration) {
 	select {
-	case runErr := <-node.engineDone:
+	case runErr := <-done:
 		if !errors.Is(runErr, context.Canceled) {
 			log.Printf("sup-kv: engine Run returned %v", runErr)
 		}
-	case <-time.After(shutdownGrace):
-		// The dumper outlived the grace — most likely a kernel fsync that
-		// never returned. Abandon the goroutine: the process is exiting, and
-		// waiting here would defeat the bounded shutdown (PERSIST-08).
-		slog.Warn("Engine did not stop within the shutdown grace", "grace", shutdownGrace.String())
+	case <-time.After(grace):
+		slog.Warn("Engine did not stop within the shutdown grace", "grace", grace.String())
 	}
-	return nil
 }
 
 // missingRequired names every required knob left at its zero default — its
