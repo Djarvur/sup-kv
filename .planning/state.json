@@ -21,7 +21,7 @@
     {
       "number": "4",
       "name": "Replication and Deterministic Simulator",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "5",
@@ -87,7 +87,7 @@
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step (verify)",
-    "reason": "Phase 4 of 9 · ready to verify"
+    "reason": "Phase 5 of 9 · 33% · ready to verify"
   },
-  "updated_at": "2026-11-22T07:05:21.951Z"
+  "updated_at": "2026-11-22T08:47:42.666Z"
 }

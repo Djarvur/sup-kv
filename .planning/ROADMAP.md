@@ -31,7 +31,7 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
 - [x] **Phase 1: Spec Reference and Decisions** - Deviation registry mapping every Spec statement to a decision and link; 11 ADRs for owner decisions 14.1-14.11; docs/IDEA.md marked historical (completed 2026-11-19)
 - [x] **Phase 2: Stand and Simulator as Tests** - F9/F9b/F14/burst/F2c automated on real sockets; simulator blind spots closed; chaos stabilized; red tests for the four Criticals (R-01, R-02, R-03, P-01) (completed 2026-11-21)
 - [x] **Phase 3: Transport** - Paced sync/retransmit sending, socket buffer setup and reporting, datagram validation, bounded queues; key→version view and Outbox seams (completed 2026-11-22)
-- [ ] **Phase 4: Protocol** - Interface closed until the full key list arrives, `startup_gate_empty`, DataSync headers, stale-record answer, immediate sync for new/returning peers, 3+-node tests
+- [x] **Phase 4: Protocol** - Interface closed until the full key list arrives, `startup_gate_empty`, DataSync headers, stale-record answer, immediate sync for new/returning peers, 3+-node tests (completed 2026-11-22)
 - [ ] **Phase 5: Persistence** - Single value limit, visible dump-load outcomes, generation integrity, decaying retries, streaming encode, blocking deadlines, engine split
 - [ ] **Phase 6: API and Semantics** - Honest `wait_for_replication`, snapshot load as full rollback, total error mapping, paginated `List`, public proto + Go client example in CI
 - [ ] **Phase 7: Observability and Configuration** - Lifecycle logging, one-point config validation, honest metric definitions, distinct exit codes, machine-enforced dependency boundary
@@ -160,7 +160,7 @@ Plans:
   3. Staleness never lies: a node holding `k@v5` that receives `k@v3` sends back exactly one unicast `DataReplication k@v5` and no `Ack` (the sender's `wait_for_replication` for `v3` reports `acked: false`); a local-write notification with a version not greater than the tracked one is ignored
   4. Misconfiguration and version mismatch are named errors: a third process under a known `node_id` with alternating `run_id`s is counted and logged as a configuration error and receives no full listing; an incompatible `proto_version` is checked before body decode, classified `bad_proto_version`, and WARN-logged rate-limited per peer per interval
   5. Replication is total and N-node behavior is specified: a write whose dump failed still broadcasts (counted as unconfirmed) and a snapshot load broadcasts its result; 3+-node behavior and timing is documented with real-socket three-node tests, and `wait_for_replication` semantics at N > 2 are in the API docs
-**Plans**: 13/13 plans executed
+**Plans**: 13/13 plans complete
 **Wave 1**
 - [x] 04-01-PLAN.md — Complete-listing wire header, per-stream accumulation, one atomic mirror, pre-body proto-version verdict (PROTO-01, PROTO-07)
 
@@ -259,7 +259,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
 | 2. Engine — HLC Versioning and LWW Store | v1.0 | 17/17 | Complete    | 2026-11-21 |
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 13/13 | Complete | 2026-11-03 |
-| 4. Replication and Deterministic Simulator | v1.0 | 13/13 | In Progress |  |
+| 4. Replication and Deterministic Simulator | v1.0 | 13/13 | Complete    | 2026-11-22 |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete | 2026-11-16 |
 | 7. v1.0 — Docs, Examples and Release | v1.0 | 5/5 | Complete | 2026-11-18 |
