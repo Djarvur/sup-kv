@@ -44,7 +44,7 @@ func (f *FileStore) CreateSnapshot(name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	snapshotDir := f.path + snapshotDirSuffix
-	err = os.MkdirAll(snapshotDir, dirMode)
+	err = ensureDir(f.ops, snapshotDir)
 	if err != nil {
 		return err
 	}

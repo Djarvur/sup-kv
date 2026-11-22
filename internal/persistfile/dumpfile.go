@@ -107,7 +107,7 @@ func (f *FileStore) Save(dump []byte) error {
 func (f *FileStore) SaveStream(fill func(io.Writer) error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return saveAtomically(f.ops, f.path, f.path+prevSuffix, fill)
+	return classifySaveError(saveAtomically(f.ops, f.path, f.path+prevSuffix, fill))
 }
 
 // Load runs the startup sweep first, then resolves the fallback chain main
@@ -309,20 +309,43 @@ func sweepEntry(dir, name string, now time.Time) (bool, error) {
 	return err == nil, err
 }
 
+// ensureDir makes dir exist and, only when it was created, syncs its parent
+// so the new directory's entry is durable before a temp file lands in it
+// (D-08, T-5-17): an existing directory performs no parent sync, keeping the
+// five-step TEST-03 order exact for every pre-existing test. MkdirAll may
+// create a chain; only dir's immediate parent is synced, the depth the plan
+// documents. Syncing the parent before write means a failure aborts before a
+// temp exists — nothing to clean.
+func ensureDir(ops fsops, dir string) error {
+	_, err := os.Stat(dir)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	err = os.MkdirAll(dir, dirMode)
+	if err != nil {
+		return err
+	}
+	return ops.syncDir(filepath.Dir(dir))
+}
+
 // saveAtomically implements the canonical atomic-write sequence (PERS-02,
-// research Pattern 3) through the fsops seam (D-07, TEST-03): MkdirAll the
-// parent so a fresh deployment's first dump creates its directory — setup,
-// not one of the five seam steps — then the five ordered operations, one
-// fsops method per step, in the exact order the TEST-03 order test asserts:
-// write → fsync → rotate → rename → dir-fsync. fill runs inside step 1 on
-// the adapter's buffered temp writer, so the encoded generation streams
-// instead of arriving as one slice (D-06). An empty prevPath skips the
-// rotation — the snapshot policy, which overwrites in place with no .prev
-// of its own (research Open Question 2). The temp file is removed on every
-// failure path — the seam steps' own hygiene, close + remove (Pitfall 5).
+// research Pattern 3) through the fsops seam (D-07, TEST-03): ensureDir the
+// parent so a fresh deployment's first dump creates its directory and (only
+// when it was created) syncs that directory's parent — setup, not one of the
+// five seam steps — then the five ordered operations, one fsops method per
+// step, in the exact order the TEST-03 order test asserts: write → fsync →
+// rotate → rename → dir-fsync. fill runs inside step 1 on the adapter's
+// buffered temp writer, so the encoded generation streams instead of arriving
+// as one slice (D-06). An empty prevPath skips the rotation — the snapshot
+// policy, which overwrites in place with no .prev of its own (research Open
+// Question 2). The temp file is removed on every failure path — the seam
+// steps' own hygiene, close + remove (Pitfall 5).
 func saveAtomically(ops fsops, path, prevPath string, fill func(io.Writer) error) error {
 	dir := filepath.Dir(path)
-	err := os.MkdirAll(dir, dirMode)
+	err := ensureDir(ops, dir)
 	if err != nil {
 		return err
 	}

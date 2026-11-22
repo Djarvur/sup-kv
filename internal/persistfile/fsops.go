@@ -2,8 +2,10 @@ package persistfile
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
+	"syscall"
 )
 
 // maxDumpBufioBytes is the adapter's writer buffer for one streamed dump
@@ -166,7 +168,9 @@ func (o *fileFSOps) rename(main string) error {
 // syncDir implements TEST-03 order step 5 (see fsops): the parent
 // directory's entry is fsynced through [os.File.Sync], so the rename under
 // it becomes durable too; the file's own data was synced before the rename.
-// The failure path cleans nothing — the temp is already the main
+// Only this directory step tolerates ENOTSUP/EINVAL through
+// tolerateDirSyncErr — the file-data fsync path above keeps every error
+// (T-5-15). The failure path cleans nothing — the temp is already the main
 // generation.
 func (*fileFSOps) syncDir(dir string) error {
 	d, err := os.Open(dir) //nolint:gosec // G304: dir derives from the configured dump path, never caller input
@@ -174,7 +178,7 @@ func (*fileFSOps) syncDir(dir string) error {
 		return err
 	}
 	defer func() { _ = d.Close() }()
-	return d.Sync()
+	return tolerateDirSyncErr(d.Sync())
 }
 
 // closeRemoveTemp is the failure hygiene of the temp-holding steps (write,
@@ -214,5 +218,8 @@ func targetExists(path string) bool {
 // data can never be masked. EINTR needs no retry loop here: [os.File.Sync]
 // already retries it through internal/poll on Linux and darwin.
 func tolerateDirSyncErr(err error) error {
+	if errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EINVAL) {
+		return nil
+	}
 	return err
 }
