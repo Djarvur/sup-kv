@@ -43,13 +43,22 @@ type Config struct {
 }
 
 // normalized returns cfg with zero or negative fields replaced by the
-// design defaults.
+// design defaults, and the two clock seams filled with the wall-clock
+// functions (PERSIST-12). These two assignments are the package's only
+// wall-clock references: every other site reads through cfg.Now or arms
+// through cfg.After.
 func (c Config) normalized() Config {
 	if c.Debounce <= 0 {
 		c.Debounce = defaultDebounce
 	}
 	if c.MaxWait <= 0 {
 		c.MaxWait = defaultMaxWait
+	}
+	if c.Now == nil {
+		c.Now = time.Now
+	}
+	if c.After == nil {
+		c.After = time.After
 	}
 	return c
 }
@@ -82,6 +91,15 @@ type Engine struct {
 	waiters []*waiter
 	dirty   bool
 	oldest  time.Time
+
+	// retryDelay and retryAt are the dump-failure ladder state (D-05,
+	// PERSIST-05): zero while healthy; a failed attempt advances the delay
+	// and fixes the instant the retry channel is armed for, so intervening
+	// writes cannot postpone the next attempt. Both are written by the dumper
+	// goroutine under mu and read by rearm.
+	retryDelay time.Duration
+	retryAt    time.Time
+
 	changed chan struct{}
 	flushCh chan chan error
 	runDone chan struct{}
@@ -261,32 +279,36 @@ func mergeRecords(store *storage.Store, records map[string]storage.Record) {
 // timer is armed from the clean-to-dirty transition timestamp and is never
 // reset by later changes, only the debounce timer resets, so a 1 ms write
 // cadence can never push the dump start past the bound (D-04, Pitfall 2).
-// flushCh requests force a dump immediately — bypassing the debounce quiet
-// window — and receive the dump's error after it completed; a clean engine
-// has nothing unconfirmed on disk and replies nil without a redundant save
-// (the D-10 snapshot flush seam Snapshot and Restore drive). Go 1.23+ timer
-// semantics apply: plain Reset, no drain selects (Pitfall 9). Run exits
-// when ctx is cancelled, sweeping every stranded waiter with ErrClosed,
-// closing runDone — the exit signal flush races its flushCh send and reply
-// against, so a request stranding between the closed-check and the send can
-// never hang — and returns ctx's error.
+// Every timer is a channel armed through cfg.After and held in a loop
+// variable: re-arming replaces the channel, so a stale channel is
+// unreachable and can never fire a dump, and no channel is ever created
+// inside the select (PERSIST-12, research Pitfall 17). flushCh requests
+// force a dump immediately — bypassing the debounce quiet window — and
+// receive the dump's error after it completed; a clean engine has nothing
+// unconfirmed on disk and replies nil without a redundant save (the D-10
+// snapshot flush seam Snapshot and Restore drive). Run exits when ctx is
+// cancelled, sweeping every stranded waiter with ErrClosed, closing
+// runDone — the exit signal flush races its flushCh send and reply against,
+// so a request stranding between the closed-check and the send can never
+// hang — and returns ctx's error.
 func (e *Engine) Run(ctx context.Context) error {
-	var debounce, deadline *time.Timer
+	var debounce, deadline, retry <-chan time.Time
 	for {
 		var fired bool
 		select {
 		case <-ctx.Done():
-			stopTimer(debounce)
-			stopTimer(deadline)
 			e.sweepClosed()
 			close(e.runDone)
 			return ctx.Err()
 		case <-e.changed:
-		case <-timerChan(debounce):
+		case <-debounce:
 			debounce = nil
 			fired = true
-		case <-timerChan(deadline):
+		case <-deadline:
 			deadline = nil
+			fired = true
+		case <-retry:
+			retry = nil
 			fired = true
 		case reply := <-e.flushCh:
 			reply <- e.flushDump()
@@ -294,7 +316,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		if fired {
 			_ = e.runDump() // the error belongs to the waiters; nobody is left to report to.
 		}
-		debounce, deadline = e.rearm(debounce, deadline)
+		debounce, deadline, retry = e.rearm(debounce, deadline, retry)
 	}
 }
 
@@ -312,29 +334,40 @@ func (e *Engine) flushDump() error {
 	return e.runDump()
 }
 
-// rearm re-syncs the debounce and deadline timers with the engine's dirty
-// state: while dirty, the debounce timer counts a fresh quiet window and
-// the deadline timer — armed once per dirty epoch from that epoch's oldest
-// change — keeps running untouched; clean means the last dump covered
-// everything, so both timers stop.
-func (e *Engine) rearm(debounce, deadline *time.Timer) (nextDebounce, nextDeadline *time.Timer) {
+// rearm re-syncs the scheduler's timer channels with the engine's retry and
+// dirty state: a pending retry owns the next attempt — arming only the retry
+// channel, because a debounce or deadline would fire earlier than the ladder
+// -- while a dirty engine counts a fresh quiet window on the debounce
+// channel and keeps the deadline channel armed from the epoch's oldest
+// change untouched; clean means the last dump covered everything, so no
+// channel is armed. The debounce channel is replaced on every re-arm (a
+// replaced channel is unreachable and simply dropped); the retry channel
+// keeps its already-armed instant while one is pending, so a write arriving
+// during backoff registers a waiter covered by that attempt instead of
+// postponing it.
+func (e *Engine) rearm(debounce, deadline, retry <-chan time.Time) (nextDebounce, nextDeadline, nextRetry <-chan time.Time) {
 	e.mu.Lock()
 	dirty, oldest := e.dirty, e.oldest
+	delay, at := e.retryDelay, e.retryAt
 	e.mu.Unlock()
+	if delay > 0 {
+		if retry == nil {
+			wait := at.Sub(e.cfg.Now())
+			if wait < 0 {
+				wait = 0
+			}
+			retry = e.cfg.After(wait)
+		}
+		return nil, nil, retry
+	}
 	if !dirty {
-		stopTimer(debounce)
-		stopTimer(deadline)
-		return nil, nil
+		return nil, nil, nil
 	}
-	if debounce == nil {
-		debounce = time.NewTimer(e.cfg.Debounce)
-	} else {
-		debounce.Reset(e.cfg.Debounce)
-	}
+	debounce = e.cfg.After(e.cfg.Debounce)
 	if deadline == nil {
-		deadline = time.NewTimer(time.Until(oldest.Add(e.cfg.MaxWait)))
+		deadline = e.cfg.After(oldest.Add(e.cfg.MaxWait).Sub(e.cfg.Now()))
 	}
-	return debounce, deadline
+	return debounce, deadline, nil
 }
 
 // sweepClosed is Run's exit sweep: under the same mutex hold the write
@@ -394,12 +427,12 @@ func (e *Engine) runDump() error {
 	e.dirty = false
 	e.mu.Unlock()
 
-	start := time.Now()
+	start := e.cfg.Now()
 	records := e.store.Records()
 	err := e.dumps.SaveStream(func(w io.Writer) error {
 		return EncodeTo(w, records, e.valueMaxBytes)
 	})
-	e.recordDump(time.Since(start), err)
+	e.recordDump(e.cfg.Now().Sub(start), err)
 	if err != nil {
 		e.failWaiters(captured)
 		return err
@@ -458,30 +491,13 @@ func (e *Engine) failWaiters(captured []*waiter) {
 	stranded = append(stranded, e.waiters...)
 	e.waiters = nil
 	e.dirty = true
-	e.oldest = time.Now()
+	e.oldest = e.cfg.Now()
 	for _, w := range stranded {
 		w.err = ErrDumpFailed
 	}
 	e.mu.Unlock()
 	for _, w := range stranded {
 		close(w.done)
-	}
-}
-
-// timerChan returns t's channel, or nil for a nil timer — a nil channel
-// receives never, disabling that select case.
-func timerChan(t *time.Timer) <-chan time.Time {
-	if t == nil {
-		return nil
-	}
-	return t.C
-}
-
-// stopTimer stops t when non-nil. Go 1.23+ timer semantics make Stop safe
-// without draining (Pitfall 9).
-func stopTimer(t *time.Timer) {
-	if t != nil {
-		t.Stop()
 	}
 }
 
@@ -536,7 +552,7 @@ func (e *Engine) await() error {
 		return ErrClosed
 	}
 	if !e.dirty {
-		e.oldest = time.Now()
+		e.oldest = e.cfg.Now()
 	}
 	e.dirty = true
 	e.waiters = append(e.waiters, w)
@@ -874,7 +890,7 @@ func (e *Engine) flush() error {
 func (e *Engine) markDirty() {
 	e.mu.Lock()
 	if !e.dirty {
-		e.oldest = time.Now()
+		e.oldest = e.cfg.Now()
 	}
 	e.dirty = true
 	e.mu.Unlock()
