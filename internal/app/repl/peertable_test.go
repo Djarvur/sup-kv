@@ -1,11 +1,14 @@
 package repl_test
 
 import (
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -237,4 +240,229 @@ func TestPeerTable_solePeer(t *testing.T) {
 			t.Fatal("pending entry retained after the returning sole peer's Ack")
 		}
 	})
+}
+
+// helloRun builds a decoded Hello datagram from nodeID announcing run
+// generation gen: byte 14 carries the generation, so one peer can announce
+// several distinct run ids while byte 0 keeps each distinct from every other
+// node's testRunID. gen 0 is the node's default run id.
+func helloRun(nodeID uint16, gen byte) port.InboundDatagram {
+	in := helloFrom(nodeID)
+	if gen != 0 {
+		in.RunID[14] = gen
+	}
+	return in
+}
+
+// configErrorWarns filters captured Config.Log lines down to the
+// configuration-error WARNs. Every duplicate-node_id path logs the
+// Spec-mandated prefix, so a count is the shared rate limiter's exact
+// frequency.
+func configErrorWarns(logs []string) []string {
+	var warns []string
+	for _, line := range logs {
+		if strings.Contains(line, "configuration error") {
+			warns = append(warns, line)
+		}
+	}
+	return warns
+}
+
+// TestPeer_alternatingRunIDsIsConfigError pins PROTO-06's named
+// misconfiguration: a known node_id announcing a run_id it carried before but
+// which is not current is counted as DuplicateNodeID, WARNed once as a
+// configuration error, dropped without a listing and leaves the row (run_id
+// and liveness) on the current run — alternating identities are never
+// rewarded with a listing per datagram.
+func TestPeer_alternatingRunIDsIsConfigError(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	var logs []string
+	core, _ := newTestCoreWithConfig(repl.Config{Log: func(msg string) { logs = append(logs, msg) }})
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	r1, r2 := helloRun(peerID1, 1).RunID, helloRun(peerID1, 2).RunID
+	core.HandleDatagram(now, helloRun(peerID1, 1), &out)
+	advanceDrain(core, &out, now) // the first-seen listing
+	out.Drain()
+	core.HandleDatagram(at(100*time.Millisecond), helloRun(peerID1, 2), &out)
+	advanceDrain(core, &out, at(100*time.Millisecond)) // the legitimate restart listing
+	out.Drain()
+	logs = nil
+
+	core.HandleDatagram(at(200*time.Millisecond), helloRun(peerID1, 1), &out)
+	if got := len(advanceDrain(core, &out, at(200*time.Millisecond))); got != 0 {
+		t.Fatalf("the alternating run_id emitted %d messages, want 0 — a previously seen identity gets no listing", got)
+	}
+	if got := core.Discards().DuplicateNodeID; got != 1 {
+		t.Fatalf("Discards().DuplicateNodeID = %d after one alternation, want 1", got)
+	}
+	warns := configErrorWarns(logs)
+	if len(warns) != 1 {
+		t.Fatalf("Config.Log carried %d configuration-error WARN(s), want exactly 1: %v", len(warns), logs)
+	}
+	if !strings.Contains(warns[0], fmt.Sprintf("node_id %d", peerID1)) {
+		t.Fatalf("the configuration-error WARN %q does not name node_id %d", warns[0], peerID1)
+	}
+	snap := core.PeerSnapshot()
+	if len(snap) != 1 {
+		t.Fatalf("PeerSnapshot holds %d rows after the alternation, want exactly 1", len(snap))
+	}
+	if p := snap[peerID1]; p.RunID != r2 {
+		t.Fatalf("the row's run_id after the alternation = %x, want the current run %x — the dropped datagram never updates the row", p.RunID[:], r2[:])
+	}
+	if p := snap[peerID1]; !p.LastHello.Equal(at(100 * time.Millisecond)) {
+		t.Fatalf("the row's LastHello after the alternation = %v, want the current run's Hello time %v — a dropped datagram never refreshes liveness",
+			p.LastHello, at(100*time.Millisecond))
+	}
+	if r1 == r2 {
+		t.Fatalf("the two test run generations collided: %x", r1[:])
+	}
+}
+
+// TestPeer_alternatingWarnRateLimitedPerPeer proves the shared
+// per-(node_id, class) limiter on the alternation path (T-4-28): two peers
+// alternating inside one interval each get their own WARN, a repeated
+// alternation from the same peer adds none until the interval elapses on
+// event time, and the boundary fires exactly at the interval.
+func TestPeer_alternatingWarnRateLimitedPerPeer(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	const warnInterval = 10 * time.Second // the pinned discardWarnInterval
+	var logs []string
+	core, _ := newTestCoreWithConfig(repl.Config{Log: func(msg string) { logs = append(logs, msg) }})
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+	for _, id := range []uint16{peerID1, peerID2} {
+		core.HandleDatagram(now, helloRun(id, 1), &out)
+		advanceDrain(core, &out, now) // each first-seen listing
+		out.Drain()
+	}
+	logs = nil
+
+	// One restart then one alternation per peer: each peer's first
+	// configuration error must WARN, even inside the same interval.
+	for _, id := range []uint16{peerID1, peerID2} {
+		core.HandleDatagram(now, helloRun(id, 2), &out)
+		advanceDrain(core, &out, now) // the legitimate restart listing
+		out.Drain()
+		core.HandleDatagram(now, helloRun(id, 1), &out)
+		advanceDrain(core, &out, now) // the alternation: no listing
+		out.Drain()
+	}
+	if got := len(configErrorWarns(logs)); got != 2 {
+		t.Fatalf("Config.Log carried %d configuration-error WARN(s) for two alternating peers in one interval, want 2 (one per peer): %v", got, logs)
+	}
+
+	// The same peer's repeated alternation inside the interval adds nothing.
+	core.HandleDatagram(now.Add(time.Second), helloRun(peerID1, 1), &out)
+	advanceDrain(core, &out, now.Add(time.Second))
+	out.Drain()
+	if got := len(configErrorWarns(logs)); got != 2 {
+		t.Fatalf("Config.Log carried %d configuration-error WARN(s) inside the interval, want still 2: %v", got, logs)
+	}
+
+	// Exactly at the interval peer 1's slot warns again.
+	core.HandleDatagram(now.Add(warnInterval), helloRun(peerID1, 1), &out)
+	advanceDrain(core, &out, now.Add(warnInterval))
+	out.Drain()
+	if got := len(configErrorWarns(logs)); got != 3 {
+		t.Fatalf("Config.Log carried %d configuration-error WARN(s) at the interval boundary, want 3: %v", got, logs)
+	}
+}
+
+// TestPeer_seenRingBounded pins the seen-run ring's fixed bound (T-4-30):
+// after nine distinct runs the first is still inside the 8-entry ring (an
+// alternation is a configuration error), while the tenth run evicts it — the
+// ring never holds more than 8, so an ancient run id is treated as a restart
+// again (documented, bounded behavior).
+func TestPeer_seenRingBounded(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	r1 := helloRun(peerID1, 1).RunID
+	for gen := byte(1); gen <= 9; gen++ {
+		core.HandleDatagram(now, helloRun(peerID1, gen), &out)
+		advanceDrain(core, &out, now) // the first-seen or restart listing
+		out.Drain()
+	}
+	r9 := helloRun(peerID1, 9).RunID
+
+	// Nine runs leave nine previous-or-current identities but the ring keeps
+	// the previous 8; run 1 was pushed when run 2 arrived and is still inside.
+	core.HandleDatagram(now, helloRun(peerID1, 1), &out)
+	if got := len(advanceDrain(core, &out, now)); got != 0 {
+		t.Fatalf("run 1 after nine distinct runs emitted %d messages, want 0 — it is still inside the 8-entry ring", got)
+	}
+	if got := core.Discards().DuplicateNodeID; got != 1 {
+		t.Fatalf("Discards().DuplicateNodeID = %d after the ninth-run alternation, want 1", got)
+	}
+	if p := core.PeerSnapshot()[peerID1]; p.RunID != r9 {
+		t.Fatalf("the row's run_id after the in-ring alternation = %x, want run 9 %x", p.RunID[:], r9[:])
+	}
+
+	// The tenth distinct run pushes run 1 out of the ring.
+	core.HandleDatagram(now, helloRun(peerID1, 10), &out)
+	advanceDrain(core, &out, now)
+	out.Drain()
+	r10 := helloRun(peerID1, 10).RunID
+	if p := core.PeerSnapshot()[peerID1]; p.RunID != r10 {
+		t.Fatalf("the row's run_id after run 10 = %x, want run 10 %x", p.RunID[:], r10[:])
+	}
+
+	// Run 1 is now forgotten, so re-announcing it is an unseen run: a
+	// legitimate restart with exactly one fresh listing.
+	core.HandleDatagram(now, helloRun(peerID1, 1), &out)
+	got := targetedSyncs(t, advanceDrain(core, &out, now), handleFor(peerID1))
+	if len(got) != 1 {
+		t.Fatalf("the evicted run 1 emitted %d targeted listing chunks, want exactly 1 — the ring forgot it, so it is a restart", len(got))
+	}
+	if p := core.PeerSnapshot()[peerID1]; p.RunID != r1 {
+		t.Fatalf("the row's run_id after run 1's return = %x, want run 1 %x — an unseen run is accepted as a restart", p.RunID[:], r1[:])
+	}
+}
+
+// TestPeer_repeatSameRunStillRefresh pins the preserved repeat contract: the
+// current run_id still refreshes liveness, emits nothing, counts nothing and
+// warns nothing — the ring must never swallow a legitimate repeat.
+func TestPeer_repeatSameRunStillRefresh(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	var logs []string
+	core, _ := newTestCoreWithConfig(repl.Config{Log: func(msg string) { logs = append(logs, msg) }})
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	core.HandleDatagram(now, helloRun(peerID1, 1), &out)
+	advanceDrain(core, &out, now) // the first-seen listing
+	out.Drain()
+	logs = nil
+	r1 := helloRun(peerID1, 1).RunID
+
+	later := at(500 * time.Millisecond)
+	core.HandleDatagram(later, helloRun(peerID1, 1), &out)
+	if got := len(advanceDrain(core, &out, later)); got != 0 {
+		t.Fatalf("a repeat of the current run emitted %d messages, want 0 — refresh only", got)
+	}
+	if got := core.Discards().DuplicateNodeID; got != 0 {
+		t.Fatalf("Discards().DuplicateNodeID = %d after a current-run repeat, want 0", got)
+	}
+	if got := len(configErrorWarns(logs)); got != 0 {
+		t.Fatalf("Config.Log carried %d configuration-error WARN(s) for a current-run repeat, want 0: %v", got, logs)
+	}
+	p := core.PeerSnapshot()[peerID1]
+	if !p.LastHello.Equal(later) {
+		t.Fatalf("the repeat's LastHello = %v, want the refreshed stamp %v", p.LastHello, later)
+	}
+	if p.RunID != r1 {
+		t.Fatalf("the repeat changed the row's run_id to %x, want %x", p.RunID[:], r1[:])
+	}
 }

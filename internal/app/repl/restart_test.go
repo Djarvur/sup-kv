@@ -1,6 +1,8 @@
 package repl_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -353,19 +355,20 @@ func TestRestart_generationInvalidatesCachedListing(t *testing.T) {
 }
 
 // TestRestart_staleRunIdAndInFlight pins the three adversarial run_id edges
-// of probe #19: a stale run_id returning after a newer one was seen is just
-// another change (inequality with the remembered value is the only test —
-// random 16-byte run_ids carry no temporal order), in-flight protocol
-// datagrams from the old run process normally on their (key, version)
-// merits outside the Hello handler, and a rapid double restart updates the
-// one row in place with exactly one full listing per change.
+// of probe #19: a run_id seen before but no longer current is the alternating
+// identity configuration error (PROTO-06) — counted, WARNed and given no
+// listing, never a fresh restart — in-flight protocol datagrams from the old
+// run process normally on their (key, version) merits outside the Hello
+// handler, and a rapid double restart (every run unseen) updates the one row
+// in place with exactly one full listing per change.
 func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 	t.Parallel()
-	t.Run("a stale run_id returning is just another change: idempotent second listing, one row", func(t *testing.T) {
+	t.Run("a previously seen run_id returning is a configuration error: no listing, counted, WARNed", func(t *testing.T) {
 		t.Parallel()
 		t.Helper()
 		now := at(0)
-		core, st := newTestCore()
+		var logs []string
+		core, st := newTestCoreWithConfig(repl.Config{Log: func(msg string) { logs = append(logs, msg) }})
 		var out port.Outbox
 		core.Advance(now, &out)
 		out.Drain()
@@ -374,32 +377,40 @@ func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 
 		r1, r2 := runIDFor(1), runIDFor(2)
 		core.HandleDatagram(now, helloFromRun(r1), &out)
-		out.Drain() // learn only
+		advanceDrain(core, &out, now) // learn + its first-seen listing
+		out.Drain()
+		logs = nil
+
 		core.HandleDatagram(now, helloFromRun(r2), &out)
 		first := targetedSyncs(t, advanceDrain(core, &out, now), handleFor(peerID1))
 		if !dataSyncsEqual(first, want) {
 			t.Fatalf("the R1→R2 reaction = %v, want the full fresh listing %v", first, want)
 		}
 
-		// A delayed Hello from the old run's R1 arrives: inequality with the
-		// remembered R2 is indistinguishable from a fresh restart, so the
-		// entry flips back and one more full listing fires — rotated one chunk
-		// by the per-peer round counter — idempotent,
-		// safe (reconciliation no-ops on equal state).
+		// A delayed Hello from the old run's R1 arrives. R1 is in the bounded
+		// seen-run ring and is not current, so this is an alternating identity:
+		// a configuration error, never a restart — no listing, no row update,
+		// one counted discard and one rate-limited WARN.
 		core.HandleDatagram(now, helloFromRun(r1), &out)
-		second := targetedSyncs(t, advanceDrain(core, &out, now), handleFor(peerID1))
-		if !dataSyncsEqual(second, rotateChunks(want)) {
-			t.Fatalf("the stale-return reaction = %v, want the next round's rotation %v of the fresh listing %v", second, rotateChunks(want), want)
+		if got := len(advanceDrain(core, &out, now)); got != 0 {
+			t.Fatalf("the stale R1 return drained %d messages, want 0 — a previously seen run gets no listing", got)
 		}
-		if got := len(first) + len(second); got != 2*len(want) {
-			t.Fatalf("the two changes emitted %d targeted chunks in total, want exactly two full listings (%d)", got, 2*len(want))
+		if got := core.Discards().DuplicateNodeID; got != 1 {
+			t.Fatalf("Discards().DuplicateNodeID = %d after the stale return, want 1", got)
+		}
+		warns := configErrorWarns(logs)
+		if len(warns) != 1 {
+			t.Fatalf("Config.Log carried %d configuration-error WARN(s) after the stale return, want exactly 1: %v", len(warns), logs)
+		}
+		if !strings.Contains(warns[0], fmt.Sprintf("node_id %d", peerID1)) {
+			t.Fatalf("the configuration-error WARN %q does not name node_id %d", warns[0], peerID1)
 		}
 		snap := core.PeerSnapshot()
 		if len(snap) != 1 {
-			t.Fatalf("PeerSnapshot holds %d rows for the one node_id, want exactly 1 — a run_id change never forks the table", len(snap))
+			t.Fatalf("PeerSnapshot holds %d rows for the one node_id, want exactly 1 — an alternation never forks the table", len(snap))
 		}
-		if p := snap[peerID1]; p.RunID != r1 {
-			t.Fatalf("the row's run_id after the stale return = %x, want the last-announced R1 %x", p.RunID[:], r1[:])
+		if p := snap[peerID1]; p.RunID != r2 {
+			t.Fatalf("the row's run_id after the stale return = %x, want the remembered R2 %x — an alternation never updates the row", p.RunID[:], r2[:])
 		}
 	})
 	t.Run("in-flight old-run traffic processes on (key, version) merits", func(t *testing.T) {
