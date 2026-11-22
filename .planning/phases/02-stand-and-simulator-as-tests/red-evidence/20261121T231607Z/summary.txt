@@ -1,0 +1,10 @@
+test	expected	observed	package	verdict
+TestRed_R03_gateClosedUntilFullList	red	fail,run	github.com/Djarvur/sup-kv/internal/grpcapi	OK
+TestRed_R01_pacedSync20k	green	pass,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_R02_unackedDrain	green	pass,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_R02_burst	green	pass,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_R03_f14ReplacedNode	red	fail,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_P01_valueLimit	red	fail,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_P01_valueLimitEngine	red	fail,run	github.com/Djarvur/sup-kv/internal/persistfile	OK
+TestConfig_parametersByEffect	(not in table)	fail,run	github.com/Djarvur/sup-kv/internal/stand	ERROR
+TestConfig_parametersByEffect/peer_timeout_evicts_silent_peer	(not in table)	fail,run	github.com/Djarvur/sup-kv/internal/stand	ERROR
