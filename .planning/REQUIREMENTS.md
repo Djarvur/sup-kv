@@ -77,23 +77,23 @@
 
 ### Protocol
 
-- [ ] **PROTO-01**: The interface stays closed until the full key list arrives (R-03, 14.5)
+- [x] **PROTO-01**: The interface stays closed until the full key list arrives (R-03, 14.5)
   - Acceptance: F14 on the stand and in the simulator — the value on A does not change; before the list B answers `Unavailable` for both reads and writes; after it, `create_if_absent` for a peer-known key returns `AlreadyExists`; with a three-part list the first two parts keep the interface closed; after the part carrying the max version `(now + 10 s)` the next local write gets a greater version; `DataSync` carries `SyncID`/`ChunkIndex`/`ChunkCount`; HLC `Update` on each part's max version; health stays `NOT_SERVING` until the list is complete; reading a listed-but-not-yet-arrived key returns `Unavailable` (14.5(6), accepted)
-- [ ] **PROTO-02**: An empty-disk node waits for a peer longer than a node with data (14.6)
+- [x] **PROTO-02**: An empty-disk node waits for a peer longer than a node with data (14.6)
   - Acceptance: new `startup_gate_empty` parameter (default 60 s); a node with data opens via `startup_gate`; two empty nodes exchange empty lists and open without waiting for the new parameter
-- [ ] **PROTO-03**: A stale `DataReplication` is answered with the newer record, not acknowledged (R-04)
+- [x] **PROTO-03**: A stale `DataReplication` is answered with the newer record, not acknowledged (R-04)
   - Acceptance: node holds `k@v5`, receives `k@v3` — exactly one unicast `DataReplication k@v5` leaves, no `Ack`; the sender's `wait_for_replication` for `v3` returns `acked: false`
-- [ ] **PROTO-04**: A newly seen or returning peer gets an immediate sync (R-05)
+- [x] **PROTO-04**: A newly seen or returning peer gets an immediate sync (R-05)
   - Acceptance: the first `Hello` from an unknown `node_id` produces exactly one full listing toward it, a repeat produces nothing; a peer returning after `peer_timeout` + 1 s receives the neighbor's state within N / `sync_response_rate` plus margin, without the `sync_interval` term; `TestRestart_newPeerNoFullSync` rewritten
-- [ ] **PROTO-05**: Local-write notifications never regress the tracked version (R-10)
+- [x] **PROTO-05**: Local-write notifications never regress the tracked version (R-10)
   - Acceptance: a notification with a version not greater than the tracked one is ignored
-- [ ] **PROTO-06**: Duplicate `node_id` with alternating `run_id`s is a named configuration error (R-12)
+- [x] **PROTO-06**: Duplicate `node_id` with alternating `run_id`s is a named configuration error (R-12)
   - Acceptance: a third process under a known `node_id` is counted and logged as a configuration error; no full listing is sent to it
-- [ ] **PROTO-07**: `proto_version` is checked before body decode (R-13)
+- [x] **PROTO-07**: `proto_version` is checked before body decode (R-13)
   - Acceptance: an incompatible version yields the `bad_proto_version` class and a WARN rate-limited per peer per interval
-- [ ] **PROTO-08**: Every local change replicates, including dump-failed writes and snapshot loads (S-02)
+- [x] **PROTO-08**: Every local change replicates, including dump-failed writes and snapshot loads (S-02)
   - Acceptance: a write whose dump failed is broadcast and counted as unconfirmed; a snapshot load broadcasts its result (with APIS-07)
-- [ ] **PROTO-09**: Three-or-more-node behavior is described and tested (14.9)
+- [x] **PROTO-09**: Three-or-more-node behavior is described and tested (14.9)
   - Acceptance: behavior and timing for 3+ nodes documented; real-socket tests with three nodes; `wait_for_replication` semantics at N > 2 in the API docs
 
 ### Persistence
@@ -239,15 +239,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | XPORT-11 | Phase 3 | Complete |
 | XPORT-12 | Phase 3 | Complete |
 | XPORT-13 | Phase 3 | Complete |
-| PROTO-01 | Phase 4 | Pending |
-| PROTO-02 | Phase 4 | Pending |
-| PROTO-03 | Phase 4 | Pending |
-| PROTO-04 | Phase 4 | Pending |
-| PROTO-05 | Phase 4 | Pending |
-| PROTO-06 | Phase 4 | Pending |
-| PROTO-07 | Phase 4 | Pending |
-| PROTO-08 | Phase 4 | Pending |
-| PROTO-09 | Phase 4 | Pending |
+| PROTO-01 | Phase 4 | Complete |
+| PROTO-02 | Phase 4 | Complete |
+| PROTO-03 | Phase 4 | Complete |
+| PROTO-04 | Phase 4 | Complete |
+| PROTO-05 | Phase 4 | Complete |
+| PROTO-06 | Phase 4 | Complete |
+| PROTO-07 | Phase 4 | Complete |
+| PROTO-08 | Phase 4 | Complete |
+| PROTO-09 | Phase 4 | Complete |
 | PERSIST-01 | Phase 5 | Pending |
 | PERSIST-02 | Phase 5 | Pending |
 | PERSIST-03 | Phase 5 | Pending |
