@@ -1262,8 +1262,14 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 //     duplicate-node_id classifier never pre-empts this branch
 //     (HandleDatagram's second variant requires run_id equality with the
 //     remembered row) — the outgoing current run joins the row's bounded
-//     seen-run history, the old run's queued listing, retained keys and
-//     partial rounds are dropped so no dead state outlives the row, the entry
+//     seen-run history, the old run's queued listing and partial rounds are
+//     dropped so no dead work outlives the row, and one targeted listing is
+//     enqueued. The old run's RETAINED listed keys deliberately survive: the
+//     new run's first complete listing replaces the set wholesale, and
+//     releasing them at the run change would reopen the F14
+//     listed-but-unarrived hole for the peer's keys until that replacement
+//     arrived (WR-02); the two-interval expiry bounds the wait when it never
+//     does. The entry
 //     updates in place (handle, runID, lastHello; the table stays keyed by
 //     node_id, one row per node — a change never forks a second row, which
 //     would fork ack tracking and liveness; the row's listing rotation
@@ -1341,15 +1347,17 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 			return
 		}
 		// A new run under this node_id no longer stands behind the old run's
-		// listing: its keys leave the retained union (a content change the
-		// mirror must publish), its partial rounds are discarded and its
-		// queued FIFO is dropped, so neither the bounded listing queue nor the
-		// accumulator inherits dead state (CR-01). The outgoing current run
+		// listing: its partial rounds and queued FIFO are dropped, so neither
+		// the bounded listing queue nor the accumulator inherits dead state
+		// (CR-01). Its RETAINED listed keys stay, though: retainListedKeys
+		// replaces the whole per-peer set on the new run's first complete
+		// listing, so dropping them here would reopen the listed-but-unarrived
+		// hole (F14) for the restarted peer's keys until its replacement
+		// listing arrives (WR-02) — the two-interval expiry in
+		// expireListedKeys bounds the wait when no replacement ever comes.
+		// The outgoing current run
 		// joins the row's bounded history before the row moves on, which is
 		// what makes a later return to it an alternation.
-		if c.dropListedPeer(in.NodeID) > 0 {
-			c.listingGen++
-		}
 		c.dropPeerSyncStreams(in.NodeID)
 		c.dropListing(listingDst{nodeID: in.NodeID, runID: known.runID})
 		c.dropOwedPeer(in.NodeID)

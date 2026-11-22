@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -27,6 +28,15 @@ func runIDFor(gen byte) [16]byte {
 // default testRunID).
 func helloFromRun(runID [16]byte) port.InboundDatagram {
 	in := helloFrom(peerID1)
+	in.RunID = runID
+	return in
+}
+
+// datagramFromRun wraps msg in a decoded datagram from peerID announcing an
+// explicit runID — the fixture a run-id-parameterized listing needs (a
+// listing is bound to the (node_id, run_id) row, CR-01).
+func datagramFromRun(peerID uint16, runID [16]byte, msg port.Message) port.InboundDatagram {
+	in := datagramFrom(peerID, msg)
 	in.RunID = runID
 	return in
 }
@@ -102,6 +112,69 @@ func rotateChunks(syncs []port.DataSync) []port.DataSync {
 	out = append(out, syncs[1:]...)
 	out = append(out, syncs[0])
 	return out
+}
+
+// TestRestart_retainsListedKeysUntilReplacement proves WR-02: a detected
+// restart does not release the peer's retained listed keys. Dropping them at
+// the run change would leave `ListedKey` false for every key the restarted
+// peer holds until its replacement listing arrives — reads would answer
+// NotFound instead of Unavailable and create_if_absent would succeed, the
+// F14 overwrite this phase forbids. The new run's first complete listing
+// replaces the set wholesale (the replace-on-completion contract), and the
+// generation moves only then.
+func TestRestart_retainsListedKeysUntilReplacement(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	const (
+		oldKey = "restart/old-listed"
+		newKey = "restart/new-listed"
+	)
+	r1, r2 := runIDFor(1), runIDFor(2)
+	entry := func(key string) port.SyncEntry {
+		return port.SyncEntry{Key: key, Version: version.PackVersion(testNowMs, 1, peerID1)}
+	}
+
+	core.HandleDatagram(now, helloFromRun(r1), &out)
+	out.Drain()
+	core.HandleDatagram(now, datagramFromRun(peerID1, r1, port.DataSync{
+		SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: []port.SyncEntry{entry(oldKey)},
+	}), &out)
+	out.Drain()
+	if _, ok := core.ListedKeysSnapshot()[oldKey]; !ok {
+		t.Fatalf("the first run's complete listing did not retain %q, want it in the union", oldKey)
+	}
+	genBefore := core.ListingGeneration()
+
+	// The restart: the old run's keys must survive the run change.
+	core.HandleDatagram(now, helloFromRun(r2), &out)
+	out.Drain()
+	if _, ok := core.ListedKeysSnapshot()[oldKey]; !ok {
+		t.Fatalf("the restart dropped %q from the union before the replacement listing arrived — the listed-but-unarrived hole reopens (WR-02)", oldKey)
+	}
+	if got := core.ListingGeneration(); got != genBefore {
+		t.Fatalf("the restart moved the listing generation %d -> %d, want no move — no content left the union", genBefore, got)
+	}
+	if !core.ListingComplete() || !core.SyncArrived() {
+		t.Fatal("the restart closed the startup-gate completeness, want it sticky true")
+	}
+
+	// The new run's complete listing replaces the whole set.
+	core.HandleDatagram(now, datagramFromRun(peerID1, r2, port.DataSync{
+		SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: []port.SyncEntry{entry(newKey)},
+	}), &out)
+	out.Drain()
+	union := core.ListedKeysSnapshot()
+	if _, ok := union[newKey]; !ok {
+		t.Fatalf("the replacement listing did not retain %q, want it in the union", newKey)
+	}
+	if _, ok := union[oldKey]; ok {
+		t.Fatalf("the previous run's %q survived the replacement listing, want the set replaced wholesale", oldKey)
+	}
 }
 
 // TestRestart_runIDChangeTriggersFullSync proves REPL-07's reaction and its
