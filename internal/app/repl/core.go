@@ -1313,9 +1313,12 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // temporal order — is still a restart. When the ring wraps, the oldest
 // identity is forgotten and treated as a restart again (documented, bounded
 // behavior: T-4-30). In-flight
-// protocol datagrams from the old run — Ack, DataReplication, DataSync —
-// process normally on their (key, version) merits, run_id-agnostic outside
-// this handler. The listing is proactive traffic on the shared listing pacer,
+// protocol datagrams from the old run — Ack and DataReplication — process
+// normally on their (key, version) merits, run_id-agnostic outside this
+// handler; an old-run DataSync part is the exception, because the listed-key
+// retention is bound to the row's current run_id (CR-01), so it is discarded
+// as unbound until the replacement run announces itself. The listing is
+// proactive traffic on the shared listing pacer,
 // never the sync_response_rate egress queue (the plan-04-03 egress-scope pin):
 // it is bounded by one in-flight listing per destination plus the queue caps,
 // and fires once per detected first Hello or run change, while the heavy

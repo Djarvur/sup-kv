@@ -201,6 +201,18 @@ its owner.
   `internal/grpcapi/server_test.go#TestServer_getListedNotArrived`), but a
   `Delete` of that key keeps the local `NotFound`. ADR 0005 rule (6)
   specifies reads only (research A7); Phase 6 owns any API-wording change.
+- **Listing trust binding (CR-01).** A received complete listing is trusted
+  only from a `(node_id, run_id)` row the peer table holds: an unbound identity
+  or a forged `run_id` is discarded as `duplicate_node_id` (counted, WARNed
+  through the per-peer rate limiter, never retained), and a retained set
+  nobody republishes for two `sync_interval`s leaves the union
+  (`Core.listingBound`, `Core.expireListedKeys`). Two consequences are
+  deliberate: an identity the node has not learned must announce itself before
+  its listing counts — which is exactly what the first-seen identity echo
+  does — and a peer that stops publishing listings stops protecting its keys
+  after that window, so the F14 protection is bounded rather than permanent.
+  Tests: `internal/app/repl/listedkeys_internal_test.go#TestSync_unboundListingDiscarded`,
+  `#TestSync_forgedRunIDCannotReplaceListing`, `#TestSync_listedKeysExpire`.
 - **Unbounded peer table (residual trusted-LAN risk, Phase 7).** The peer
   table itself is unbounded in peer rows — a pre-existing risk on a trusted
   segment, recorded as research Open Question 5 and owned by Phase 7
