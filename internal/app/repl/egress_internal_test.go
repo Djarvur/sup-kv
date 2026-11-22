@@ -9,8 +9,10 @@ package repl
 // suffix is the documented testpackage exemption.
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
+	"runtime"
 	"testing"
 	"time"
 
@@ -49,10 +51,17 @@ func (s *egressStore) Version(key string) (version.RecordVersion, bool) {
 	return v, ok
 }
 
-// Lookup returns the fake store's record for key.
+// Lookup returns a caller-owned copy of the fake store's record for key —
+// the production storage.Store contract, whose clone is load-bearing for
+// TestEgress_noValueRetention: an enqueue path that looks a record up
+// allocates the full value there, exactly as the real store's clone would.
 func (s *egressStore) Lookup(key string) (storage.Record, bool) {
 	rec, ok := s.records[key]
-	return rec, ok
+	if !ok {
+		return storage.Record{}, false
+	}
+	rec.Data = bytes.Clone(rec.Data)
+	return rec, true
 }
 
 // Versions returns a fresh copy of the fake store's version view.
@@ -190,6 +199,60 @@ func TestEgress_capDropsOldest(t *testing.T) {
 	}
 	if got := core.QueuedResponses(); got != maxEgressEntries {
 		t.Fatalf("QueuedResponses() = %d after the re-enqueue, want the cap %d", got, maxEgressEntries)
+	}
+}
+
+// TestEgress_noValueRetention proves the CR-02 retention bound: enqueuing one
+// DataReplication answer per stored key retains no record Data in the queue.
+// The store holds answers values of valueLen bytes each — 256 × 60 KiB ≈
+// 15 MiB — so an enqueue path that looked a record up (the production Lookup
+// clones the value) would allocate that whole volume. TotalAlloc is the
+// probe rather than HeapAlloc because CR-02 has two halves: the queue pinning
+// up to maxEgressEntries value copies (retention) and the pre-dedupe Lookup
+// allocating and discarding a full copy per duplicate request (allocation
+// amplification) — only the cumulative counter observes both. The bound is
+// deliberately generous, a small fraction of a single value's volume and far
+// below the ≈15 MiB the defect would allocate.
+func TestEgress_noValueRetention(t *testing.T) {
+	// Not parallel: the allocation probe needs a quiet package — a parallel
+	// sibling's allocations would contaminate TotalAlloc.
+	core := newEgressCore()
+	st, ok := core.store.(*egressStore)
+	if !ok {
+		t.Fatalf("newEgressCore store is a %T, want the white-box *egressStore", core.store)
+	}
+	now := egressNow()
+	var out port.Outbox
+	core.Advance(now, &out) // startup Hello + empty listing, outside the probe
+	out.Drain()
+
+	const (
+		answers   = 256
+		valueLen  = 60 * 1024
+		maxGrowth = 1 << 20 // 1 MiB, versus the ≈15 MiB value volume
+	)
+	keys := make([]string, answers)
+	for i := range answers {
+		key := fmt.Sprintf("bulk/%06d", i)
+		keys[i] = key
+		ver := version.PackVersion(egressTestNowMs, uint16(i), egressTestPeer)
+		st.versions[key] = ver
+		st.records[key] = storage.Record{Version: ver, Data: bytes.Repeat([]byte("x"), valueLen)}
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for _, key := range keys {
+		core.handleDataRequest(now, "peer", key)
+	}
+	runtime.ReadMemStats(&after)
+
+	if got := core.QueuedResponses(); got != answers {
+		t.Fatalf("QueuedResponses() = %d, want %d — every present key queues one answer", got, answers)
+	}
+	if growth := after.TotalAlloc - before.TotalAlloc; growth > maxGrowth {
+		t.Fatalf("enqueuing %d answers over %d-byte values allocated %d bytes, want <= %d — the queue pinned value copies (CR-02)",
+			answers, valueLen, growth, maxGrowth)
 	}
 }
 
