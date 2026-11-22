@@ -13,9 +13,9 @@
 // the write is on disk (PERS-04); ErrDumpFailed reports the failed dump while
 // the record stays readable in memory (D-05); ErrUnconfirmed reports that the
 // dump did not complete within Config.ConfirmTimeout — the record is in
-// memory and not yet durable (PERSIST-08, D-07). Flush, FlushTimeout,
-// Snapshot and Restore are bounded by the same confirmation deadline, so a
-// hung fsync can never park them. Reads are never gated on dumps. No
+// memory and not yet durable (PERSIST-08, D-07). FlushTimeout is bounded by
+// its own d; Flush, Snapshot and Restore are bounded by Config.ConfirmTimeout
+// — so a hung fsync can never park them. Reads are never gated on dumps. No
 // callbacks, no events — results only (Phase 2 D-01 tradition).
 //
 // The package is split into five internal roles (D-10, PERSIST-11): the
