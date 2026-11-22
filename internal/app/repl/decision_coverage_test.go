@@ -25,11 +25,13 @@ type decisionRow struct {
 // column names where each one lives so a missing row points a reader at the
 // right test.
 //
-// Two rows cite deliberately adjacent evidence rather than a behaviour test of
-// their own: 14.7's last-read-value file is consumer territory (sup-kv ships
-// none — the public proto surface is the boundary the anchor pins), and 14.9's
-// real-socket 3+-node suite is PROTO-09's Phase 4 deliverable, so the current
-// 2-5-node chaos runs carry the citation.
+// One row cites deliberately adjacent evidence rather than a behaviour test of
+// its own: 14.7's last-read-value file is consumer territory (sup-kv ships
+// none — the public proto surface is the boundary the anchor pins). 14.9 cites
+// the simulator's N=3 convergence scenario, which asserts convergence from
+// every origin and the partition-heal bound; the real-socket three-node test
+// (TestSmoke_threeNodeBroadcastConvergence) is the wiring proof over the same
+// contract.
 var decisionIndex = []decisionRow{
 	{"14.1", "0001-snapshot-load-full-rollback.md", "TestEngine_snapshotCreateLoadRestore"},
 	{"14.2", "0002-create-if-absent-blocked-by-tombstone.md", "TestServer_errorMapping"},
@@ -39,7 +41,7 @@ var decisionIndex = []decisionRow{
 	{"14.6", "0006-startup-gate-empty-wait.md", "TestGate_opensOnTimeout"},
 	{"14.7", "0007-public-proto-consumer-zone.md", "TestServer_setGetRoundTrip"},
 	{"14.8", "0008-metrics-off-by-default.md", "TestMetrics_noDefaultListener"},
-	{"14.9", "0009-multi-node-support.md", "TestChaos_convergence"},
+	{"14.9", "0009-multi-node-support.md", "TestScenario_threeNode"},
 	{"14.10", "0010-darwin-development-only.md", "TestPlatform_darwinReplicationUntested"},
 	{"14.11", "0011-value-limit-60kib-kept.md", "TestEngine_configShrunkValueLimits"},
 }

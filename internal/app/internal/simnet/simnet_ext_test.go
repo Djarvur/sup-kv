@@ -325,7 +325,9 @@ func TestSim_ReplaceNodeWithState_preservesState(t *testing.T) {
 // TestSim_recvBudget_refusesAndCounts proves the per-node receive budget: the
 // first delivery after the budget is set is accepted, every later one is
 // refused at fire time and counted, and the sender's pending set keeps the
-// refused writes unconfirmed.
+// refused writes unconfirmed. The budget is armed at 50ms, after discovery and
+// its first-seen listings have drained, so only the scripted writes count
+// against it (the listing traffic does not move this bound).
 func TestSim_recvBudget_refusesAndCounts(t *testing.T) {
 	t.Parallel()
 	const seed = int64(23)
@@ -501,7 +503,10 @@ func runSimExtScenario(seed int64) (string, []map[string]storage.Record, simnet.
 // gate (T-2-05): the same seed replays byte-identically with every extension
 // active — identical TraceDigest, identical fault counters and identical
 // final stores — and the counters prove the extensions actually fired rather
-// than being bypassed.
+// than being bypassed. First-seen listings are part of the traced traffic, but
+// the gate compares two same-seed runs rather than a pinned golden digest, so
+// the extra listing traffic changes what is compared, never the equality
+// contract.
 func TestSim_determinism_withExtensions(t *testing.T) {
 	t.Parallel()
 	const seed = int64(43)
