@@ -653,10 +653,24 @@ func TestMain_startupGateEmptySelection(t *testing.T) {
 		if elapsed := time.Since(started); elapsed < startupGateSelectionProbe {
 			time.Sleep(startupGateSelectionProbe - elapsed)
 		}
-		status, ok, _ := healthAnswer(t, addr)
-		if !ok || status != healthpb.HealthCheckResponse_NOT_SERVING {
+		// healthAnswer documents ok=false as a transient transport error
+		// ("not up yet"), not a status: under parallel package load one probe
+		// can still fail after the endpoint first answered. Retry within a
+		// bound that stays well inside the empty backstop, so a correct
+		// selection can never have opened the gate when the answer lands.
+		var status healthpb.HealthCheckResponse_ServingStatus
+		statusOK := false
+		waitFor(t, (emptyGate-startupGateSelectionProbe)/2, "the empty node's health answer after the probe", func() bool {
+			s, ok, _ := healthAnswer(t, addr)
+			if !ok {
+				return false
+			}
+			status, statusOK = s, true
+			return true
+		})
+		if !statusOK || status != healthpb.HealthCheckResponse_NOT_SERVING {
 			t.Fatalf("the empty node's health at >= %v after launch = (%v, ok=%t), want NOT_SERVING: the empty backstop (%v), not the normal gate (%v), must govern",
-				startupGateSelectionProbe, status, ok, emptyGate, normalGate)
+				startupGateSelectionProbe, status, statusOK, emptyGate, normalGate)
 		}
 		awaitServing(t, addr, 5*time.Second)
 		signalAndWaitExit(t, node)
