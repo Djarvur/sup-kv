@@ -32,6 +32,10 @@ import (
 // oversized write instead of a 60 KiB payload.
 const testValueLimit = 1024
 
+// listedNotArrivedMessage is the pinned 14.5(6) status message for a read of
+// a key a peer's complete listing named whose value has not arrived.
+const listedNotArrivedMessage = "startup gate: key is listed by a peer but its value has not arrived"
+
 // testFlowWindowSize is the static gRPC stream flow-control window the
 // harness client advertises: the transport floor (64 KiB — smaller values
 // are ignored, http2_client.go) pinned as STATIC, which disables the BDP
@@ -121,6 +125,11 @@ type testServerConfig struct {
 	// builder always launches the gate resolver; tests that need an open
 	// gate pass always-open wiring and call awaitGateOpen.
 	gate grpcapi.ServerOptions
+
+	// listedKey is the listing-mirror membership seam (D-01, rule 14.5(6)):
+	// it reports whether a peer's complete listing named a key. Nil means no
+	// listing knowledge, the single-node configuration.
+	listedKey func(key string) bool
 
 	// waitTimeout, knownPeers and waitReplicated are the
 	// wait_for_replication seams (API-05, plan 05-05), merged into the same
@@ -214,6 +223,9 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	// merge the config's wait knobs over the gate knobs before
 	// construction (zero/nil values keep the defaults documented above).
 	opts := cfg.gate
+	if cfg.listedKey != nil {
+		opts.ListedKey = cfg.listedKey
+	}
 	opts.WaitTimeout = cfg.waitTimeout
 	opts.KnownPeers = cfg.knownPeers
 	opts.WaitReplicated = cfg.waitReplicated
@@ -580,4 +592,139 @@ func TestServer_list(t *testing.T) {
 	if got := none.GetKeys(); len(got) != 0 {
 		t.Fatalf("List unmatched prefix: want 0 keys, got %v", got)
 	}
+}
+
+// newListedServer builds the open-gate harness with the listing-mirror
+// membership seam wired: listed reports whether a peer's complete listing
+// named a key (rule 14.5(6)).
+func newListedServer(t *testing.T, listed func(key string) bool) *testHarness {
+	t.Helper()
+	h := buildTestServer(t, testServerConfig{gate: openGateOptions(), listedKey: listed})
+	awaitGateOpen(t, h)
+	return h
+}
+
+// TestServer_getListedNotArrived pins rule 14.5(6)'s read answer: a key a
+// peer's complete listing named, but whose value has not arrived locally,
+// is Unavailable with the listed-key message — never NotFound, which would
+// claim the peer's key does not exist.
+func TestServer_getListedNotArrived(t *testing.T) {
+	t.Parallel()
+
+	ts := newListedServer(t, func(key string) bool { return key == "listed/pending" })
+	ctx := t.Context()
+
+	_, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: "listed/pending"})
+	assertCode(t, "Get listed-but-unarrived key", err, codes.Unavailable)
+	if got := status.Convert(err).Message(); got != listedNotArrivedMessage {
+		t.Fatalf("Get listed-but-unarrived key message: want %q, got %q", listedNotArrivedMessage, got)
+	}
+}
+
+// TestServer_getListedTombstoneAndAbsent pins the tombstone-visible
+// discriminator: a listed key that is tombstoned locally is NotFound (the
+// local tombstone wins over "not arrived"), and a key no listing names that
+// is absent locally is NotFound too. Engine.Get alone would collapse both
+// into the listed-but-unarrived answer, which is why the handler probes
+// Engine.Version (RESEARCH Pitfall 10).
+func TestServer_getListedTombstoneAndAbsent(t *testing.T) {
+	t.Parallel()
+
+	ts := newListedServer(t, func(key string) bool { return key == "listed/dead" })
+	ctx := t.Context()
+
+	// Local tombstone: the listed key was deleted here.
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "listed/dead", Value: []byte("v")})
+	if err != nil {
+		t.Fatalf("Set listed/dead: want OK, got error: %v", err)
+	}
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "listed/dead"})
+	if err != nil {
+		t.Fatalf("Delete listed/dead: want OK, got error: %v", err)
+	}
+
+	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: "listed/dead"})
+	assertCode(t, "Get listed tombstoned key", err, codes.NotFound)
+
+	// Unlisted and locally absent: no local record and no listing names it.
+	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: "listed/absent"})
+	assertCode(t, "Get unlisted absent key", err, codes.NotFound)
+}
+
+// TestServer_getListedLive pins local presence winning: a listed key whose
+// value is already here is served normally — the listing seam is consulted
+// only when the local read misses.
+func TestServer_getListedLive(t *testing.T) {
+	t.Parallel()
+
+	ts := newListedServer(t, func(key string) bool { return key == "listed/live" })
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "listed/live", Value: []byte("here")})
+	if err != nil {
+		t.Fatalf("Set listed/live: want OK, got error: %v", err)
+	}
+	get, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: "listed/live"})
+	if err != nil {
+		t.Fatalf("Get listed live key: want OK, got error: %v", err)
+	}
+	if !bytes.Equal(get.GetRecord().GetValue(), []byte("here")) {
+		t.Fatalf("Get listed live key: want %q, got %q", "here", get.GetRecord().GetValue())
+	}
+}
+
+// TestServer_createIfAbsentListed pins the F14 guard: create_if_absent on
+// any listed key — locally absent or tombstoned — is AlreadyExists before
+// the engine is called, because a peer already owns that key and a local
+// create would overwrite it. An unlisted key still reaches the engine's
+// SetIfAbsent, whose own AlreadyExists applies after the first write.
+func TestServer_createIfAbsentListed(t *testing.T) {
+	t.Parallel()
+
+	ts := newListedServer(t, func(key string) bool {
+		return key == "listed/absent" || key == "listed/dead"
+	})
+	ctx := t.Context()
+
+	// A tombstoned listed key starts as a local record the test deletes.
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "listed/dead", Value: []byte("v")})
+	if err != nil {
+		t.Fatalf("Set listed/dead: want OK, got error: %v", err)
+	}
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "listed/dead"})
+	if err != nil {
+		t.Fatalf("Delete listed/dead: want OK, got error: %v", err)
+	}
+
+	saves := func() int {
+		ts.dumps.mu.Lock()
+		defer ts.dumps.mu.Unlock()
+		return len(ts.dumps.saved)
+	}
+	before := saves()
+
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "listed/absent", Value: []byte("local"), CreateIfAbsent: true,
+	})
+	assertCode(t, "create_if_absent on a listed absent key", err, codes.AlreadyExists)
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "listed/dead", Value: []byte("local"), CreateIfAbsent: true,
+	})
+	assertCode(t, "create_if_absent on a listed tombstoned key", err, codes.AlreadyExists)
+	if after := saves(); after != before {
+		t.Fatalf("create_if_absent on listed keys reached the engine: dump generations %d -> %d", before, after)
+	}
+
+	// Unlisted: the engine decides — the first create succeeds and dumps,
+	// the second is the engine's own AlreadyExists.
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "listed/unlisted", Value: []byte("local"), CreateIfAbsent: true,
+	})
+	if err != nil {
+		t.Fatalf("create_if_absent on an unlisted key: want OK, got error: %v", err)
+	}
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "listed/unlisted", Value: []byte("other"), CreateIfAbsent: true,
+	})
+	assertCode(t, "create_if_absent on an existing unlisted key", err, codes.AlreadyExists)
 }

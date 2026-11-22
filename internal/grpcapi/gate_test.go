@@ -171,6 +171,59 @@ func TestGate_openRestoresReads(t *testing.T) {
 	}
 }
 
+// TestServer_gateOpenListedRace pins Pitfall 2's structural guarantee: the
+// adapter publishes completeness and the listed key set in one atomic
+// snapshot, so a create_if_absent issued immediately after health reports
+// SERVING is already blocked by the listed set — no window exists in which
+// the gate is open but the keys are invisible (F14's back door).
+func TestServer_gateOpenListedRace(t *testing.T) {
+	t.Parallel()
+
+	// One immutable publication carries both answers, exactly like the
+	// adapter's listing mirror: readers load the same pointer for
+	// completeness and membership.
+	type listingMirror struct {
+		complete bool
+		keys     map[string]struct{}
+	}
+	var mirror atomic.Pointer[listingMirror]
+
+	ts := buildTestServer(t, testServerConfig{
+		gate: grpcapi.ServerOptions{
+			SyncArrived: func() bool {
+				m := mirror.Load()
+				return m != nil && m.complete
+			},
+			StartupGate: gateTestNeverBackstop,
+		},
+		listedKey: func(key string) bool {
+			m := mirror.Load()
+			if m == nil || !m.complete {
+				return false
+			}
+			_, ok := m.keys[key]
+			return ok
+		},
+	})
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "race/key", Value: []byte("local"), CreateIfAbsent: true,
+	})
+	assertCode(t, "create_if_absent before the gate opens", err, codes.Unavailable)
+
+	// The peer's complete listing arrives: one store publishes the gate's
+	// completeness and the key membership together, and the resolver's next
+	// poll opens the gate on that same snapshot.
+	mirror.Store(&listingMirror{complete: true, keys: map[string]struct{}{"race/key": {}}})
+	awaitGateOpen(t, ts)
+
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "race/key", Value: []byte("local"), CreateIfAbsent: true,
+	})
+	assertCode(t, "create_if_absent immediately after the gate opens", err, codes.AlreadyExists)
+}
+
 // TestGate_opensOnSync proves the sync half of the opening rule: with the
 // StartupGate backstop an hour away, the flip of the injected SyncArrived
 // closure alone opens the gate — the resolver's next poll flips health to
