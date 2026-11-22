@@ -1315,14 +1315,15 @@ func TestEngine_snapshotFlushForcesDump(t *testing.T) {
 			Version: version.PackVersion(1, 1, synctestNodeID+1),
 			Data:    []byte("forced-value"),
 		}
-		if _, _, err := eng.ApplyRemote("forced", remote); err != nil {
+		_, _, err := eng.ApplyRemote("forced", remote)
+		if err != nil {
 			t.Fatalf("ApplyRemote() error = %v, want nil", err)
 		}
 		if got := dumps.saveAttempts(); got != 0 {
 			t.Fatalf("save attempts before the snapshot = %d, want 0 — the debounce has not fired", got)
 		}
 
-		err := eng.Snapshot("s")
+		err = eng.Snapshot("s")
 		if err != nil {
 			t.Fatalf("Snapshot(s) error = %v, want nil", err)
 		}

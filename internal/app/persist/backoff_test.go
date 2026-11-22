@@ -213,7 +213,8 @@ func TestSnapshot_forcedFlushRespectsRetryLadder(t *testing.T) {
 			_, _, err := eng.Set("ladder-write", []byte("value"))
 			setDone <- err
 		}()
-		if err := <-setDone; !errors.Is(err, persist.ErrDumpFailed) {
+		err := <-setDone
+		if !errors.Is(err, persist.ErrDumpFailed) {
 			t.Fatalf("Set() error = %v, want ErrDumpFailed — the first attempt fails", err)
 		}
 		instants := dumps.attemptInstants()
@@ -224,8 +225,9 @@ func TestSnapshot_forcedFlushRespectsRetryLadder(t *testing.T) {
 
 		// Several snapshots inside the first 100 ms rung: each is refused with
 		// the last classified failure, none reaches the port and none logs.
-		for i := 0; i < refusedSnapshots; i++ {
-			if err := eng.Snapshot("ladder-snap"); !errors.Is(err, errFakeSave) {
+		for range refusedSnapshots {
+			err := eng.Snapshot("ladder-snap")
+			if !errors.Is(err, errFakeSave) {
 				t.Fatalf("Snapshot() during the armed rung error = %v, want the last dump failure %v",
 					err, errFakeSave)
 			}
@@ -250,8 +252,9 @@ func TestSnapshot_forcedFlushRespectsRetryLadder(t *testing.T) {
 
 		// Another refused burst leaves the advanced rung untouched: the next
 		// attempt is failure+300 ms, and the ERROR count still tracks attempts.
-		for i := 0; i < refusedSnapshots; i++ {
-			if err := eng.Snapshot("ladder-snap"); !errors.Is(err, errFakeSave) {
+		for range refusedSnapshots {
+			err := eng.Snapshot("ladder-snap")
+			if !errors.Is(err, errFakeSave) {
 				t.Fatalf("Snapshot() during the second armed rung error = %v, want %v", err, errFakeSave)
 			}
 		}
