@@ -62,6 +62,7 @@ var (
 	errLogFormatEnv      = errors.New("must be json or text")
 	errIncompleteCertSet = errors.New("the metrics certificate envs must be set together")
 	errDatagramCeiling   = errors.New("value-max-bytes exceeds the datagram ceiling")
+	errStartupGateRange  = errors.New("startup gate must be positive")
 )
 
 // Process exit codes: a configuration error (missing or malformed knob)
@@ -98,6 +99,7 @@ const (
 	envDumpPath           = "SUPKV_DUMP_PATH"
 	envGRPCAddr           = "SUPKV_GRPC_ADDR"
 	envStartupGate        = "SUPKV_STARTUP_GATE"
+	envStartupGateEmpty   = "SUPKV_STARTUP_GATE_EMPTY"
 	envWaitTimeout        = "SUPKV_WAIT_TIMEOUT"
 	envValueMaxBytes      = "SUPKV_VALUE_MAX_BYTES"
 	envSyncChunkBytes     = "SUPKV_SYNC_CHUNK_BYTES"
@@ -131,18 +133,23 @@ const (
 // The design defaults (docs/IDEA.md §Parameters, plus the two API-layer
 // knobs: the Open Q1 pin's distinct gRPC listener and the A2 wait default).
 const (
-	defaultGRPCAddr       = "127.0.0.1:7901"
-	defaultStartupGate    = time.Second
-	defaultWaitTimeout    = time.Second
-	defaultValueMaxBytes  = 61440
-	defaultSyncChunkBytes = 1400
-	defaultHelloInterval  = time.Second
-	defaultPeerTimeout    = 5 * time.Second
-	defaultAckTimeout     = 200 * time.Millisecond
-	defaultAckTimeoutMax  = 5 * time.Second
-	defaultRetransmit     = 100 * time.Millisecond
-	defaultSyncInterval   = 30 * time.Second
-	defaultSyncRespRate   = 500
+	defaultGRPCAddr    = "127.0.0.1:7901"
+	defaultStartupGate = time.Second
+	defaultWaitTimeout = time.Second
+
+	// defaultStartupGateEmpty is the empty-disk node's backstop (D-02,
+	// ADR 0006): a node that loaded no records has nothing local to answer
+	// with, so it waits longer for a peer listing than a node with data.
+	defaultStartupGateEmpty = 60 * time.Second
+	defaultValueMaxBytes    = 61440
+	defaultSyncChunkBytes   = 1400
+	defaultHelloInterval    = time.Second
+	defaultPeerTimeout      = 5 * time.Second
+	defaultAckTimeout       = 200 * time.Millisecond
+	defaultAckTimeoutMax    = 5 * time.Second
+	defaultRetransmit       = 100 * time.Millisecond
+	defaultSyncInterval     = 30 * time.Second
+	defaultSyncRespRate     = 500
 	// defaultMaxClockLead is the inbound version bound's launch default
 	// (XPORT-04): 60 s, the documented drift tolerance. The core normalizes
 	// a zero or negative value to the same bound; the flag default only
@@ -172,6 +179,7 @@ type config struct {
 	dumpPath           string
 	grpcAddr           string
 	startupGate        time.Duration
+	startupGateEmpty   time.Duration
 	waitTimeout        time.Duration
 	valueMaxBytes      int
 	syncChunkBytes     int
@@ -341,6 +349,8 @@ func registerConfig(cfg *config, nodeID *uint64, showVersion *bool) error {
 		"optional metrics/debug listen address — unset means no listener (env SUPKV_METRICS_ADDR)")
 	flag.DurationVar(&cfg.startupGate, "startup-gate", envDur(envStartupGate, defaultStartupGate),
 		"gate backstop: writable this long after start even without a sync round (env SUPKV_STARTUP_GATE)")
+	flag.DurationVar(&cfg.startupGateEmpty, "startup-gate-empty", envDur(envStartupGateEmpty, defaultStartupGateEmpty),
+		"empty-disk gate backstop: a node with no loaded records waits this long for a peer listing (env SUPKV_STARTUP_GATE_EMPTY)")
 	flag.DurationVar(&cfg.waitTimeout, "wait-timeout", envDur(envWaitTimeout, defaultWaitTimeout),
 		"default wait_for_replication bound (env SUPKV_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.valueMaxBytes, "value-max-bytes", envNum(envValueMaxBytes, defaultValueMaxBytes),
@@ -430,6 +440,10 @@ func finalizeConfig(cfg *config, nodeID uint64, envErr error) error {
 	if err != nil {
 		return err
 	}
+	err = checkStartupGates(*cfg)
+	if err != nil {
+		return err
+	}
 	return checkDatagramCeiling(*cfg)
 }
 
@@ -446,6 +460,23 @@ func checkMetricsCerts(cfg config) error {
 	}
 	return fmt.Errorf("%w: %s, %s and %s",
 		errIncompleteCertSet, envMetricsCert, envMetricsKey, envMetricsClientCA)
+}
+
+// checkStartupGates enforces T-4-12's positivity contract for both gate
+// backstops before any bind: a zero or negative value can never mean "stay
+// closed forever" — the empty gate's default and this check both guard it —
+// and the error names the offending parameter. Only positivity is checked
+// here; cross-parameter relations are Phase 7's one-point validation (Open
+// Question 7), and ADR 0006 defines the two parameters separately, so neither
+// implies the other.
+func checkStartupGates(cfg config) error {
+	if cfg.startupGate <= 0 {
+		return fmt.Errorf("%w: --startup-gate=%s", errStartupGateRange, cfg.startupGate)
+	}
+	if cfg.startupGateEmpty <= 0 {
+		return fmt.Errorf("%w: --startup-gate-empty=%s", errStartupGateRange, cfg.startupGateEmpty)
+	}
+	return nil
 }
 
 // checkDatagramCeiling enforces XPORT-03's startup half: the largest record
@@ -505,7 +536,8 @@ func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.Ca
 // — persist.Open threads the change tap through storage.Config — then the
 // dump store and the write-confirmation engine, the replication adapter
 // over the engine as its StateStore, the API server consuming both through
-// its seam options, and the gate resolver plus hub goroutines on the API
+// its seam options — its gate backstop chosen once from the loaded store's
+// record count (D-02) — and the gate resolver plus hub goroutines on the API
 // context. Returns the wired bundle and the listening gRPC endpoint.
 func wire(cfg config) (*wired, net.Listener, error) {
 	hub := grpcapi.NewWatchHub()
@@ -529,11 +561,20 @@ func wire(cfg config) (*wired, net.Listener, error) {
 		_ = adapter.Run(replCtx)
 	}()
 
+	// The empty-vs-data selection (D-02, ADR 0006) is made once, here: the
+	// engine finished loading synchronously above, so KeyCount is final, and
+	// the resolver reads only the resolved duration from now on. A node with
+	// any record — live or tombstoned — never consults startup_gate_empty.
+	gateBackstop := cfg.startupGate
+	if engine.KeyCount() == 0 {
+		gateBackstop = cfg.startupGateEmpty
+	}
 	srv := grpcapi.NewServer(engine, adapter.NotifyLocalWrite, hub, grpcapi.ServerOptions{
 		SyncArrived:    adapter.SyncArrived,
+		ListedKey:      adapter.ListedKey,
 		KnownPeers:     adapter.KnownPeers,
 		WaitReplicated: adapter.WaitReplicated,
-		StartupGate:    cfg.startupGate,
+		StartupGate:    gateBackstop,
 		WaitTimeout:    cfg.waitTimeout,
 	})
 
