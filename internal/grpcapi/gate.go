@@ -45,10 +45,11 @@ const (
 // injects the udprepl adapter's SyncArrived mirror, tests inject fakes,
 // and future gate options grow without another NewServer signature change.
 type ServerOptions struct {
-	// SyncArrived reports whether the first replication sync round has
-	// arrived — the API-04 sync half. Production injects the udprepl
-	// adapter's atomic mirror (A1 semantics: any received DataSync
-	// datagram counts); tests inject fakes. Only the gate resolver's poll
+	// SyncArrived reports whether a COMPLETE listing round has been processed
+	// — every chunk of some peer's DataSync round received, not merely the
+	// first arrival — the API-04 sync half. Production injects the udprepl
+	// adapter's atomic mirror (the adapter reports `mirrorStats`' completeness
+	// bit, D-01 semantics); tests inject fakes. Only the gate resolver's poll
 	// loop calls it, never the write handlers: the handlers see only the
 	// resolved gate flag.
 	SyncArrived func() bool
