@@ -86,6 +86,13 @@ linters:
           allow:
             - $gostd
             - github.com/Djarvur/sup-kv # own module path allowed per D-11's deny-third-party wording
+        sup-kv-public-api-no-internal:
+          files:
+            - '**/api/**' # the published consumer package; leading **/ + quotes for the same depguard glob reason as above
+            - '!$test'
+          deny:
+            - pkg: github.com/Djarvur/sup-kv/internal
+              desc: the public API package must remain importable by other modules
     dupl:
       threshold: 100
     embeddedstructfieldcheck:
