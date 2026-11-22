@@ -392,8 +392,16 @@ func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family
 }
 
 // dumpFamilies builds the persistence-cycle families over one reading of the
-// engine's DumpStats seam.
+// engine's DumpStats seam: the last duration, the attempt and error totals,
+// and the failure-class split (PERSIST-05). The class family always renders
+// all three values; "other" is the residual between the error total and the
+// two classed counters (Errors is their superset), clamped so a scrape
+// racing a dump's counter updates never renders a negative sample.
 func dumpFamilies(stats persist.DumpStats) []Family {
+	other := uint64(0)
+	if classified := stats.DiskFull + stats.Permission; stats.Errors > classified {
+		other = stats.Errors - classified
+	}
 	return []Family{
 		{
 			Name: "supkv_dumps_duration_seconds", Type: Gauge,
@@ -414,6 +422,15 @@ func dumpFamilies(stats persist.DumpStats) []Family {
 			Help: "Failed dumps.",
 			Samples: []Sample{
 				{Value: float64(stats.Errors)},
+			},
+		},
+		{
+			Name: "supkv_dumps_failures_total", Type: Counter,
+			Help: "Failed dump attempts, by failure class.",
+			Samples: []Sample{
+				{Labels: []Label{{Name: labelClass, Value: "disk_full"}}, Value: float64(stats.DiskFull)},
+				{Labels: []Label{{Name: labelClass, Value: "permission"}}, Value: float64(stats.Permission)},
+				{Labels: []Label{{Name: labelClass, Value: "other"}}, Value: float64(other)},
 			},
 		},
 	}

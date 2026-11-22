@@ -78,6 +78,16 @@ func (e classedTestError) Unwrap() error { return e.err }
 // FailureClass returns the classified class.
 func (e classedTestError) FailureClass() port.FailureClass { return e.class }
 
+// offsetsFrom returns every instant's offset from base — the diagnostic
+// form the ladder assertions print on failure.
+func offsetsFrom(base time.Time, instants []time.Time) []time.Duration {
+	out := make([]time.Duration, len(instants))
+	for i, at := range instants {
+		out[i] = at.Sub(base)
+	}
+	return out
+}
+
 // newFailureEngine builds an engine over an empty store and the shared fake
 // port, running the design-default timing on the bubble clock with the
 // failure recorder wired in.
@@ -114,8 +124,10 @@ func TestEngine_backoffLadder(t *testing.T) {
 			t.Fatalf("Set() error = %v, want ErrDumpFailed — the first attempt fails", err)
 		}
 
-		// A write during the backoff registers a waiter the next attempt
-		// covers; the seventh failure follows, the eighth attempt succeeds.
+		// A write registered after the seventh failure waits out the capped
+		// 5 s rung: the eighth attempt succeeds and covers it — never an
+		// extra dump.
+		synctest.Sleep(backoffLadder[len(backoffLadder)-2])
 		duringErr := make(chan error, 1)
 		go func() {
 			_, _, err := eng.Set("during", []byte("during-value"))
@@ -128,7 +140,8 @@ func TestEngine_backoffLadder(t *testing.T) {
 		}
 		instants := dumps.attemptInstants()
 		if len(instants) != len(backoffLadder)+1 {
-			t.Fatalf("attempts = %d, want %d (seven failures, one success)", len(instants), len(backoffLadder)+1)
+			t.Fatalf("attempts = %d at %v, want %d (seven failures, one success)",
+				len(instants), offsetsFrom(instants[0], instants), len(backoffLadder)+1)
 		}
 		if want := start.Add(synctestDebounce); !instants[0].Equal(want) {
 			t.Errorf("the first attempt landed at %v, want the debounce instant %v", instants[0], want)
@@ -158,6 +171,7 @@ func TestEngine_backoffLadder(t *testing.T) {
 		if !errors.Is(err, persist.ErrDumpFailed) {
 			t.Fatalf("the post-recovery Set() error = %v, want ErrDumpFailed", err)
 		}
+		synctest.Sleep(backoffLadder[0]) // let the reset ladder's first rung fire
 		instants = dumps.attemptInstants()
 		if len(instants) != len(backoffLadder)+3 {
 			t.Fatalf("attempts after the reset failure = %d, want %d", len(instants), len(backoffLadder)+3)

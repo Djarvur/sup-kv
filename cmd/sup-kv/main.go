@@ -577,7 +577,16 @@ func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.Ca
 	engine, discarded := persist.Open(cfg.nodeID, time.Now, cfg.driftWarn, dumps, storage.Config{
 		ValueMaxBytes: cfg.valueMaxBytes,
 		OnChange:      hub.Ingest,
-	}, persist.Config{Debounce: cfg.dumpDebounce, MaxWait: cfg.dumpMaxWait})
+	}, persist.Config{
+		Debounce: cfg.dumpDebounce,
+		MaxWait:  cfg.dumpMaxWait,
+		// One ERROR per failed attempt with the class label the metric uses
+		// (D-05, PERSIST-05): a static message plus attributes, never dynamic
+		// text, and the engine's dumper goroutine only formats and logs.
+		OnDumpFailure: func(err error, class port.FailureClass) {
+			slog.Error("Dump failed", "class", class.String(), "detail", err.Error())
+		},
+	})
 	stats := engine.LoadStats()
 	logLoadStats(stats)
 	if skipped := stats.Decoded.ValueLimit; skipped > 0 {

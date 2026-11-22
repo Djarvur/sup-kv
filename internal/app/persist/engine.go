@@ -18,10 +18,20 @@ import (
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
-// Design defaults a zero or negative Config field is normalized to (D-04).
+// Design defaults a zero or negative Config field is normalized to (D-04),
+// and the bounded dump-failure ladder's base and cap (D-05, PERSIST-05): the
+// first failure retries after the base delay, every later one doubles it, and
+// the cap bounds the wait — the confirmation timeout of the next plan sits
+// above it.
 const (
-	defaultDebounce = 50 * time.Millisecond
-	defaultMaxWait  = time.Second
+	defaultDebounce  = 50 * time.Millisecond
+	defaultMaxWait   = time.Second
+	defaultRetryBase = 100 * time.Millisecond
+	defaultRetryCap  = 5 * time.Second
+
+	// retryGrowth is the ladder's growth factor: every failure doubles the
+	// previous wait until the cap binds.
+	retryGrowth = 2
 )
 
 // Config holds the dump timing parameters; it is immutable once handed to
@@ -126,10 +136,14 @@ type Engine struct {
 
 	// dumpNanos, dumpTotal and dumpErrors carry DumpStats lock-free for
 	// scrapers (OBS-01): runDump is the single writer — the serialized
-	// dumper — so atomic reads need no engine mutex.
-	dumpNanos  atomic.Int64
-	dumpTotal  atomic.Uint64
-	dumpErrors atomic.Uint64
+	// dumper — so atomic reads need no engine mutex. dumpDiskFull and
+	// dumpPermission split the failed attempts by the adapter's class
+	// (PERSIST-05); both are subsets of dumpErrors.
+	dumpNanos      atomic.Int64
+	dumpTotal      atomic.Uint64
+	dumpErrors     atomic.Uint64
+	dumpDiskFull   atomic.Uint64
+	dumpPermission atomic.Uint64
 }
 
 // DumpStats is the dump-cycle gauge OBS-01 reads: the last dump's
@@ -313,7 +327,8 @@ func (e *Engine) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-e.changed:
 		case <-debounce:
-			debounce = nil
+			// The debounce channel is re-armed unconditionally below, so a
+			// fired one needs no clearing.
 			fired = true
 		case <-deadline:
 			deadline = nil
@@ -327,7 +342,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		if fired {
 			_ = e.runDump() // the error belongs to the waiters; nobody is left to report to.
 		}
-		debounce, deadline, retry = e.rearm(debounce, deadline, retry)
+		debounce, deadline, retry = e.rearm(deadline, retry)
 	}
 }
 
@@ -356,29 +371,25 @@ func (e *Engine) flushDump() error {
 // keeps its already-armed instant while one is pending, so a write arriving
 // during backoff registers a waiter covered by that attempt instead of
 // postponing it.
-func (e *Engine) rearm(debounce, deadline, retry <-chan time.Time) (nextDebounce, nextDeadline, nextRetry <-chan time.Time) {
+func (e *Engine) rearm(deadline, retry <-chan time.Time) (nextDebounce, nextDeadline, nextRetry <-chan time.Time) {
 	e.mu.Lock()
 	dirty, oldest := e.dirty, e.oldest
 	delay, at := e.retryDelay, e.retryAt
 	e.mu.Unlock()
 	if delay > 0 {
 		if retry == nil {
-			wait := at.Sub(e.cfg.Now())
-			if wait < 0 {
-				wait = 0
-			}
-			retry = e.cfg.After(wait)
+			retry = e.cfg.After(max(at.Sub(e.cfg.Now()), 0))
 		}
 		return nil, nil, retry
 	}
 	if !dirty {
 		return nil, nil, nil
 	}
-	debounce = e.cfg.After(e.cfg.Debounce)
+	nextDebounce = e.cfg.After(e.cfg.Debounce)
 	if deadline == nil {
 		deadline = e.cfg.After(oldest.Add(e.cfg.MaxWait).Sub(e.cfg.Now()))
 	}
-	return debounce, deadline, nil
+	return nextDebounce, deadline, nil
 }
 
 // sweepClosed is Run's exit sweep: under the same mutex hold the write
@@ -428,9 +439,10 @@ func (e *Engine) sweepClosed() {
 // snapshot) or re-marks the engine dirty after it (covered by the next), so
 // no waiter is ever confirmed against a dump that misses its record. On
 // failure every current waiter resolves ErrDumpFailed while the state stays
-// readable in memory, dirty re-arms from a fresh epoch and the re-armed
-// debounce timer starts the next attempt one interval later — never a tight
-// retry loop (D-05, research A8).
+// readable in memory, dirty re-arms from a fresh epoch and the bounded retry
+// ladder arms the next attempt — 100 ms doubling to the 5 s cap, reset by a
+// success — so a persistent failure never busy-loops (D-05, PERSIST-05,
+// research A8).
 func (e *Engine) runDump() error {
 	e.mu.Lock()
 	captured := e.waiters
@@ -445,11 +457,61 @@ func (e *Engine) runDump() error {
 	})
 	e.recordDump(e.cfg.Now().Sub(start), err)
 	if err != nil {
+		e.handleDumpFailure(err)
 		e.failWaiters(captured)
 		return err
 	}
+	e.resetRetry()
 	e.confirmWaiters(captured)
 	return nil
+}
+
+// handleDumpFailure applies one failed attempt's decay and report (D-05,
+// PERSIST-05): the class counters, the next ladder rung fixed at this
+// failure's instant — so a write arriving during the backoff registers a
+// waiter the armed retry covers instead of postponing it — and exactly one
+// OnDumpFailure callback carrying the underlying error and the adapter's
+// class. It runs on the dumper goroutine once per failed attempt; the
+// callback must not block.
+func (e *Engine) handleDumpFailure(err error) {
+	class := port.FailureClassOf(err)
+	e.mu.Lock()
+	e.retryDelay = nextRetry(e.retryDelay)
+	e.retryAt = e.cfg.Now().Add(e.retryDelay)
+	e.mu.Unlock()
+	switch class {
+	case port.FailureDiskFull:
+		e.dumpDiskFull.Add(1)
+	case port.FailurePermission:
+		e.dumpPermission.Add(1)
+	case port.FailureOther:
+	}
+	if e.cfg.OnDumpFailure != nil {
+		e.cfg.OnDumpFailure(err, class)
+	}
+}
+
+// nextRetry returns the ladder rung after d: the first failure (d == 0)
+// arms the base delay, every later one doubles it, and the cap bounds the
+// wait.
+func nextRetry(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultRetryBase
+	}
+	next := d * retryGrowth
+	if next > defaultRetryCap {
+		return defaultRetryCap
+	}
+	return next
+}
+
+// resetRetry clears the ladder after a successful attempt: the next failure
+// starts again from the base delay and covers the waiters immediately.
+func (e *Engine) resetRetry() {
+	e.mu.Lock()
+	e.retryDelay = 0
+	e.retryAt = time.Time{}
+	e.mu.Unlock()
 }
 
 // recordDump stores one dump cycle's observability (OBS-01): the span of
@@ -470,6 +532,8 @@ func (e *Engine) DumpStats() DumpStats {
 		DurationSeconds: float64(e.dumpNanos.Load()) / float64(time.Second),
 		Total:           e.dumpTotal.Load(),
 		Errors:          e.dumpErrors.Load(),
+		DiskFull:        e.dumpDiskFull.Load(),
+		Permission:      e.dumpPermission.Load(),
 	}
 }
 
