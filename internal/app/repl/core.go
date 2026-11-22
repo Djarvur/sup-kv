@@ -110,6 +110,14 @@ const (
 	// dedupe identity (T-3-21), and the drop is counted in EgressDropped.
 	maxEgressEntries = 32768
 
+	// maxListingDestinations bounds the in-flight listing destinations — the
+	// concurrent targeted and periodic FIFOs (CR-01, T-4-23) — and
+	// maxListingChunks the total queued listing chunk work across them: a
+	// worst-case 20 000-key round at one entry per chunk fits whole. Both
+	// bounds are pinned by the 04-08 listing queue.
+	maxListingDestinations = 32
+	maxListingChunks       = 65536
+
 	// maxSyncStreams bounds the partial-listing accumulator: a peer may send
 	// many distinct sync_ids with missing chunks, so the number of retained
 	// streams is capped and an overflow evicts the least-progressed stream
@@ -651,6 +659,10 @@ type Core struct {
 	listingCount  int
 	nextListingAt time.Time
 	syncRotation  uint64
+
+	// listingDropped counts every listing trigger the queue bounds refused
+	// (CR-01, T-4-23) — the 04-08 observability counter.
+	listingDropped uint64
 
 	// recordQueue is the paced record-send FIFO fed by the discovery flush and
 	// the retransmit scanner; recordQueued is its (key, version) dedupe set and
@@ -2507,6 +2519,15 @@ func (c *Core) QueuedSends() int {
 // (T-3-21).
 func (c *Core) EgressDropped() uint64 {
 	return c.egressDropped
+}
+
+// ListingDropped returns the number of listing triggers the destination or
+// queued-chunk cap refused (CR-01, T-4-23) — the observability seam for the
+// listing drop policy, mirroring EgressDropped: every refused first-seen or
+// restart listing is counted once, and a refused trigger leaves no FIFO
+// behind.
+func (c *Core) ListingDropped() uint64 {
+	return c.listingDropped
 }
 
 // PacedSends returns the number of datagrams the listing, record and egress
