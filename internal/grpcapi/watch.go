@@ -357,11 +357,19 @@ func (h *WatchHub) shutdownSubscribers() {
 // Watch streams the subscriber's snapshot as ordinary WatchResponse events (D-03)
 // followed by every live change under the prefix in arrival order (D-05) —
 // tombstones included as deleted=true (D-02), no origin marking (D-07).
-// The hub owns the exact cut; the handler streams the snapshot, then
-// relays the hub's buffered events until the stream context ends or the
-// hub sheds this subscriber with ResourceExhausted — the slow-consumer
-// disconnect whose resubscribe-and-resnapshot heals the shed (D-02, A3).
+// The startup gate is the first statement, before even the nil-hub check
+// (API-04, D-01): a closed node refuses the stream with Unavailable, like
+// every other read — the gate is the interface contract, so a
+// misconstructed server still answers Unavailable rather than Unimplemented
+// while cold. The hub owns the exact cut; the handler streams the
+// snapshot, then relays the hub's buffered events until the stream context
+// ends or the hub sheds this subscriber with ResourceExhausted — the
+// slow-consumer disconnect whose resubscribe-and-resnapshot heals the shed
+// (D-02, A3).
 func (s *Server) Watch(req *apiproto.WatchRequest, stream apiproto.SupKVService_WatchServer) error {
+	if s.gated() {
+		return gateUnavailable()
+	}
 	if s.hub == nil {
 		return status.Error(codes.Unimplemented, "watch requires a hub; construct the server through NewServer")
 	}

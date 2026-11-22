@@ -110,12 +110,13 @@ func (s *Server) Health() *health.Server {
 	return s.healthSrv
 }
 
-// gated reports whether the startup gate is still closed, so writes are
-// rejected with Unavailable (API-04). Reads never consult it: Get, List
-// and Watch are served from the first moment — serving stale-but-locally-
-// confirmed state beats rejecting reads on a node whose peers have not
-// synced yet, and the gate's whole purpose is to keep a cold node from
-// *writing* versions its peers' newer state would have to beat.
+// gated reports whether the startup gate is still closed, so every data
+// RPC — reads and writes alike — is rejected with Unavailable (API-04,
+// D-01). The purpose is that a cold node must not answer from a picture it
+// does not yet have: reads of keys it has never heard of would lie as
+// NotFound, and writes would stamp versions its peers' newer state would
+// have to beat. Get, List and Watch consult the gate exactly like Set and
+// Delete.
 func (s *Server) gated() bool {
 	return !s.gateOpen.Load()
 }

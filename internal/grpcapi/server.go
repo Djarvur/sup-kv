@@ -59,8 +59,8 @@ type Server struct {
 	healthSrv *health.Server
 
 	// gateOpen is the resolved startup-gate state (API-04): closed at
-	// construction, opened exactly once by RunGate. Write handlers read it
-	// through gated; reads never consult it.
+	// construction, opened exactly once by RunGate. Every data handler —
+	// reads and writes alike — reads it through gated.
 	gateOpen atomic.Bool
 }
 
@@ -98,10 +98,17 @@ func NewServer(engine *persist.Engine, notify LocalNotify, hub *WatchHub, opts S
 	}
 }
 
-// Get returns the live record for one key. Reads are never gated on dumps
-// or replication state — an absent or tombstoned key is the NotFound code,
-// never an empty success. An empty key is rejected with InvalidArgument
-// before any engine call (A7), like the write handlers.
+// Get returns the live record for one key. The startup gate is checked
+// first (API-04, D-01): while it is closed every read — like every write —
+// answers Unavailable, because a cold node must not answer from a picture
+// it does not yet have. Once the gate opens, an absent or tombstoned key is
+// the NotFound code, never an empty success; a key a peer's complete
+// listing named but whose value has not arrived is Unavailable (rule
+// 14.5(6): Engine.Version distinguishes the local tombstone from the
+// listed-but-unarrived key, because Get alone hides tombstones). An empty
+// key is rejected with InvalidArgument before any engine call (A7), like
+// the write handlers — but only past the gate, so a closed node answers
+// Unavailable even for an empty key.
 //
 // Get deliberately does not enforce the key-length ceiling: the write side
 // (Set, Delete) and the replication receive path do. Pre-upgrade records
@@ -109,6 +116,9 @@ func NewServer(engine *persist.Engine, notify LocalNotify, hub *WatchHub, opts S
 // 5's load-time accounting decides what happens to them (RESEARCH Open
 // Question 2: write-side only, Get permissive).
 func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.GetResponse, error) {
+	if s.gated() {
+		return nil, gateUnavailable()
+	}
 	if req.GetKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
 	}
@@ -213,13 +223,18 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 // response (D-12): the empty prefix matches every key (D-15), tombstones
 // are never listed — List reflects live state, not history (D-14) — and
 // the response carries keys only; values are fetched via Get (D-13). The
-// engine's Records() snapshot is tombstone-inclusive by contract, so the
-// Deleted filter here is adapter-side. The scale envelope — tens of
-// thousands of keys — fits the gRPC 4 MiB default send limit (research
-// A6): grpc defaults are kept, and grpc.MaxSendMsgSize is the documented
-// growth knob if key names ever grow the envelope — pagination is
-// deliberately not hand-rolled (D-12).
+// startup gate is checked first like every other data RPC (API-04, D-01):
+// a closed node answers Unavailable rather than an empty list, which would
+// lie about a state it has not yet learned. The engine's Records() snapshot
+// is tombstone-inclusive by contract, so the Deleted filter here is
+// adapter-side. The scale envelope — tens of thousands of keys — fits the
+// gRPC 4 MiB default send limit (research A6): grpc defaults are kept, and
+// grpc.MaxSendMsgSize is the documented growth knob if key names ever grow
+// the envelope — pagination is deliberately not hand-rolled (D-12).
 func (s *Server) List(_ context.Context, req *apiproto.ListRequest) (*apiproto.ListResponse, error) {
+	if s.gated() {
+		return nil, gateUnavailable()
+	}
 	records := s.engine.Records()
 	keys := make([]string, 0, len(records))
 	for key, rec := range records {
