@@ -259,8 +259,9 @@ func TestFileStore_loadOutcomeTable(t *testing.T) {
 					continue
 				}
 				preserved++
-				if _, err := os.Stat(failure.Preserved); err != nil {
-					t.Errorf("preserved generation %s = %v, want it to exist", failure.Preserved, err)
+				_, statErr := os.Stat(failure.Preserved)
+				if statErr != nil {
+					t.Errorf("preserved generation %s = %v, want it to exist", failure.Preserved, statErr)
 				}
 			}
 			if preserved != tt.wantPreserved {

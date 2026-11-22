@@ -216,7 +216,7 @@ func TestFileStore_fallbackChain(t *testing.T) {
 
 // TestFileStore_saveFailureHygiene proves the temp-file hygiene of Pitfall
 // 5: a Save that cannot create its temp file fails, and the directory keeps
-// exactly its pre-existing dump — no dump-* litter. Skipped as root, where
+// exactly its pre-existing dump — no temp litter. Skipped as root, where
 // directory modes do not bind.
 func TestFileStore_saveFailureHygiene(t *testing.T) {
 	t.Parallel()

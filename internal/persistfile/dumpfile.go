@@ -1,9 +1,11 @@
 // Package persistfile is the sup-kv dump file adapter: the only
 // os-importing persistence code, implementing port.DumpStore with atomic
-// writes, .prev rotation and the fallback chain (D-01/D-02). The store
-// mutex serializes SaveStream against CreateSnapshot: the rotate-first order
-// that keeps the crash chain correct (D-02) briefly leaves the main path
-// absent between the two renames, and a concurrent snapshot copy must
+// writes, .prev rotation and the fallback chain (D-01/D-02). Load also
+// preserves every rejected generation under .corrupt-<UTC> and sweeps old
+// orphan temps at startup (D-02, D-08) — no load ever deletes evidence. The
+// store mutex serializes SaveStream against CreateSnapshot: the rotate-first
+// order that keeps the crash chain correct (D-02) briefly leaves the main
+// path absent between the two renames, and a concurrent snapshot copy must
 // never observe that window as ErrNoDump. Concurrent save calls serialize
 // on the same mutex; the engine's single dumper goroutine remains the
 // design's serializer. Load and ReadSnapshot stay lock-free — every
@@ -17,27 +19,35 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
-// Adapter file modes and path suffixes: the dump directory and the
-// snapshots directory are created 0700 (values privacy over non-owner
+// Adapter file modes, temp marker and path suffixes: the dump directory and
+// the snapshots directory are created 0700 (values privacy over non-owner
 // readability; grep still works for the owner), the dump files keep
 // [os.CreateTemp]'s 0600 default, and prevSuffix is the previous
 // generation's path suffix — the fallback chain walks main then
 // main+prevSuffix (D-02, D-08). A generation the load cannot accept is
 // preserved under corruptSuffix plus a UTC stamp (stampLayout), never
 // deleted: the corrupted bytes are the evidence an operator inspects
-// (D-02, T-5-12).
+// (D-02, T-5-12). Every in-flight temp carries orphanTempMarker: '~' is
+// outside the snapshot-name charset [A-Za-z0-9._-], so no legal snapshot or
+// dump generation can contain it and the startup sweep can select temps
+// without keying on a data-file prefix (D-08, T-5-14). Old temps are
+// removed only after defaultOrphanTempAge, so a concurrent instance's
+// in-flight write is never swept.
 const (
-	prevSuffix    = ".prev"
-	corruptSuffix = ".corrupt-"
-	stampLayout   = "20060102T150405Z"
-	tempPattern   = "dump-*"
-	dirMode       = 0o700
+	prevSuffix           = ".prev"
+	corruptSuffix        = ".corrupt-"
+	stampLayout          = "20060102T150405Z"
+	orphanTempMarker     = ".tmp~"
+	tempPattern          = orphanTempMarker + "*"
+	defaultOrphanTempAge = time.Hour
+	dirMode              = 0o700
 )
 
 // FileStore persists whole dump bytes at one main file path, deriving the
@@ -100,22 +110,23 @@ func (f *FileStore) SaveStream(fill func(io.Writer) error) error {
 	return saveAtomically(f.ops, f.path, f.path+prevSuffix, fill)
 }
 
-// Load resolves the fallback chain main then .prev and reports the first
-// generation whose bytes pass parse together with the outcome, accepted
-// generation and every candidate fault (D-02). A read error or an oracle
-// rejection — a truncated or unparseable file counts as unreadable — is
-// recorded against its candidate, preserved under a collision-free
-// .corrupt-<UTC> name and the chain advances; an absent candidate is not a
-// failure. No candidate at all is the prompt start, and candidates that all
-// fail are unusable. Presence is never lost from the report: when .prev is
-// accepted after an absent main, the main candidate is recorded with
-// [fs.ErrNotExist] as its cause, so the engine's single Backup WARN always
-// names why the main was not used. Preservation keeps the loaded .prev
-// alive: the corrupt main has left the rotation path before any save, so
-// the first rotate finds no main and is a no-op. now is the clock that names
-// a preserved generation; the adapter stays clock-free.
+// Load runs the startup sweep first, then resolves the fallback chain main
+// then .prev and reports the first generation whose bytes pass parse
+// together with the outcome, accepted generation and every candidate fault
+// (D-02). A read error or an oracle rejection — a truncated or unparseable
+// file counts as unreadable — is recorded against its candidate, preserved
+// under a collision-free .corrupt-<UTC> name and the chain advances; an
+// absent candidate is not a failure. No candidate at all is the prompt
+// start, and candidates that all fail are unusable. Presence is never lost
+// from the report: when .prev is accepted after an absent main, the main
+// candidate is recorded with [fs.ErrNotExist] as its cause, so the engine's
+// single Backup WARN always names why the main was not used. Preservation
+// keeps the loaded .prev alive: the corrupt main has left the rotation path
+// before any save, so the first rotate finds no main and is a no-op. now is
+// the clock that names a preserved generation; the adapter stays clock-free.
 func (f *FileStore) Load(now time.Time, parse func([]byte) error) port.LoadResult {
 	var result port.LoadResult
+	result.Swept, result.SweepErr = sweepOrphans(f.path, now)
 	candidates := []struct {
 		generation port.Generation
 		path       string
@@ -230,6 +241,72 @@ func syncDirBestEffort(dir string) {
 	}
 	_ = d.Sync()
 	_ = d.Close()
+}
+
+// sweepOrphans removes old orphan temp files from the dump directory and the
+// snapshots directory beside it (D-08, PERSIST-09): every candidate carries
+// orphanTempMarker, is a regular file and predates defaultOrphanTempAge, so
+// a concurrent instance's in-flight write and every live data file survive.
+// A missing directory is not an error; the count and the first error are
+// returned so Load can report them without aborting the chain.
+func sweepOrphans(mainPath string, now time.Time) (int, error) {
+	dumpDir := filepath.Dir(mainPath)
+	mainBase := filepath.Base(mainPath)
+	var swept int
+	var firstErr error
+	for _, dir := range []string{dumpDir, mainPath + snapshotDirSuffix} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, entry := range entries {
+			if dir == dumpDir && protectedDataName(entry.Name(), mainBase) {
+				continue
+			}
+			removed, removeErr := sweepEntry(dir, entry.Name(), now)
+			if removeErr != nil && firstErr == nil {
+				firstErr = removeErr
+			}
+			if removed {
+				swept++
+			}
+		}
+	}
+	return swept, firstErr
+}
+
+// protectedDataName reports whether name is the configured main, its .prev
+// or one of its .corrupt-* evidence names — the dump-directory exclusions
+// that protect even a main whose own name carries the temp marker.
+func protectedDataName(name, mainBase string) bool {
+	return name == mainBase ||
+		name == mainBase+prevSuffix ||
+		strings.HasPrefix(name, mainBase+corruptSuffix)
+}
+
+// sweepEntry decides one directory entry and removes it when it is an old
+// orphan temp: the marker is the only selection key, so no data-file prefix
+// can match. No symlink is followed (Lstat) and no young file is touched.
+func sweepEntry(dir, name string, now time.Time) (bool, error) {
+	if !strings.Contains(name, orphanTempMarker) {
+		return false, nil
+	}
+	path := filepath.Join(dir, name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.Mode().IsRegular() || !info.ModTime().Before(now.Add(-defaultOrphanTempAge)) {
+		return false, nil
+	}
+	err = os.Remove(path)
+	return err == nil, err
 }
 
 // saveAtomically implements the canonical atomic-write sequence (PERS-02,

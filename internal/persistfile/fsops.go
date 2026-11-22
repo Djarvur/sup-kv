@@ -180,7 +180,7 @@ func (*fileFSOps) syncDir(dir string) error {
 // closeRemoveTemp is the failure hygiene of the temp-holding steps (write,
 // fsync): the held handle is closed — closing an already-closed file just
 // errors, ignored — and the temp is removed, so a failed save never litters
-// dump-* files (Pitfall 5).
+// temp files (Pitfall 5).
 func (o *fileFSOps) closeRemoveTemp() {
 	if o.tmp != nil {
 		_ = o.tmp.Close()

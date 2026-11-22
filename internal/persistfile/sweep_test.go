@@ -177,14 +177,16 @@ func TestSweep_protectsDataNames(t *testing.T) {
 			}
 			survivors := []string{dumpPath, dumpPath + ".prev", corrupt}
 			for _, path := range survivors {
-				if _, err := os.Lstat(path); err != nil {
-					t.Errorf("Lstat(%s) = %v, want the data name kept", path, err)
+				_, survivorErr := os.Lstat(path)
+				if survivorErr != nil {
+					t.Errorf("Lstat(%s) = %v, want the data name kept", path, survivorErr)
 				}
 			}
 			for _, name := range tt.snaps {
 				path := filepath.Join(snapshots, name)
-				if _, err := os.Lstat(path); err != nil {
-					t.Errorf("Lstat(%s) = %v, want the legal snapshot kept", path, err)
+				_, snapshotErr := os.Lstat(path)
+				if snapshotErr != nil {
+					t.Errorf("Lstat(%s) = %v, want the legal snapshot kept", path, snapshotErr)
 				}
 			}
 		})
