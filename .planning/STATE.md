@@ -4,17 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
+current_plan: 2
 status: executing
-stopped_at: Phase 4 context gathered (--auto)
-last_updated: "2026-11-22T02:53:21.698Z"
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-11-22T03:27:29.749Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 3 complete, transitioned to Phase 4
-state_head: 3e796082acf89b0224160ffb41f4a66c746d8df1
+last_activity_desc: Completed 04-01-PLAN.md (protocol header and listing completeness)
+state_head: d1760dba239548bfef1d08ae444f5c27ae060154
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 34
+  completed_plans: 35
 ---
 
 # Project State
@@ -24,14 +25,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-19)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 3 — Transport
+**Current focus:** Phase 4 — Protocol
 
 ## Current Position
 
-Phase: 4 (Protocol) — READY TO EXECUTE
-Plan: 6
+Phase: 4 (Protocol)
+Current Plan: 2
+Total Plans in Phase: 13
 Status: Ready to execute
-Last activity: 2026-11-22 — Phase 3 complete, transitioned to Phase 4
+Last activity: 2026-11-22 — Completed 04-01-PLAN.md
 
 Progress: [███░░░░░░░] 33%
 
@@ -89,6 +91,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P11 | 649s | 2 tasks | 19 files |
 | Phase 03 P12 | 1382s | 3 tasks | 17 files |
 | Phase 03 P13 | 1048s | 2 tasks | 10 files |
+| Phase 04 P01 | 23min | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -225,6 +228,11 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-13: `make race-soak` gained `./internal/stand/` only after measuring it — 6.53 s single run, ~2.2 min projected at COUNT=20; the whole target is 81.22 s at COUNT=1, so ~27 min at the default 20 and the 120-minute race-flake budget stands.
 - [Phase 03]: 03-13: The documented-scale R-01 run measured 110.26 s, projecting 20 runs to ~37 min — inside the 120-minute job budget and consistent with RESEARCH A5; the first scheduled run is the observation, and a budget miss is recorded rather than paying with the count.
 - [Phase 03]: 03-13: The full gate ran with real exit statuses (tidy, lint, test, red-runner with mutants, darwin cross build/vet, bench smoke, one nightly-scale R-01 run, clean tree); the four remaining red rows (R-03 x2, P-01 x2) are Phase 4/5 work and no bound, row or test was weakened.
+- [Phase 04]: 04-01: DataSync v2 carries sync_id/chunk_index/chunk_count; chunks accumulate as an index set per (node_id, run_id, sync_id), and only all indices 1..count open the gate.
+- [Phase 04]: 04-01: One atomic {complete, keys} mirror publishes only on a union-content generation move; an identical listing flood clones and republishes nothing.
+- [Phase 04]: 04-01: Retained listed keys are capped at 131072 by whole-peer-set LRU eviction through refcounts; ListedKeysEvicted counts keys that actually left the union.
+- [Phase 04]: 04-01: proto_version is judged pre-CRC/body as ProtoVersionMismatch; bad_sync_header is a header-first class; both WARN per (node_id, class) on event time.
+- [Phase 04]: 04-01: chunkOverheadBytes 96 with both graduated lenses re-derived to sum 1112; sync_id is a monotone build-time counter and run_id is part of the accumulation key, keeping same-seed replay byte-identical.
 
 ### Pending Todos
 
@@ -247,7 +255,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T00:06:23.933Z
-Stopped at: Phase 4 context gathered (--auto)
+Last session: 2026-11-22T03:26:54.291Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None
 Next action: `/gsd:verify-work 3` (or `/gsd:execute-phase 4` after the phase gate is verified) — Phase 4 (Protocol) is unblocked
