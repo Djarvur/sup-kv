@@ -377,3 +377,134 @@ func TestListing_restartDropsOldRunFIFO(t *testing.T) {
 			got, listingTestChunks, listingTestChunks-1)
 	}
 }
+
+// TestListing_chunkCapCoversEveryDestination pins the WR-01 arithmetic: the
+// queued-chunk bound must cover one full receiver-acceptable round for every
+// targeted destination PLUS the reserved broadcast round. Lowering it below
+// that product makes the chunk cap, not the destination cap, refuse
+// documented-scale rounds as soon as a handful of destinations are draining —
+// the defect this bound exists to remove.
+func TestListing_chunkCapCoversEveryDestination(t *testing.T) {
+	t.Parallel()
+	want := (maxListingDestinations + 1) * maxSyncChunks
+	if maxListingChunks < want {
+		t.Fatalf(
+			"maxListingChunks = %d, want at least %d = (%d destinations + 1 broadcast) × %d chunks"+
+				" — the destination cap must be the binding bound for any round a receiver accepts (WR-01)",
+			maxListingChunks, want, maxListingDestinations, maxSyncChunks,
+		)
+	}
+}
+
+// TestListing_broadcastNeverStarved proves the WR-01 reservation: with every
+// targeted destination slot already in flight, the periodic broadcast round is
+// still admitted (the destination cap exempts it), and it drains AHEAD of the
+// targeted FIFOs instead of waiting behind their entire queued work.
+func TestListing_broadcastNeverStarved(t *testing.T) {
+	t.Parallel()
+	// A long peer_timeout keeps all 32 targeted rows (and their FIFOs) alive
+	// across the periodic-trigger jump this test makes.
+	core, _, now := newListingCore(t,
+		Config{SyncChunkBytes: listingTestBudget, PeerTimeout: time.Hour}, listingTestChunks)
+	var out port.Outbox
+	for i := range maxListingDestinations {
+		id := uint16(i + 2) // clear of the local node id
+		core.HandleDatagram(now, listingHello(id, listingRunID(i, 0), fmt.Sprintf("fill-%02d", i)), &out)
+	}
+	out.Drain()
+	if got := len(core.listingByDst); got != maxListingDestinations {
+		t.Fatalf("%d targeted triggers left %d in-flight FIFOs, want %d", maxListingDestinations, got, maxListingDestinations)
+	}
+
+	// The next periodic tick must admit the broadcast despite the full
+	// destination table. The jump clears the sync interval plus the timer's
+	// positive-only jitter (at most a tenth of the interval).
+	broadcastAt := now.Add(defaultSyncInterval + defaultSyncInterval/jitterDivisor)
+	core.Advance(broadcastAt, &out)
+	if _, admitted := core.listingByDst[broadcastDst()]; !admitted {
+		t.Fatalf("the periodic broadcast round was refused with %d targeted FIFOs in flight (ListingDropped %d) — a listing flood must never starve the periodic round (WR-01)",
+			len(core.listingByDst), core.ListingDropped())
+	}
+	if got := core.ListingDropped(); got != 0 {
+		t.Fatalf("ListingDropped() = %d after the periodic trigger under the destination cap, want 0 — the broadcast is exempt", got)
+	}
+
+	// Drain priority: the pacer's next slot emits the broadcast round, never a
+	// targeted unicast queued ahead of it.
+	first := dataSyncEmission(t, out.Drain())
+	if !first.Broadcast {
+		t.Fatalf("the first listing emission after the periodic trigger is a targeted unicast to %q, want the broadcast round to drain first (WR-01)", first.To)
+	}
+}
+
+// dataSyncEmission returns the first DataSync message among drained,
+// failing the test when the batch carries none.
+func dataSyncEmission(t *testing.T, drained []port.Outbound) port.Outbound {
+	t.Helper()
+	for _, ob := range drained {
+		if _, ok := ob.Msg.(port.DataSync); ok {
+			return ob
+		}
+	}
+	t.Fatal("the drained batch carries no DataSync emission")
+	return port.Outbound{}
+}
+
+// TestListing_refusedFirstSeenIsRearmed proves the WR-01 re-arm: a first-seen
+// Hello refused by the destination cap is kept (not lost for the run) and the
+// refused peer still receives its complete targeted listing once the drain
+// frees a slot — even though its next Hello would take the repeat branch and
+// never ask again.
+func TestListing_refusedFirstSeenIsRearmed(t *testing.T) {
+	t.Parallel()
+	core, _, now := newListingCore(t, Config{SyncChunkBytes: listingTestBudget}, listingTestChunks)
+	var out port.Outbox
+	for i := range maxListingDestinations {
+		id := uint16(i + 2)
+		core.HandleDatagram(now, listingHello(id, listingRunID(i, 0), fmt.Sprintf("fill-%02d", i)), &out)
+	}
+	out.Drain()
+
+	const refusedID = uint16(maxListingDestinations + 2)
+	const refusedHandle = "late-joiner"
+	core.HandleDatagram(now, listingHello(refusedID, listingRunID(99, 0), refusedHandle), &out)
+	out.Drain()
+	if got := core.ListingDropped(); got != 1 {
+		t.Fatalf("ListingDropped() = %d after the cap-refused first-seen Hello, want 1", got)
+	}
+	if got := len(core.listingOwed); got != 1 {
+		t.Fatalf("the refused first-seen listing left %d owed entries, want 1 — a refusal must be re-armed, not lost (WR-01)", got)
+	}
+	if core.listingByDst[listingDst{nodeID: refusedID, runID: listingRunID(99, 0)}] != nil {
+		t.Fatal("the refused first-seen listing was admitted anyway, want it waiting for capacity")
+	}
+
+	drained, _ := drainListingQueues(core, now)
+	got := listingSyncsTo(drained, refusedHandle)
+	if len(got) != listingTestChunks {
+		t.Fatalf("the re-armed first-seen listing delivered %d chunks to %q, want the full %d-chunk round (WR-01)",
+			len(got), refusedHandle, listingTestChunks)
+	}
+	if indices := listingChunkIndices(got); !slices.Equal(indices, []uint32{1, 2, 3, 4}) {
+		t.Fatalf("the re-armed round emitted chunk indices %v, want the complete 1..%d sequence", indices, listingTestChunks)
+	}
+	if got := len(core.listingOwed); got != 0 {
+		t.Fatalf("%d owed listings survived the drain, want 0", got)
+	}
+}
+
+// listingSyncsTo returns every unicast DataSync chunk of drained addressed to
+// handle, skipping the other destinations' chunks — the per-destination
+// filter the multi-destination re-arm test needs.
+func listingSyncsTo(drained []port.Outbound, handle string) []port.DataSync {
+	var syncs []port.DataSync
+	for _, ob := range drained {
+		if ob.Broadcast || ob.To != handle {
+			continue
+		}
+		if msg, ok := ob.Msg.(port.DataSync); ok {
+			syncs = append(syncs, msg)
+		}
+	}
+	return syncs
+}

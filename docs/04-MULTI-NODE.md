@@ -24,13 +24,27 @@ listing work is one shared chunk build, not one store copy per peer
 and the store generation is unchanged — one `Versions()` copy per build age,
 not per trigger or per peer).
 
+The periodic broadcast reserves its place in both listing caps, so targeted
+traffic can never refuse it, and it drains ahead of every targeted FIFO
+(`Core.enqueueListing`, `Core.drainListings`): a flood of first-seen/restart
+tests can delay the broadcast round by at most one pacing slot. A targeted
+listing the caps refuse is kept for re-arm and enqueued as soon as the drain
+frees capacity (`Core.oweListing`, `Core.retryOwedListings`) — a refusal
+delays a first-seen or restart listing, it no longer loses it for that run.
+
 Discovery adds targeted traffic on top. The first `Hello` from an unknown
 `node_id` — a join, or a peer returning after `peer_timeout` — receives
-exactly one unicast targeted listing; a restart (a new `run_id`) receives
+exactly one unicast identity echo (a `Hello`, so the receiver holds our peer
+row before it trusts the listing: a received listing is bound to a known
+`(node_id, run_id)` row, CR-01) plus exactly one unicast targeted listing; a
+restart (a new `run_id`) receives
 one more (`Core.handleHello`; pinned by
 `internal/app/repl/restart_test.go#TestRestart_firstHelloExactlyOneListing`,
 `#TestRestart_runIDChangeTriggersFullSync` and
-`#TestRestart_returningAfterEvictionGetsListing`). A node joining an N-node
+`#TestRestart_returningAfterEvictionGetsListing`). The echo is bounded — the
+receiver of an echo it did not ask for answers with its own echo and listing,
+and that reply reaches us as a repeat Hello — so each side echoes at most
+once per pair. A node joining an N-node
 segment therefore receives up to N−1 targeted listings from its peers plus
 the N−1 periodic listings, while each sender still emits only its own chunk
 stream.
@@ -104,10 +118,23 @@ silently.
 | `maxSyncEntriesPerStream` | 65 536 | one round's accumulated key→version entries | a single hostile round is dropped whole before it can fill memory |
 | `maxSyncEntriesTotal` | 131 072 | all partial rounds' retained entries | sized for the documented 20 000-key scale with headroom |
 | `maxSyncChunks` | 65 536 | an accepted `chunk_count` | a worst-case 20 000-key round at one entry per chunk fits |
-| `maxListedKeysTotal` | 131 072 | the retained per-peer listed-key union | same 20 000-key scale with headroom; overflow evicts whole peer sets in LRU order so the union, refcounts and retained total shrink together |
-| `maxListingDestinations` | 32 | in-flight listing FIFOs | one per known peer plus the broadcast round; room for a 32-node segment |
-| `maxListingChunks` | 65 536 | queued listing chunk work across destinations | one worst-case 20 000-key round fits whole; a trigger crossing the bound is refused whole |
+| `maxListedKeysTotal` | 131 072 | the retained per-peer listed-key union | same 20 000-key scale with headroom; overflow evicts whole peer sets in LRU order so the union, refcounts and retained total shrink together. A set a peer has not republished for two `sync_interval`s is released too (CR-01): retention is bounded in time as well as size |
+| `maxListingDestinations` | 32 | in-flight TARGETED listing FIFOs | one per known peer; room for a 32-node segment. The periodic broadcast round is exempt — it reserves its own FIFO |
+| `maxListingChunks` | 2 162 688 | queued listing chunk work across destinations | `(32 + 1) × 65 536`: one full receiver-acceptable round per targeted destination plus the reserved broadcast round, so the destination cap — not this bound — refuses a documented-scale round. The count is virtual: every FIFO points at one shared build |
 | `seenRunsCap` | 8 | per-peer history of previous `run_id`s | bounds hostile identity flapping; the oldest entry is forgotten when the ring wraps |
+
+**Listing drain time (WR-01).** The caps bound the queue, not the wire time.
+One round is `round_chunks ÷ sync_response_rate`; at the 500/s default a
+20 000-key store costs ~690 chunks with ordinary keys (~1.4 s), while the
+protocol's worst case — keys long enough that one entry fills a chunk
+(~20 000 chunks) — costs 40 s. The broadcast round drains ahead of targeted
+rounds, so its own round completes within that time of its admission; the
+last of a full destination table (32 targeted rounds plus the broadcast)
+costs the sum of the rounds ahead of it, ~45 s at the ordinary-key scale and
+~22 minutes at the one-entry-per-chunk worst case. When a round takes longer
+than `sync_interval`, the next periodic trigger finds the broadcast still in
+flight and is a no-op, so the effective broadcast period becomes the round
+time; `sync_interval` is the floor, never a guarantee, for a large store.
 
 The counters are `Core.SyncStreamDropped` (streams the entry bounds
 dropped), `Core.ListedKeysEvicted` (keys released from the retained union,

@@ -110,23 +110,33 @@ const (
 	// dedupe identity (T-3-21), and the drop is counted in EgressDropped.
 	maxEgressEntries = 32768
 
-	// maxListingDestinations bounds the in-flight listing destinations — the
-	// concurrent targeted and periodic FIFOs (CR-01, T-4-23). One FIFO per
-	// known peer plus the broadcast round is the healthy shape; a hostile
+	// maxListingDestinations bounds the in-flight TARGETED listing
+	// destinations — the concurrent first-seen and restart FIFOs (CR-01,
+	// T-4-23). One FIFO per known peer is the healthy shape; a hostile
 	// segment can claim at most this many distinct (node_id, run_id)
 	// identities, and every further trigger is refused and counted instead of
 	// minting a queue entry (the destination is never the datagram's source
 	// handle, so a spoofed port buys nothing, T-4-25). The value leaves room
-	// for a 32-node segment.
+	// for a 32-node segment. The periodic broadcast round is NOT subject to
+	// this bound: it reserves its own FIFO and chunk work (WR-01), so no
+	// volume of targeted triggers can refuse the only listing every peer
+	// receives.
 	maxListingDestinations = 32
 
 	// maxListingChunks bounds the total queued listing chunk work across every
-	// destination (CR-01, T-4-23): a worst-case 20 000-key round at one entry
-	// per chunk (20 000 chunks) fits whole, with headroom. A trigger that
-	// would cross the bound is refused whole — never partially enqueued — and
-	// counted, so a hostile restart flood cannot accumulate listings faster
-	// than the shared pacer drains them.
-	maxListingChunks = 65536
+	// destination (CR-01, T-4-23, WR-01): one full worst-case round for each
+	// targeted destination PLUS the reserved broadcast round. The count is
+	// virtual — every FIFO holds one pointer to the shared build (CR-01), so a
+	// full queue costs one build plus O(destinations) bookkeeping, never
+	// per-chunk memory. Sizing it as (destinations+1) × the receiver's
+	// chunk ceiling is what makes the destination cap, not this bound, the
+	// binding limit for any round a receiver will accept (chunk_count must be
+	// at or under maxSyncChunks, T-4-02): a documented-scale round can no
+	// longer be refused because other destinations filled a smaller pool. A
+	// trigger that would cross the bound is refused whole — never partially
+	// enqueued — counted, and (for a targeted first-seen/restart trigger)
+	// re-armed for a later Advance (WR-01).
+	maxListingChunks = (maxListingDestinations + 1) * maxSyncChunks
 
 	// maxSyncStreams bounds the partial-listing accumulator: a peer may send
 	// many distinct sync_ids with missing chunks, so the number of retained
@@ -551,6 +561,14 @@ type listingFIFO struct {
 	emitted    int
 }
 
+// owedListing is one targeted-listing trigger the caps refused, kept for a
+// later re-arm (WR-01): the destination it was built for and the rotation the
+// trigger asked for. The set lives in Core.listingOwed.
+type owedListing struct {
+	dst      listingDst
+	rotation uint64
+}
+
 // scanDiscardKey identifies one WARN rate-limit slot: a datagram's node_id
 // and its discard class (D-06/D-07, T-4-04). The peer identity belongs in the
 // key — a duplicate-node-id or foreign-version flood from one peer must not
@@ -741,6 +759,15 @@ type Core struct {
 	syncRotation   uint64
 	build          *listingBuild
 	listingDropped uint64
+
+	// listingOwed is the retry set of targeted listings a cap refused
+	// (WR-01): each entry keeps the destination and the rotation the trigger
+	// asked for, so a refusal delays a first-seen or restart listing instead
+	// of losing it for the run. The set is bounded by maxListingDestinations
+	// (a refused reservation past that is dropped and stays counted), and the
+	// retry runs at the end of every Advance once the drain has freed
+	// capacity. Entry order is owe order — the deterministic retry order.
+	listingOwed []owedListing
 
 	// recordQueue is the paced record-send FIFO fed by the discovery flush and
 	// the retransmit scanner; recordQueued is its (key, version) dedupe set and
@@ -1325,33 +1352,14 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 		}
 		c.dropPeerSyncStreams(in.NodeID)
 		c.dropListing(listingDst{nodeID: in.NodeID, runID: known.runID})
+		c.dropOwedPeer(in.NodeID)
 		known.pushSeenRun(known.runID)
 	}
 	known.handle = in.Source
 	known.runID = in.RunID
 	known.lastHello = now
 	c.peers[in.NodeID] = known
-	// One targeted listing per (node_id, run_id) destination. Only a restart
-	// advances the rotation: the first-seen round is round 0, and the repeated
-	// rounds that must cover the key space are the restarts.
-	//
-	// The listing's receiver must already hold this node's peer row, or the
-	// listing binding (CR-01) discards every part: a first-seen or restarting
-	// peer has not necessarily heard our Hello yet, so the identity half of
-	// "one targeted listing toward a newly seen peer" travels with it — one
-	// unicast Hello to the same handle, flushed ahead of the paced listing
-	// chunks. Without this echo the targeted listing would be dropped as
-	// unbound and the joiner would wait for our next periodic Hello PLUS a
-	// periodic listing, reintroducing the sync_interval term D-04 removes.
-	// The exchange terminates: a receiver that has not yet learned us answers
-	// our echo with its own echo (and listing), and that reply reaches us as a
-	// repeat Hello — the row it names is the one the original Hello created —
-	// so each side echoes at most once per pair.
-	out.Unicast(in.Source, port.Hello{})
-	if c.enqueueListing(now, listingDst{nodeID: in.NodeID, runID: in.RunID}, known.rotation) && remembered {
-		known.rotation++
-		c.peers[in.NodeID] = known
-	}
+	c.greetAndList(now, in, known, remembered, out)
 	if remembered || !discovery {
 		return
 	}
@@ -1365,6 +1373,43 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 		c.ledgerAdd(in.NodeID, pk)
 		c.enqueueRecordSend(now, pk, false)
 	}
+}
+
+// greetAndList announces this node to a first-seen or restarting peer and
+// triggers the one targeted listing it is owed: the identity echo first, then
+// the listing FIFO, or — when the caps refuse it — an owed entry a later
+// Advance re-arms (WR-01). The row's rotation advances only on a restarted
+// peer whose round was actually admitted, so a refused round never claims
+// coverage it did not provide; the updated row is written back to the table.
+//
+//nolint:revive // flag-parameter: restart is the caller's already-decided branch (first-seen vs run change), not a second mode this helper chooses.
+func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, restart bool, out *port.Outbox) {
+	// The listing's receiver must already hold this node's peer row, or the
+	// listing binding (CR-01) discards every part: a first-seen or restarting
+	// peer has not necessarily heard our Hello yet, so the identity half of
+	// "one targeted listing toward a newly seen peer" travels with it — one
+	// unicast Hello to the same handle, flushed ahead of the paced listing
+	// chunks. Without this echo the targeted listing would be dropped as
+	// unbound and the joiner would wait for our next periodic Hello PLUS a
+	// periodic listing, reintroducing the sync_interval term D-04 removes.
+	// The exchange terminates: a receiver that has not yet learned us answers
+	// our echo with its own echo (and listing), and that reply reaches us as a
+	// repeat Hello — the row it names is the one the original Hello created —
+	// so each side echoes at most once per pair.
+	out.Unicast(in.Source, port.Hello{})
+	dst := listingDst{nodeID: in.NodeID, runID: in.RunID}
+	if !c.enqueueListing(now, dst, known.rotation) {
+		// A caps-refused first-seen or restart listing is re-armed, not lost
+		// (WR-01): the row was already updated, so this peer's next Hello takes
+		// the repeat branch and would never trigger the listing again.
+		c.oweListing(dst, known.rotation)
+		return
+	}
+	if !restart {
+		return
+	}
+	known.rotation++
+	c.peers[in.NodeID] = known
 }
 
 // applyRemote resolves one inbound DataReplication against the store's
@@ -2115,6 +2160,7 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 	}
 	c.syncListing(now)
 	c.drainListings(now, out)
+	c.retryOwedListings(now)
 	c.expireListedKeys(now)
 	c.evictPeers(now, out)
 	c.scanRetransmit(now)
@@ -2185,24 +2231,43 @@ func (c *Core) syncListing(now time.Time) {
 // round counter — the single enqueue function the first-seen Hello, the
 // restart branch and the periodic broadcast all share (no second
 // implementation). It is a no-op when dst already has a FIFO in flight (one
-// in-flight listing per destination, T-3-23), refuses when the queue is at its
-// destination or queued-chunk bound (counting the drop, T-4-23), and
-// otherwise appends the FIFO with startIndex = rotation % len(chunks). It
+// in-flight listing per destination, T-3-23), refuses when dst's caps are
+// full (counting the drop, T-4-23), and otherwise appends the FIFO with
+// startIndex = rotation % len(chunks). The periodic broadcast round is exempt
+// from the destination cap and its chunk work is reserved in
+// maxListingChunks, so a targeted flood can never refuse it (WR-01). It
 // reports whether a FIFO was enqueued; a refused or duplicate trigger advances
-// nothing.
+// nothing. A refused TARGETED trigger is re-armed by its caller
+// ([Core.oweListing]); the broadcast retries at its next periodic tick.
 func (c *Core) enqueueListing(now time.Time, dst listingDst, rotation uint64) bool {
 	if _, busy := c.listingByDst[dst]; busy {
 		return false
 	}
-	if len(c.listingByDst) >= maxListingDestinations {
-		c.listingDropped++
-		return false
-	}
 	build := c.listingBuild(now)
-	if c.listingCount+len(build.chunks) > maxListingChunks {
+	if !c.listingFits(dst, len(build.chunks)) {
 		c.listingDropped++
 		return false
 	}
+	c.admitListing(now, dst, rotation, build)
+	return true
+}
+
+// listingFits reports whether a round of chunks toward dst fits the caps dst
+// is subject to. A targeted destination must leave the broadcast round's
+// reserved chunk work untouched; the broadcast itself skips the destination
+// cap (its FIFO slot is reserved) and fits because maxListingChunks reserves
+// one full round beyond the targeted maximum.
+func (c *Core) listingFits(dst listingDst, chunks int) bool {
+	if dst != broadcastDst() && len(c.listingByDst) >= maxListingDestinations {
+		return false
+	}
+	return c.listingCount+chunks <= maxListingChunks
+}
+
+// admitListing installs one fitted listing FIFO at the caller's rotation and
+// accounts its chunk work. The first enqueue after an idle queue clamps the
+// shared pacer slot to now, so its first chunk is immediate.
+func (c *Core) admitListing(now time.Time, dst listingDst, rotation uint64, build *listingBuild) {
 	//nolint:gosec // G115: the modulus is len(build.chunks), an int, so the result fits.
 	start := int(rotation % uint64(len(build.chunks)))
 	if c.listingCount == 0 {
@@ -2211,7 +2276,68 @@ func (c *Core) enqueueListing(now time.Time, dst listingDst, rotation uint64) bo
 	c.listingByDst[dst] = &listingFIFO{build: build, dst: dst, startIndex: start}
 	c.listingOrder = append(c.listingOrder, dst)
 	c.listingCount += len(build.chunks)
-	return true
+}
+
+// oweListing keeps a refused targeted listing for a later re-arm (WR-01) — a
+// refusal delays a first-seen or restart listing, it never loses it. One entry
+// per destination (a repeated refusal is one wait), and the retry set itself is
+// bounded by maxListingDestinations, so a hostile trigger flood cannot grow it
+// past the reservation the FIFO cap already models; past the bound the trigger
+// stays counted and lost, exactly as before the re-arm existed.
+func (c *Core) oweListing(dst listingDst, rotation uint64) {
+	for _, owed := range c.listingOwed {
+		if owed.dst == dst {
+			return
+		}
+	}
+	if len(c.listingOwed) >= maxListingDestinations {
+		return
+	}
+	c.listingOwed = append(c.listingOwed, owedListing{dst: dst, rotation: rotation})
+}
+
+// retryOwedListings re-arms every owed targeted listing the caps now admit, in
+// owe order (the deterministic order). An entry whose peer row vanished or
+// whose run changed is dropped — a listing is only meaningful toward the live
+// identity — and a destination that is already served in flight is dropped
+// (the in-flight round covers it). The first entry the caps still refuse stops
+// the pass: capacity is shared, so later entries would fail too, and ordering
+// by owe time keeps the delay fair.
+func (c *Core) retryOwedListings(now time.Time) {
+	for i := 0; i < len(c.listingOwed); {
+		owed := c.listingOwed[i]
+		if known, ok := c.peers[owed.dst.nodeID]; !ok || known.runID != owed.dst.runID {
+			c.listingOwed = c.removeOwedAt(i)
+			continue
+		}
+		if _, busy := c.listingByDst[owed.dst]; busy {
+			c.listingOwed = c.removeOwedAt(i)
+			continue
+		}
+		build := c.listingBuild(now)
+		if !c.listingFits(owed.dst, len(build.chunks)) {
+			return
+		}
+		c.admitListing(now, owed.dst, owed.rotation, build)
+		c.listingOwed = c.removeOwedAt(i)
+	}
+}
+
+// removeOwedAt deletes the i-th owed entry and returns the shortened slice.
+func (c *Core) removeOwedAt(i int) []owedListing {
+	return append(c.listingOwed[:i], c.listingOwed[i+1:]...)
+}
+
+// dropOwedPeer removes every owed listing for nodeID — the peer-eviction and
+// restart cleanup, so no dead identity's round is ever re-armed.
+func (c *Core) dropOwedPeer(nodeID uint16) {
+	for i := 0; i < len(c.listingOwed); {
+		if c.listingOwed[i].dst.nodeID == nodeID {
+			c.listingOwed = c.removeOwedAt(i)
+			continue
+		}
+		i++
+	}
 }
 
 // listingBuild returns the shared listing build for now: a cached build is
@@ -2249,12 +2375,7 @@ func (c *Core) dropListing(dst listingDst) {
 	}
 	c.listingCount -= len(q.build.chunks) - q.emitted
 	delete(c.listingByDst, dst)
-	for i, d := range c.listingOrder {
-		if d == dst {
-			c.listingOrder = append(c.listingOrder[:i], c.listingOrder[i+1:]...)
-			break
-		}
-	}
+	c.listingOrder = removeListingDst(c.listingOrder, dst)
 }
 
 // chunkOrdinal returns the 0-based chunk position as the wire's 1-based
@@ -2273,21 +2394,27 @@ func syncChunkCount(chunks [][]port.SyncEntry) uint32 {
 }
 
 // drainListings emits queued listing chunks at the shared pacer cadence
-// (D-01): while a listing slot is due, the FIFO at the head of the
-// destination order emits one datagram carrying its shared build's sync_id and
-// chunk_count and the chunk at its own rotated position — broadcast for the
-// zero destination, unicast at the peer row's current handle otherwise — and
-// the slot advances by the jittered interval. Chunk indices are the chunk's
-// ORIGINAL 1-based position in the unrotated build, so rotation only reorders
-// emission and a receiver can still recognize completeness. The clamp shape is
-// drainEgress': an Advance that arrives late emits one datagram, never a
-// backlog burst, and the next slot is measured from the actual emission time.
-// A destination whose FIFO has emitted every chunk, or whose peer row
-// disappeared, leaves the order, so its in-flight mark clears exactly when its
-// listing completes (T-3-23).
+// (D-01): while a listing slot is due, one datagram carrying its shared
+// build's sync_id and chunk_count and the chunk at its own rotated position
+// emits — broadcast for the zero destination, unicast at the peer row's
+// current handle otherwise — and the slot advances by the jittered interval.
+// The broadcast round drains AHEAD of every targeted FIFO (WR-01): it is the
+// only listing every peer receives unprompted, so a flood of first-seen and
+// restart rounds can delay it by at most one pacing slot, never by their
+// entire queued work. Chunk indices are the chunk's ORIGINAL 1-based position
+// in the unrotated build, so rotation only reorders emission and a receiver
+// can still recognize completeness. The clamp shape is drainEgress': an
+// Advance that arrives late emits one datagram, never a backlog burst, and the
+// next slot is measured from the actual emission time. A destination whose
+// FIFO has emitted every chunk, or whose peer row disappeared, leaves the
+// order, so its in-flight mark clears exactly when its listing completes
+// (T-3-23).
 func (c *Core) drainListings(now time.Time, out *port.Outbox) {
 	for c.listingCount > 0 && !now.Before(c.nextListingAt) {
 		dst := c.listingOrder[0]
+		if _, serving := c.listingByDst[broadcastDst()]; serving {
+			dst = broadcastDst()
+		}
 		q := c.listingByDst[dst]
 		idx := (q.startIndex + q.emitted) % len(q.build.chunks)
 		msg := port.DataSync{
@@ -2306,7 +2433,7 @@ func (c *Core) drainListings(now time.Time, out *port.Outbox) {
 		c.listingCount--
 		if q.emitted == len(q.build.chunks) {
 			delete(c.listingByDst, dst)
-			c.listingOrder = c.listingOrder[1:]
+			c.listingOrder = removeListingDst(c.listingOrder, dst)
 		}
 		if now.After(c.nextListingAt) {
 			c.nextListingAt = now
@@ -2314,6 +2441,19 @@ func (c *Core) drainListings(now time.Time, out *port.Outbox) {
 		c.listingJitterSeq++
 		c.nextListingAt = c.nextListingAt.Add(c.jitteredSpacing(c.syncResponseInterval, c.listingJitterSeq))
 	}
+}
+
+// removeListingDst removes dst from the drain order, preserving the order of
+// the rest — the completed-FIFO cleanup. The broadcast may complete while
+// other FIFOs wait behind it (drain priority, WR-01), so completion is never
+// assumed to be the head.
+func removeListingDst(order []listingDst, dst listingDst) []listingDst {
+	for i, d := range order {
+		if d == dst {
+			return append(order[:i], order[i+1:]...)
+		}
+	}
+	return order
 }
 
 // jitterOffset returns a deterministic offset in [0, span) derived from the
@@ -2447,6 +2587,7 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 	}
 	for _, id := range expired {
 		c.dropListing(listingDst{nodeID: id, runID: c.peers[id].runID})
+		c.dropOwedPeer(id)
 		delete(c.peers, id)
 		// The evicted peer's retained listing and partial rounds go with it:
 		// the mirror must never serve a dead peer's keys, and the union must
@@ -2845,11 +2986,12 @@ func (c *Core) EgressDropped() uint64 {
 	return c.egressDropped
 }
 
-// ListingDropped returns the number of listing triggers the destination or
-// queued-chunk cap refused (CR-01, T-4-23) — the observability seam for the
-// listing drop policy, mirroring EgressDropped: every refused first-seen or
-// restart listing is counted once, and a refused trigger leaves no FIFO
-// behind.
+// ListingDropped returns the number of targeted listing triggers a cap
+// refused (CR-01, T-4-23, WR-01) — the observability seam for the listing
+// drop policy, mirroring EgressDropped: every refused first-seen or restart
+// listing is counted once, and the refused trigger is re-armed for a later
+// Advance, so the count measures back-pressure rather than permanent loss (a
+// trigger refused past the retry set's bound is lost and stays counted).
 func (c *Core) ListingDropped() uint64 {
 	return c.listingDropped
 }
