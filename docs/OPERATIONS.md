@@ -92,9 +92,15 @@ write confirmed by node A is immediately visible on A, and visible on every
 peer within the convergence bounds above. Clients that must read what they
 just wrote keep talking to the same node.
 
-A restarted node serves reads immediately (reads are never gated by
-startup), but it may briefly miss peer writes that happened while it was
-down, until replication catches up — bounded by the same convergence bounds.
+A node stays closed — reads and writes both answer `Unavailable` — until it
+has received a complete key listing from a peer or its startup gate elapses
+(health stays `NOT_SERVING` until then). A node that loaded records from
+disk uses `--startup-gate` (environment twin `SUPKV_STARTUP_GATE`, default
+1 s); a node whose disk was empty uses `--startup-gate-empty` (environment
+twin `SUPKV_STARTUP_GATE_EMPTY`, default 60 s, empty-disk nodes only), so a
+cold node waits longer for a peer. A restarted node may briefly miss peer
+writes that happened while it was down, until replication catches up —
+bounded by the same convergence bounds.
 
 ## Not a lock service
 
@@ -146,7 +152,7 @@ The endpoint serves:
   message type), `supkv_replication_datagrams_retransmitted_total`,
   `supkv_datagrams_discarded_total` (by classification: `bad_crc`,
   `undecodable`, `bad_proto_version`, `own_broadcast`,
-  `duplicate_node_id`), `supkv_merges_conflicts_total`,
+  `duplicate_node_id`, `bad_sync_header`), `supkv_merges_conflicts_total`,
   `supkv_clock_drift_warnings_total`, `supkv_dumps_duration_seconds`,
   `supkv_dumps_total`, `supkv_dumps_errors_total` — plus the standard
   `go_*`/`process_*` runtime families;
