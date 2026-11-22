@@ -38,6 +38,12 @@ validated: "2026-11-22"
 
 ## Per-Task Verification Map
 
+> **Population:** the rows below stay the template until execution. The map is filled by the
+> validate-phase workflow after the 12 plans have run, from each task's `<verify><automated>`
+> block and its recorded status — planning has not run those commands, so a pre-filled row would
+> invent a result. The plans' verify blocks are the authoritative per-task command list until
+> then.
+
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | {N}-01-01 | 01 | 1 | PERSIST-{XX} | T-{N}-01 / — | {expected secure behavior or "N/A"} | unit | `{command}` | ✅ / ❌ W0 | ⬜ pending |
