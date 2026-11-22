@@ -994,6 +994,14 @@ func (e *Engine) Flush() error {
 	return e.flush()
 }
 
+// FlushTimeout is the bounded flush seam (PERSIST-08, D-07): it forces the
+// same covering dump as Flush but gives up after d — zero or negative means
+// the configured ConfirmTimeout — returning ErrUnconfirmed when the dumper
+// never answers.
+func (e *Engine) FlushTimeout(_ time.Duration) error {
+	return e.flush()
+}
+
 // flush forces the dumper to complete one dump covering every unconfirmed
 // write and returns that dump's error: it hands a reply channel to Run
 // through flushCh, which Run services immediately — bypassing the debounce

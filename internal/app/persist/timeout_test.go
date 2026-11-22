@@ -53,6 +53,8 @@ type timeoutDumpPort struct {
 	mu        sync.Mutex
 	saves     [][]byte
 	snapshots map[string][]byte
+	installed map[string][]byte
+	copies    int
 }
 
 // newTimeoutDumpPort returns a fake whose every SaveStream parks until
@@ -62,6 +64,7 @@ func newTimeoutDumpPort() *timeoutDumpPort {
 		started:   make(chan struct{}),
 		release:   make(chan struct{}),
 		snapshots: make(map[string][]byte),
+		installed: make(map[string][]byte),
 	}
 }
 
@@ -93,6 +96,7 @@ func (*timeoutDumpPort) Load(_ time.Time, _ func([]byte) error) port.LoadResult 
 func (p *timeoutDumpPort) CreateSnapshot(name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.copies++
 	if len(p.saves) == 0 {
 		return persist.ErrDumpFailed
 	}
@@ -104,6 +108,9 @@ func (p *timeoutDumpPort) CreateSnapshot(name string) error {
 func (p *timeoutDumpPort) ReadSnapshot(name string) ([]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if data, ok := p.installed[name]; ok {
+		return bytes.Clone(data), nil
+	}
 	data, ok := p.snapshots[name]
 	if !ok {
 		return nil, errNoTimeoutSnapshot
@@ -124,6 +131,20 @@ func (p *timeoutDumpPort) saveCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.saves)
+}
+
+// copyCount returns the number of CreateSnapshot attempts.
+func (p *timeoutDumpPort) copyCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.copies
+}
+
+// installSnapshot supplies a ReadSnapshot fixture for the Restore proof.
+func (p *timeoutDumpPort) installSnapshot(name string, data []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.installed[name] = bytes.Clone(data)
 }
 
 // lastSave returns the latest completed generation.
@@ -284,4 +305,159 @@ func TestEngine_timeoutThenDumpSuccess(t *testing.T) {
 			t.Errorf("DumpStats().Unconfirmed = %d, want 1 (only the first write timed out)", got)
 		}
 	})
+}
+
+// TestFlush_timeout proves Flush and FlushTimeout are bounded: Flush uses
+// the confirmation timeout, an explicit FlushTimeout uses its own deadline,
+// and both return the wrapped ErrUnconfirmed when the dumper never answers.
+func TestFlush_timeout(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newTimeoutEngine(persist.Config{ConfirmTimeout: 2 * time.Second})
+		stop := startDumper(t, eng)
+		defer stop()
+		defer dumps.releaseAll()
+
+		hungWrite(t, eng, dumps, 2*time.Second)
+
+		start := time.Now()
+		flushDone := make(chan error, 1)
+		go func() { flushDone <- eng.Flush() }()
+		var err error
+		select {
+		case err = <-flushDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Flush() did not return within its confirmation timeout")
+		}
+		if !errors.Is(err, persist.ErrUnconfirmed) {
+			t.Fatalf("Flush() error = %v, want ErrUnconfirmed", err)
+		}
+		if want := start.Add(2 * time.Second); !time.Now().Equal(want) {
+			t.Errorf("Flush() returned at %v, want exactly %v", time.Now(), want)
+		}
+
+		explicit := time.Now()
+		go func() { flushDone <- eng.FlushTimeout(500 * time.Millisecond) }()
+		select {
+		case err = <-flushDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("FlushTimeout(500ms) did not return within its deadline")
+		}
+		if !errors.Is(err, persist.ErrUnconfirmed) {
+			t.Fatalf("FlushTimeout(500ms) error = %v, want ErrUnconfirmed", err)
+		}
+		if want := explicit.Add(500 * time.Millisecond); !time.Now().Equal(want) {
+			t.Errorf("FlushTimeout(500ms) returned at %v, want exactly %v", time.Now(), want)
+		}
+	})
+}
+
+// TestSnapshot_timeout proves Snapshot is bounded by the confirmation
+// timeout and copies nothing when the forced flush cannot complete: state
+// that is not confirmed on disk never becomes a recovery point.
+func TestSnapshot_timeout(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newTimeoutEngine(persist.Config{ConfirmTimeout: 2 * time.Second})
+		stop := startDumper(t, eng)
+		defer stop()
+		defer dumps.releaseAll()
+
+		hungWrite(t, eng, dumps, 2*time.Second)
+		start := time.Now()
+		snapDone := make(chan error, 1)
+		go func() { snapDone <- eng.Snapshot("timeout-snap") }()
+		var err error
+		select {
+		case err = <-snapDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Snapshot() did not return within the confirmation timeout")
+		}
+		if !errors.Is(err, persist.ErrUnconfirmed) {
+			t.Fatalf("Snapshot() error = %v, want ErrUnconfirmed", err)
+		}
+		if want := start.Add(2 * time.Second); !time.Now().Equal(want) {
+			t.Errorf("Snapshot() returned at %v, want exactly %v", time.Now(), want)
+		}
+		if got := dumps.copyCount(); got != 0 {
+			t.Errorf("CreateSnapshot calls = %d, want 0 — an unconfirmed state must not be copied", got)
+		}
+	})
+}
+
+// TestRestore_timeoutReturnsPartial proves Restore keeps its partial-list
+// contract under the timeout: every replayed record is returned even though
+// the confirming flush expired, and the error is distinguishable — it
+// matches ErrUnconfirmed and never ErrDumpFailed.
+func TestRestore_timeoutReturnsPartial(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newTimeoutEngine(persist.Config{ConfirmTimeout: 2 * time.Second})
+		stop := startDumper(t, eng)
+		defer stop()
+		defer dumps.releaseAll()
+
+		dumps.installSnapshot("snap", timeoutSnapshotFixture(t, "snap-key", "snap-value"))
+
+		type restoreResult struct {
+			records []persist.RestoredRecord
+			err     error
+		}
+		restoreDone := make(chan restoreResult, 1)
+		go func() {
+			records, err := eng.Restore("snap")
+			restoreDone <- restoreResult{records: records, err: err}
+		}()
+		var result restoreResult
+		select {
+		case result = <-restoreDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Restore() did not return within the confirmation timeout")
+		}
+		if !errors.Is(result.err, persist.ErrUnconfirmed) {
+			t.Fatalf("Restore() error = %v, want ErrUnconfirmed", result.err)
+		}
+		if errors.Is(result.err, persist.ErrDumpFailed) {
+			t.Error("Restore() error matches ErrDumpFailed — the unconfirmed class must stay distinguishable")
+		}
+		if len(result.records) != 1 || result.records[0].Key != "snap-key" {
+			t.Fatalf("Restore() partial list = %+v, want exactly the replayed snap-key", result.records)
+		}
+	})
+}
+
+// hungWrite installs one record and lets its confirmation time out — the
+// prerequisite that leaves the dumper standing for the flush and snapshot
+// proofs.
+func hungWrite(t *testing.T, eng *persist.Engine, dumps *timeoutDumpPort, timeout time.Duration) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := eng.Set(timeoutWriteKey, []byte(timeoutWriteValue))
+		done <- err
+	}()
+	dumps.waitStarted()
+	synctest.Sleep(timeout + time.Millisecond)
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(timeoutGuard):
+		t.Fatal("the prerequisite write did not time out")
+	}
+	if !errors.Is(err, persist.ErrUnconfirmed) {
+		t.Fatalf("the prerequisite write error = %v, want ErrUnconfirmed", err)
+	}
+}
+
+// timeoutSnapshotFixture encodes one live record as a dump generation the Restore
+// proof can replay.
+func timeoutSnapshotFixture(t *testing.T, key, value string) []byte {
+	t.Helper()
+	rec := storage.Record{Data: []byte(value)}
+	rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, false)
+	dump, err := persist.Encode(map[string]storage.Record{key: rec}, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Encode(snapshot fixture) error = %v", err)
+	}
+	return dump
 }
