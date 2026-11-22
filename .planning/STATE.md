@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 04-04-PLAN.md
-last_updated: "2026-11-22T04:16:09.371Z"
+stopped_at: Completed 04-05-PLAN.md
+last_updated: "2026-11-22T04:32:50.915Z"
 last_activity: 2026-11-22
 last_activity_desc: Completed 04-02-PLAN.md (gated reads and listed-key RPC answers)
-state_head: 416eeb9c372dfd0195429064dc6dd2c1b80c1e3c
+state_head: 80492d90ab9e7af349c16ba9724cc5bc493e260a
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 38
+  completed_plans: 39
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Completed 04-02-PLAN.md
@@ -95,6 +95,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P02 | 5min | 2 tasks | 8 files |
 | Phase 04 P03 | 587s | 2 tasks | 16 files |
 | Phase 04 P04 | 10min | 2 tasks | 9 files |
+| Phase 04 P05 | 791s | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -248,6 +249,10 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-04: The stand harness derives --startup-gate-empty from an explicit --startup-gate in the extras, yields to an explicit empty gate, and appends the derived flag last so later-flag-wins parsing gives it precedence; the frozen R-03 30 s governs both timers without editing stand_red_test.go (T-4-13).
 - [Phase 04]: 04-04: checkStartupGates validates positivity only and names the offending flag — a zero/negative gate exits 2 through the usage path; cross-parameter relations stay Phase 7's one-point validation (T-4-12).
 - [Phase 04]: 04-04: The executed docs demo pair pins --startup-gate-empty=2s so a lost first empty listing cannot hold an empty demo node closed for the 60 s default and flake the verbatim README/EXAMPLES runs (Rule 3).
+- [Phase 04]: 04-05: The egress queue is identity-only (handle, kind, key): enqueueResponse takes the identity directly and resolveQueuedResponse builds DataRequest/DataReplication from current store state at drain time, so a queued answer pins no record bytes and no producer looks a record up before the dedupe check (CR-02).
+- [Phase 04]: 04-05: handleDataRequest probes StateStore.Version (presence only, no Data copy) and handleDataSync's local-newer branch enqueues the identity without a second Lookup; the drain owns the probe/read race and a vanished key still skips without consuming a pacer slot.
+- [Phase 04]: 04-05: applyRemote branches three ways before ApplyRemote on one point Version probe — strictly older queues exactly one unicast reply carrying the held record and sends no Ack (no merge, no conflict, ledger untouched); equal Acks with no reply (the version was absorbed at install, and the retransmission drain needs it); newer/absent applies and Acks as before (PROTO-03).
+- [Phase 04]: 04-05: The stale reply reuses the (handle, kind, key) egress identity path, so T-4-17's dedupe/amplification bound and CR-02's key-sized retention bound cover the new producer with no extra queue machinery; TestWaitIntegration_staleRecordNotAcked proves the real adapter tracker reports acked=false.
 
 ### Pending Todos
 
@@ -270,7 +275,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T04:15:59.390Z
-Stopped at: Completed 04-04-PLAN.md
+Last session: 2026-11-22T04:32:50.626Z
+Stopped at: Completed 04-05-PLAN.md
 Resume file: None
 Next action: `/gsd:verify-work 3` (or `/gsd:execute-phase 4` after the phase gate is verified) — Phase 4 (Protocol) is unblocked
