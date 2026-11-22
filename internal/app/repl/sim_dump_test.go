@@ -214,8 +214,8 @@ type simEngine struct {
 func startSimEngine(t *testing.T, sched *simnet.Scheduler, cluster *simnet.Cluster, failAttempts int) *simEngine {
 	t.Helper()
 	activity := &simActivity{}
-	port := &simDumpPort{sched: sched, activity: activity, fail: failAttempts}
-	eng := persist.New(cluster.Store(0), port, persist.Config{
+	dumps := &simDumpPort{sched: sched, activity: activity, fail: failAttempts}
+	eng := persist.New(cluster.Store(0), dumps, persist.Config{
 		Debounce: simDumpDebounce,
 		MaxWait:  simDumpMaxWait,
 		Now:      sched.Now,
@@ -224,7 +224,7 @@ func startSimEngine(t *testing.T, sched *simnet.Scheduler, cluster *simnet.Clust
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- eng.Run(ctx) }()
-	h := &simEngine{sched: sched, cluster: cluster, port: port, activity: activity, eng: eng, cancel: cancel, done: done}
+	h := &simEngine{sched: sched, cluster: cluster, port: dumps, activity: activity, eng: eng, cancel: cancel, done: done}
 	t.Cleanup(func() { h.stop(t) })
 	return h
 }
@@ -503,7 +503,8 @@ func TestScenario_dumpNotify(t *testing.T) {
 		if !stats.Loaded || stats.Outcome != port.LoadMain || stats.Decoded.ValueLimit != 1 {
 			t.Fatalf("LoadStats() = %+v, want a loaded Main with one value_limit discard", stats)
 		}
-		if _, err := eng.Get("skip/fat"); !errors.Is(err, storage.ErrNotFound) {
+		_, err = eng.Get("skip/fat")
+		if !errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("Get(skip/fat) error = %v, want ErrNotFound (skipped at load)", err)
 		}
 		rec, err := eng.Get("skip/slim")

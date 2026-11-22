@@ -845,10 +845,17 @@ func (c *Cluster) Delete(i int, key string) (storage.Record, error) {
 // function of the seed.
 func (c *Cluster) NotifyInstalled(i int, key string) storage.Record {
 	c.checkIndex(i, "NotifyInstalled")
+	now := c.sched.Now()
 	rec, ok := c.nodes[i].store.Lookup(key)
 	if !ok {
 		panic(fmt.Sprintf("simnet: Cluster.NotifyInstalled: Lookup %q on node %d: record missing", key, i))
 	}
+	var out port.Outbox
+	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
+	c.route(i, out.Drain())
+	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
+	c.drive(i, now)
+	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
 	return rec
 }
 
