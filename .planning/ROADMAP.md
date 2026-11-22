@@ -251,18 +251,35 @@ Plans:
 **Plans**: 13 plans
 
 Plans:
+**Wave 1**
 - [ ] 06-01-PLAN.md — Public API schema: move to api/supkvapi/v1, add List page fields, compatibility alias, import sweep, buf gates
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 06-02-PLAN.md — Honest wait tracer: write-time peer capture, zero-peer false, signature ripple (incl. NotifyInstalled and notifyReplayedWrite)
 - [ ] 06-03-PLAN.md — Standalone Go client example module and CI gate
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 06-04-PLAN.md — Total, path-free error mapping with adapter-side failure classes
+- [ ] 06-11-PLAN.md — Wait expansion: tracker promise set, no-growth discovery flush, regression matrix
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 06-05-PLAN.md — Keyset-paginated List over the live key→version view (owns the serialized page-budget constants)
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 06-06-PLAN.md — Durability-gate tracer: generation-tagged installs and the confirmed watermark
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 06-12-PLAN.md — Watch expansion: nil-safe startup suppression, bounded pending, Unavailable shutdown
+
+**Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 06-07-PLAN.md — Explicit gRPC transport limits and one-way health
 - [ ] 06-08-PLAN.md — Snapshot load as a full rollback with broadcast
+
+**Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 06-09-PLAN.md — docs/API.md phase-owned contract sections and doc-anchor guard
 - [ ] 06-10-PLAN.md — Documentation and registry ripple (EXAMPLES, MULTI-NODE, SPEC-DEVIATIONS, AGENTS)
-- [ ] 06-11-PLAN.md — Wait expansion: tracker promise set, no-growth discovery flush, regression matrix
-- [ ] 06-12-PLAN.md — Watch expansion: nil-safe startup suppression, bounded pending, Unavailable shutdown
+
+**Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 06-13-PLAN.md — Phase gate: frozen-file base diff, red-runner 7/7, make lint/test/buf-breaking
 
 ### Phase 7: Observability and Configuration
