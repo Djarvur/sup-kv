@@ -329,14 +329,14 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 13/13 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 13/13 | Complete    | 2026-11-22 |
 | 5. gRPC API and Binary | v1.0 | 12/12 | Complete    | 2026-11-22 |
-| 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 1/13 | In Progress |  |
+| 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete | 2026-11-16 |
 | 7. v1.0 — Docs, Examples and Release | v1.0 | 5/5 | Complete | 2026-11-18 |
 | 1. Spec Reference and Decisions | v1.1 | 4/4 | Complete | 2026-11-19 |
 | 2. Stand and Simulator as Tests | v1.1 | 17/17 | Complete | 2026-11-21 |
 | 3. Transport | v1.1 | 13/13 | Complete | 2026-11-22 |
 | 4. Protocol | v1.1 | 0/? | Not started | - |
 | 5. Persistence | v1.1 | 0/? | Not started | - |
-| 6. API and Semantics | v1.1 | 0/? | Not started | - |
+| 6. API and Semantics | v1.1 | 1/13 | In Progress | - |
 | 7. Observability and Configuration | v1.1 | 0/? | Not started | - |
 | 8. Performance | v1.1 | 0/? | Not started | - |
 | 9. Documentation and Release | v1.1 | 0/? | Not started | - |

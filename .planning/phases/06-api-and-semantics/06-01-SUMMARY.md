@@ -237,9 +237,17 @@ status: complete
 - **Fix:** `git commit --amend --no-edit` on the unpushed move commit (the plan explicitly endorses squashing Task 1 into the shared commit), then the Task 3 commit carries only `.golangci.yml`.
 - **Verification:** `git log --oneline` shows two commits over 2b36688; the tree at `6f0d1a9` lints clean (the nolints and prose deprecation are in it).
 
+**5. [Rule 1 - Bug] The ROADMAP progress updater wrote into the wrong milestone's row**
+- **Found during:** the metadata close-out, when reading the resulting `ROADMAP.md`
+- **Issue:** `gsd_run query roadmap.update-plan-progress 06` matched by phase number and rewrote the **v1.0** phase-6 row (`6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete`) as `1/13 | In Progress`, while leaving the v1.1 `6. API and Semantics` row at `0/? | Not started`. The tool reported `updated: true`, so only reading the file caught it.
+- **Fix:** the v1.0 row was restored byte-for-byte and the v1.1 row set to `1/13 | In Progress`; the tooling defect is logged in `deferred-items.md` because every later phase-6 plan will hit it.
+- **Files modified:** `.planning/ROADMAP.md`, `.planning/phases/06-api-and-semantics/deferred-items.md`
+- **Verification:** `sed -n '326,344p' .planning/ROADMAP.md` shows the v1.0 row back at `9/9 | Complete | 2026-11-16` and the v1.1 row at `1/13 | In Progress`.
+
 ### Notes
 
-- No plan task was skipped, reordered, or expanded; no file outside the plan's list was authored. `docs/SPEC-DEVIATIONS.md`, `docs/EXAMPLES.md` and `AGENTS.md` still name the old proto import path in prose — the plan's file list excludes them, so they are left for the docs-owning plan (Phase 9 / 06-13's ripple), not silently edited here.
+- No plan task was skipped, reordered, or expanded; no file outside the plan's list was authored, except the phase's `deferred-items.md` reporting ledger. `docs/SPEC-DEVIATIONS.md`, `docs/EXAMPLES.md` and `AGENTS.md` still name the old proto import path in prose — the plan's file list excludes them, so they are left for the docs-owning plan (Phase 9 / 06-13's ripple), not silently edited here.
+- Out-of-scope findings are recorded in `.planning/phases/06-api-and-semantics/deferred-items.md`: the ROADMAP handler's phase-number collision, the pre-existing stale v1.1 phase-4/5 progress rows, and the cross-package UDP port-contention flake.
 
 ## Issues Encountered
 
