@@ -1293,36 +1293,41 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 
 // TestEngine_snapshotFlushForcesDump pins D-10's "forces the current dump
 // to complete" against the real dumper loop under exact virtual time with
-// no real I/O inside the bubble (PERS-05): a dirty engine — its one save
-// failed, the write returned ErrDumpFailed — must complete a NEW dump
-// before the snapshot copies, observable as the fake's attempt count (the
-// forced save is attempt two) and the copied bytes carrying the record;
-// a Snapshot on the fully-confirmed engine that follows adds no save at
-// all (not dirty: no dump, straight copy).
+// no real I/O inside the bubble (PERS-05): a dirty engine with no dump
+// failure pending — a remote merge marks it dirty without a waiter — must
+// complete a NEW dump before the snapshot copies, observable as the fake's
+// attempt count (the forced save is attempt one, before the debounce fires)
+// and the copied bytes carrying the record; a Snapshot on the
+// fully-confirmed engine that follows adds no save at all (not dirty: no
+// dump, straight copy).
+//
+// A dirty engine whose failure ladder has a rung pending does NOT force an
+// extra attempt (WR-02, TestSnapshot_forcedFlushRespectsRetryLadder): the
+// flush answers the ladder's last classified failure immediately and the
+// armed rung completes the covering dump on its own schedule.
 func TestEngine_snapshotFlushForcesDump(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		eng, dumps := newFakeEngine()
-		dumps.failSaves = 1
 		defer startDumper(t, eng)()
-		setErr := make(chan error, 1)
-		go func() {
-			_, _, err := eng.Set("forced", []byte("forced-value"))
-			setErr <- err
-		}()
-		err := <-setErr
-		if !errors.Is(err, persist.ErrDumpFailed) {
-			t.Fatalf("Set() error = %v, want ErrDumpFailed (the dirty state)", err)
+
+		remote := storage.Record{
+			Version: version.PackVersion(1, 1, synctestNodeID+1),
+			Data:    []byte("forced-value"),
 		}
-		if got := dumps.saveCount(); got != 0 {
-			t.Fatalf("completed saves before the snapshot = %d, want 0", got)
+		if _, _, err := eng.ApplyRemote("forced", remote); err != nil {
+			t.Fatalf("ApplyRemote() error = %v, want nil", err)
 		}
-		err = eng.Snapshot("s")
+		if got := dumps.saveAttempts(); got != 0 {
+			t.Fatalf("save attempts before the snapshot = %d, want 0 — the debounce has not fired", got)
+		}
+
+		err := eng.Snapshot("s")
 		if err != nil {
 			t.Fatalf("Snapshot(s) error = %v, want nil", err)
 		}
-		if got := dumps.saveAttempts(); got != 2 {
-			t.Fatalf("save attempts = %d, want exactly 2 (one failed, one forced by the snapshot)", got)
+		if got := dumps.saveAttempts(); got != 1 {
+			t.Fatalf("save attempts = %d, want exactly 1 (forced by the snapshot before the debounce)", got)
 		}
 		if got := dumps.saveCount(); got != 1 {
 			t.Fatalf("completed saves = %d, want 1", got)
@@ -1345,8 +1350,8 @@ func TestEngine_snapshotFlushForcesDump(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Snapshot(s2) error = %v, want nil", err)
 		}
-		if got := dumps.saveAttempts(); got != 2 {
-			t.Errorf("save attempts after the confirmed snapshot = %d, want still 2 (no extra save)", got)
+		if got := dumps.saveAttempts(); got != 1 {
+			t.Errorf("save attempts after the confirmed snapshot = %d, want still 1 (no extra save)", got)
 		}
 		if !bytes.Equal(dumps.snapshot("s2"), dumps.save(0).dump) {
 			t.Error("second snapshot copy differs from the confirmed save's bytes")

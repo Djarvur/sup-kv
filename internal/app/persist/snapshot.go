@@ -21,7 +21,11 @@ import (
 // adapter (D-10, PERS-05): the snapshot file is byte-identical to the main
 // dump at creation, and a flush triggered while state is dirty forces a new
 // dump before the copy. A flush error aborts with nothing copied: state
-// that is not confirmed on disk must never become a recovery point. The
+// that is not confirmed on disk must never become a recovery point. A flush
+// requested while the dump-failure ladder has a rung pending answers that
+// ladder's last classified failure immediately instead of forcing an extra
+// attempt (WR-02), so a snapshot loop under a persistent failure cannot
+// bypass the bounded retry rate. The
 // flush is bounded by the confirmation timeout (PERSIST-08), so a hung
 // fsync answers ErrUnconfirmed rather than parking the call. Safe
 // against a dump running concurrently with the copy: the adapter's atomic

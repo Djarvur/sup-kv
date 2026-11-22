@@ -51,6 +51,7 @@ type scheduler struct {
 	mu         sync.Mutex
 	retryDelay time.Duration
 	retryAt    time.Time
+	lastErr    error
 
 	store         *storage.Store
 	dumps         port.DumpStore
@@ -106,6 +107,7 @@ func (e *Engine) Run(ctx context.Context) error {
 // contract, and this one owns the scheduler's state.
 func (s *scheduler) run(ctx context.Context) error {
 	var debounce, deadline, retry <-chan time.Time
+	var retryArmedAt time.Time
 	for {
 		var fired bool
 		select {
@@ -129,17 +131,29 @@ func (s *scheduler) run(ctx context.Context) error {
 		if fired {
 			_ = s.runDump() // the error belongs to the waiters; nobody is left to report to.
 		}
-		debounce, deadline, retry = s.rearm(deadline, retry)
+		debounce, deadline, retry, retryArmedAt = s.rearm(deadline, retry, retryArmedAt)
 	}
 }
 
 // flushDump services a flushCh request: a dirty engine dumps immediately —
 // the forced dump that must complete before a snapshot copies the main file
 // (D-10) — while a clean engine has nothing unconfirmed on disk and replies
-// nil without a redundant save.
+// nil without a redundant save. A pending retry rung owns the next attempt
+// (WR-02): while the ladder is armed a dirty engine answers with the last
+// classified failure instead of forcing an extra attempt, so a client-driven
+// snapshot loop under a persistent dump failure cannot bypass the bounded
+// ladder and drive one full Records copy and one ERROR line per request. The
+// armed rung still dumps and re-arms on its own schedule; a success resets
+// the ladder, after which a flush may force the next attempt again.
 func (s *scheduler) flushDump() error {
 	if !s.conf.isDirty() {
 		return nil
+	}
+	s.mu.Lock()
+	delay, lastErr := s.retryDelay, s.lastErr
+	s.mu.Unlock()
+	if delay > 0 && lastErr != nil {
+		return lastErr
 	}
 	return s.runDump()
 }
@@ -152,28 +166,35 @@ func (s *scheduler) flushDump() error {
 // change untouched; clean means the last dump covered everything, so no
 // channel is armed. The debounce channel is replaced on every re-arm (a
 // replaced channel is unreachable and simply dropped); the retry channel
-// keeps its already-armed instant while one is pending, so a write arriving
-// during backoff registers a waiter covered by that attempt instead of
-// postponing it.
-func (s *scheduler) rearm(deadline, retry <-chan time.Time) (nextDebounce, nextDeadline, nextRetry <-chan time.Time) {
+// keeps its already-armed instant while the pending rung is unchanged, so a
+// write arriving during backoff registers a waiter covered by that attempt
+// instead of postponing it, and is replaced when a flush-forced failure
+// advanced the ladder, so the next attempt fires at the newly computed
+// instant rather than the stale one (WR-02). retryArmedAt is the run loop's
+// record of the instant the current retry channel was armed for.
+func (s *scheduler) rearm(
+	deadline, retry <-chan time.Time,
+	retryArmedAt time.Time,
+) (nextDebounce, nextDeadline, nextRetry <-chan time.Time, nextRetryArmedAt time.Time) {
 	dirty, oldest := s.conf.epoch()
 	s.mu.Lock()
 	delay, at := s.retryDelay, s.retryAt
 	s.mu.Unlock()
 	if delay > 0 {
-		if retry == nil {
+		if retry == nil || !retryArmedAt.Equal(at) {
 			retry = s.cfg.After(max(at.Sub(s.cfg.Now()), 0))
+			retryArmedAt = at
 		}
-		return nil, nil, retry
+		return nil, nil, retry, retryArmedAt
 	}
 	if !dirty {
-		return nil, nil, nil
+		return nil, nil, nil, time.Time{}
 	}
 	nextDebounce = s.cfg.After(s.cfg.Debounce)
 	if deadline == nil {
 		deadline = s.cfg.After(oldest.Add(s.cfg.MaxWait).Sub(s.cfg.Now()))
 	}
-	return nextDebounce, deadline, nil
+	return nextDebounce, deadline, nil, time.Time{}
 }
 
 // runDump is the serialized dump cycle: the confirmation role captures the
@@ -218,15 +239,17 @@ func (s *scheduler) runDump() error {
 // handleDumpFailure applies one failed attempt's decay and report (D-05,
 // PERSIST-05): the class counters, the next ladder rung fixed at this
 // failure's instant — so a write arriving during the backoff registers a
-// waiter the armed retry covers instead of postponing it — and exactly one
-// OnDumpFailure callback carrying the underlying error and the adapter's
-// class. It runs on the dumper goroutine once per failed attempt; the
-// callback must not block.
+// waiter the armed retry covers instead of postponing it — the classified
+// failure the next flush answers with instead of forcing an extra attempt
+// (WR-02), and exactly one OnDumpFailure callback carrying the underlying
+// error and the adapter's class. It runs on the dumper goroutine once per
+// failed attempt; the callback must not block.
 func (s *scheduler) handleDumpFailure(err error) {
 	class := port.FailureClassOf(err)
 	s.mu.Lock()
 	s.retryDelay = nextRetry(s.retryDelay)
 	s.retryAt = s.cfg.Now().Add(s.retryDelay)
+	s.lastErr = err
 	s.mu.Unlock()
 	switch class {
 	case port.FailureDiskFull:
@@ -255,11 +278,13 @@ func nextRetry(d time.Duration) time.Duration {
 }
 
 // resetRetry clears the ladder after a successful attempt: the next failure
-// starts again from the base delay and covers the waiters immediately.
+// starts again from the base delay, covers the waiters immediately and is
+// again the last classified failure a flush may report.
 func (s *scheduler) resetRetry() {
 	s.mu.Lock()
 	s.retryDelay = 0
 	s.retryAt = time.Time{}
+	s.lastErr = nil
 	s.mu.Unlock()
 }
 

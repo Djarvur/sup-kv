@@ -284,7 +284,10 @@ A failed dump is retried, not fatal. Each failed attempt logs exactly one
 ERROR carrying the failure class and the underlying error, and publishes
 its class counter; the node retries on a ladder that starts at 100 ms and
 doubles after every further failure up to a 5 s cap, and the next success
-resets it. Health stays `SERVING` under a persistent dump failure: reads
+resets it. A snapshot request's forced flush does not bypass that ladder:
+while a rung is pending it answers the last dump failure immediately instead
+of driving an extra dump attempt and an extra ERROR line at the client's
+request rate. Health stays `SERVING` under a persistent dump failure: reads
 keep serving and the node keeps retrying, because the failure is a
 durability risk, not a serving failure. It surfaces on writes instead — a
 write whose covering dump does not complete within the confirmation timeout

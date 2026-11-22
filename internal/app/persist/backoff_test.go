@@ -38,6 +38,10 @@ var backoffLadder = []time.Duration{
 // records: one per failed attempt.
 const backoffCollected = 7
 
+// refusedSnapshots is the number of Snapshot requests the WR-02 regression
+// sends inside each armed retry rung: none may reach the port.
+const refusedSnapshots = 5
+
 // failureLog records the OnDumpFailure callbacks in order — the callback
 // must fire exactly once per failed attempt, on the dumper goroutine.
 type failureLog struct {
@@ -184,6 +188,83 @@ func TestEngine_backoffLadder(t *testing.T) {
 		if want := failedAt.Add(backoffLadder[0]); !retriedAt.Equal(want) {
 			t.Errorf("the retry after the reset landed at %v, want %v (the ladder restarts at 100 ms)",
 				retriedAt, want)
+		}
+	})
+}
+
+// TestSnapshot_forcedFlushRespectsRetryLadder is the WR-02 regression: with a
+// port that always fails, a client snapshot loop must not bypass the bounded
+// dump-failure ladder. While a rung is pending every Snapshot answers the last
+// classified failure immediately — no extra attempt, no full Records() copy
+// and no extra OnDumpFailure ERROR line — and the armed rung still fires at
+// its own instant, doubling the next one.
+func TestSnapshot_forcedFlushRespectsRetryLadder(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		log := &failureLog{}
+		eng, dumps := newFailureEngine(log)
+		dumps.mu.Lock()
+		dumps.failSaves = 1000 // every attempt fails for the test's lifetime
+		dumps.mu.Unlock()
+		defer startDumper(t, eng)()
+
+		setDone := make(chan error, 1)
+		go func() {
+			_, _, err := eng.Set("ladder-write", []byte("value"))
+			setDone <- err
+		}()
+		if err := <-setDone; !errors.Is(err, persist.ErrDumpFailed) {
+			t.Fatalf("Set() error = %v, want ErrDumpFailed — the first attempt fails", err)
+		}
+		instants := dumps.attemptInstants()
+		if len(instants) != 1 {
+			t.Fatalf("attempts after the first failure = %d, want 1", len(instants))
+		}
+		firstFailure := instants[0]
+
+		// Several snapshots inside the first 100 ms rung: each is refused with
+		// the last classified failure, none reaches the port and none logs.
+		for i := 0; i < refusedSnapshots; i++ {
+			if err := eng.Snapshot("ladder-snap"); !errors.Is(err, errFakeSave) {
+				t.Fatalf("Snapshot() during the armed rung error = %v, want the last dump failure %v",
+					err, errFakeSave)
+			}
+		}
+		if got := dumps.saveAttempts(); got != 1 {
+			t.Errorf("dump attempts after %d refused snapshots = %d, want 1 — the ladder owns the rate",
+				refusedSnapshots, got)
+		}
+		if errs, _ := log.snapshot(); len(errs) != 1 {
+			t.Errorf("OnDumpFailure fired %d times, want 1 — one ERROR line per ladder rung", len(errs))
+		}
+
+		// The armed rung still fires at failure+100 ms and doubles the next one.
+		synctest.Sleep(100 * time.Millisecond)
+		instants = dumps.attemptInstants()
+		if len(instants) != 2 {
+			t.Fatalf("attempts after the first rung = %d, want 2", len(instants))
+		}
+		if want := firstFailure.Add(100 * time.Millisecond); !instants[1].Equal(want) {
+			t.Errorf("the first retry landed at %v, want %v", instants[1], want)
+		}
+
+		// Another refused burst leaves the advanced rung untouched: the next
+		// attempt is failure+300 ms, and the ERROR count still tracks attempts.
+		for i := 0; i < refusedSnapshots; i++ {
+			if err := eng.Snapshot("ladder-snap"); !errors.Is(err, errFakeSave) {
+				t.Fatalf("Snapshot() during the second armed rung error = %v, want %v", err, errFakeSave)
+			}
+		}
+		synctest.Sleep(200 * time.Millisecond)
+		instants = dumps.attemptInstants()
+		if len(instants) != 3 {
+			t.Fatalf("attempts after the second rung = %d, want 3", len(instants))
+		}
+		if want := firstFailure.Add(300 * time.Millisecond); !instants[2].Equal(want) {
+			t.Errorf("the second retry landed at %v, want %v", instants[2], want)
+		}
+		if errs, _ := log.snapshot(); len(errs) != 3 {
+			t.Errorf("OnDumpFailure fired %d times, want 3 — one per failed attempt, none per refused snapshot", len(errs))
 		}
 	})
 }
