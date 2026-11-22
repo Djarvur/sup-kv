@@ -817,14 +817,16 @@ func (e *Engine) Records() map[string]storage.Record {
 // adapter (D-10, PERS-05): the snapshot file is byte-identical to the main
 // dump at creation, and a flush triggered while state is dirty forces a new
 // dump before the copy. A flush error aborts with nothing copied: state
-// that is not confirmed on disk must never become a recovery point. Safe
+// that is not confirmed on disk must never become a recovery point. The
+// flush is bounded by the confirmation timeout (PERSIST-08), so a hung
+// fsync answers ErrUnconfirmed rather than parking the call. Safe
 // against a dump running concurrently with the copy: the adapter's atomic
 // renames mean no torn read, and its save-snapshot serialization closes
 // the rotate window in which the main path is briefly absent — the copy
 // always reads one complete generation. Requires a running Run goroutine
 // like every blocking engine call.
 func (e *Engine) Snapshot(name string) error {
-	err := e.flush()
+	err := e.flush(e.cfg.ConfirmTimeout)
 	if err != nil {
 		return err
 	}
@@ -867,7 +869,9 @@ type RestoredRecord struct {
 // absent — and is returned even when the confirming dump failed, so a
 // snapshot load can replicate what is already in memory (PROTO-08) while
 // the error still reports the dump honestly: a failed final dump surfaces
-// as ErrDumpFailed carrying its cause, and a closed engine as ErrClosed.
+// as ErrDumpFailed carrying its cause, a dump that outlived the confirmation
+// timeout as ErrUnconfirmed (the two stay distinguishable), and a closed
+// engine as ErrClosed.
 // A mid-replay store error aborts deterministically instead: the records
 // installed before it stay marked dirty (the dumper persists them) and come
 // back with the error, so no installed-but-unreturned record can be lost
@@ -887,11 +891,19 @@ func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
 	if err != nil {
 		return restored, err
 	}
-	err = e.flush()
-	if err != nil && !errors.Is(err, ErrClosed) {
+	err = e.flush(e.cfg.ConfirmTimeout)
+	switch {
+	case err == nil:
+		return restored, nil
+	case errors.Is(err, ErrClosed):
+		return restored, err
+	case errors.Is(err, ErrUnconfirmed):
+		// Already the honest durability answer (PERSIST-08): keep it
+		// distinguishable from a failed dump.
+		return restored, err
+	default:
 		return restored, fmt.Errorf("%w: %w", ErrDumpFailed, err)
 	}
-	return restored, err
 }
 
 // replaySnapshot replays the snapshot's records in deterministic sorted-key
@@ -985,21 +997,28 @@ func replayRecord(store *storage.Store, key string, rec storage.Record) (version
 // write-confirmed dump. It is the only such path: Run's exit sweep resolves
 // stranded waiters with ErrClosed without performing a final dump, so state
 // merged after the last scheduled dump would otherwise die with the
-// process. Delegates to flush with its exact contract: a dirty engine
-// completes one covering dump and returns its error, a clean engine replies
-// nil without a redundant save (the D-10 clean decision), and ErrClosed
-// once Run has exited. Requires a running Run goroutine like every blocking
-// engine call.
+// process. It is exactly FlushTimeout with the confirmation timeout: a dirty
+// engine completes one covering dump and returns its error, a clean engine
+// replies nil without a redundant save (the D-10 clean decision), ErrClosed
+// once Run has exited, and ErrUnconfirmed when the dump outlives the
+// deadline (PERSIST-08). Requires a running Run goroutine like every
+// blocking engine call.
 func (e *Engine) Flush() error {
-	return e.flush()
+	return e.FlushTimeout(0)
 }
 
 // FlushTimeout is the bounded flush seam (PERSIST-08, D-07): it forces the
 // same covering dump as Flush but gives up after d — zero or negative means
 // the configured ConfirmTimeout — returning ErrUnconfirmed when the dumper
-// never answers.
-func (e *Engine) FlushTimeout(_ time.Duration) error {
-	return e.flush()
+// never answers. Both the flush-channel send and the reply wait are bound by
+// that one deadline, so a dumper stuck in a kernel fsync can never park the
+// caller. Snapshot and Restore ride this seam with the confirmation timeout,
+// and the binary's shutdown passes its grace period.
+func (e *Engine) FlushTimeout(d time.Duration) error {
+	if d <= 0 {
+		d = e.cfg.ConfirmTimeout
+	}
+	return e.flush(d)
 }
 
 // flush forces the dumper to complete one dump covering every unconfirmed
@@ -1014,8 +1033,11 @@ func (e *Engine) FlushTimeout(_ time.Duration) error {
 // also race runDone, the channel Run closes after the sweep: a reply found
 // after runDone closed is exactly one the sweep answered (program order in
 // Run), an absent one is the stranded case, and flush returns ErrClosed
-// instead of hanging.
-func (e *Engine) flush() error {
+// instead of hanging. Both waits are additionally bounded by one deadline
+// armed through cfg.After (PERSIST-08, T-5-24): expiry — the send never
+// accepted or the reply never delivered — is the wrapped ErrUnconfirmed,
+// because the dump's outcome is unknown rather than failed.
+func (e *Engine) flush(d time.Duration) error {
 	reply := make(chan error, 1)
 	e.mu.Lock()
 	closed := e.closed
@@ -1023,10 +1045,13 @@ func (e *Engine) flush() error {
 	if closed {
 		return ErrClosed
 	}
+	timeout := e.cfg.After(d)
 	select {
 	case e.flushCh <- reply:
 	case <-e.runDone:
 		return ErrClosed
+	case <-timeout:
+		return fmt.Errorf("%w: flush", ErrUnconfirmed)
 	}
 	select {
 	case err := <-reply:
@@ -1038,6 +1063,8 @@ func (e *Engine) flush() error {
 		default:
 			return ErrClosed
 		}
+	case <-timeout:
+		return fmt.Errorf("%w: flush", ErrUnconfirmed)
 	}
 }
 

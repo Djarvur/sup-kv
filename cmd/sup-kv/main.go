@@ -907,6 +907,14 @@ func serve(node *wired, listener net.Listener, sig <-chan os.Signal) error {
 // dump failure is the returned error: a clean exit is reserved for a
 // confirmed shutdown.
 //
+// Both remaining waits are bounded by the same shutdownGrace (PERSIST-08,
+// T-5-24): the final flush is FlushTimeout, so a stuck fsync answers
+// ErrUnconfirmed instead of hanging the process, and the engineDone wait is
+// a select against a grace timer — a dumper still stuck in the kernel at
+// process exit is abandoned with one WARN, which is the deliberate choice
+// over an unkillable shutdown. A flush error keeps the exit-code-1 path: a
+// clean exit still means the final dump was confirmed.
+//
 // A second SIGTERM/SIGINT observed on sig while GracefulStop drains is an
 // operator's hurry-up: it takes the same force path as the grace deadline
 // (Stop) immediately. The final Flush sits after GracefulStop in the
@@ -944,15 +952,22 @@ func shutdown(node *wired, sig <-chan os.Signal) error {
 	node.replCancel()
 	<-node.replDone
 
-	err := node.engine.Flush()
+	err := node.engine.FlushTimeout(shutdownGrace)
 	if err != nil {
 		return fmt.Errorf("final dump failed: %w", err)
 	}
 
 	node.engineCancel()
-	runErr := <-node.engineDone
-	if !errors.Is(runErr, context.Canceled) {
-		log.Printf("sup-kv: engine Run returned %v", runErr)
+	select {
+	case runErr := <-node.engineDone:
+		if !errors.Is(runErr, context.Canceled) {
+			log.Printf("sup-kv: engine Run returned %v", runErr)
+		}
+	case <-time.After(shutdownGrace):
+		// The dumper outlived the grace — most likely a kernel fsync that
+		// never returned. Abandon the goroutine: the process is exiting, and
+		// waiting here would defeat the bounded shutdown (PERSIST-08).
+		slog.Warn("Engine did not stop within the shutdown grace", "grace", shutdownGrace.String())
 	}
 	return nil
 }
