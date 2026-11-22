@@ -613,6 +613,10 @@ type RestoredRecord struct {
 // snapshot load can replicate what is already in memory (PROTO-08) while
 // the error still reports the dump honestly: a failed final dump surfaces
 // as ErrDumpFailed carrying its cause, and a closed engine as ErrClosed.
+// A mid-replay store error aborts deterministically instead: the records
+// installed before it stay marked dirty (the dumper persists them) and come
+// back with the error, so no installed-but-unreturned record can be lost
+// (IN-04) — the caller's snapshot-load notify covers exactly that list.
 // Load and decode errors surface unchanged — a missing snapshot or a
 // generation-level decode fault — never a silent empty success.
 func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
@@ -624,30 +628,50 @@ func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	restored := make([]RestoredRecord, 0, len(records))
-	if restoreChanges(e.store.Records(), records) {
-		for _, key := range slices.Sorted(maps.Keys(records)) {
-			ver, replayed, err := replayRecord(e.store, key, records[key])
-			if err != nil {
-				return nil, err
-			}
-			if !replayed {
-				continue
-			}
-			restored = append(restored, RestoredRecord{
-				Key:     key,
-				Version: ver,
-				Data:    bytes.Clone(records[key].Data),
-				Deleted: records[key].Deleted,
-			})
-		}
-		e.markDirty()
+	restored, err := e.replaySnapshot(records)
+	if err != nil {
+		return restored, err
 	}
 	err = e.flush()
 	if err != nil && !errors.Is(err, ErrClosed) {
 		return restored, fmt.Errorf("%w: %w", ErrDumpFailed, err)
 	}
 	return restored, err
+}
+
+// replaySnapshot replays the snapshot's records in deterministic sorted-key
+// order, marks the engine dirty whenever anything was installed, and returns
+// exactly the records the replay installed. A mid-replay store error aborts
+// the replay deterministically and returns the PARTIAL list with the error
+// (IN-04): the records installed before the abort are already in memory, so
+// they are marked dirty for the next dump and returned so the caller's
+// totality notify covers them — an installed-but-unreturned record would be
+// neither dumped nor replicated.
+func (e *Engine) replaySnapshot(records map[string]storage.Record) ([]RestoredRecord, error) {
+	restored := make([]RestoredRecord, 0, len(records))
+	if !restoreChanges(e.store.Records(), records) {
+		return restored, nil
+	}
+	for _, key := range slices.Sorted(maps.Keys(records)) {
+		ver, replayed, err := replayRecord(e.store, key, records[key])
+		if err != nil {
+			if len(restored) > 0 {
+				e.markDirty()
+			}
+			return restored, err
+		}
+		if !replayed {
+			continue
+		}
+		restored = append(restored, RestoredRecord{
+			Key:     key,
+			Version: ver,
+			Data:    bytes.Clone(records[key].Data),
+			Deleted: records[key].Deleted,
+		})
+	}
+	e.markDirty()
+	return restored, nil
 }
 
 // restoreChanges reports whether replaying the snapshot's records would
