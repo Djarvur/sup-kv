@@ -501,6 +501,37 @@ func TestWatermark_equalCounterDomain(t *testing.T) {
 	}
 }
 
+// TestCodec_corruptLineIsolated proves the PERSIST-03 defining behavior: a
+// raw JSON syntax error on one record line loses exactly that record — the
+// sibling lines still load and the fault is counted — where a streaming
+// json.Decoder is permanently poisoned by the same syntax error and loses
+// the whole generation.
+func TestCodec_corruptLineIsolated(t *testing.T) {
+	t.Parallel()
+	dump := encodeRecords(t, map[string]storage.Record{
+		"mid": sealed("mid", storage.Record{Version: version.PackVersion(1007, 1, 1), Data: []byte("mid-value")}),
+	})
+	lines := strings.Split(strings.TrimSuffix(string(dump), "\n"), "\n")
+	// The middle record line (keep-a/keep-b sort before mid) is replaced with
+	// a line whose first byte cannot open a JSON object.
+	lines[2] = "!" + lines[2][1:]
+	corrupt := []byte(strings.Join(lines, "\n") + "\n")
+	decoded, discarded, err := persist.Decode(corrupt, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Decode(corrupt line) error = %v, want nil — one bad line must not collapse the generation", err)
+	}
+	if discarded != 1 {
+		t.Errorf("Decode(corrupt line) discarded = %d, want 1 (the malformed line)", discarded)
+	}
+	want := map[string]storage.Record{
+		"keep-a": sealed("keep-a", storage.Record{Version: version.PackVersion(1000, 1, 1), Data: []byte("a-value")}),
+		"mid":    sealed("mid", storage.Record{Version: version.PackVersion(1007, 1, 1), Data: []byte("mid-value")}),
+	}
+	if !recordsEqual(decoded, want) {
+		t.Errorf("Decode(corrupt line) records = %v, want the two intact siblings", decoded)
+	}
+}
+
 // TestCodec_truncatedGenerationUnreadable pins the generation-level fault
 // class for a torn tail (PERS-02, D-02): a dump truncated mid-record is
 // unreadable as a whole generation — Decode rejects it, so Load's fallback
