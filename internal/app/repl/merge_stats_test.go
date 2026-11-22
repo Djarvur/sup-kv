@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -79,6 +81,66 @@ func TestMergeStats_counts(t *testing.T) {
 	out.Drain()
 	if got := core.MergeStats(); got.Conflicts != 1 || got.DriftWarnings != 1 {
 		t.Fatalf("after the post-absorption apply MergeStats() = %+v, want Conflicts still 1, DriftWarnings 1", got)
+	}
+}
+
+// TestMergeStats_listingAndStaleExcluded pins the two non-merge paths that
+// must leave the remote-merge counters untouched. A listing part absorbs its
+// max version into the store clock through Observe — that absorption is real
+// and visible (the next local write strictly beats the listed state,
+// PROTO-01) — but listing drift is Phase 7's OBSV territory and counts
+// nothing here (Open Question 6). A strictly older DataReplication takes the
+// answer-not-Ack branch, which returns before ApplyRemote, so it counts
+// nothing either (PROTO-03): the counters describe merges, not answers.
+func TestMergeStats_listingAndStaleExcluded(t *testing.T) {
+	t.Parallel()
+	core, st := newTestCoreWithConfig(repl.Config{MaxClockLead: driftLead})
+	now := at(0)
+	var out port.Outbox
+
+	// A complete one-part listing whose max version sits one drift-warn
+	// window plus a second past the wall clock — exactly the stamp that
+	// would count a DriftWarning if it travelled the merge path.
+	past := testNowMs + 5000 + int64(testDriftWarn/time.Millisecond) + 1000
+	listed := version.PackVersion(past, 0, peerID1)
+	core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{
+		SyncID:     1,
+		ChunkIndex: 1,
+		ChunkCount: 1,
+		Entries:    []port.SyncEntry{{Key: keyAlpha, Version: listed}},
+	}), &out)
+	out.Drain()
+	if got := core.MergeStats(); got.Conflicts != 0 || got.DriftWarnings != 0 {
+		t.Fatalf("after the listing part MergeStats() = %+v, want none — listing drift is clock-only this phase (OQ6)", got)
+	}
+
+	// The absorption is real, not skipped: the next local write strictly
+	// beats the listed max version, so the part reached Observe.
+	written := localWrite(t, core, st, now, keyBeta, "after-the-listing")
+	if written.Compare(listed) <= 0 {
+		t.Fatalf("the local write stamped %x, want strictly greater than the listed %x — the listing part must reach Observe (PROTO-01)", written[:], listed[:])
+	}
+
+	// A held record above the sender's stale copy: the answer-not-Ack branch
+	// queues its reply and never calls ApplyRemote, so the counters are
+	// unchanged while the held record is still served.
+	v5 := version.PackVersion(testNowMs, 5, peerID1)
+	held := seedVersion(t, st, keyGamma, storage.Record{Version: v5, Data: []byte("five")})
+	queuedBefore := core.QueuedResponses()
+	stale := storage.Record{Version: version.PackVersion(testNowMs, 3, peerID1), Data: []byte("three")}
+	core.HandleDatagram(now, replFrom(peerID1, keyGamma, stale), &out)
+	if got := len(out.Drain()); got != 0 {
+		t.Fatalf("the stale DataReplication emitted %d messages directly, want 0 — the answer queues", got)
+	}
+	if got := core.QueuedResponses(); got != queuedBefore+1 {
+		t.Fatalf("QueuedResponses() = %d after the stale record, want %d — exactly one answer queues", got, queuedBefore+1)
+	}
+	if got := core.MergeStats(); got.Conflicts != 0 || got.DriftWarnings != 0 {
+		t.Fatalf("after the stale record MergeStats() = %+v, want none — the stale branch never merges", got)
+	}
+	served, err := st.store.Get(keyGamma)
+	if err != nil || served.Version != held.Version {
+		t.Fatalf("store Get(%q) after the stale record = (%x, %v), want the held %x", keyGamma, served.Version[:], err, held.Version[:])
 	}
 }
 
