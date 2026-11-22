@@ -162,6 +162,13 @@ const (
 	// state.
 	maxSyncChunks = 65536
 
+	// syncStreamGotHint caps the chunk-index map's initial capacity hint
+	// (WR-05): the map grows as chunks actually arrive, and those arrivals are
+	// bounded by the entry caps, so a claimed chunk_count must never
+	// pre-allocate a map the datagram can never fill. Eight slots cover the
+	// chunks a healthy round delivers before the map's own growth takes over.
+	syncStreamGotHint = 8
+
 	// maxListedKeysTotal bounds the retained per-peer listed-key payload —
 	// the union's size, coincidentally equal to maxSyncEntriesTotal because
 	// both model the same 20 000-key scale with headroom (T-4-41). An
@@ -1686,9 +1693,15 @@ func (c *Core) accumulateSync(now time.Time, in port.InboundDatagram, msg port.D
 	stream := c.syncs[key]
 	if stream == nil {
 		c.makeSyncStreamRoom()
+		// The index map's capacity hint is clamped (WR-05): it must never
+		// scale with the attacker-supplied chunk_count. A one-chunk datagram
+		// claiming maxSyncChunks would otherwise buy ~1.2 MiB of retained heap
+		// per stream — a remotely repeatable ~19 MiB for the stream bound —
+		// while the map grows correctly on its own as chunks actually arrive,
+		// and those arrivals are already bounded by the entry caps.
 		stream = &syncStream{
 			count:   msg.ChunkCount,
-			got:     make(map[uint32]struct{}, msg.ChunkCount),
+			got:     make(map[uint32]struct{}, int(min(msg.ChunkCount, syncStreamGotHint))),
 			entries: make(map[string]version.RecordVersion, len(msg.Entries)),
 		}
 		c.syncs[key] = stream
