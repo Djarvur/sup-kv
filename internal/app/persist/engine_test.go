@@ -372,6 +372,15 @@ func (f *fakeDumpPort) save(i int) fakeSave {
 	return f.saves[i]
 }
 
+// seedSave installs a completed save as if it were the on-disk generation —
+// the fixture for a test that starts a clean engine over an existing main and
+// expects CreateSnapshot to copy it without a flush rewrite.
+func (f *fakeDumpPort) seedSave(dump []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saves = append(f.saves, fakeSave{at: time.Now(), dump: bytes.Clone(dump)})
+}
+
 // newFakeEngine builds an engine over an empty store and a fresh fake port,
 // running the design-default timing (the D-04 defaults the suite asserts);
 // inside a synctest bubble time.Now is the virtual clock, so the store's
