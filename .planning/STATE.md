@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-11-22T12:52:26.737Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-11-22T13:18:46.953Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 4 complete, transitioned to Phase 5
-state_head: 84376e29cf82681b58e647a8dcdd224ece1f481a
+state_head: 4b88551e16de98113135c4a8dc2f2e00e9380bea
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 48
+  completed_plans: 49
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 5 (Persistence) — executing
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 12
 Status: Executing (05-01 complete, 05-02 next)
 Last activity: 2026-11-22 — 05-01 complete; 05-02 next
@@ -106,6 +106,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P12 | 272s | 2 tasks | 3 files |
 | Phase 04 P13 | 1178 | 3 tasks | 10 files |
 | Phase 05 P01 | 761s | 3 tasks | 14 files |
+| Phase 05 P02 | 868 | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -296,6 +297,9 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-01: The value limit is one exported storage.ValueMaxBytes; Config.ValueLimit serves the pre-store decode and NewStore normalizes through it, so the decode bound and the enforcement point cannot diverge (PERSIST-01, D-01).
 - [Phase 05]: 05-01: Open keeps its frozen (*Engine, int) signature — the decode uses storeCfg.ValueLimit() before the clock seed and NewStore; the engine captures Store.ValueMaxBytes() for runDump and Restore.
 - [Phase 05]: 05-01: An over-limit encode is a wrapped storage.ErrValueTooLarge naming the key (a store-invariant tripwire), never a silent skip; a non-positive --value-max-bytes exits 2 through the usage path instead of falling back to the default.
+- [Phase 05]: Decode returns DecodeStats (Checksum, Version, ValueLimit, Malformed) with Total(); Open keeps its frozen (*Engine, int) shape by returning the total.
+- [Phase 05]: The dump reader bound is maxDumpLineBytes(), derived from the format's datagram and key ceilings and independent of valueMaxBytes, so a config-shrunk load classifies records instead of faulting.
+- [Phase 05]: format_version stays 1 with an optional record_count: fewer record lines than the count is an incomplete generation, more is tolerated, and an absent field is the documented v1.0 legacy path.
 
 ### Pending Todos
 
@@ -318,7 +322,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T12:52:26.323Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-11-22T13:18:46.533Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None
 Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-02-PLAN.md is next)
