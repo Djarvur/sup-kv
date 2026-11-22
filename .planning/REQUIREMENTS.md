@@ -98,29 +98,29 @@
 
 ### Persistence
 
-- [ ] **PERSIST-01**: The value limit is defined in one place and enforced (P-01, Q-04)
+- [x] **PERSIST-01**: The value limit is defined in one place and enforced (P-01, Q-04)
   - Acceptance: a record of exactly `value_max_bytes` survives a restart at any accepted flag value; an invalid value exits with code 2; the 61 440 constant exists once, passed by configuration
-- [ ] **PERSIST-02**: Dump-load outcomes are visible and never destroy evidence (P-02)
+- [x] **PERSIST-02**: Dump-load outcomes are visible and never destroy evidence (P-02)
   - Acceptance: start from `.prev` — one WARN with path and cause; both generations unusable — ERROR and a nonzero metric; files absent — neither; unusable files are preserved under a separate name, not overwritten by rotation
-- [ ] **PERSIST-03**: Generation integrity is explicit (P-03)
+- [x] **PERSIST-03**: Generation integrity is explicit (P-03)
   - Acceptance: the format carries a record count or a terminator; a file truncated at a line boundary is recognized as incomplete; one corrupted record discards only that record
-- [ ] **PERSIST-04**: After a backup or empty start the engine is marked dirty (P-04)
+- [x] **PERSIST-04**: After a backup or empty start the engine is marked dirty (P-04)
   - Acceptance: the first rotation never displaces the last good generation with a corrupt one; `SnapshotCreate` right after such a start yields a snapshot that decodes to the in-memory state
-- [ ] **PERSIST-05**: Dump failures decay and log (P-05)
+- [x] **PERSIST-05**: Dump failures decay and log (P-05)
   - Acceptance: each failure — one ERROR entry with the underlying error (ENOSPC, EACCES); retries with a growing pause up to a cap; health behavior under a persistent dump failure is defined and documented
-- [ ] **PERSIST-06**: A dump cycle allocates at most two state sizes (P-06)
+- [x] **PERSIST-06**: A dump cycle allocates at most two state sizes (P-06)
   - Acceptance: streaming encode; the memory model is documented
-- [ ] **PERSIST-07**: Equal version with different content is resolved deliberately (P-07)
+- [x] **PERSIST-07**: Equal version with different content is resolved deliberately (P-07)
   - Acceptance: either the random tail as in the Spec or a deterministic tie-break — decision recorded in an ADR, implemented, tested
-- [ ] **PERSIST-08**: Blocking engine calls carry a deadline (P-08)
+- [x] **PERSIST-08**: Blocking engine calls carry a deadline (P-08)
   - Acceptance: a hung fsync cannot block writes, snapshots or shutdown indefinitely
-- [ ] **PERSIST-09**: Temp-file hygiene and the darwin fsync helper are fixed (P-09)
+- [x] **PERSIST-09**: Temp-file hygiene and the darwin fsync helper are fixed (P-09)
   - Acceptance: orphan temp files collected; new directories synced at the parent; `fsync_darwin.go` removed or handles EINTR/ENOTSUP
-- [ ] **PERSIST-10**: Records skipped at start are accounted (P-10)
+- [x] **PERSIST-10**: Records skipped at start are accounted (P-10)
   - Acceptance: records skipped due to a reduced value limit are counted and logged, not silently dropped and later deleted from disk
-- [ ] **PERSIST-11**: `persist.Engine` is split along its responsibilities (Q-03)
+- [x] **PERSIST-11**: `persist.Engine` is split along its responsibilities (Q-03)
   - Acceptance: loader/composition root, store facade, dump scheduler, confirmation accounting and snapshot orchestration are separate; the `DumpStore` port returns the load outcome and failure cause (backs P-02, S-02)
-- [ ] **PERSIST-12**: `internal/app/persist` timers and `time.Now()` sit behind the same seam as the repl core (Q-06)
+- [x] **PERSIST-12**: `internal/app/persist` timers and `time.Now()` sit behind the same seam as the repl core (Q-06)
   - Acceptance: the dump↔replication-notify interaction is exercised by the simulator
 
 ### API
@@ -248,18 +248,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PROTO-07 | Phase 4 | Complete |
 | PROTO-08 | Phase 4 | Complete |
 | PROTO-09 | Phase 4 | Complete |
-| PERSIST-01 | Phase 5 | Pending |
-| PERSIST-02 | Phase 5 | Pending |
-| PERSIST-03 | Phase 5 | Pending |
-| PERSIST-04 | Phase 5 | Pending |
-| PERSIST-05 | Phase 5 | Pending |
-| PERSIST-06 | Phase 5 | Pending |
-| PERSIST-07 | Phase 5 | Pending |
-| PERSIST-08 | Phase 5 | Pending |
-| PERSIST-09 | Phase 5 | Pending |
-| PERSIST-10 | Phase 5 | Pending |
-| PERSIST-11 | Phase 5 | Pending |
-| PERSIST-12 | Phase 5 | Pending |
+| PERSIST-01 | Phase 5 | Complete |
+| PERSIST-02 | Phase 5 | Complete |
+| PERSIST-03 | Phase 5 | Complete |
+| PERSIST-04 | Phase 5 | Complete |
+| PERSIST-05 | Phase 5 | Complete |
+| PERSIST-06 | Phase 5 | Complete |
+| PERSIST-07 | Phase 5 | Complete |
+| PERSIST-08 | Phase 5 | Complete |
+| PERSIST-09 | Phase 5 | Complete |
+| PERSIST-10 | Phase 5 | Complete |
+| PERSIST-11 | Phase 5 | Complete |
+| PERSIST-12 | Phase 5 | Complete |
 | APIS-01 | Phase 6 | Pending |
 | APIS-02 | Phase 6 | Pending |
 | APIS-03 | Phase 6 | Pending |

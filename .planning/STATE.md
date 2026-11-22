@@ -5,17 +5,17 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
 current_plan: 12
-status: executing
-stopped_at: Completed 05-11-PLAN.md
-last_updated: "2026-11-22T16:51:06.364Z"
+status: ready_for_verification
+stopped_at: Completed 05-12-PLAN.md
+last_updated: "2026-11-22T17:30:17.557Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 5 executing; 05-11 complete, 05-12 next
-state_head: 1f79eef40f6b0519781e163bb7a02d37a750038e
+last_activity_desc: Phase 5 plans complete; 05-12 done, ready for phase verification
+state_head: 9b8008a33950b3048d7e466f6de5756fb0ceed69
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 58
+  completed_plans: 59
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 
 ## Current Position
 
-Phase: 5 (Persistence) — executing
+Phase: 5 (Persistence) — ready for verification
 Current Plan: 12
 Total Plans in Phase: 12
-Status: Executing (05-11 complete, 05-12 next)
-Last activity: 2026-11-22 — 05-11 complete; 05-12 next
+Status: Phase complete — ready for verification
+Last activity: 2026-11-22 — 05-12 complete; ready for phase verification
 
 Progress: [███░░░░░░░] 33%
 
@@ -116,6 +116,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P09 | 12min | 3 tasks | 7 files |
 | Phase 05 P10 | 3min | 2 tasks | 2 files |
 | Phase 05 P11 | 134 | 2 tasks | 1 files |
+| Phase 05 P12 | 30min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -348,6 +349,10 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-10: The memory model states peak live (one Records() copy + one record line + the 64 KiB writer) and names the copy's read-lock writer pause as residual; B/op churn is explicitly a different, larger number
 - [Phase 05]: 05-11: S-PAR-05 and S-PERS-09 flipped to implemented and S-PERS-08 kept implemented with the port.LoadBackup outcome and one-WARN evidence; S-HLC-07 kept accepted-deviation with the ADR 0012 link; S-DM-04/05/08 cite ValueMaxBytes, MergeChanged/join/RecordsEqual and the tie-break tests
 - [Phase 05]: 05-11: the preamble names ADR 0012 separately from the 0001–0011 / 14.1–14.11 mapping because 0012 records P-07, not an owner decision; the diff-scope gate proved exactly the eight rows changed and task 2 made no no-op commit
+- [Phase 05]: Both frozen P-01 tests ran directly before the flip (engine PASS 1.06 s; stand PASS 4.18 s with both 63000- and 64000-byte subtests), so the green rows rest on a genuine pass; the runner then recorded observed=pass,run for both.
+- [Phase 05]: The flip is exactly the two red->green data fields in scripts/red-expectations.tsv; the header and the other five rows are untouched, and the runner plus both frozen tests are byte-identical to the phase-start base 4f81fd7 (diff exit 0).
+- [Phase 05]: The Phase-5 gate ran in order on the committed flip: lint, darwin and bench-smoke were green on first invocation; the first make test hung 600 s in TestScenario_dumpNotify and the package-alone run hit the known ratio flake, while the full rerun was green (repl 276 s) with no test or bound changed.
+- [Phase 05]: Both load-sensitive flakes (TestScenario_dumpNotify virtual-time harness hang, TestCore_keyCountCostFlat ratio repeat) are deferred to the Phase-8 flake owner with their standalone/rerun evidence; the TSV-only diff cannot have caused either.
 
 ### Pending Todos
 
@@ -370,7 +375,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T16:51:05.861Z
-Stopped at: Completed 05-11-PLAN.md
+Last session: 2026-11-22T17:30:17.107Z
+Stopped at: Completed 05-12-PLAN.md
 Resume file: None
-Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-10-PLAN.md is next)
+Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
