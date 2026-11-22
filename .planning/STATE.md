@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 12
+current_plan: 13
 status: executing
-stopped_at: Completed 04-11-PLAN.md
-last_updated: "2026-11-22T06:30:09.082Z"
+stopped_at: Completed 04-12-PLAN.md
+last_updated: "2026-11-22T06:38:30.611Z"
 last_activity: 2026-11-22
 last_activity_desc: Completed 04-07-PLAN.md (three-node broadcast convergence)
-state_head: 4a352e84990e1e7ea835dd98f1660c206c80d97a
+state_head: 47ecdccfd30a7596ec3d0a9128ba5d5dcfa7b218
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 45
+  completed_plans: 46
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 12
+Current Plan: 13
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Completed 04-07-PLAN.md
@@ -102,6 +102,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P09 | 847 | 2 tasks | 5 files |
 | Phase 04 P10 | 397s | 2 tasks | 3 files |
 | Phase 04 P11 | 780 | 2 tasks | 2 files |
+| Phase 04 P12 | 272s | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -282,6 +283,9 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-11: listing drift is pinned as clock-only — MergeStats stays zero while the next local write strictly beats the listed max version, so an Observe-skipping implementation fails (OQ6).
 - [Phase 04]: 04-11: the WARN limiter is pinned per (node_id, class) by counting class+node pairs in the captured Log — two classes from one peer and a second peer's first occurrence each warn once.
 - [Phase 04]: 04-11: the 12 declared residual files needed no edit — every one was already adapted by its owning semantic plan or compiles unchanged through shared fakes; task 2's deliverable is the recorded all-green run and the adaptation table.
+- [Phase 04]: 04-12: every multi-node claim carries a code or test reference; residual windows are labelled accepted/residual with Phase 6/7/9 owners.
+- [Phase 04]: 04-12: OPERATIONS' stale 'reads are never gated by startup' sentence was corrected while documenting --startup-gate-empty, matching ADR 0005/D-01's closed reads-and-writes interface.
+- [Phase 04]: 04-12: exactly the five declared deviation rows (S-HLC-04, S-HLC-10, S-PROTO-18, S-ALG-ST-06, S-ALG-RC-05) were flipped to implemented with current evidence; PROTO-09 remains for 04-13 to close.
 
 ### Pending Todos
 
@@ -304,7 +308,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T06:30:08.743Z
-Stopped at: Completed 04-11-PLAN.md
+Last session: 2026-11-22T06:38:30.299Z
+Stopped at: Completed 04-12-PLAN.md
 Resume file: None
 Next action: continue Phase 4 with `/gsd:execute-phase 4` (04-08-PLAN.md is next)
