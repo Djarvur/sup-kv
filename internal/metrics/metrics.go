@@ -186,6 +186,7 @@ type Sources struct {
 	Retransmitted func() uint64
 	MergeStats    func() repl.MergeStats
 	DumpStats     func() persist.DumpStats
+	LoadStats     func() persist.LoadStats
 
 	// The XPORT-07 emission set (03-12): the paced-datagram counter, the
 	// total send-queue gauge, the egress overflow drops and the receive-path
@@ -208,7 +209,23 @@ func Snapshot(s Sources) []Family {
 	families = append(families, pacingFamilies(s.Paced(), s.SendQueue(), s.EgressDropped(), s.ReadErrors())...)
 	families = append(families, trafficFamilies(s.Discards(), s.Sent())...)
 	families = append(families, dumpFamilies(s.DumpStats())...)
+	load := s.LoadStats()
+	families = append(families, loadFamilies(load)...)
+	families = append(families, discardClassFamilies(load.Decoded)...)
 	return append(families, runtimeFamilies()...)
+}
+
+// loadFamilies builds the startup load-outcome family (PERSIST-02): the four
+// outcome labels always render, with the loaded outcome at 1 and the others
+// at 0; an unloaded engine reports all four at 0.
+func loadFamilies(persist.LoadStats) []Family {
+	return nil
+}
+
+// discardClassFamilies builds the load-time discard family (PERSIST-10): the
+// four decode classes always render from the accepted generation's census.
+func discardClassFamilies(persist.DecodeStats) []Family {
+	return nil
 }
 
 // replicationFamilies builds the peer/unacked/retransmit/merge families (the

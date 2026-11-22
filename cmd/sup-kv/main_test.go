@@ -1468,6 +1468,8 @@ func TestMetrics_optIn(t *testing.T) {
 		"supkv_dumps_duration_seconds",
 		"supkv_dumps_total",
 		"supkv_dumps_errors_total",
+		"supkv_dump_load_total",
+		"supkv_dump_records_discarded_total",
 		"go_goroutines",
 		"process_cpu_seconds_total",
 	} {

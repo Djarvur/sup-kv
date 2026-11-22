@@ -17,6 +17,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/metrics"
+	"github.com/Djarvur/sup-kv/internal/port"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -202,6 +203,8 @@ var families = []struct {
 	{"supkv_dumps_duration_seconds", "gauge"},
 	{"supkv_dumps_total", "counter"},
 	{"supkv_dumps_errors_total", "counter"},
+	{"supkv_dump_load_total", "counter"},
+	{"supkv_dump_records_discarded_total", "counter"},
 	{"go_goroutines", "gauge"},
 	{"go_memstats_alloc_bytes", "gauge"},
 	{"go_memstats_sys_bytes", "gauge"},
@@ -220,6 +223,7 @@ func zeroSources() metrics.Sources {
 		Retransmitted: func() uint64 { return 0 },
 		MergeStats:    func() repl.MergeStats { return repl.MergeStats{} },
 		DumpStats:     func() persist.DumpStats { return persist.DumpStats{} },
+		LoadStats:     func() persist.LoadStats { return persist.LoadStats{} },
 		Paced:         func() uint64 { return 0 },
 		SendQueue:     func() int { return 0 },
 		EgressDropped: func() uint64 { return 0 },
@@ -258,6 +262,14 @@ func TestMetrics_families(t *testing.T) {
 		"supkv_dumps_duration_seconds 0\n",
 		"supkv_dumps_total 0\n",
 		"supkv_dumps_errors_total 0\n",
+		"supkv_dump_load_total{outcome=\"prompt\"} 0\n",
+		"supkv_dump_load_total{outcome=\"main\"} 0\n",
+		"supkv_dump_load_total{outcome=\"backup\"} 0\n",
+		"supkv_dump_load_total{outcome=\"unusable\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"checksum\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"version\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"value_limit\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"malformed\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"bad_crc\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"undecodable\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"bad_proto_version\"} 0\n",
@@ -304,12 +316,27 @@ func TestMetrics_values(t *testing.T) {
 	src.SendQueue = func() int { return 23 }
 	src.EgressDropped = func() uint64 { return 3 }
 	src.ReadErrors = func() uint64 { return 5 }
+	src.LoadStats = func() persist.LoadStats {
+		return persist.LoadStats{
+			Loaded:  true,
+			Outcome: port.LoadBackup,
+			Decoded: persist.DecodeStats{Checksum: 2, Version: 3, ValueLimit: 4, Malformed: 5},
+		}
+	}
 	out := renderTo(t, metrics.Snapshot(src))
 	for _, line := range []string{
 		"supkv_replication_datagrams_paced_total 7001\n",
 		"supkv_replication_send_queue 23\n",
 		"supkv_replication_egress_dropped_total 3\n",
 		"supkv_replication_read_errors_total 5\n",
+		"supkv_dump_load_total{outcome=\"prompt\"} 0\n",
+		"supkv_dump_load_total{outcome=\"main\"} 0\n",
+		"supkv_dump_load_total{outcome=\"backup\"} 1\n",
+		"supkv_dump_load_total{outcome=\"unusable\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"checksum\"} 2\n",
+		"supkv_dump_records_discarded_total{class=\"version\"} 3\n",
+		"supkv_dump_records_discarded_total{class=\"value_limit\"} 4\n",
+		"supkv_dump_records_discarded_total{class=\"malformed\"} 5\n",
 		"supkv_datagrams_discarded_total{class=\"empty_key\"} 11\n",
 		"supkv_datagrams_discarded_total{class=\"key_too_long\"} 12\n",
 		"supkv_datagrams_discarded_total{class=\"tombstone_with_data\"} 13\n",

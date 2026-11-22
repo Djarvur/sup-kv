@@ -12,9 +12,11 @@ package stand //nolint:testpackage // the persistence scenarios share the harnes
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,7 +24,7 @@ import (
 // The persistence-load scenario constants: one key every seeded generation
 // carries, a generation-level garbage payload (its first line is not a JSON
 // object, so the decoder rejects the whole generation before considering any
-// record line), and the two static log messages the load classes emit.
+// record line), and the static log messages the load classes emit.
 const (
 	persistLoadKey = "stand/persist/load-key"
 
@@ -30,6 +32,19 @@ const (
 
 	persistBackupMsg   = "Dump generation fallback"
 	persistUnusableMsg = "No usable dump generation"
+	persistSkipMsg     = "Dumped records skipped by the configured value limit"
+
+	// The shrunk-limit scenario: a 64-byte record stored at the default limit
+	// and reopened under a 16-byte limit, so the codec discards exactly it and
+	// the other record keeps serving.
+	persistShrunkKeepKey   = "stand/persist/shrunk-keep"
+	persistShrunkKeepValue = "keep"
+	persistShrunkFatKey    = "stand/persist/shrunk-fat"
+	persistShrunkFatBytes  = 64
+	persistShrunkLimit     = 16
+
+	persistValueLimitSample = `supkv_dump_records_discarded_total{class="value_limit"}`
+	persistLoadMainSample   = `supkv_dump_load_total{outcome="main"}`
 )
 
 // seedPersistDump runs one node over the pair's dump path, writes key with
@@ -295,4 +310,75 @@ func TestStand_persistLoadPrompt(t *testing.T) {
 	persistAssertMessageCount(t, node, persistBackupMsg, 0)
 	persistAssertMessageCount(t, node, persistUnusableMsg, 0)
 	assertNoPanic(t, node, "the fresh-start node")
+}
+
+// TestStand_persistShrunkLimit proves the PERSIST-10 process-level half: a
+// record stored at the default limit and reopened under a 16-byte limit is
+// counted by class, logged once with the count and the configured limit,
+// published as a non-zero value_limit metric sample, and — because a Main
+// load stays clean — left in the main dump until a write rotates it away.
+func TestStand_persistShrunkLimit(t *testing.T) {
+	t.Parallel()
+	p := newStandPair(t)
+
+	// Seed at the default limit and shut down cleanly: the final confirmed
+	// dump holds both records, the fat one included.
+	seedNode := startStandNode(t, p, standNodeAID)
+	awaitServing(t, p.grpcA, servingDeadline)
+	seedClient := standClient(t, p.grpcA)
+	standSetWith(t, seedClient, persistShrunkKeepKey, persistShrunkKeepValue)
+	standSetWith(t, seedClient, persistShrunkFatKey, strings.Repeat("f", persistShrunkFatBytes))
+	signalAndWaitExit(t, seedNode)
+	mainBefore := readFinalDump(t, p.dumpA)
+	if !strings.Contains(mainBefore, `"key":"`+persistShrunkFatKey+`"`) {
+		t.Fatalf("the seeded dump %s lacks the fat record:\n%s", p.dumpA, mainBefore)
+	}
+
+	metricsAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	metricsURL := "http://" + metricsAddr + "/metrics"
+	node := startStandLoggedNode(t, p, standNodeAID,
+		"--value-max-bytes="+strconv.Itoa(persistShrunkLimit),
+		"--metrics-addr="+metricsAddr)
+	awaitServing(t, p.grpcA, servingDeadline)
+	standMetricsReady(t, metricsURL)
+	client := standClient(t, p.grpcA)
+
+	if value, found := standGet(t, client, persistShrunkKeepKey); !found || value != persistShrunkKeepValue {
+		t.Fatalf("Get(%q) under the shrunk limit = (%q, %t), want the slim record",
+			persistShrunkKeepKey, value, found)
+	}
+	if value, found := standGet(t, client, persistShrunkFatKey); found {
+		t.Fatalf("Get(%q) under the shrunk limit = (%q, true), want it skipped at load",
+			persistShrunkFatKey, value)
+	}
+
+	// The evidence window: zero writes, so the main dump still carries the
+	// skipped record's line until normal rotation allows its displacement.
+	mainAfterLoad := readFinalDump(t, p.dumpA)
+	if !strings.Contains(mainAfterLoad, `"key":"`+persistShrunkFatKey+`"`) {
+		t.Fatalf("the skipped record left the main dump before any write (PERSIST-10):\n%s", mainAfterLoad)
+	}
+
+	line := awaitPersistMessage(t, node, persistSkipMsg)
+	if !strings.Contains(line, `"count":1`) {
+		t.Fatalf("the skip WARN does not carry the count 1:\n%s", line)
+	}
+	if !strings.Contains(line, `"value_max_bytes":`+strconv.Itoa(persistShrunkLimit)) {
+		t.Fatalf("the skip WARN does not carry the configured limit %d:\n%s", persistShrunkLimit, line)
+	}
+
+	body := standMetricsScrape(t, metricsURL)
+	if got := standMetricsSample(t, body, persistValueLimitSample); got != 1 {
+		t.Fatalf("%s = %v after one skipped record, want 1:\n%s", persistValueLimitSample, got, body)
+	}
+	if got := standMetricsSample(t, body, persistLoadMainSample); got != 1 {
+		t.Fatalf("%s = %v after a Main load, want 1:\n%s", persistLoadMainSample, got, body)
+	}
+
+	signalAndWaitExit(t, node)
+	persistAssertMessageCount(t, node, persistSkipMsg, 1)
+	if out := node.stderr.String(); strings.Contains(out, "undecodable dumped records") {
+		t.Fatalf("the value-limit skip was also reported as an undecodable class:\n%s", out)
+	}
+	assertNoPanic(t, node, "the shrunk-limit node")
 }
