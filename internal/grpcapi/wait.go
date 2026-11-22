@@ -33,28 +33,33 @@ const (
 )
 
 // waitForReplication produces the wait_for_replication report (API-05,
-// D-08..D-11) after a successful engine write: it reports only what the
+// D-08..D-11, A-01) after a successful engine write: it reports only what the
 // injected ServerOptions.WaitReplicated seam observed — the adapter's
-// tracker, never the single-driver repl core and never a polled mirror.
-// The report is the D-08 aggregate (acked plus counts, no per-peer
-// breakdown); it may delay the response within timeout but never changes
-// the write outcome, which the engine already confirmed before this runs.
-// timeout is the resolved wait deadline (D-09: the positive per-request
-// wait_timeout_ms, else the operator-tunable default).
+// tracker, never the single-driver repl core and never a polled mirror — and
+// it pins the reported total to the peer set the handler captured immediately
+// before the engine write (peers). The report is the D-08 aggregate (acked
+// plus counts, no per-peer breakdown); it may delay the response within
+// timeout but never changes the write outcome, which the engine already
+// confirmed before this runs. timeout is the resolved wait deadline (D-09:
+// the positive per-request wait_timeout_ms, else the operator-tunable
+// default).
 //
-// The pinned semantics (XPORT-12):
+// The pinned semantics (A-01, XPORT-12):
 //
 //  1. A nil WaitReplicated is the legal single-node wiring (D-11): no
-//     tracker can exist through this seam, so the report is
-//     (true, 0, 0) immediately.
-//  2. total is captured exactly once, before the wait (D-10): peers
-//     discovered during the wait never extend the awaited set. A nil
-//     KnownPeers means zero peers — the single-node wiring.
-//  3. total == 0 returns (true, 0, 0) after calling WaitReplicated with
-//     total 0. That call is the RELEASE point for the tracker the adapter
-//     created when the write's notification requested tracking: the wait
-//     path itself enters no waiting loop, so without the call the
-//     zero-peer path would leak the tracker (D-11).
+//     tracker can exist through this seam, so nothing was awaited and
+//     nothing was acknowledged — (false, 0, 0) immediately. An acked=true
+//     answer here would report a confirmation no peer ever sent.
+//  2. total is len(peers) — the set captured exactly once, immediately
+//     before the engine write (D-01): a peer discovered during the wait
+//     never extends the awaited set and never moves the reported total, and
+//     an Ack from a node outside the set cannot complete it.
+//  3. total == 0 (zero peers at write acceptance) returns (false, 0, 0)
+//     after calling WaitReplicated with total 0. That call is the RELEASE
+//     point for the tracker the adapter created when the write's
+//     notification requested tracking: the wait path itself enters no
+//     waiting loop, so without the call the zero-peer path would leak the
+//     tracker (D-11, T-06-05).
 //  4. Otherwise the adapter's tracker waits and reports; the count is
 //     clamped to the write-time total (WR-01: a matching Ack from a node
 //     outside the write-time peer snapshot joins the core's acked set, so
@@ -64,21 +69,22 @@ const (
 //     acked=false for both; timeout and ctx cancellation return the last
 //     observed count with acked=false. The wait never reports a success it
 //     did not observe.
-func (s *Server) waitForReplication(ctx context.Context, key string, ver version.RecordVersion, timeout time.Duration) (acked bool, ackedCount, total uint32) {
+func (s *Server) waitForReplication(ctx context.Context, key string, ver version.RecordVersion, peers []uint16, timeout time.Duration) (acked bool, ackedCount, total uint32) {
 	if s.opts.WaitReplicated == nil {
-		return true, 0, 0
+		return false, 0, 0
 	}
-	peerCount := uint32(len(s.writePeers())) //nolint:gosec // G115: the peer table is keyed by 16-bit node ids, so the count never exceeds 65536 — the conversion cannot truncate.
-	if peerCount == 0 {
-		// Zero known peers at write time (D-11): immediate acked with
-		// nothing awaited. The total==0 call releases the notify-time
-		// tracker; its report is discarded because the single-node answer
-		// is fixed.
+	total = uint32(len(peers)) //nolint:gosec // G115: the peer table is keyed by 16-bit node ids, so the set holds at most 65536 entries — the conversion cannot truncate.
+	if total == 0 {
+		// Zero captured peers (A-01, D-01): nothing was awaited, so nothing
+		// was acknowledged — the honest answer is (false, 0, 0), never the
+		// old single-node acked=true. The total==0 call is still the RELEASE
+		// point for the notify-time tracker; its report is discarded because
+		// the zero-peer answer is fixed.
 		_, _ = s.opts.WaitReplicated(ctx, key, ver, 0, timeout)
-		return true, 0, 0
+		return false, 0, 0
 	}
-	acked, count := s.opts.WaitReplicated(ctx, key, ver, peerCount, timeout)
-	return acked, min(count, peerCount), peerCount
+	acked, count := s.opts.WaitReplicated(ctx, key, ver, total, timeout)
+	return acked, min(count, total), total
 }
 
 // writePeers returns the write-time peer-id snapshot the handler captured

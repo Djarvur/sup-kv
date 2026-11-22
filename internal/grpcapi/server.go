@@ -234,7 +234,7 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 	resp := &apiproto.SetResponse{Version: ver[:]}
 	if req.GetWaitForReplication() {
 		timeout := s.waitTimeout(req.GetWaitTimeoutMs())
-		resp.Acked, resp.AckedCount, resp.TotalPeers = s.waitForReplication(ctx, req.GetKey(), ver, timeout)
+		resp.Acked, resp.AckedCount, resp.TotalPeers = s.waitForReplication(ctx, req.GetKey(), ver, peers, timeout)
 	}
 	return resp, nil
 }
@@ -286,7 +286,7 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 	resp := &apiproto.DeleteResponse{Version: ver[:]}
 	if req.GetWaitForReplication() {
 		timeout := s.waitTimeout(req.GetWaitTimeoutMs())
-		resp.Acked, resp.AckedCount, resp.TotalPeers = s.waitForReplication(ctx, req.GetKey(), ver, timeout)
+		resp.Acked, resp.AckedCount, resp.TotalPeers = s.waitForReplication(ctx, req.GetKey(), ver, peers, timeout)
 	}
 	return resp, nil
 }

@@ -87,9 +87,10 @@ type ServerOptions struct {
 	// timeout and ctx, and reports the observed acked flag and count
 	// against the write-time peer total. Production injects the udprepl
 	// adapter's method value; a nil seam is the single-node wiring (D-11)
-	// — no tracker can exist through this seam, so the wait reports
-	// (true, 0, 0) immediately. Handler goroutines wait only here, never
-	// by calling the single-driver core.
+	// — no tracker can exist through this seam, so nothing was awaited and
+	// the wait reports the honest (false, 0, 0) immediately (A-01).
+	// Handler goroutines wait only here, never by calling the single-driver
+	// core.
 	WaitReplicated func(ctx context.Context, key string, ver version.RecordVersion, total uint32, timeout time.Duration) (acked bool, ackedCount uint32)
 
 	// WaitTimeout is the operator-tunable wait_for_replication default

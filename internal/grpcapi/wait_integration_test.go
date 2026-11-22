@@ -234,10 +234,10 @@ func TestWaitIntegration_ackedThroughRealAdapterTracker(t *testing.T) {
 	go func() { _ = adapterA.Run(ctx) }()
 	go func() { _ = adapterB.Run(ctx) }()
 
-	// Discovery over real broadcast Hellos: A must know B before the write,
-	// or the wait-set seeds empty, total is zero and the wait short-circuits
-	// at acked=true 0/0 (D-11) — the degenerate path this test must not
-	// confuse with success.
+	// Discovery over real broadcast Hellos: A must know B before the write, or
+	// the write-time capture is empty, total is zero and the wait answers the
+	// honest (false, 0/0) immediately (A-01) — the degenerate path this test
+	// must not confuse with success.
 	waitFor(t, integrationDeadline, "adapter A to discover adapter B", func() bool {
 		return adapterA.KnownPeers() == 1
 	})

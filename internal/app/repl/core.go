@@ -736,8 +736,8 @@ func (h *retryHeap) Pop() any {
 // concurrent use: exactly one driver goroutine — the adapter's event loop
 // in production, the simulator's scheduler in tests — calls the handlers
 // (D-04); the copying accessors (Discards, SyncArrived, PeerSnapshot,
-// PendingSnapshot) are the sanctioned cross-goroutine read seams, consumed
-// through the production adapter's post-event atomics. Results, never
+// PeerIDs, PendingSnapshot) are the sanctioned cross-goroutine read seams,
+// consumed through the production adapter's post-event atomics. Results, never
 // callbacks: no handler takes a callback, a channel or a goroutine.
 type Core struct {
 	nodeID uint16
@@ -2251,9 +2251,22 @@ func (c *Core) trackLocalWrite(now time.Time, key string, rec storage.Record, pe
 	pk := pendingKey{key: key, version: rec.Version}
 	_, tracked := c.pending[pk]
 	if !tracked {
+		// The promise set is exactly the write-time snapshot, restricted to
+		// peers the table still holds: a captured peer that has already left
+		// can never Ack, so awaiting it would idle to the caller's timeout
+		// instead of reporting the honest false (A-01, D-01).
 		waitSet := make(map[uint16]struct{}, len(peers))
 		for _, id := range peers {
+			if _, present := c.peers[id]; !present {
+				continue
+			}
 			waitSet[id] = struct{}{}
+		}
+		if len(peers) > 0 && len(waitSet) == 0 {
+			// The capture named peers the table no longer holds: nobody left
+			// can Ack this version, so the waiter learns the honest false now
+			// rather than burning its timeout on an unfulfillable promise.
+			out.WaitSetEmpty(key, rec.Version)
 		}
 		entry := pendingEntry{
 			version:   rec.Version,

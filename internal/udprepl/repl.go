@@ -787,13 +787,14 @@ func (a *Adapter) applyResults(out *port.Outbox) {
 // or ctx cancellation returns the last observed count with acked=false —
 // the wait never reports a success it did not observe.
 //
-// total == 0 is the D-11 single-node case: a write with no peers is acked
-// immediately with nothing awaited, and this call is the RELEASE point for
-// the tracker the adapter created at notify time (the zero-peer path never
-// enters the waiting loop). An absent tracker reports an immediate
-// (false, 0) without polling: two paths reach it — a write notified with
-// track=false, and a white-box test driving the core directly — and
-// neither has a waiter to resolve.
+// total == 0 is the D-11 single-node release case: the adapter creates the
+// tracker at notify time even for a zero-peer write, so this call is its
+// RELEASE point. It reports (true, 0) — a benign release verdict — while the
+// gRPC handler, which owns the public report, answers the honest
+// (false, 0, 0) for a write no peer acknowledged (A-01). An absent tracker
+// reports an immediate (false, 0) without polling: two paths reach it — a
+// write notified with track=false, and a white-box test driving the core
+// directly — and neither has a waiter to resolve.
 //
 // One wait per write identity is expected (the gRPC handler issues exactly
 // one). A second concurrent wait for the same identity shares the same
