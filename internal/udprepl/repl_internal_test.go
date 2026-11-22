@@ -331,3 +331,63 @@ func TestWaitReplicated_ctxCancelReleases(t *testing.T) {
 		t.Fatalf("canceled wait left %d trackers, want the map empty", got)
 	}
 }
+
+// TestMirror_identicalListingFloodDoesNotRepublish pins the publication gate
+// (PROTO-01, T-4-05): the listing mirror is content-gated. After the first
+// complete listing the adapter's published pointer is captured; 100 further
+// identical complete listings leave that pointer — and the adapter's
+// generation field — unchanged, so an identical-listing flood costs no clone
+// and no republish, while SyncArrived and ListedKey keep answering true from
+// the retained snapshot. White-box because the pointer and the generation are
+// unexported adapter state.
+func TestMirror_identicalListingFloodDoesNotRepublish(t *testing.T) {
+	t.Parallel()
+	adapter := newTrackerTestAdapter(t)
+	now := time.UnixMilli(1730000000000)
+	entry := port.SyncEntry{Key: mirrorFloodKey, Version: version.PackVersion(1730000000000, 1, trackerNodeB)}
+	in := port.InboundDatagram{
+		Source:       "n22",
+		Status:       port.Decoded,
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeID:       trackerNodeB,
+		RunID:        trackerRunIDB,
+		Msg: port.DataSync{
+			SyncID:     1,
+			ChunkIndex: 1,
+			ChunkCount: 1,
+			Entries:    []port.SyncEntry{entry},
+		},
+	}
+	var out port.Outbox
+	adapter.core.HandleDatagram(now, in, &out)
+	out.Drain()
+	adapter.mirrorStats()
+	first := adapter.listing.Load()
+	if first == nil || !first.complete {
+		t.Fatalf("the first complete listing published no complete mirror (%v), want one pointer carrying complete=true", first)
+	}
+	if _, ok := first.keys[mirrorFloodKey]; !ok {
+		t.Fatalf("the published mirror lacks %q, want the listing's key visible in the same pointer", mirrorFloodKey)
+	}
+	gen := adapter.listingGen
+	for i := range 100 {
+		adapter.core.HandleDatagram(now, in, &out)
+		out.Drain()
+		adapter.mirrorStats()
+		if got := adapter.listing.Load(); got != first {
+			t.Fatalf("identical complete listing %d republished the mirror pointer %p -> %p, want no republish", i+1, first, got)
+		}
+		if genNow := adapter.listingGen; genNow != gen {
+			t.Fatalf("identical complete listing %d moved the adapter generation %d -> %d, want no move", i+1, gen, genNow)
+		}
+	}
+	if !adapter.SyncArrived() {
+		t.Fatal("SyncArrived() = false after the identical-listing flood, want true from the retained snapshot")
+	}
+	if !adapter.ListedKey(mirrorFloodKey) {
+		t.Fatalf("ListedKey(%q) = false after the flood, want true from the retained snapshot", mirrorFloodKey)
+	}
+}
+
+// mirrorFloodKey is the one key the identical-listing flood repeats.
+const mirrorFloodKey = "mirror/flood"

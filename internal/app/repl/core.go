@@ -100,6 +100,38 @@ const (
 	// dedupe identity (T-3-21), and the drop is counted in EgressDropped.
 	maxEgressEntries = 32768
 
+	// maxSyncStreams bounds the partial-listing accumulator: a peer may send
+	// many distinct sync_ids with missing chunks, so the number of retained
+	// streams is capped and an overflow evicts the least-progressed stream
+	// deterministically (T-4-03). The cap is deliberately small: a healthy
+	// segment has one in-flight round per peer plus transient stragglers.
+	maxSyncStreams = 16
+
+	// maxSyncEntriesPerStream bounds one stream's accumulated key→version
+	// entries (T-4-03). A stream beyond it is dropped whole, so a single
+	// hostile round cannot fill memory before the total cap reacts.
+	maxSyncEntriesPerStream = 65536
+
+	// maxSyncEntriesTotal bounds the accumulator's total retained entries
+	// across every stream — the in-flight entry cap, matching
+	// maxListedKeysTotal below. Overflow evicts whole streams, least
+	// progressed first, and counts each eviction (T-4-03).
+	maxSyncEntriesTotal = 131072
+
+	// maxSyncChunks bounds the accepted chunk_count (T-4-02): sized for a
+	// worst-case 20 000-key round at one entry per chunk, with headroom. A
+	// header above it is a bad_sync_header violation, never accumulated
+	// state.
+	maxSyncChunks = 65536
+
+	// maxListedKeysTotal bounds the retained per-peer listed-key payload —
+	// the union's size, coincidentally equal to maxSyncEntriesTotal because
+	// both model the same 20 000-key scale with headroom (T-4-41). An
+	// overflow evicts whole peer sets in LRU order, so the union, the
+	// refcounts and the retained total shrink together; each released key is
+	// counted in ListedKeysEvicted.
+	maxListedKeysTotal = 131072
+
 	// broadcastDst is the listing queue's destination key for the periodic
 	// broadcast round; every other key is a peer's opaque address handle.
 	broadcastDst = ""
@@ -382,6 +414,26 @@ type listingFIFO struct {
 	entries [][]port.SyncEntry
 }
 
+// syncStreamKey identifies one peer's in-flight listing round: its node_id,
+// its run_id and the round's sync_id. run_id belongs in the key so a
+// restarted peer's fresh sync_id counter can never collide with the partial
+// state its previous run left behind.
+type syncStreamKey struct {
+	peer uint16
+	run  [16]byte
+	id   uint64
+}
+
+// syncStream is one peer's partial listing round: the round's chunk count,
+// the set of chunk indices received so far, and the accumulated key→version
+// entries. The round is complete exactly when every index 1..count is in
+// got — arrival of any single chunk proves nothing (PROTO-01).
+type syncStream struct {
+	count   uint32
+	got     map[uint32]struct{}
+	entries map[string]version.RecordVersion
+}
+
 // recordSend is one queued record emission: the tracked pair and whether the
 // send is a ladder retransmission (retry) or the discovery flush's first
 // send. The record itself is never retained — drainRecordSends re-reads it
@@ -610,6 +662,39 @@ type Core struct {
 	// touch core state.
 	syncArrived bool
 
+	// The listing accumulator (PROTO-01): one syncStream per
+	// (peer, run, sync_id) round, bounded by maxSyncStreams,
+	// maxSyncEntriesPerStream and maxSyncEntriesTotal; syncEntries is the
+	// total retained entry count the total cap reads, and syncStreamDropped
+	// counts every stream the caps evicted.
+	syncs             map[syncStreamKey]*syncStream
+	syncEntries       int
+	syncStreamDropped uint64
+
+	// The retained listed-key payload (PROTO-01, T-4-41): each peer's last
+	// complete listing as a key set, the union's per-key refcounts, the
+	// union itself and its size, and the LRU over peers (listedOrder front =
+	// least recently published) that bounds the payload. listedKeysEvicted
+	// counts every key released by an eviction.
+	listedByPeer      map[uint16]map[string]struct{}
+	listedRefs        map[string]int
+	listedKeys        map[string]struct{}
+	listedKeyCount    int
+	listedOrder       *list.List
+	listedPos         map[uint16]*list.Element
+	listedKeysEvicted uint64
+
+	// listingGen is the published listing content version: it moves exactly
+	// when the union membership or the complete flag actually changes, so an
+	// identical repeated complete listing republishes nothing downstream.
+	// listingComplete flips true on the first complete listing and never
+	// resets; nextSyncID allocates one fresh sync_id per emission round
+	// (build-time counter, never crypto/rand — same-seed replay stays
+	// byte-identical).
+	listingGen      uint64
+	listingComplete bool
+	nextSyncID      uint64
+
 	// The no-Hello WARN state (XPORT-09, D-07): firstAdvance is the event
 	// time of the first Advance — the warning's clock origin — helloSeen
 	// flips on the first Hello received from any peer, and peerWarned
@@ -640,6 +725,13 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 		recordQueued:         make(map[pendingKey]struct{}),
 		egressIDs:            make(map[egressKey]struct{}),
 		discardWarnAt:        make(map[string]time.Time),
+		syncs:                make(map[syncStreamKey]*syncStream),
+		listedByPeer:         make(map[uint16]map[string]struct{}),
+		listedRefs:           make(map[string]int),
+		listedKeys:           make(map[string]struct{}),
+		listedOrder:          list.New(),
+		listedPos:            make(map[uint16]*list.Element),
+		nextSyncID:           1,
 		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
 }
@@ -1827,6 +1919,51 @@ func (c *Core) Retransmissions() uint64 {
 // calling into a core the driver owns.
 func (c *Core) SyncArrived() bool {
 	return c.syncArrived
+}
+
+// ListingGeneration returns the listing content version the adapter's mirror
+// compares against: it moves exactly when the retained union membership or
+// the listing-complete flag actually changes, so an identical repeated
+// complete listing moves nothing and triggers no downstream publication
+// (PROTO-01, T-4-05). A value read the adapter mirrors from its event loop.
+func (c *Core) ListingGeneration() uint64 {
+	return c.listingGen
+}
+
+// ListingComplete reports whether a complete listing has been processed —
+// every chunk of some peer's round received. It flips on the first complete
+// listing and never resets; the startup gate's sync half reads it through the
+// adapter's mirror.
+func (c *Core) ListingComplete() bool {
+	return c.listingComplete
+}
+
+// ListedKeysSnapshot returns a defensive clone of the retained listed-key
+// union — every key named by some peer's last complete listing. The union is
+// maintained incrementally by the refcounts, never recomputed from the
+// per-peer sets, so the read is O(keys) at listing cadence only; the clone
+// shares no backing map with core state (the storage.Records copying
+// precedent).
+func (c *Core) ListedKeysSnapshot() map[string]struct{} {
+	out := make(map[string]struct{}, len(c.listedKeys))
+	for key := range c.listedKeys {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+// SyncStreamDropped returns the number of partial-listing streams the bounds
+// evicted — the T-4-03 observability signal: a growing value means a peer is
+// flooding distinct sync_ids with missing chunks.
+func (c *Core) SyncStreamDropped() uint64 {
+	return c.syncStreamDropped
+}
+
+// ListedKeysEvicted returns the number of retained listed keys released by
+// whole-peer-set eviction (T-4-41) — each key removed from the union by the
+// maxListedKeysTotal bound increments it once.
+func (c *Core) ListedKeysEvicted() uint64 {
+	return c.listedKeysEvicted
 }
 
 // PeerSnapshot returns a defensive copy of the peer table keyed by NodeID

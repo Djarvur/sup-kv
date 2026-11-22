@@ -11,7 +11,7 @@ import (
 // verdict as an input, never re-deriving it.
 type DecodeStatus int8
 
-// The three decode outcomes of one inbound datagram.
+// The four decode outcomes of one inbound datagram.
 const (
 	// Decoded means the envelope and body both unmarshaled and passed the
 	// CRC gate; Msg carries the decoded message.
@@ -23,6 +23,14 @@ const (
 	// body) at all — including schema-domain violations such as a run_id
 	// that is not 16 bytes.
 	Undecodable
+	// ProtoVersionMismatch means the envelope unmarshaled but its
+	// proto_version differs from the protocol version this build speaks.
+	// The verdict is decided after the envelope fields are read and BEFORE
+	// the CRC gate and body decode: a foreign version's body need not
+	// follow this version's framing contract, so it is never decoded. Msg
+	// is nil; ProtoVersion, NodeID and RunID carry the parsed envelope
+	// fields so the core can attribute and rate-limit the discard (D-07).
+	ProtoVersionMismatch
 )
 
 // Message is the sealed interface of the replication message structs. The
@@ -72,9 +80,23 @@ type SyncEntry struct {
 	Version version.RecordVersion
 }
 
-// DataSync is one self-sufficient chunk of the sorted key→version listing
-// exchanged for full reconciliation (REPL-05).
+// DataSync is one chunk of the sorted key→version listing exchanged for
+// full reconciliation (REPL-05). The header makes completeness a wire fact:
+// every chunk of one listing round carries the same SyncID and ChunkCount,
+// and its own 1-based ChunkIndex, so the receiver accumulates parts and
+// knows the listing is complete exactly when every index 1..ChunkCount has
+// arrived — the first chunk alone is never the whole listing (PROTO-01).
 type DataSync struct {
+	// SyncID identifies the listing round. A fresh value is allocated per
+	// emission round, so a reordered or retransmitted chunk from one round
+	// can never be accumulated into another.
+	SyncID uint64
+	// ChunkIndex is this chunk's 1-based position within the round.
+	ChunkIndex uint32
+	// ChunkCount is the number of chunks in the round, at least 1: an empty
+	// listing travels as one empty chunk with count 1.
+	ChunkCount uint32
+	// Entries is this chunk's share of the sorted listing.
 	Entries []SyncEntry
 }
 

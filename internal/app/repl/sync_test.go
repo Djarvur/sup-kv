@@ -794,10 +794,115 @@ const (
 	keyTombstone = "cfg/tomb"
 )
 
-// syncFrom builds a decoded DataSync datagram from peerID carrying the
-// listing entries in the given (sender-sorted) order (REPL-05).
+// syncFrom builds a decoded single-part DataSync datagram from peerID — the
+// 1-of-1 header an honest sender stamps on a listing that fits one chunk
+// (count 1, index 1, no continuation): the shape every pre-existing
+// accepted-DataSync fixture carries so it reaches the compare path instead
+// of the header-validation discard. Multi-part tests build their own
+// datagrams with explicit sync ids and indices.
 func syncFrom(peerID uint16, entries ...port.SyncEntry) port.InboundDatagram {
-	return datagramFrom(peerID, port.DataSync{Entries: entries})
+	return datagramFrom(peerID, port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: entries})
+}
+
+// chunkedListing builds chunks one datagram per part with the same syncID,
+// consecutive 1-based indices and the shared chunk count — the wire shape a
+// real multi-chunk round carries. Each part names one key whose version is
+// valid at the fixed test now, so the header and entries both pass
+// validation.
+func chunkedListing(peerID uint16, syncID uint64, chunks int) []port.InboundDatagram {
+	parts := make([]port.InboundDatagram, 0, chunks)
+	for i := range chunks {
+		parts = append(parts, datagramFrom(peerID, port.DataSync{
+			SyncID:     syncID,
+			ChunkIndex: uint32(i + 1),
+			ChunkCount: uint32(chunks),
+			Entries: []port.SyncEntry{{
+				Key:     fmt.Sprintf("cfg/part%d", i),
+				Version: version.PackVersion(testNowMs, uint16(i), peerID),
+			}},
+		}))
+	}
+	return parts
+}
+
+// TestSync_partialListingKeepsGateClosed proves the completeness contract
+// (PROTO-01, R-03): a three-chunk listing delivered in order leaves
+// SyncArrived and ListingComplete false after chunks 1 and 2 — the first
+// chunk is a PART, never the whole listing — and only the closing chunk
+// flips both.
+func TestSync_partialListingKeepsGateClosed(t *testing.T) {
+	t.Parallel()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	out.Drain()
+	parts := chunkedListing(peerID1, 44, 3)
+	for i, part := range parts {
+		core.HandleDatagram(at(0), part, &out)
+		out.Drain()
+		complete := i == len(parts)-1
+		if got := core.SyncArrived(); got != complete {
+			t.Fatalf("after chunk %d of 3 SyncArrived() = %v, want %v — completeness is every index 1..count, not first arrival", i+1, got, complete)
+		}
+		if got := core.ListingComplete(); got != complete {
+			t.Fatalf("after chunk %d of 3 ListingComplete() = %v, want %v", i+1, got, complete)
+		}
+	}
+}
+
+// TestSync_headerOutOfOrderAndDuplicate proves accumulation is an
+// index-set discipline (PROTO-01): the same three-chunk listing delivered
+// out of order (3, 1, 2) — with chunk 2 delivered twice — completes only when
+// all of 1..3 are present, and a duplicate chunk after completion neither
+// reopens nor breaks the state.
+func TestSync_headerOutOfOrderAndDuplicate(t *testing.T) {
+	t.Parallel()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	out.Drain()
+	parts := chunkedListing(peerID1, 45, 3)
+	feed := func(i int) {
+		t.Helper()
+		core.HandleDatagram(at(0), parts[i], &out)
+		out.Drain()
+	}
+	feed(2)
+	if core.SyncArrived() {
+		t.Fatal("SyncArrived() = true after only chunk 3 of 3, want false")
+	}
+	feed(0)
+	if core.SyncArrived() {
+		t.Fatal("SyncArrived() = true after chunks 3 and 1 of 3, want false — chunk 2 is still missing")
+	}
+	feed(1)
+	if !core.SyncArrived() {
+		t.Fatal("SyncArrived() = false after all three chunks (3, 1, 2), want true")
+	}
+	feed(1)
+	if !core.SyncArrived() {
+		t.Fatal("SyncArrived() = false after a duplicate chunk, want it sticky true")
+	}
+}
+
+// TestSync_emptyListingCompletes proves the empty-listing edge (PROTO-01):
+// an empty store announces itself as ONE chunk with count 1 and index 1, and
+// that single empty part completes the listing and opens the gate.
+func TestSync_emptyListingCompletes(t *testing.T) {
+	t.Parallel()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	out.Drain()
+	core.HandleDatagram(at(0), datagramFrom(peerID1, port.DataSync{SyncID: 46, ChunkIndex: 1, ChunkCount: 1}), &out)
+	out.Drain()
+	if !core.SyncArrived() || !core.ListingComplete() {
+		t.Fatalf("a one-chunk empty listing left SyncArrived/ListingComplete = %v/%v, want true/true — an empty listing is still a complete listing",
+			core.SyncArrived(), core.ListingComplete())
+	}
+	if got := len(core.ListedKeysSnapshot()); got != 0 {
+		t.Fatalf("an empty listing listed %d keys, want 0", got)
+	}
 }
 
 // newSyncCore returns the local node's core over a real store with cfg —

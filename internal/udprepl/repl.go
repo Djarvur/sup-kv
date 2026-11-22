@@ -307,9 +307,18 @@ type Adapter struct {
 	egressDropped atomic.Uint64
 	pacedSends    atomic.Uint64
 
-	// syncArrived mirrors the core's first-DataSync-received flag (the
-	// startup gate's sync half, API-04).
-	syncArrived atomic.Bool
+	// listing is the gate's one publication point: an immutable snapshot of
+	// the core's listing state — whether a complete listing has been
+	// processed and the union of its keys — stored as ONE pointer, so a
+	// reader that observes complete=true structurally also observes the keys
+	// that complete listing named (PROTO-01, T-4-05, RESEARCH Pattern 2).
+	// Publishing completeness and keys separately would leave a window where
+	// the gate opens before ListedKey can answer. The event loop stores a
+	// fresh pointer only when the core's listing generation changed, so an
+	// identical repeated listing clones nothing (adapter-goroutine writes,
+	// any-goroutine reads).
+	listing    atomic.Pointer[listingMirror]
+	listingGen uint64
 
 	// trackers maps each wait-requesting local write's identity to its
 	// waiter tracker (XPORT-12). NotifyLocalWrite is the ONLY production
@@ -860,13 +869,39 @@ func (a *Adapter) SentByType() SentByType {
 	}
 }
 
-// SyncArrived reports whether the core has received its first DataSync
-// datagram (the startup gate's sync half, API-04), mirrored after the
-// latest event-loop iteration — safe from any goroutine. gRPC handler
-// goroutines read the gate's sync half only here, never by calling the
-// single-driver core.
+// SyncArrived reports whether the core has processed a COMPLETE listing —
+// every chunk of some peer's round received (the startup gate's sync half,
+// API-04, PROTO-01). It reads the one listing mirror pointer the event loop
+// publishes, so a true answer implies ListedKey can answer from the same
+// snapshot; false covers both "no complete listing yet" and "mirror never
+// published". Safe from any goroutine: the pointer is the only state read.
 func (a *Adapter) SyncArrived() bool {
-	return a.syncArrived.Load()
+	m := a.listing.Load()
+	return m != nil && m.complete
+}
+
+// ListedKey reports whether the completed listing named key — a key some
+// peer's listing carried, whether or not its value has arrived yet. It loads
+// the SAME mirror pointer SyncArrived reads and returns false for a missing
+// mirror, an incomplete listing, or a key outside the union (PROTO-01,
+// 14.5(6)). Reads never wait for the value itself; the RPC layer maps this to
+// Unavailable/AlreadyExists. Safe from any goroutine.
+func (a *Adapter) ListedKey(key string) bool {
+	m := a.listing.Load()
+	if m == nil || !m.complete {
+		return false
+	}
+	_, ok := m.keys[key]
+	return ok
+}
+
+// listingMirror is one immutable publication of the core's listing state:
+// whether a complete listing has been processed and the listed-key union at
+// that moment. Stored as one pointer so completeness and keys can never be
+// observed from different generations (T-4-05).
+type listingMirror struct {
+	complete bool
+	keys     map[string]struct{}
 }
 
 // ReadErrors returns the number of receive-path errors the read loop has
@@ -996,11 +1031,13 @@ func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) {
 }
 
 // mirrorStats copies the core's discard counters, known-peer count, the
-// first-sync flag, the OBS-01 gauge set — the pending-set gauge, the
+// listing mirror, the OBS-01 gauge set — the pending-set gauge, the
 // remote-merge counters and the retransmissions counter — and the XPORT-07
 // emission set (total queue depth, egress drops, paced sends) into the
 // atomics after each loop iteration (D-04): cross-goroutine readers — the
-// smoke test, later observability — never touch core state.
+// smoke test, later observability — never touch core state. The listing
+// mirror is published only when its generation moved, so its clone cost is
+// paid at listing cadence, never per event.
 func (a *Adapter) mirrorStats() {
 	d := a.core.Discards()
 	a.badCRC.Store(d.BadCRC)
@@ -1026,7 +1063,18 @@ func (a *Adapter) mirrorStats() {
 	a.sendQueue.Store(int64(a.core.QueuedSends()))
 	a.egressDropped.Store(a.core.EgressDropped())
 	a.pacedSends.Store(a.core.PacedSends())
-	a.syncArrived.Store(a.core.SyncArrived())
+	// The listing mirror is content-gated: the core's generation moves only
+	// on an actual {complete, union} change, so an identical listing flood
+	// republishes no pointer and clones no map. Completeness and keys are
+	// captured into ONE immutable value and published by ONE pointer store —
+	// the gate can never open before ListedKey sees the keys (T-4-05).
+	if gen := a.core.ListingGeneration(); gen != a.listingGen {
+		a.listingGen = gen
+		a.listing.Store(&listingMirror{
+			complete: a.core.ListingComplete(),
+			keys:     a.core.ListedKeysSnapshot(),
+		})
+	}
 }
 
 // armTimer re-arms (or first creates) t for the next deadline and returns

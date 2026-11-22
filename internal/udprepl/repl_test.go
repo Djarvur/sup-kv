@@ -219,6 +219,43 @@ func recordsEqual(a, b map[string]storage.Record) bool {
 	return true
 }
 
+// TestWire_dataSyncHeaderRoundTrip proves the completeness header survives
+// the real protobuf codec (PROTO-01, D-01): a DataSync carrying sync_id,
+// 1-based chunk_index and chunk_count encodes and decodes with all three
+// values intact, so the wire — not a struct copy — is what carries
+// completeness end to end.
+func TestWire_dataSyncHeaderRoundTrip(t *testing.T) {
+	t.Parallel()
+	want := port.DataSync{
+		SyncID:     0x0102030405060708,
+		ChunkIndex: 2,
+		ChunkCount: 3,
+		Entries: []port.SyncEntry{{
+			Key:     "wire/roundtrip",
+			Version: version.PackVersion(testNowMs, 1, nodeIDB),
+		}},
+	}
+	datagram, err := udprepl.EncodeDatagramForTest(want, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode DataSync with header: %v", err)
+	}
+	in := udprepl.DecodeDatagramForTest(datagram, handleB)
+	if in.Status != port.Decoded {
+		t.Fatalf("decode verdict = %d, want port.Decoded", in.Status)
+	}
+	got, ok := in.Msg.(port.DataSync)
+	if !ok {
+		t.Fatalf("decoded message = %T, want port.DataSync", in.Msg)
+	}
+	if got.SyncID != want.SyncID || got.ChunkIndex != want.ChunkIndex || got.ChunkCount != want.ChunkCount {
+		t.Fatalf("decoded header = (sync_id %d, index %d, count %d), want (%d, %d, %d) — the header must cross the real codec",
+			got.SyncID, got.ChunkIndex, got.ChunkCount, want.SyncID, want.ChunkIndex, want.ChunkCount)
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Key != want.Entries[0].Key || got.Entries[0].Version != want.Entries[0].Version {
+		t.Fatalf("decoded entries = %+v, want %+v", got.Entries, want.Entries)
+	}
+}
+
 // Post-Run NotifyLocalWrite constants: the call count must cross the
 // adapter's 1024-entry notify buffer (the WR-01 window — an unguarded send
 // swallows the first 1024 post-Run notifications and blocks forever on the
@@ -615,11 +652,12 @@ func TestWaitReplicated_superseded(t *testing.T) {
 	}
 }
 
-// TestMirror_syncArrivedFlip proves the sync mirror (API-04): after the
-// mirror has demonstrably run (a Hello traversed the loop) SyncArrived() is
-// still false, one DataSync datagram traversing the loop flips it true
-// through the atomic, and it stays true across further unrelated events —
-// the flag never resets.
+// TestMirror_syncArrivedFlip proves the sync mirror (API-04, PROTO-01): after
+// the mirror has demonstrably run (a Hello traversed the loop) SyncArrived()
+// is still false, one COMPLETE DataSync listing (a single part) traversing
+// the loop flips it true through the atomic, and it stays true across further
+// unrelated events — the flag never resets. A partial listing is covered by
+// TestMirror_listingComplete; here the closing part is the only part.
 func TestMirror_syncArrivedFlip(t *testing.T) {
 	t.Parallel()
 	adapter, udpPort := newMirrorAdapter(t)
@@ -639,10 +677,13 @@ func TestMirror_syncArrivedFlip(t *testing.T) {
 		t.Fatal("SyncArrived() = true after a Hello event, want false — only a DataSync receipt counts")
 	}
 
-	// One DataSync datagram from the same peer handle flips the mirrored
-	// flag.
+	// One complete DataSync listing (a single part with count 1) from the
+	// same peer handle flips the mirrored flag.
 	datagram, err = udprepl.EncodeDatagramForTest(port.DataSync{
-		Entries: []port.SyncEntry{{Key: mirrorKey, Version: version.PackVersion(testNowMs, 1, nodeIDB)}},
+		SyncID:     1,
+		ChunkIndex: 1,
+		ChunkCount: 1,
+		Entries:    []port.SyncEntry{{Key: mirrorKey, Version: version.PackVersion(testNowMs, 1, nodeIDB)}},
 	}, nodeIDB, runIDB)
 	if err != nil {
 		t.Fatalf("encode DataSync: %v", err)
@@ -669,6 +710,60 @@ func TestMirror_syncArrivedFlip(t *testing.T) {
 // corruptByte is the bit pattern XORed into a body byte to build a bad-CRC
 // datagram: the envelope still parses, the CRC fails (D-08's framing class).
 const corruptByte = 0xFF
+
+// TestMirror_listingComplete proves the one-pointer listing mirror end to
+// end over a real socket (PROTO-01, T-4-05): while only part 1 of a 3-chunk
+// listing has been handled, SyncArrived and ListedKey both answer false —
+// the first chunk is not the listing — and after the closing chunk both flip
+// true from the SAME published pointer, so the gate cannot open before the
+// listed keys are visible. A key outside the union stays false.
+func TestMirror_listingComplete(t *testing.T) {
+	t.Parallel()
+	adapter, udpPort := newMirrorAdapter(t)
+	tx := peerSocket(t)
+	const keys = 3
+	sendPart := func(index int, key string) {
+		t.Helper()
+		datagram, err := udprepl.EncodeDatagramForTest(port.DataSync{
+			SyncID:     9,
+			ChunkIndex: uint32(index),
+			ChunkCount: keys,
+			Entries:    []port.SyncEntry{{Key: key, Version: version.PackVersion(testNowMs, uint16(index), nodeIDB)}},
+		}, nodeIDB, runIDB)
+		if err != nil {
+			t.Fatalf("encode listing part %d: %v", index, err)
+		}
+		sendDatagram(t, tx, udpPort, datagram)
+	}
+
+	sendPart(1, mirrorKey)
+	// The first missing key enqueues a DataRequest; its emission proves part 1
+	// traversed the whole loop and the mirror ran after it.
+	waitFor(t, mirrorWait, "part 1 to be processed (one DataRequest sent)", func() bool {
+		return adapter.SentByType().DataRequest >= 1
+	})
+	if adapter.SyncArrived() {
+		t.Fatal("SyncArrived() = true after part 1 of 3, want false — the first chunk is not the listing")
+	}
+	if adapter.ListedKey(mirrorKey) {
+		t.Fatalf("ListedKey(%q) = true after part 1 of 3, want false — no listing is complete yet", mirrorKey)
+	}
+
+	sendPart(3, "mirror/three")
+	sendPart(2, "mirror/two")
+	waitFor(t, mirrorWait, "SyncArrived() to flip after the closing chunk", func() bool {
+		return adapter.SyncArrived()
+	})
+	if !adapter.ListedKey(mirrorKey) {
+		t.Fatalf("ListedKey(%q) = false after the complete listing, want true from the same published snapshot", mirrorKey)
+	}
+	if !adapter.ListedKey("mirror/three") {
+		t.Fatal("ListedKey(mirror/three) = false after the complete listing, want true — every chunk's keys are listed")
+	}
+	if adapter.ListedKey("mirror/never-listed") {
+		t.Fatal("ListedKey(mirror/never-listed) = true, want false — the union holds only listed keys")
+	}
+}
 
 // discardCapture is a slog.Handler recording every record it is handed —
 // the capturing sink TestDiscardLog_classes installs as the default logger
