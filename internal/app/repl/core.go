@@ -755,6 +755,14 @@ type Core struct {
 	mergeStats    MergeStats
 	retransmitted uint64
 
+	// notificationsRegressed counts local-write notifications the guard
+	// refused because their version was not greater than the version tracked
+	// for that key — regressive and equal duplicate notifications alike
+	// (PROTO-05, D-05). Driver-goroutine-only mutation behind the copying
+	// NotificationsRegressed accessor; Phase 7's OBSV surface owns publishing
+	// it (no adapter mirror this phase).
+	notificationsRegressed uint64
+
 	// syncArrived flips true on the first received DataSync datagram and
 	// never resets — the startup gate's sync half (API-04). Set by
 	// handleDataSync on the driver goroutine; read through the copying
@@ -2454,6 +2462,15 @@ func (c *Core) MergeStats() MergeStats {
 // like the discard counters.
 func (c *Core) Retransmissions() uint64 {
 	return c.retransmitted
+}
+
+// NotificationsRegressed returns the number of local-write notifications the
+// not-greater-than-tracked guard ignored (PROTO-05, D-05) — both regressive
+// notifications (an older version) and equal duplicate notifications of the
+// tracked version. A value read like the discard counters; Phase 7's OBSV
+// surface owns publishing it (no adapter mirror this phase).
+func (c *Core) NotificationsRegressed() uint64 {
+	return c.notificationsRegressed
 }
 
 // SyncArrived reports whether a COMPLETE listing has been processed — every

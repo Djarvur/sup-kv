@@ -1418,3 +1418,173 @@ func TestReplication_absentApplies(t *testing.T) {
 		t.Fatalf("store Get(%q) after the absent-key apply = (%x, %v), want v3", keyGamma, got.Version[:], err)
 	}
 }
+
+// TestNotify_firstNotificationProceeds pins the notification guard's normal
+// path (PROTO-05, D-05): the author's first notification of a stored record
+// has no tracked entry, so it always broadcasts and creates the tracking
+// entry. The guard must never compare against store.Version with <= — the
+// store already holds exactly the notified version here, so a store
+// comparison would swallow this case.
+func TestNotify_firstNotificationProceeds(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	ver, _, err := st.store.Set(keyAlpha, []byte("v5"))
+	if err != nil {
+		t.Fatalf("store Set(%q): %v", keyAlpha, err)
+	}
+	rec, err := st.store.Get(keyAlpha)
+	if err != nil {
+		t.Fatalf("store Get(%q): %v", keyAlpha, err)
+	}
+	core.NotifyLocalWrite(now, keyAlpha, rec, &out)
+	drained := out.Drain()
+	if len(drained) != 1 || !drained[0].Broadcast {
+		t.Fatalf("the first notification drained %d messages, want exactly 1 broadcast: %+v", len(drained), drained)
+	}
+	msg, ok := drained[0].Msg.(port.DataReplication)
+	if !ok || msg.Key != keyAlpha || msg.Record.Version != ver {
+		t.Fatalf("the first notification emitted %+v, want a DataReplication for (%s, %x)", drained[0].Msg, keyAlpha, ver[:])
+	}
+	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, nil)
+	if got := core.NotificationsRegressed(); got != 0 {
+		t.Fatalf("NotificationsRegressed() = %d after a first notification, want 0 — the normal path is never a regression", got)
+	}
+}
+
+// TestNotify_equalTrackedIgnored proves the equal-duplicate half of the guard
+// (PROTO-05, D-05): re-notifying the already-tracked version broadcasts
+// nothing, creates no second entry, leaves the tracked version alone and
+// counts one regression.
+func TestNotify_equalTrackedIgnored(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+	ver := localWrite(t, core, st, now, keyAlpha, "v5")
+
+	rec, err := st.store.Get(keyAlpha)
+	if err != nil {
+		t.Fatalf("store Get(%q): %v", keyAlpha, err)
+	}
+	core.NotifyLocalWrite(now, keyAlpha, rec, &out)
+	if got := len(out.Drain()); got != 0 {
+		t.Fatalf("an equal duplicate notification emitted %d messages, want 0 — it must never reach the wire", got)
+	}
+	if got := core.NotificationsRegressed(); got != 1 {
+		t.Fatalf("NotificationsRegressed() = %d after one equal duplicate, want 1", got)
+	}
+	if got := core.UnackedStats(now).Count; got != 1 {
+		t.Fatalf("UnackedStats().Count = %d after an equal duplicate, want 1 — no second tracking entry", got)
+	}
+	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, nil)
+}
+
+// TestNotify_regressedIgnored proves the regressive half of the guard
+// (PROTO-05, D-05): notifying a version older than the tracked one
+// broadcasts nothing, keeps the newer tracking entry and counts one
+// regression.
+func TestNotify_regressedIgnored(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+	ver := localWrite(t, core, st, now, keyAlpha, "v5")
+
+	older := storage.Record{
+		Version: version.PackVersion(testNowMs-1, 0, localID),
+		Data:    []byte("v3"),
+	}
+	if older.Version.Compare(ver) >= 0 {
+		t.Fatalf("test fixture version %x is not strictly older than the tracked %x", older.Version[:], ver[:])
+	}
+	core.NotifyLocalWrite(now, keyAlpha, older, &out)
+	if got := len(out.Drain()); got != 0 {
+		t.Fatalf("a regressive notification emitted %d messages, want 0 — it must never reach the wire", got)
+	}
+	if got := core.NotificationsRegressed(); got != 1 {
+		t.Fatalf("NotificationsRegressed() = %d after one regressive notification, want 1", got)
+	}
+	if got := core.UnackedStats(now).Count; got != 1 {
+		t.Fatalf("UnackedStats().Count = %d after a regressive notification, want 1 — tracking must stay on the newer version", got)
+	}
+	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, nil)
+}
+
+// TestNotify_newerBroadcasts proves the accepted-change side of the guard
+// (PROTO-05): a notification newer than the tracked version supersedes the
+// old tracking — emitting its Superseded result — and broadcasts.
+func TestNotify_newerBroadcasts(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+	older := localWrite(t, core, st, now, keyAlpha, "v5")
+
+	ver, _, err := st.store.Set(keyAlpha, []byte("v9"))
+	if err != nil {
+		t.Fatalf("store Set(%q): %v", keyAlpha, err)
+	}
+	if ver.Compare(older) <= 0 {
+		t.Fatalf("second store write version %x is not strictly newer than %x", ver[:], older[:])
+	}
+	rec, err := st.store.Get(keyAlpha)
+	if err != nil {
+		t.Fatalf("store Get(%q): %v", keyAlpha, err)
+	}
+	core.NotifyLocalWrite(now, keyAlpha, rec, &out)
+
+	drained := out.Drain()
+	if len(drained) != 1 || !drained[0].Broadcast {
+		t.Fatalf("the newer notification drained %d messages, want exactly 1 broadcast: %+v", len(drained), drained)
+	}
+	msg, ok := drained[0].Msg.(port.DataReplication)
+	if !ok || msg.Key != keyAlpha || msg.Record.Version != ver {
+		t.Fatalf("the newer notification emitted %+v, want a DataReplication for (%s, %x)", drained[0].Msg, keyAlpha, ver[:])
+	}
+	results := out.DrainResults()
+	if len(results) != 1 || results[0].Kind != port.ResultSuperseded || results[0].Key != keyAlpha || results[0].Version != older {
+		t.Fatalf("the newer notification results = %+v, want exactly one Superseded for (%s, %x)", results, keyAlpha, older[:])
+	}
+	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, nil)
+	if got := core.NotificationsRegressed(); got != 0 {
+		t.Fatalf("NotificationsRegressed() = %d after an accepted newer notification, want 0", got)
+	}
+}
+
+// TestNotify_absentKeyBroadcasts proves the empty case of the guard: a key
+// with no tracked entry proceeds and creates tracking — absent means accept,
+// never a regression.
+func TestNotify_absentKeyBroadcasts(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	ver := version.PackVersion(testNowMs, 0, peerID2)
+	core.NotifyLocalWrite(now, keyGamma, storage.Record{Version: ver, Data: []byte("first")}, &out)
+	drained := out.Drain()
+	if len(drained) != 1 || !drained[0].Broadcast {
+		t.Fatalf("an untracked-key notification drained %d messages, want exactly 1 broadcast: %+v", len(drained), drained)
+	}
+	msg, ok := drained[0].Msg.(port.DataReplication)
+	if !ok || msg.Key != keyGamma || msg.Record.Version != ver {
+		t.Fatalf("the untracked-key notification emitted %+v, want a DataReplication for (%s, %x)", drained[0].Msg, keyGamma, ver[:])
+	}
+	assertPending(t, core.PendingSnapshot(), keyGamma, ver, nil)
+	if got := core.NotificationsRegressed(); got != 0 {
+		t.Fatalf("NotificationsRegressed() = %d after an untracked-key notification, want 0", got)
+	}
+}
