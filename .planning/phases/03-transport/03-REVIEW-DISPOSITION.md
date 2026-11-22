@@ -1,6 +1,6 @@
 ---
 phase: 03-transport
-updated: 2026-11-22T03:00:00Z
+updated: 2026-11-22T06:51:01Z
 total: 13
 ---
 
@@ -12,8 +12,8 @@ from REVIEW.md on each review run — decisions recorded here are preserved.
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | Restart-listing queue unbounded + keyed by attacker-controlled source handle (100 spoofed Hellos → 96 FIFOs / 4 800 queued chunks; O(store) Versions copy per trigger). Fix: bound the per-destination listing set, cap queue depth, dedupe by (node_id, run_id) instead of handle. **Follow-up plan candidate (Phase 4/7 window).** |
-| CR-02 | critical | open | Egress queue pins a full record copy per answer (~1.9 GiB at cap) and allocates before dedupe (60 KiB garbage per 65-byte request). Fix: carry identity only; build the message at drain. **Follow-up plan candidate (Phase 4).** |
+| CR-01 | critical | fixed | Restart-listing queue unbounded + keyed by attacker-controlled source handle (100 spoofed Hellos → 96 FIFOs / 4 800 queued chunks; O(store) Versions copy per trigger). Fix: bound the per-destination listing set, cap queue depth, dedupe by (node_id, run_id) instead of handle. Fixed in v1.1 Phase 4 (plan 04-08, commit 1e06c58); regression tests TestListing_hostileBounded and TestListing_sharedBuild. |
+| CR-02 | critical | fixed | Egress queue pins a full record copy per answer (~1.9 GiB at cap) and allocates before dedupe (60 KiB garbage per 65-byte request). Fix: carry identity only; build the message at drain. Fixed in v1.1 Phase 4 (plan 04-05, commit e42a20a); regression tests TestEgress_identityOnly and TestEgress_noValueRetention. |
 | WR-01 | warning | open | Tracker leaks when `WaitReplicated` is nil while the notify seam creates trackers. Fix: skip tracking when the wait seam is absent (single-node wiring) or release on the nil path. |
 | WR-02 | warning | open | `sync_chunk_bytes` unbounded — typo can OOM first listing or make unsendable chunks. Fix: startup validation (Phase 7's one-point config validation will host it; a cheap bound now if touched). |
 | WR-03 | warning | open | `red-r01-x20` evidence step prints a stale committed summary on fresh checkouts. Fix: restrict the evidence print to the current run's artifacts. |
