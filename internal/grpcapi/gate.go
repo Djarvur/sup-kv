@@ -91,6 +91,16 @@ type ServerOptions struct {
 	// or negative. A positive per-request wait_timeout_ms overrides it
 	// for that write.
 	WaitTimeout time.Duration
+
+	// ReplayNotify is the paced replication seam for a snapshot load's
+	// replayed records (PROTO-08, T-4-20, WR-04): production injects the
+	// udprepl adapter's NotifyReplayedWrite, which queues each record on the
+	// shared record-send pacer instead of broadcasting it immediately, so a
+	// large load drains one datagram per pacing slot rather than flooding the
+	// segment. A nil seam is the single-node or unpaced configuration: the
+	// handler then notifies each replayed record through the live LocalNotify
+	// seam with track=false. Only SnapshotLoad calls it.
+	ReplayNotify LocalReplayNotify
 }
 
 // gateUnavailable returns the API-04 status every gated write carries

@@ -2110,8 +2110,49 @@ func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
 // A newer local write under the same key REPLACES the older tracking: every
 // entry with a strictly smaller version leaves, fresh wait-set, ladder reset
 // — local supersession (REPL-02). Replication progress is never a
-// precondition of the write path: this enqueues-and-returns (D-05).
+// precondition of the write path: this enqueues-and-returns (D-05). A replay
+// of already-installed records uses [Core.NotifyReplayedWrite] instead: same
+// tracking, paced emission.
 func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
+	if _, accepted := c.trackLocalWrite(now, key, rec, out); !accepted {
+		return
+	}
+	own := storage.Record{
+		Version:  rec.Version,
+		Data:     bytes.Clone(rec.Data),
+		Deleted:  rec.Deleted,
+		Checksum: rec.Checksum,
+	}
+	out.Broadcast(port.DataReplication{Key: key, Record: own})
+}
+
+// NotifyReplayedWrite is [Core.NotifyLocalWrite] for a record a snapshot load
+// (or another recovery replay) already installed in the store: the tracking is
+// identical — same guard, same wait-set, same ladder — but the emission rides
+// the paced record-send queue instead of broadcasting immediately (WR-04,
+// T-4-20). A 20 000-record load therefore drains one datagram per pacer slot,
+// exactly like a tracked write's discovery flush or a retransmission, instead
+// of emitting 20 000 back-to-back broadcasts that lose most of themselves
+// against the receivers' inbound queues. The queue pins no record: the drain
+// re-reads the stored record and skips it when the version moved, and the
+// retransmission ladder still covers loss. Live writes keep the immediate
+// broadcast (a client waits on them); only the replay seam — which no client
+// waits on — trades latency for pacing.
+func (c *Core) NotifyReplayedWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
+	pk, accepted := c.trackLocalWrite(now, key, rec, out)
+	if !accepted {
+		return
+	}
+	c.enqueueRecordSend(now, pk, false)
+}
+
+// trackLocalWrite applies the notification guard and the supersession rules
+// and installs the tracking entry, reporting the (key, version) pair the
+// caller must emit and whether the notification was accepted at all. The guard
+// branches are documented on [Core.NotifyLocalWrite]; both emission shapes
+// (immediate broadcast, paced record send) share this one bookkeeping path, so
+// no second implementation can drift.
+func (c *Core) trackLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) (pendingKey, bool) {
 	if tracked, ok := c.trackedVersion(key); ok {
 		switch cmp := rec.Version.Compare(tracked); {
 		case cmp < 0:
@@ -2121,11 +2162,11 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 			// mirror and the tracking stay on the greater version.
 			out.Superseded(key, rec.Version)
 			c.notificationsRegressed++
-			return
+			return pendingKey{}, false
 		case cmp == 0:
 			// An equal duplicate displaced nothing: count it, resolve nothing.
 			c.notificationsRegressed++
-			return
+			return pendingKey{}, false
 		}
 	}
 	c.removeSupersededLocal(key, rec.Version, out)
@@ -2150,13 +2191,7 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 		}
 		c.pushRetry(pk, entry.nextRetry)
 	}
-	own := storage.Record{
-		Version:  rec.Version,
-		Data:     bytes.Clone(rec.Data),
-		Deleted:  rec.Deleted,
-		Checksum: rec.Checksum,
-	}
-	out.Broadcast(port.DataReplication{Key: key, Record: own})
+	return pk, true
 }
 
 // Advance fires the due timers — the hello timer, the DataSync startup and

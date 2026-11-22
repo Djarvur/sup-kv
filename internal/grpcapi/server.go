@@ -46,6 +46,15 @@ const listedKeyNotArrivedMessage = "startup gate: key is listed by a peer but it
 // (udprepl.ErrRunLoopExited once that loop has exited).
 type LocalNotify func(key string, rec storage.Record, track bool) error
 
+// LocalReplayNotify is the PACED replication notification seam for records a
+// snapshot load replayed (PROTO-08, T-4-20, WR-04). The record is already
+// installed; the seam queues it without a tracker and without an immediate
+// broadcast, so a large load drains through the record-send pacer instead of
+// emitting one datagram per key back-to-back. Production injects
+// udprepl.Adapter.NotifyReplayedWrite; a nil seam means "no paced path" and
+// the handler falls back to LocalNotify with track=false.
+type LocalReplayNotify func(key string, rec storage.Record) error
+
 // Server implements the apiproto.SupKVServiceServer surface over one persist
 // Engine. The UnimplementedSupKVServiceServer embed is mandatory with
 // protoc-gen-go-grpc v1.6.2 (forward compatibility): every phase-5 RPC is
@@ -338,7 +347,7 @@ func (s *Server) SnapshotLoad(_ context.Context, req *apiproto.SnapshotLoadReque
 	// records installed before the close are exactly the abandoned ones.
 	if !errors.Is(err, persist.ErrClosed) {
 		for _, rec := range records {
-			s.notifyLocalWrite(rec.Key, rec.Version, rec.Data, rec.Deleted, false)
+			s.notifyReplayedWrite(rec)
 		}
 	}
 	if err != nil {
@@ -369,6 +378,26 @@ func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []
 		Checksum: storage.RecordChecksum(key, ver, data, deleted),
 	}
 	_ = s.notify(key, rec, track)
+}
+
+// notifyReplayedWrite hands one snapshot-replayed record to the paced replay
+// seam when the wiring provides one (WR-04, T-4-20), else through the live
+// notification seam with track=false — a load has no waiter report. The
+// rebuilt record is notifyLocalWrite's: the replay's stored version, its data
+// and the store's checksum. A notify error is ignored for the same reason as
+// on the live path: the record is already installed and the RPC's own error
+// (if any) reports the dump honestly.
+func (s *Server) notifyReplayedWrite(rec persist.RestoredRecord) {
+	if s.opts.ReplayNotify == nil {
+		s.notifyLocalWrite(rec.Key, rec.Version, rec.Data, rec.Deleted, false)
+		return
+	}
+	_ = s.opts.ReplayNotify(rec.Key, storage.Record{
+		Version:  rec.Version,
+		Data:     bytes.Clone(rec.Data),
+		Deleted:  rec.Deleted,
+		Checksum: storage.RecordChecksum(rec.Key, rec.Version, rec.Data, rec.Deleted),
+	})
 }
 
 // keyTooLongError builds the InvalidArgument for a write key over the

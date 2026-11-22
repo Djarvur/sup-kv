@@ -133,9 +133,14 @@ type inboundEvent struct {
 // flag: the tracker is created synchronously in NotifyLocalWrite before the
 // enqueue, so no later code can mistake a notification for a tracker
 // creation site.
+// localWrite is one queued author notification: the key and the defensively
+// copied record, plus whether the record is a REPLAY of already-installed
+// state (a snapshot load) rather than a live write. A replay takes the core's
+// paced record-send path instead of the immediate broadcast (WR-04).
 type localWrite struct {
-	key string
-	rec storage.Record
+	key    string
+	rec    storage.Record
+	replay bool
 }
 
 // trackerKey identifies one wait-requesting local write: the key and the
@@ -570,8 +575,14 @@ func (a *Adapter) Run(ctx context.Context) error {
 			// The tracker, when the write requested one, was created in
 			// NotifyLocalWrite BEFORE this enqueue. Neither this case nor
 			// the core handler creates one: a result for an absent trackers
-			// entry is dropped (applyResults), never an insert.
-			a.core.NotifyLocalWrite(time.Now(), lw.key, lw.rec, &out)
+			// entry is dropped (applyResults), never an insert. A replayed
+			// record (a snapshot load) rides the paced record-send queue,
+			// never an immediate broadcast (WR-04).
+			if lw.replay {
+				a.core.NotifyReplayedWrite(time.Now(), lw.key, lw.rec, &out)
+			} else {
+				a.core.NotifyLocalWrite(time.Now(), lw.key, lw.rec, &out)
+			}
 		case <-timerChan(timer):
 			// A due deadline — the Advance below fires the due timers.
 		}
@@ -616,15 +627,51 @@ func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record, track bool) e
 	if track {
 		a.ensureTracker(keyID)
 	}
-	lw := localWrite{
-		key: key,
-		rec: storage.Record{
-			Version:  rec.Version,
-			Data:     bytes.Clone(rec.Data),
-			Deleted:  rec.Deleted,
-			Checksum: rec.Checksum,
-		},
+	err := a.enqueueLocalWrite(localWrite{key: key, rec: cloneLocalRecord(rec)})
+	if err != nil {
+		// A failed notify deletes the just-created tracker before returning, so
+		// the zero-value path (Run already gone, no waiter will ever resolve it)
+		// cannot leak a map entry. An absent tracker makes this a no-op.
+		a.deleteTracker(keyID)
+		return err
 	}
+	return nil
+}
+
+// NotifyReplayedWrite enqueues one snapshot-load (or recovery-replay) record
+// for the event loop, where the core puts it on the PACED record-send queue
+// instead of broadcasting immediately (WR-04, T-4-20): a large load drains one
+// datagram per pacing slot rather than emitting one broadcast per key
+// back-to-back. No tracker is created — a load has no wait_for_replication
+// report — and the copy rules are NotifyLocalWrite's.
+func (a *Adapter) NotifyReplayedWrite(key string, rec storage.Record) error {
+	return a.enqueueLocalWrite(localWrite{key: key, rec: cloneLocalRecord(rec), replay: true})
+}
+
+// cloneLocalRecord defensively copies one record for the notification
+// channel: the author may reuse its buffer once the call returns.
+func cloneLocalRecord(rec storage.Record) storage.Record {
+	return storage.Record{
+		Version:  rec.Version,
+		Data:     bytes.Clone(rec.Data),
+		Deleted:  rec.Deleted,
+		Checksum: rec.Checksum,
+	}
+}
+
+// enqueueLocalWrite is the notification channel handoff shared by the live and
+// replay seams. The enqueue and the closed-loop decision are one select over
+// the notify channel and the loop's done channel, with a re-check after a won
+// send (D-15 P4-IN-01 — the former pre-check-then-enqueue pair raced Run's
+// exit and could report nil for a notification nobody will ever drain): while
+// Run is active the send enqueues into the bounded 1024-deep buffer (D-05) and
+// reports nil; once Run has returned, done is closed, so either the select's
+// done branch or — when a buffered send still won the uniform choice against
+// the already closed done — the post-send re-check reports
+// [ErrRunLoopExited]. A writer never blocks forever on a loop that no longer
+// receives, never panics, and the drop is surfaced to the author, never
+// silent.
+func (a *Adapter) enqueueLocalWrite(lw localWrite) error {
 	select {
 	case a.notify <- lw:
 		// The send won, but a send into a buffer nobody drains proves
@@ -634,13 +681,11 @@ func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record, track bool) e
 		// deterministic error — never a nil report for a dropped write.
 		select {
 		case <-a.done:
-			a.deleteTracker(keyID)
 			return ErrRunLoopExited
 		default:
 		}
 		return nil
 	case <-a.done:
-		a.deleteTracker(keyID)
 		return ErrRunLoopExited
 	}
 }

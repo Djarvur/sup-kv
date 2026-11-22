@@ -1535,6 +1535,41 @@ func TestNotify_regressedIgnored(t *testing.T) {
 	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, nil)
 }
 
+// TestNotifyReplayed_pacedNotImmediate proves WR-04's core half: a replayed
+// record is tracked exactly like a live write but reaches the wire only
+// through the paced record-send drain — no immediate broadcast from the notify
+// call, then one DataReplication per Advance slot.
+func TestNotifyReplayed_pacedNotImmediate(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	out.Drain()
+
+	ver, _, err := st.store.Set(keyAlpha, []byte("replayed"))
+	if err != nil {
+		t.Fatalf("store Set(%q): %v", keyAlpha, err)
+	}
+	rec, err := st.store.Get(keyAlpha)
+	if err != nil {
+		t.Fatalf("store Get(%q): %v", keyAlpha, err)
+	}
+	core.NotifyReplayedWrite(now, keyAlpha, rec, &out)
+	if got := len(out.Drain()); got != 0 {
+		t.Fatalf("the replay notification emitted %d messages synchronously, want 0 — a replayed record rides the paced queue (WR-04)", got)
+	}
+	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1})
+
+	core.Advance(now, &out)
+	repls := broadcastRepls(out.Drain())
+	if len(repls) != 1 || repls[0].Key != keyAlpha || repls[0].Record.Version != ver {
+		t.Fatalf("the paced drain emitted %v, want exactly one DataReplication for (%s, %x)", repls, keyAlpha, ver[:])
+	}
+}
+
 // TestNotify_newerBroadcasts proves the accepted-change side of the guard
 // (PROTO-05): a notification newer than the tracked version supersedes the
 // old tracking — emitting its Superseded result — and broadcasts.

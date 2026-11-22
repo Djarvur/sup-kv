@@ -658,6 +658,29 @@ func TestWaitReplicated_superseded(t *testing.T) {
 	}
 }
 
+// TestReplayNotify_paced proves the adapter's replay seam end to end (WR-04,
+// T-4-20): a replayed record is tracked exactly like a live write and reaches
+// the socket through the paced record-send drain rather than as an immediate
+// handler emission, so a snapshot load of N records cannot burst N
+// back-to-back broadcasts.
+func TestReplayNotify_paced(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(nodeIDA)
+	adapter, _ := newMirrorAdapterWithStore(t, st, repl.Config{})
+	rec := writeStoredRecord(t, st, []byte("replayed"))
+
+	notifyErr := adapter.NotifyReplayedWrite(mirrorKey, rec)
+	if notifyErr != nil {
+		t.Fatalf("NotifyReplayedWrite(%q): %v", mirrorKey, notifyErr)
+	}
+	waitFor(t, mirrorWait, "the replayed record to surface in the unacked gauge", func() bool {
+		return adapter.UnackedStats().Count == 1
+	})
+	waitFor(t, mirrorWait, "the replayed record to reach the wire as a DataReplication", func() bool {
+		return adapter.SentByType().Data >= 1
+	})
+}
+
 // TestMirror_syncArrivedFlip proves the sync mirror (API-04, PROTO-01): after
 // the mirror has demonstrably run (a Hello traversed the loop) SyncArrived()
 // is still false, one COMPLETE DataSync listing (a single part) traversing

@@ -512,6 +512,18 @@ func checkDatagramCeiling(cfg config) error {
 		errDatagramCeiling, cfg.valueMaxBytes, storage.MaxKeyBytes, measured, udprepl.MaxDatagramBytes)
 }
 
+// gateBackstopFor resolves the startup-gate backstop once, from the loaded
+// store's record count (D-02, ADR 0006): the engine finished loading before
+// the wiring runs, so KeyCount is final and the resolver reads only the
+// duration. A node with any record — live or tombstoned — never consults
+// startup_gate_empty.
+func gateBackstopFor(cfg config, engine *persist.Engine) time.Duration {
+	if engine.KeyCount() == 0 {
+		return cfg.startupGateEmpty
+	}
+	return cfg.startupGate
+}
+
 // startEngine opens the real dump store at the configured path, resolves
 // the engine over it with the hub's change tap threaded through
 // storage.Config, and launches the single dumper goroutine. Returns the
@@ -561,20 +573,15 @@ func wire(cfg config) (*wired, net.Listener, error) {
 		_ = adapter.Run(replCtx)
 	}()
 
-	// The empty-vs-data selection (D-02, ADR 0006) is made once, here: the
-	// engine finished loading synchronously above, so KeyCount is final, and
-	// the resolver reads only the resolved duration from now on. A node with
-	// any record — live or tombstoned — never consults startup_gate_empty.
-	gateBackstop := cfg.startupGate
-	if engine.KeyCount() == 0 {
-		gateBackstop = cfg.startupGateEmpty
-	}
+	// The empty-vs-data selection (D-02, ADR 0006): the engine finished
+	// loading synchronously above, so KeyCount is final.
 	srv := grpcapi.NewServer(engine, adapter.NotifyLocalWrite, hub, grpcapi.ServerOptions{
 		SyncArrived:    adapter.SyncArrived,
 		ListedKey:      adapter.ListedKey,
 		KnownPeers:     adapter.KnownPeers,
 		WaitReplicated: adapter.WaitReplicated,
-		StartupGate:    gateBackstop,
+		ReplayNotify:   adapter.NotifyReplayedWrite,
+		StartupGate:    gateBackstopFor(cfg, engine),
 		WaitTimeout:    cfg.waitTimeout,
 	})
 

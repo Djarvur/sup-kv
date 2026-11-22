@@ -55,6 +55,14 @@ Reactive answers — the answer to a `DataRequest`, a stale-record answer, a
 receiver's completeness state is per `(node_id, run_id, sync_id)`
 (`Core.accumulateSync`), bounded as the next section records.
 
+A snapshot load replicates through the paced record-send queue, never as an
+immediate broadcast burst (T-4-20, WR-04): each replayed record is tracked
+like a local write and drained one datagram per pacing slot
+(`Core.NotifyReplayedWrite`, `Core.drainRecordSends`), so loading a
+20 000-record snapshot cannot emit 20 000 back-to-back datagrams against the
+peers' inbound queues — the retransmission ladder still covers loss. A live
+write keeps its immediate broadcast: a client waits on it, a load does not.
+
 ## Timing
 
 These are the bounds the tests establish; none is a new rule.

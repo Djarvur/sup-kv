@@ -177,6 +177,10 @@ type testServerConfig struct {
 	// capturing seam to observe which writes and replays reach replication.
 	notify func(key string, rec storage.Record, track bool) error
 
+	// replayNotify is the paced replay seam (WR-04); nil leaves replay
+	// notifications on the live notify seam.
+	replayNotify func(key string, rec storage.Record) error
+
 	// waitTimeout, knownPeers and waitReplicated are the
 	// wait_for_replication seams (API-05, plan 05-05), merged into the same
 	// ServerOptions the gate wiring rides on. waitTimeout zero means
@@ -288,6 +292,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	opts.WaitTimeout = cfg.waitTimeout
 	opts.KnownPeers = cfg.knownPeers
 	opts.WaitReplicated = cfg.waitReplicated
+	opts.ReplayNotify = cfg.replayNotify
 
 	api := grpcapi.NewServer(eng, cfg.notify, hub, opts)
 	gateCtx, cancelGate := context.WithCancel(t.Context())
@@ -973,6 +978,95 @@ func TestServer_snapshotLoadNotifies(t *testing.T) {
 			t.Errorf("notified %q version %x does not dominate the snapshot's %x",
 				call.key, call.rec.Version[:], snapVersion[:])
 		}
+	}
+}
+
+// TestServer_snapshotLoadUsesReplaySeam proves WR-04's wiring half: when the
+// paced replay seam is installed, every replayed record reaches it (never the
+// live notify seam), so a load drains through the record-send pacer instead of
+// emitting one immediate broadcast per key. The live seam is empty because a
+// load installs no wait_for_replication waiter.
+func TestServer_snapshotLoadUsesReplaySeam(t *testing.T) {
+	t.Parallel()
+
+	live := &notifyCapture{}
+	replayed := make([]string, 0, 3)
+	var replayMu sync.Mutex
+	h := buildTestServer(t, testServerConfig{
+		gate:   openGateOptions(),
+		notify: live.notify,
+		replayNotify: func(key string, _ storage.Record) error {
+			replayMu.Lock()
+			defer replayMu.Unlock()
+			replayed = append(replayed, key)
+			return nil
+		},
+	})
+	awaitGateOpen(t, h)
+
+	snapVersion := version.PackVersion(1_700_000_000_000, 3, 7)
+	fixture := map[string]storage.Record{
+		"replay/alpha": {Version: snapVersion, Data: []byte("alpha-value")},
+		"replay/beta":  {Version: snapVersion, Data: []byte("beta-value")},
+	}
+	for key, rec := range fixture {
+		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
+		fixture[key] = rec
+	}
+	dump, err := persist.Encode(fixture)
+	if err != nil {
+		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
+	}
+	h.dumps.mu.Lock()
+	h.dumps.snapshot = dump
+	h.dumps.mu.Unlock()
+
+	_, err = h.client.SnapshotLoad(t.Context(), &apiproto.SnapshotLoadRequest{Name: "replay"})
+	if err != nil {
+		t.Fatalf("SnapshotLoad error = %v, want nil", err)
+	}
+
+	replayMu.Lock()
+	got := slices.Clone(replayed)
+	replayMu.Unlock()
+	want := []string{"replay/alpha", "replay/beta"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("paced replay seam received keys %v, want %v in sorted replay order (WR-04)", got, want)
+	}
+	if calls := live.snapshot(); len(calls) != 0 {
+		t.Fatalf("the live notify seam received %d replay notifications, want 0 — replayed records take the paced seam", len(calls))
+	}
+}
+
+// TestServer_snapshotLoadReplayFallsBackToLive proves the nil-seam contract:
+// without a paced replay seam the replayed records still notify through the
+// live seam with track=false, so no load is ever silently unreplicated.
+func TestServer_snapshotLoadReplayFallsBackToLive(t *testing.T) {
+	t.Parallel()
+
+	h, capture := newNotifyServer(t)
+	fixture := map[string]storage.Record{
+		"fallback/key": {Version: version.PackVersion(1_700_000_000_000, 4, 9), Data: []byte("v")},
+	}
+	for key, rec := range fixture {
+		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
+		fixture[key] = rec
+	}
+	dump, err := persist.Encode(fixture)
+	if err != nil {
+		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
+	}
+	h.dumps.mu.Lock()
+	h.dumps.snapshot = dump
+	h.dumps.mu.Unlock()
+
+	_, loadErr := h.client.SnapshotLoad(t.Context(), &apiproto.SnapshotLoadRequest{Name: "fallback"})
+	if loadErr != nil {
+		t.Fatalf("SnapshotLoad error = %v, want nil", loadErr)
+	}
+	calls := capture.snapshot()
+	if len(calls) != 1 || calls[0].key != "fallback/key" || calls[0].track {
+		t.Fatalf("live-seam fallback calls = %+v, want one track=false notify for \"fallback/key\"", calls)
 	}
 }
 
