@@ -266,12 +266,19 @@ func TestFsops_failureAtEachStep(t *testing.T) {
 	tests := []struct {
 		name      string
 		failAt    fsopStep
+		fillErr   bool   // the caller's fill returns the injected error instead
 		mainAfter string // "" expects the main generation absent
 		prevAfter string // "" expects no .prev generation
 	}{
 		{
 			name:      "write failure leaves the seeded generation alone",
 			failAt:    fsopWrite,
+			mainAfter: fsopsOldGen,
+			prevAfter: "",
+		},
+		{
+			name:      "fill failure cleans the temp, main untouched",
+			fillErr:   true,
 			mainAfter: fsopsOldGen,
 			prevAfter: "",
 		},
@@ -312,7 +319,11 @@ func TestFsops_failureAtEachStep(t *testing.T) {
 			}
 			ops := &failingFSOps{failAt: tt.failAt, err: errFsopsInjected}
 			store.ops = ops
-			err = store.Save([]byte(fsopsNewGen))
+			if tt.fillErr {
+				err = store.SaveStream(func(io.Writer) error { return errFsopsInjected })
+			} else {
+				err = store.Save([]byte(fsopsNewGen))
+			}
 			if !errors.Is(err, errFsopsInjected) {
 				t.Fatalf("Save() error = %v, want exactly the injected error", err)
 			}
@@ -338,6 +349,33 @@ func TestFsops_failureAtEachStep(t *testing.T) {
 			}
 			fsopsGeneration(t, dumpPath, fsopsRecovered)
 		})
+	}
+}
+
+// TestFsops_injectedWriteStillRunsFill pins the failure-matrix fake's own
+// contract (Pitfall 23's test-side half): an injected write failure still
+// executes the caller's fill — into a discard sink — before returning the
+// injected error, so the row exercises the production streamed-write shape
+// instead of bypassing it, and no temp file is ever created.
+func TestFsops_injectedWriteStillRunsFill(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "dump.json")
+	store := New(dumpPath)
+	store.ops = &failingFSOps{failAt: fsopWrite, err: errFsopsInjected}
+	ran := false
+	err := store.SaveStream(func(io.Writer) error {
+		ran = true
+		return nil
+	})
+	if !errors.Is(err, errFsopsInjected) {
+		t.Fatalf("SaveStream() error = %v, want exactly the injected error", err)
+	}
+	if !ran {
+		t.Error("the injected write failure skipped the fill callback")
+	}
+	if got := fsopsEntries(t, dir); len(got) != 0 {
+		t.Errorf("directory after the injected write failure holds %v, want no temp", got)
 	}
 }
 
