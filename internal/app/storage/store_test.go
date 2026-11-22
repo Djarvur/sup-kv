@@ -507,7 +507,7 @@ func TestMerge_losers(t *testing.T) {
 			t.Errorf("Get() = (%q, %v), want the stored value (%q, nil)", rec.Data, err, "a")
 		}
 	})
-	t.Run("equal version is a no-op with no conflicts", func(t *testing.T) {
+	t.Run("equal version with greater content wins and reports one conflict", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
 		stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
@@ -520,8 +520,29 @@ func TestMerge_losers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
+		want := []storage.Conflict{{Key: "k", Winner: stored.Version, Loser: stored.Version}}
+		if !conflictsEqual(conflicts, want) {
+			t.Errorf("Merge() conflicts = %v, want exactly one pairing the equal version", conflicts)
+		}
+		rec, err := store.Get("k")
+		if err != nil || rec.Version != stored.Version || !bytes.Equal(rec.Data, []byte("x")) {
+			t.Errorf("Get() = (%x, %q, %v), want the greater-content winner %q", rec.Version[:], rec.Data, err, "x")
+		}
+	})
+	t.Run("equal version with identical content is a full no-op", func(t *testing.T) {
+		t.Parallel()
+		store := newStore()
+		stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		_, _, err := store.Merge("k", stored)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		conflicts, _, err := store.Merge("k", stored)
+		if err != nil {
+			t.Fatalf("redelivery Merge() error = %v, want nil", err)
+		}
 		if conflicts != nil {
-			t.Errorf("Merge() conflicts = %v, want nil (duplicate delivery is silent)", conflicts)
+			t.Errorf("redelivery Merge() conflicts = %v, want nil (identical content is silent)", conflicts)
 		}
 		rec, err := store.Get("k")
 		if err != nil || rec.Version != stored.Version || !bytes.Equal(rec.Data, []byte("a")) {
@@ -1102,7 +1123,7 @@ func TestStore_onChange(t *testing.T) {
 		}
 	})
 
-	t.Run("an equal-version redelivery fires nothing", func(t *testing.T) {
+	t.Run("an equal-version content win fires the tap once more", func(t *testing.T) {
 		t.Parallel()
 		store, tap := newTapStore()
 		rec := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
@@ -1110,16 +1131,36 @@ func TestStore_onChange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed Merge() error = %v, want nil", err)
 		}
-		dup := storage.Record{Version: rec.Version, Data: []byte("x")}
-		conflicts, _, err := store.Merge("k", dup)
+		winner := storage.Record{Version: rec.Version, Data: []byte("x")}
+		conflicts, _, err := store.Merge("k", winner)
+		if err != nil {
+			t.Fatalf("Merge() error = %v, want nil", err)
+		}
+		if len(conflicts) != 1 {
+			t.Fatalf("Merge() conflicts = %v, want exactly one tie-break conflict", conflicts)
+		}
+		if got := tap.count(); got != 2 {
+			t.Fatalf("tap fired %d times, want 2 — the seed install plus the tie-break install (D-06)", got)
+		}
+	})
+
+	t.Run("an identical equal-version redelivery fires nothing", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		rec := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		_, _, err := store.Merge("k", rec)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		conflicts, _, err := store.Merge("k", rec)
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
 		if conflicts != nil {
-			t.Fatalf("Merge() conflicts = %v, want nil (equal version is a full no-op)", conflicts)
+			t.Fatalf("Merge() conflicts = %v, want nil (identical content is a full no-op)", conflicts)
 		}
 		if got := tap.count(); got != 1 {
-			t.Fatalf("tap fired %d times, want 1 (the seed install only — an equal-version redelivery never installs, D-06)", got)
+			t.Fatalf("tap fired %d times, want 1 (the seed install only — an identical redelivery never installs, D-06)", got)
 		}
 	})
 

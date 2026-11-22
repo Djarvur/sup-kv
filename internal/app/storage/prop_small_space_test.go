@@ -61,8 +61,10 @@ func mixedVersion(rng *rand.Rand) version.RecordVersion {
 // recordForVersion derives the whole record from its version: the payload is
 // the version bytes and the tombstone flag a function of the first byte, so
 // two records with equal versions are byte-identical. That is the premise of
-// the equal-version no-op law — a version is unique per production write, so
-// state two different writes could not produce must not enter the law tests.
+// the random draws: a version is unique per production write, so state two
+// different writes could not produce must not enter the property's random
+// half — the deliberate different-payload collision subtest is where the
+// equal-version content law is exercised.
 func recordForVersion(ver version.RecordVersion) storage.Record {
 	if ver[0]%3 == 0 {
 		return storage.Record{Version: ver, Deleted: true}
@@ -100,7 +102,8 @@ func pointwiseSupremum(stores ...*storage.Store) map[string]storage.Record {
 // TestProp_mergeSmallSpace is TEST-15's small-space property: the CRDT laws
 // run over store triples drawn half from the small (l, c, node) space, the
 // merged state must be the pointwise supremum of the drawn versions, and an
-// equal-version collision is pinned as a full no-op. Every run prints the
+// equal-version collision with different content resolves deterministically by
+// the (version, content) law. Every run prints the
 // seed and the package-scoped replay command (testutil.NewRNG).
 func TestProp_mergeSmallSpace(t *testing.T) {
 	t.Parallel()
@@ -124,15 +127,15 @@ func TestProp_mergeSmallSpace(t *testing.T) {
 			}
 		}
 	})
-	t.Run("an equal-version collision is a full no-op", func(t *testing.T) {
+	t.Run("an equal-version collision resolves by the content law", func(t *testing.T) {
 		t.Parallel()
 		rng := testutil.NewRNG(t)
 		for step := range smallSpaceCollisions {
 			ver := smallSpaceVersion(rng)
 			stored := recordForVersion(ver)
-			// Equal version, deliberately different payload: the current law
-			// ignores the incoming record entirely (a production collision of
-			// equal versions is the same write delivered twice).
+			// Equal version, deliberately different payload: the deterministic
+			// (version, content) law decides — remove-wins first, then the
+			// greater Data bytes — and the same delivery twice changes nothing.
 			incoming := storage.Record{Version: ver, Data: []byte("different payload")}
 			store := newStore()
 			_, _, err := store.Merge("collision", stored)
@@ -143,15 +146,24 @@ func TestProp_mergeSmallSpace(t *testing.T) {
 			if err != nil {
 				t.Fatalf("step %d collision Merge() error = %v, want nil", step, err)
 			}
-			if len(conflicts) != 0 {
-				t.Fatalf("step %d equal-version Merge() conflicts = %v, want none (replay with the property seed above)",
-					step, conflicts)
+			if want := equalVersionConflicts("collision", stored, incoming); !conflictsEqual(conflicts, want) {
+				t.Fatalf("step %d equal-version Merge() conflicts = %v, want %v (replay with the property seed above)",
+					step, conflicts, want)
 			}
+			want := contentWinner(stored, incoming)
 			rec, ok := store.Records()["collision"]
-			if !ok || rec.Version != stored.Version || rec.Deleted != stored.Deleted ||
-				!bytes.Equal(rec.Data, stored.Data) {
-				t.Fatalf("step %d equal-version Merge() changed the stored record: got (%x, deleted=%t, ok=%t) (replay with the property seed above)",
-					step, rec.Version[:], rec.Deleted, ok)
+			if !ok || rec.Version != want.Version || rec.Deleted != want.Deleted ||
+				!bytes.Equal(rec.Data, want.Data) {
+				t.Fatalf("step %d equal-version Merge() stored (%x, deleted=%t, ok=%t), want the content winner (%x, deleted=%t) (replay with the property seed above)",
+					step, rec.Version[:], rec.Deleted, ok, want.Version[:], want.Deleted)
+			}
+			before := store.Records()
+			_, _, err = store.Merge("collision", incoming)
+			if err != nil {
+				t.Fatalf("step %d redelivery Merge() error = %v, want nil", step, err)
+			}
+			if !recordsEqual(store.Records(), before) {
+				t.Fatalf("step %d equal-version redelivery changed the merged state (replay with the property seed above)", step)
 			}
 		}
 	})

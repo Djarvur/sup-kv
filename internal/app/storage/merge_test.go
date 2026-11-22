@@ -290,10 +290,44 @@ func TestMerge_equalVersionContentLaw(t *testing.T) {
 	})
 }
 
+// contentWinner returns the record the (version, content) law keeps for two
+// equal-version records: identical content keeps the stored record, a
+// tombstone beats a live record, and otherwise the greater Data bytes win.
+// It is the test-side expression of the law derived from the rule itself,
+// never from the production join.
+func contentWinner(stored, incoming storage.Record) storage.Record {
+	if storage.RecordsEqual(stored, incoming) {
+		return stored
+	}
+	if incoming.Deleted != stored.Deleted {
+		if incoming.Deleted {
+			return incoming
+		}
+		return stored
+	}
+	if bytes.Compare(incoming.Data, stored.Data) > 0 {
+		return incoming
+	}
+	return stored
+}
+
+// equalVersionConflicts is the (version, content) law's conflict expectation
+// for an equal-version merge: identical content yields no conflict, and any
+// content difference yields exactly one conflict pairing the equal version
+// bytes — the version cannot name the winner, so Winner and Loser are equal.
+func equalVersionConflicts(key string, stored, incoming storage.Record) []storage.Conflict {
+	if storage.RecordsEqual(stored, incoming) {
+		return nil
+	}
+	return []storage.Conflict{{Key: key, Winner: incoming.Version, Loser: incoming.Version}}
+}
+
 // TestMerge_losersProperty proves exact loser accounting over seeded random
 // stored/incoming pairs: differing versions yield exactly one Conflict whose
-// Winner is the greater full 16-byte version and Loser the lesser, equal
-// versions yield none, and no Conflict ever pairs equal versions (CORE-07).
+// Winner is the greater full 16-byte version and Loser the lesser, while
+// equal versions follow the content law — no Conflict for identical content
+// and exactly one pairing the equal versions for different content (CORE-07,
+// PERSIST-07).
 func TestMerge_losersProperty(t *testing.T) {
 	t.Parallel()
 	rng := testutil.NewRNG(t)
@@ -316,17 +350,11 @@ func TestMerge_losersProperty(t *testing.T) {
 		case cmpOlder:
 			want = []storage.Conflict{{Key: key, Winner: stored.Version, Loser: incoming.Version}}
 		case cmpSame:
-			want = nil
+			want = equalVersionConflicts(key, stored, incoming)
 		}
 		if !conflictsEqual(conflicts, want) {
 			t.Fatalf("step %d Merge() conflicts = %v, want %v (replay with the property seed above)",
 				step, conflicts, want)
-		}
-		for _, conflict := range conflicts {
-			if conflict.Loser == conflict.Winner {
-				t.Fatalf("step %d Conflict pairs equal versions %x (replay with the property seed above)",
-					step, conflict.Loser[:])
-			}
 		}
 	}
 }

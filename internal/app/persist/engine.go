@@ -478,33 +478,27 @@ func (e *Engine) await() error {
 // confirmation — the running Run picks the dirty flag up and dumps on the
 // debounce schedule, so the changed e.changed nudge (the same non-blocking
 // signal await sends) is what wakes an idle dumper to re-arm its timers.
-// The dirty decision is coded to storage.Store.Merge's documented return
-// contract (D-15, 03 IN-02 + 04 IN-02, threat T-6-01): a Conflict whose
-// Winner is the incoming version is a displacement (the record became the
-// stored record — changed), one whose Winner is the stored version a
-// rejection (a stale redelivery installed nothing — unchanged), and no
-// Conflict is either an equal-version redelivery over an existing record
-// (a full no-op) or the first record under the key (installed with
-// nothing displaced) — the live-read probe taken BEFORE the merge
-// separates the two, so an equal redelivery leaves a clean engine clean
-// with no redundant dump. The probe cannot see a stored tombstone, so an
-// equal-version redelivery of a tombstone arms one redundant dump — the
-// safe direction only: a genuinely changed record never skips its dump,
-// and PERS-04's confirmation semantics are untouched.
+// The dirty decision is exactly storage.Store.MergeChanged's changed result
+// (D-15, 03 IN-02 + 04 IN-02, threat T-6-01; PERSIST-07, ADR 0012): the
+// store alone knows whether the incoming record became the stored record —
+// a strictly newer version, the first record under the key, or an
+// equal-version content tie-break win — while a stale rejection, a losing
+// tie-break and an identical redelivery install nothing. The old
+// Conflict/version heuristic cannot tell a tie-break win from a loss,
+// because both pair the same version bytes, and the live-read probe could
+// not see a stored tombstone; the changed result removes both ambiguities,
+// so a no-op redelivery always leaves a clean engine clean (no redundant
+// dump) and a content change never skips its dump.
 // Store errors surface unchanged: an oversize record's ErrValueTooLarge
 // merges nothing, dirties nothing and never wedges the engine (T-04-04).
 // Not gated on Run's exit: the merge keeps the store converging even while
 // the dumper is gone, exactly like reads keep serving (Get).
 func (e *Engine) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
-	_, getErr := e.store.Get(key)
-	conflicts, drift, err := e.store.Merge(key, rec)
+	conflicts, changed, drift, err := e.store.MergeChanged(key, rec)
 	if err != nil {
 		return conflicts, drift, err
 	}
-	displaced := len(conflicts) > 0 && conflicts[0].Winner == rec.Version
-	if !displaced && getErr == nil {
-		// Rejected stale redelivery or equal-version redelivery over the
-		// live record the probe saw: the store did not change.
+	if !changed {
 		return conflicts, drift, nil
 	}
 	e.markDirty()

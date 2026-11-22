@@ -1444,7 +1444,8 @@ func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, 
 }
 
 // applyRemote resolves one inbound DataReplication against the store's
-// current state, with exactly three outcomes (PROTO-03, the refined D-03):
+// current state, with exactly three version outcomes (PROTO-03, the refined
+// D-03) and the equal-version content tie-break on top (PERSIST-07, ADR 0012):
 //
 //   - strictly older incoming (a held version sorts after it): answer with
 //     exactly one unicast DataReplication carrying the held record and send
@@ -1453,11 +1454,21 @@ func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, 
 //     current. The store is not merged, the merge counters are untouched and
 //     the tracking ledger neither gains nor loses an entry — an Ack here
 //     would tell the sender a record it did not get was accepted.
-//   - equal version: Ack it and emit no reply. The record is already held
-//     (merge idempotence), and every equal duplicate must be confirmed or
-//     retransmission ladders never drain (S-PROTO-16, R-02). The clock
-//     already absorbed this version when the record was installed, so
-//     skipping the merge changes no state.
+//   - equal version with identical content: Ack it and emit no reply. The
+//     record is already held (merge idempotence), and every equal duplicate
+//     must be confirmed or retransmission ladders never drain (S-PROTO-16,
+//     R-02). The clock already absorbed this version when the record was
+//     installed, so skipping the merge changes no state.
+//   - equal version with different content: the store's deterministic
+//     (version, content) tie-break decides, and the wire answer follows the
+//     stored record after the merge — never the version, which is equal on
+//     both sides. The merge is applied and its single tie-break Conflict is
+//     counted; when the store now holds exactly the incoming record the
+//     sender won, so it is Acked and no reply is emitted; otherwise the
+//     stored record won, and the sender receives exactly one unicast
+//     DataReplication carrying it and no Ack. Both replicas therefore
+//     converge on the same record, and no randomness lets a peer choose or
+//     predict a different outcome.
 //   - strictly newer or absent: fall through to ApplyRemote and Ack after
 //     the in-memory apply — nothing here waits for a dump (REPL-03).
 //
@@ -1481,9 +1492,12 @@ func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplicatio
 			c.enqueueResponse(now, source, egressDataReplication, msg.Key)
 			return
 		case cmp == 0:
-			// Already held at this exact version: Ack and emit no reply.
-			out.Unicast(source, port.Ack{Key: msg.Key, Version: held})
-			return
+			// Only identical content is the old equal-version no-op; a
+			// differing record must reach the store so the tie-break decides.
+			if stored, ok := c.store.Lookup(msg.Key); ok && storage.RecordsEqual(stored, msg.Record) {
+				out.Unicast(source, port.Ack{Key: msg.Key, Version: held})
+				return
+			}
 		}
 	}
 	conflicts, drift, err := c.store.ApplyRemote(msg.Key, msg.Record)
@@ -1510,7 +1524,16 @@ func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplicatio
 			c.removePending(pk)
 		}
 	}
-	out.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})
+	// The answer follows the stored record, not an assumption about who won:
+	// the incoming record lost an equal-version tie-break exactly when the
+	// store does not now hold it (ADR 0012).
+	if stored, ok := c.store.Lookup(msg.Key); ok && storage.RecordsEqual(stored, msg.Record) {
+		out.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})
+		return
+	}
+	// The stored record won: answer with it exactly like the strictly-older
+	// branch, and send no Ack — the sender's record was not accepted.
+	c.enqueueResponse(now, source, egressDataReplication, msg.Key)
 }
 
 // handleAck drains one waiter of the pending entry matching the Ack's

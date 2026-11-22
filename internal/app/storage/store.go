@@ -51,9 +51,10 @@ type Config struct {
 	// visible only through Records(). Every change source
 	// converges on install (local Set/SetIfAbsent/Delete writes, remote
 	// merges, replicated tombstone deletes, snapshot-restore replay), so the
-	// tap observes commit order for all of them, and the strictly-greater
-	// join law keeps a merge loser and an equal-version redelivery from ever
-	// reaching it (D-06: events fire only on actual state changes). The
+	// tap observes commit order for all of them, and the (version, content)
+	// join law keeps a merge loser and an identical equal-version redelivery
+	// from ever reaching it (D-06: events fire only on actual state changes;
+	// a tie-break win at an equal version IS a change). The
 	// callback is invoked synchronously from the write paths under the
 	// store's locking discipline and must not block — fan-out belongs behind
 	// a non-blocking channel send — and it must not call back into the same
@@ -174,6 +175,16 @@ func RecordChecksum(key string, ver version.RecordVersion, data []byte, deleted 
 	return crc32.Update(sum, crc32.IEEETable, []byte{flag})
 }
 
+// RecordsEqual reports whether two records hold identical content: the same
+// full 16-byte version, the same tombstone flag and identical Data bytes.
+// Checksum is excluded because it is derived from the key and those fields.
+// It is the one content comparison the (version, content) tie-break and the
+// replication core's equal-version branch share (PERSIST-07, ADR 0012), so the
+// merge law and the wire rule cannot drift.
+func RecordsEqual(a, b Record) bool {
+	return a.Version == b.Version && a.Deleted == b.Deleted && bytes.Equal(a.Data, b.Data)
+}
+
 // Get returns a copy of the live record for key. A missing key and a
 // tombstoned key are both ErrNotFound; the tombstone is invisible to Get.
 func (s *Store) Get(key string) (Record, error) {
@@ -292,22 +303,38 @@ func (s *Store) Delete(key string) (version.RecordVersion, time.Duration, error)
 	return ver, drift, nil
 }
 
-// Merge joins an externally versioned record for key: the remote record
-// keeps its own version, only a strictly greater full 16-byte version
-// displaces the stored record, and an equal version is a full no-op. Every
-// displaced or rejected version is returned exactly once as a Conflict.
-// Values over Config.ValueMaxBytes are rejected with ErrValueTooLarge and
-// nothing is stored.
-func (s *Store) Merge(key string, rec Record) (conflicts []Conflict, drift time.Duration, err error) {
+// MergeChanged joins an externally versioned record for key by the
+// (version, content) order and reports whether the incoming record became the
+// stored record. The version order is unchanged: only a strictly greater full
+// 16-byte version displaces the stored record. At an equal version the
+// deterministic content tie-break decides (PERSIST-07, ADR 0012): identical
+// content is a full no-op, a tombstone beats a live record whichever side
+// carries it, and otherwise the lexicographically greater Data bytes win.
+// Every displaced or rejected version is returned exactly once as a Conflict —
+// the equal-version tie-break included, with Winner and Loser the same version
+// bytes. Values over Config.ValueMaxBytes are rejected with ErrValueTooLarge
+// and nothing is stored. The changed result is authoritative for the dump
+// decision: it is true exactly when the incoming record was installed.
+func (s *Store) MergeChanged(key string, rec Record) (conflicts []Conflict, changed bool, drift time.Duration, err error) {
 	if len(rec.Data) > s.cfg.ValueMaxBytes {
-		return nil, 0, ErrValueTooLarge
+		return nil, false, 0, ErrValueTooLarge
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conflicts = s.join(key, rec)
+	conflicts, changed = s.join(key, rec)
 	remoteL, remoteC, _ := rec.Version.Unpack()
 	_, _, drift = s.clock.Update(remoteL, remoteC)
-	return conflicts, drift, nil
+	return conflicts, changed, drift, nil
+}
+
+// Merge joins an externally versioned record for key exactly like
+// [Store.MergeChanged] and returns the conflicts and the clock drift: the
+// three-result wrapper every pre-tie-break caller uses. It discards the
+// changed result; callers that decide a dump or a reply from the installation
+// outcome call MergeChanged directly.
+func (s *Store) Merge(key string, rec Record) (conflicts []Conflict, drift time.Duration, err error) {
+	conflicts, _, drift, err = s.MergeChanged(key, rec)
+	return conflicts, drift, err
 }
 
 // Observe absorbs one received version into the store's clock without
@@ -335,34 +362,55 @@ func (s *Store) Len() int {
 // Generation returns the store's monotone content generation: it moves by
 // exactly one whenever a stored record actually changed, because every
 // change source converges on install — local Set/SetIfAbsent/Delete writes,
-// winning remote merges and snapshot-restore replay. A rejected
-// SetIfAbsent, a Delete of a missing key, an equal-or-older Merge, the
-// clock-only Observe and every read path therefore leave it unchanged: a
-// content generation, never a call count (T-4-43).
+// winning remote merges (a content tie-break win included) and
+// snapshot-restore replay. A rejected
+// SetIfAbsent, a Delete of a missing key, a losing or identical-content
+// Merge, the clock-only Observe and every read path therefore leave it
+// unchanged: a content generation, never a call count (T-4-43).
 func (s *Store) Generation() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.generation
 }
 
-// join compares rec against the stored record by the full 16-byte version
-// and installs it when strictly greater; the caller must hold the write
-// lock. It returns the displaced or rejected versions as conflicts.
-func (s *Store) join(key string, rec Record) []Conflict {
+// join compares rec against the stored record by the full 16-byte version and,
+// at an equal version, by the deterministic content tie-break (PERSIST-07,
+// ADR 0012): identical content is a full no-op, remove-wins settles a
+// differing tombstone flag, and otherwise the greater Data bytes win by
+// [bytes.Compare] over explicit fields (no map order, no randomness). It
+// installs only when the incoming record wins and reports whether it did; the
+// caller must hold the write lock. Every displaced or rejected version is
+// returned exactly once as a Conflict — the tie-break included, where Winner
+// and Loser are the same version bytes and the stored record is the only
+// observable evidence of the outcome.
+func (s *Store) join(key string, rec Record) ([]Conflict, bool) {
 	stored, ok := s.records[key]
 	if !ok {
 		s.install(key, rec)
-		return nil
+		return nil, true
 	}
-	cmp := rec.Version.Compare(stored.Version)
-	switch {
+	switch cmp := rec.Version.Compare(stored.Version); {
 	case cmp > 0:
 		s.install(key, rec)
-		return []Conflict{{Key: key, Winner: rec.Version, Loser: stored.Version}}
+		return []Conflict{{Key: key, Winner: rec.Version, Loser: stored.Version}}, true
 	case cmp < 0:
-		return []Conflict{{Key: key, Winner: stored.Version, Loser: rec.Version}}
+		return []Conflict{{Key: key, Winner: stored.Version, Loser: rec.Version}}, false
 	default:
-		return nil
+		switch {
+		case RecordsEqual(stored, rec):
+			return nil, false
+		case rec.Deleted && !stored.Deleted:
+			// Remove-wins: a delete at the same version beats a live value.
+			s.install(key, rec)
+			return []Conflict{{Key: key, Winner: rec.Version, Loser: stored.Version}}, true
+		case stored.Deleted && !rec.Deleted:
+			return []Conflict{{Key: key, Winner: stored.Version, Loser: rec.Version}}, false
+		case bytes.Compare(rec.Data, stored.Data) > 0:
+			s.install(key, rec)
+			return []Conflict{{Key: key, Winner: rec.Version, Loser: stored.Version}}, true
+		default:
+			return []Conflict{{Key: key, Winner: stored.Version, Loser: rec.Version}}, false
+		}
 	}
 }
 
@@ -370,7 +418,7 @@ func (s *Store) join(key string, rec Record) []Conflict {
 // checksum, bumps the content generation and fires the Config.OnChange tap
 // with the stored record. install is the single convergence point of every
 // change source — local writes reach it through write, remote merges through
-// the strictly-greater join branch — so the tap fires exactly when a record
+// a winning join branch — so the tap fires exactly when a record
 // became the stored record (D-06) and observes commit order, and the
 // generation moves exactly once per actual change and never for a no-op; the
 // caller must hold the write lock.
