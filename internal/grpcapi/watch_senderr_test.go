@@ -123,8 +123,17 @@ func newSenderrServer(t *testing.T) (*grpcapi.Server, *persist.Engine) {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	go func() { _ = eng.Run(ctx) }()
-	srv := grpcapi.NewServer(eng, nil, hub, grpcapi.ServerOptions{})
+	srv := grpcapi.NewServer(eng, nil, hub, openGateOptions())
 	go func() { _ = hub.Run(ctx) }()
+	// Watch is gated like every data RPC (API-04, D-01): this fixture calls
+	// the handler directly with no gRPC health client, so it opens the gate
+	// through the resolver and waits on the in-process health server — the
+	// same 1:1 gate/health binding the bufconn harness observes.
+	go srv.RunGate(ctx)
+	waitFor(t, gateWait, "the senderr server's gate to open", func() bool {
+		resp, err := srv.Health().Check(ctx, &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
 	return srv, eng
 }
 

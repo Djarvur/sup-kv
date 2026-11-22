@@ -30,6 +30,12 @@ import (
 	"github.com/Djarvur/sup-kv/internal/persistfile"
 )
 
+// listedKeyNotArrivedMessage is the rule 14.5(6) status message for a read
+// of a key a peer's complete listing named whose value has not arrived
+// locally: the key provably exists on a peer, so claiming NotFound would
+// lie about the cluster's state.
+const listedKeyNotArrivedMessage = "startup gate: key is listed by a peer but its value has not arrived"
+
 // LocalNotify is the post-write replication notification seam: the gRPC
 // write handler is "the author" of the phase-4 D-05 explicit-call contract.
 // It receives the record the write just installed and whether the write
@@ -124,6 +130,19 @@ func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.Get
 	}
 	rec, err := s.engine.Get(req.GetKey())
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			// Engine.Get hides tombstones, so ErrNotFound covers both "no
+			// local record" and "local tombstone". Version is
+			// tombstone-visible — the only presence probe on this path — so
+			// a present record is the local tombstone (keep NotFound), while
+			// an absent one may be a key a peer's complete listing named
+			// whose value has not arrived: that is Unavailable, never
+			// NotFound (rule 14.5(6)).
+			if _, present := s.engine.Version(req.GetKey()); !present &&
+				s.opts.ListedKey != nil && s.opts.ListedKey(req.GetKey()) {
+				return nil, status.Error(codes.Unavailable, listedKeyNotArrivedMessage)
+			}
+		}
 		return nil, mapError(err)
 	}
 	return &apiproto.GetResponse{Record: recordToProto(req.GetKey(), rec)}, nil
@@ -141,7 +160,11 @@ func (s *Server) Get(_ context.Context, req *apiproto.GetRequest) (*apiproto.Get
 // storage.MaxKeyBytes is rejected with InvalidArgument before any engine
 // call too (XPORT-03: the one key-length ceiling, measured in bytes, also
 // enforced on receive and at startup) — create_if_absent rides the same
-// single validation path. wait_for_replication asks the
+// single validation path. A create_if_absent for a key a peer's complete
+// listing named is then refused with AlreadyExists before the engine call
+// (D-01, rule 14.5): the peer already owns the key, so a local create would
+// overwrite it (F14). The check covers live and tombstoned listed keys
+// alike, because the listed set carries keys, not versions. wait_for_replication asks the
 // server to wait after the confirmed write for the replication Acks and
 // decorate the response with the D-08 aggregate report (wait.go): the wait
 // is bounded by the positive per-request wait_timeout_ms, else the
@@ -160,6 +183,9 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 	}
 	if len(req.GetKey()) > storage.MaxKeyBytes {
 		return nil, keyTooLongError(len(req.GetKey()))
+	}
+	if req.GetCreateIfAbsent() && s.opts.ListedKey != nil && s.opts.ListedKey(req.GetKey()) {
+		return nil, status.Error(codes.AlreadyExists, storage.ErrAlreadyExists.Error())
 	}
 	var (
 		ver version.RecordVersion
