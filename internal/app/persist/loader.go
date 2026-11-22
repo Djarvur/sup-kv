@@ -1,7 +1,6 @@
 package persist
 
 import (
-	"errors"
 	"slices"
 	"time"
 
@@ -90,15 +89,16 @@ func (e *Engine) startLoadDirty(outcome port.LoadOutcome, at time.Time) {
 	e.startDirty(at)
 }
 
-// mergeRecords installs every record via Merge, skipping one the
-// config-shrunk value limit rejects — an oversized record must never abort
-// startup. The decoder already applies the same configured limit, so this
-// skip is the belt over that bound: Merge has no other error.
+// mergeRecords installs every record via Merge. The decoder applied the same
+// configured limit — Open decodes with storeCfg.ValueLimit(), and NewStore
+// normalizes ValueMaxBytes through that same helper — so every record handed
+// here is within the limit and Merge's only error class,
+// storage.ErrValueTooLarge, cannot fire; the store remains the sole
+// authority on the bound. The merge error is therefore ignored explicitly
+// rather than re-checked as a skip over a state the decoder already excluded
+// (IN-05).
 func mergeRecords(store *storage.Store, records map[string]storage.Record) {
 	for key, rec := range records {
-		_, _, err := store.Merge(key, rec)
-		if errors.Is(err, storage.ErrValueTooLarge) {
-			continue
-		}
+		_, _, _ = store.Merge(key, rec)
 	}
 }
