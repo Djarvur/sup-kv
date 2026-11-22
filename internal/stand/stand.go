@@ -612,24 +612,62 @@ func (p *standPair) slots(nodeID int) (bindPort, bcastPort int, grpcAddr, dumpPa
 // frozen R-03 test names only --startup-gate=30s and must keep BOTH timers at
 // 30 s, while every other scenario stays on the harness's 1 s cadence. Later
 // flags win in main.go's parsing, so the derived value is appended after the
-// extras. A scenario that already names the empty gate (either the equals
-// form or the bare flag) wins: the function returns "" and nothing is
-// appended, so an explicit --startup-gate-empty is never overridden — ADR
-// 0006 keeps the two parameters separate and only this test harness derives
-// one from the other.
+// extras. A scenario that already names the empty gate wins: the function
+// returns "" and nothing is appended, so an explicit --startup-gate-empty is
+// never overridden — ADR 0006 keeps the two parameters separate and only this
+// test harness derives one from the other. Every spelling Go's flag package
+// accepts is recognized — single or double dash, and the `flag=value` or
+// `flag value` pair form (IN-05: a scenario written `--startup-gate 30s` used
+// to derive the harness default instead, racing the closed-side assertions).
 func emptyGateArg(extra []string) string {
-	for _, arg := range extra {
-		if arg == "--startup-gate-empty" || strings.HasPrefix(arg, "--startup-gate-empty=") {
-			return ""
-		}
+	if hasFlag(extra, "startup-gate-empty") {
+		return ""
 	}
 	derived := standStartupGate.String()
-	for _, arg := range extra {
-		if value, ok := strings.CutPrefix(arg, "--startup-gate="); ok {
-			derived = value
-		}
+	if value, ok := flagValue(extra, "startup-gate"); ok {
+		derived = value
 	}
 	return "--startup-gate-empty=" + derived
+}
+
+// normalizeFlagArg strips a flag argument's leading dashes — one or two, per
+// Go's flag package — so every recognized spelling compares the same way.
+func normalizeFlagArg(arg string) string {
+	return strings.TrimLeft(arg, "-")
+}
+
+// hasFlag reports whether args names flag in any form the flag package
+// accepts: -name, --name, -name=value or --name=value. A bare -name/--name
+// element counts too (it consumes the following argument as its value).
+func hasFlag(args []string, name string) bool {
+	for _, arg := range args {
+		trimmed := normalizeFlagArg(arg)
+		if trimmed == name || strings.HasPrefix(trimmed, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// flagValue returns the LAST value args give name — later flags win in
+// main.go's parsing — accepting both the `flag=value` and the space-separated
+// `flag value` pair form. A bare flag with no following argument yields false:
+// the flag package would reject it, and deriving a value for a malformed
+// command line would only hide that.
+func flagValue(args []string, name string) (string, bool) {
+	value, found := "", false
+	prefix := name + "="
+	for i := 0; i < len(args); i++ {
+		trimmed := normalizeFlagArg(args[i])
+		switch {
+		case strings.HasPrefix(trimmed, prefix):
+			value, found = strings.TrimPrefix(trimmed, prefix), true
+		case trimmed == name && i+1 < len(args):
+			value, found = args[i+1], true
+			i++ // the value is consumed; it is not an argument of its own
+		}
+	}
+	return value, found
 }
 
 // nodeArgsWithExtras composes one node's command line: the topology defaults,
