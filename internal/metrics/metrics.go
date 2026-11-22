@@ -393,10 +393,12 @@ func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family
 
 // dumpFamilies builds the persistence-cycle families over one reading of the
 // engine's DumpStats seam: the last duration, the attempt and error totals,
-// and the failure-class split (PERSIST-05). The class family always renders
-// all three values; "other" is the residual between the error total and the
-// two classed counters (Errors is their superset), clamped so a scrape
-// racing a dump's counter updates never renders a negative sample.
+// the failure-class split (PERSIST-05) and the confirmation-timeout count
+// (PERSIST-08). The class family always renders all three values; "other" is
+// the residual between the error total and the two classed counters (Errors
+// is their superset), clamped so a scrape racing a dump's counter updates
+// never renders a negative sample. Unconfirmed is independent of the error
+// counters: a timed-out confirmation says nothing about the dump's outcome.
 func dumpFamilies(stats persist.DumpStats) []Family {
 	other := uint64(0)
 	if classified := stats.DiskFull + stats.Permission; stats.Errors > classified {
@@ -431,6 +433,13 @@ func dumpFamilies(stats persist.DumpStats) []Family {
 				{Labels: []Label{{Name: labelClass, Value: "disk_full"}}, Value: float64(stats.DiskFull)},
 				{Labels: []Label{{Name: labelClass, Value: "permission"}}, Value: float64(stats.Permission)},
 				{Labels: []Label{{Name: labelClass, Value: "other"}}, Value: float64(other)},
+			},
+		},
+		{
+			Name: "supkv_dumps_unconfirmed_total", Type: Counter,
+			Help: "Writes answered before their covering dump completed.",
+			Samples: []Sample{
+				{Value: float64(stats.Unconfirmed)},
 			},
 		},
 	}

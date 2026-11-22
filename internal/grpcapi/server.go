@@ -209,12 +209,13 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 		ver, _, err = s.engine.Set(req.GetKey(), req.GetValue())
 	}
 	if err != nil {
-		// PROTO-08 totality (D-08, T-4-18): a write the engine installed but
-		// whose confirming dump failed is in memory and must reach peers, so
-		// it is notified before the error answers Unavailable. track is false:
-		// the RPC errors, so no wait_for_replication report exists. ErrClosed
-		// is shutdown work the process is abandoning — never notified.
-		if errors.Is(err, persist.ErrDumpFailed) {
+		// PROTO-08 totality (D-08, T-4-18, T-5-25): a write the engine installed
+		// but whose confirming dump failed — or did not complete within the
+		// confirmation timeout (PERSIST-08) — is in memory and must reach peers,
+		// so it is notified before the error answers Unavailable. track is
+		// false: the RPC errors, so no wait_for_replication report exists.
+		// ErrClosed is shutdown work the process is abandoning — never notified.
+		if errors.Is(err, persist.ErrDumpFailed) || errors.Is(err, persist.ErrUnconfirmed) {
 			s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false, false)
 		}
 		return nil, mapError(err)
@@ -257,10 +258,12 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 	}
 	ver, _, err := s.engine.Delete(req.GetKey())
 	if err != nil {
-		// PROTO-08 totality (D-08, T-4-18): the unconfirmed tombstone is
-		// already installed in memory and must reach peers before the RPC
-		// answers Unavailable; track is false and ErrClosed never notifies.
-		if errors.Is(err, persist.ErrDumpFailed) {
+		// PROTO-08 totality (D-08, T-4-18, T-5-25): the unconfirmed tombstone
+		// is already installed in memory and must reach peers before the RPC
+		// answers Unavailable — whichever unconfirmed class it is, a failed
+		// dump or an expired confirmation timeout (PERSIST-08); track is false
+		// and ErrClosed never notifies.
+		if errors.Is(err, persist.ErrDumpFailed) || errors.Is(err, persist.ErrUnconfirmed) {
 			s.notifyLocalWrite(req.GetKey(), ver, nil, true, false)
 		}
 		return nil, mapError(err)
@@ -420,6 +423,7 @@ func keyTooLongError(length int) error {
 //	storage.ErrAlreadyExists -> codes.AlreadyExists   ("key already exists" — any record incl. tombstone)
 //	storage.ErrValueTooLarge -> codes.InvalidArgument ("value exceeds the maximum allowed size")
 //	persist.ErrDumpFailed    -> codes.Unavailable     ("dump failed; write not confirmed")
+//	persist.ErrUnconfirmed   -> codes.Unavailable     ("write not confirmed before the confirmation timeout")
 //	persist.ErrClosed        -> codes.Unavailable     ("persist engine closed")
 //	persistfile.ErrInvalidSnapshotName -> codes.InvalidArgument ("invalid snapshot name")
 //
@@ -436,6 +440,8 @@ func mapError(err error) error {
 		return status.Error(codes.InvalidArgument, storage.ErrValueTooLarge.Error())
 	case errors.Is(err, persist.ErrDumpFailed):
 		return status.Error(codes.Unavailable, persist.ErrDumpFailed.Error())
+	case errors.Is(err, persist.ErrUnconfirmed):
+		return status.Error(codes.Unavailable, persist.ErrUnconfirmed.Error())
 	case errors.Is(err, persist.ErrClosed):
 		return status.Error(codes.Unavailable, persist.ErrClosed.Error())
 	case errors.Is(err, persistfile.ErrInvalidSnapshotName):
