@@ -93,3 +93,18 @@ jobs:
           go test -race ./...
           go mod tidy
           git diff --exit-code go.mod go.sum
+
+  # Dedicated nested-module job: examples/client is a separate Go module, so
+  # the root `go list ./...`/`go test ./...` graph never visits it (that
+  # exclusion is the point — the example proves consumer importability).
+  # This job runs the same `make client-example` target developers run
+  # locally: build + vet + tidy proof, no proto regeneration.
+  client-example:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make client-example

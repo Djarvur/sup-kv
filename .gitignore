@@ -3,6 +3,9 @@
 /bin/
 /dist/
 *.exe
+# `make client-example` runs `go build ./...` inside the nested module, which
+# writes the example's executable beside main.go.
+/examples/client/client
 
 # Locally built dev tools (the make proto plugin binary).
 .tmp/

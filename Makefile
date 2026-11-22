@@ -1,4 +1,4 @@
-.PHONY: lint test bench bench-smoke race-soak red-run generate build proto buf-lint buf-format buf-breaking release release-snapshot
+.PHONY: lint test bench bench-smoke race-soak red-run generate build client-example proto buf-lint buf-format buf-breaking release release-snapshot
 
 # Version stamping for the build target (D-18): version from git describe,
 # commit from the short sha, "dev" when git is unavailable.
@@ -87,6 +87,17 @@ generate:
 build:
 	go build ./...
 	CGO_ENABLED=0 go build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/sup-kv ./cmd/sup-kv
+
+## client-example: build, vet and tidy-proof the standalone consumer example
+## in examples/client. The example is a nested Go module, so `go list ./...`
+## and `go test ./...` at the root never visit it (by design — it must be
+## importable from another module): this target is its single gate and the
+## CI `client-example` job invokes exactly this target. The `git diff` leg
+## proves the committed go.mod/go.sum are tidy; it only sees tracked files,
+## which is why the pre-commit untracked case is proven by the hash
+## comparison in the plan instead.
+client-example:
+	cd examples/client && go build ./... && go vet ./... && go mod tidy && git diff --exit-code -- go.mod go.sum
 
 ## proto: regenerate the committed wire code (dev machines only — CI never
 ## regenerates; the pb.go files are committed). One buf generate pass per
