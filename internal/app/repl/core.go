@@ -880,9 +880,10 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 // per-class rate-limited WARN on the event-loop's now (T-3-25).
 //
 // Everything else reaches protocol processing:
-// Hello upserts the peer
-// table and — when a known node's run_id changed — answers with the
-// targeted full listing toward the restarted peer (REPL-07),
+// Hello learns a previously unknown node and answers it with one targeted
+// full listing (the first-seen listing, PROTO-04), refreshes a known node's
+// liveness, or — when a known node's run_id changed — replaces the old run's
+// listing with one targeted full listing toward the restarted peer (REPL-07),
 // DataReplication applies the record and Acks it, Ack drains
 // the pending-set wait-set (REPL-02), DataRequest answers through the
 // rate-limited egress queue (REPL-04), and DataSync compares per entry
@@ -1130,39 +1131,49 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 }
 
 // handleHello upserts the peer-table row from one Hello datagram (REPL-01)
-// and owns the restart discrimination (REPL-07, probe #19). Three cases,
-// pinned: an unknown node_id is learned — entry created, no targeted listing
-// (the peer's own startup DataSync and the periodic rounds reconcile it);
-// a known node_id repeating its remembered run_id refreshes lastHello only,
-// never a second listing (a per-Hello full listing at hello_interval cadence
-// would be a self-inflicted listing flood; the flap case is bounded by this
-// idempotence, not by rate limiting);
-// a known node_id whose run_id differs from the remembered one is a detected
-// restart — the duplicate-node_id classifier never pre-empts this branch
-// (HandleDatagram's second variant requires run_id equality with the
-// remembered row) — the old run's queued listing, retained keys and partial
-// rounds are dropped so no dead state outlives the row, the entry updates in
-// place (handle, runID, lastHello; the table stays keyed by
-// node_id, one row per node — a change never forks a second row, which would
-// fork ack tracking and liveness; the row's listing rotation survives) and one
-// bounded targeted listing is enqueued through the single
-// [Core.enqueueListing], rotated by that peer's rotation counter and drained
-// through the shared listing pacer at one datagram per interval. Inequality
-// with the remembered run_id is the only trigger: run_ids are 16 random bytes
-// per process start, so they carry no temporal order — a stale run_id
-// returning after a newer one was seen is indistinguishable from a fresh
-// restart and is handled as just another change (entry update plus one
+// and owns the three-way outcome (REPL-07, PROTO-04, probe #19), pinned:
+//
+//   - an unknown node_id is learned and gets exactly one immediate targeted
+//     listing toward its announced identity — the first-seen listing that
+//     gives a newly seen or returning peer its state without a sync_interval
+//     term — and, when the Hello also ends an empty table, the same event
+//     still runs the discovery flush. The two behaviors are not mutually
+//     exclusive and this branch must never return early (Pitfall 5): an evicted
+//     peer's return Hello, whatever its run_id, is this unknown-node case.
+//   - a known node_id repeating its remembered run_id refreshes lastHello
+//     only, never a second listing (a per-Hello full listing at hello_interval
+//     cadence would be a self-inflicted listing flood; the flap case is bounded
+//     by this idempotence, not by rate limiting).
+//   - a known node_id whose run_id differs from the remembered one is a
+//     detected restart — the duplicate-node_id classifier never pre-empts this
+//     branch (HandleDatagram's second variant requires run_id equality with
+//     the remembered row) — the old run's queued listing, retained keys and
+//     partial rounds are dropped so no dead state outlives the row, the entry
+//     updates in place (handle, runID, lastHello; the table stays keyed by
+//     node_id, one row per node — a change never forks a second row, which
+//     would fork ack tracking and liveness; the row's listing rotation
+//     survives) and one targeted listing is enqueued. A restart necessarily
+//     has discovery == false, so this branch returns.
+//
+// Both listing paths call the single [Core.enqueueListing] — there is no
+// second implementation. The first-seen round starts at chunk 0; the restart
+// round uses and advances the row's rotation counter, so repeated restarts
+// cover the whole key space under buffer loss (D-01's targeted half).
+// Inequality with the remembered run_id is the only restart trigger: run_ids
+// are 16 random bytes per process start, so they carry no temporal order — a
+// stale run_id returning after a newer one was seen is indistinguishable from
+// a fresh restart and is handled as just another change (entry update plus one
 // idempotent re-sync; reconciliation no-ops on equal state). In-flight
 // protocol datagrams from the old run — Ack, DataReplication, DataSync —
 // process normally on their (key, version) merits, run_id-agnostic outside
 // this handler. The listing is proactive traffic on the shared listing pacer,
 // never the sync_response_rate egress queue (the plan-04-03 egress-scope pin):
 // it is bounded by one in-flight listing per destination plus the queue caps,
-// and fires once per detected change, while the heavy replay traffic it
-// solicits IS limiter-gated — that flows as DataRequest replies on the
-// receiving node's side and newer-responses on ours. A detected restart never
-// re-adds the peer to any pending wait-set and never touches the backoff
-// ladder (the REPL-02 interplay): the restarted node heals through
+// and fires once per detected first Hello or run change, while the heavy
+// replay traffic it solicits IS limiter-gated — that flows as DataRequest
+// replies on the receiving node's side and newer-responses on ours. A detected
+// restart never re-adds the peer to any pending wait-set and never touches the
+// backoff ladder (the REPL-02 interplay): the restarted node heals through
 // reconciliation via the targeted listing, not through retransmission, and an
 // entry that already drained stays drained — the dump/restart path, not
 // retransmission, is the durability story. Only a Hello refreshes lastHello —
@@ -1174,10 +1185,7 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // brand-new peer receives the pending set promptly, not at the next backoff
 // expiry (research A6), while the pacer prevents the whole-set burst R-01/R-02
 // measured. A Hello that does not end an empty table modifies no wait-set:
-// only discovery adds waiters. Discovery and restart are mutually exclusive by
-// construction — a restart requires a remembered row, and an empty table
-// remembers nothing (an evicted peer's return Hello, whatever its run_id, is
-// the unknown-node case).
+// only discovery adds waiters.
 func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	// Any received Hello — a discovery, a refresh or a restart — proves the
 	// receive path hears peers, so the no-Hello WARN stands down for the
@@ -1209,18 +1217,14 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	known.runID = in.RunID
 	known.lastHello = now
 	c.peers[in.NodeID] = known
-	if remembered {
-		// One targeted listing per restart: the row's rotation counter picks the
-		// start chunk and advances on a successful enqueue, so repeated restart
-		// rounds cover the whole key space under buffer loss (D-01's targeted
-		// half).
-		if c.enqueueListing(now, listingDst{nodeID: in.NodeID, runID: in.RunID}, known.rotation) {
-			known.rotation++
-			c.peers[in.NodeID] = known
-		}
-		return
+	// One targeted listing per (node_id, run_id) destination. Only a restart
+	// advances the rotation: the first-seen round is round 0, and the repeated
+	// rounds that must cover the key space are the restarts.
+	if c.enqueueListing(now, listingDst{nodeID: in.NodeID, runID: in.RunID}, known.rotation) && remembered {
+		known.rotation++
+		c.peers[in.NodeID] = known
 	}
-	if !discovery {
+	if remembered || !discovery {
 		return
 	}
 	for _, pk := range sortedPendingKeys(c.pending) {

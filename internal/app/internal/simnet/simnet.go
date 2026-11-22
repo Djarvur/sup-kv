@@ -633,8 +633,8 @@ func (c *Cluster) ReplaceNodeWithState(i int, runID [16]byte, offset time.Durati
 // AddNode boots one fresh cluster member: the next node id with its derived
 // handle and a deterministically derived fresh run id, over an empty store
 // whose clock starts at the scheduler's virtual time plus offset — the
-// empty-disk join shape (a brand-new node reconciling through the periodic
-// rounds, never a targeted listing). It returns the new node's index
+// empty-disk join shape (a brand-new node reconciling through the first-Hello
+// targeted listing and the periodic rounds). It returns the new node's index
 // (nodes keep index = node_id-1). Determinism contract: as SetClockOffset —
 // the derived identity draws no randomness, so the event stream stays a
 // pure function of the seed.
