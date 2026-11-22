@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 10
+current_plan: 11
 status: executing
-stopped_at: Completed 05-09-PLAN.md
-last_updated: "2026-11-22T16:30:21.784Z"
+stopped_at: Completed 05-10-PLAN.md
+last_updated: "2026-11-22T16:43:29.086Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 executing; 05-09 complete, 05-10 next
-state_head: 06704d63ab7bc30adf76434d22e295f39ab63877
+state_head: 4a0e04e5a7b497eab5bf561514c08bf397390406
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 56
+  completed_plans: 57
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 5 (Persistence) — executing
-Current Plan: 10
+Current Plan: 11
 Total Plans in Phase: 12
 Status: Executing (05-09 complete, 05-10 next)
 Last activity: 2026-11-22 — 05-09 complete; 05-10 next
@@ -114,6 +114,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P07 | 1114 | 3 tasks | 10 files |
 | Phase 05 P08 | 924 | 3 tasks | 10 files |
 | Phase 05 P09 | 12min | 3 tasks | 7 files |
+| Phase 05 P10 | 3min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -341,6 +342,9 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-09: Each state-owning role keeps one mutex, never nested; rearm reads the confirmer epoch and the scheduler retry state under two sequential locks
 - [Phase 05]: 05-09: New constructs one dumpStats holder and hands the same pointer to the scheduler and the confirmer, so the timeout counter and the dump counters are one published value
 - [Phase 05]: 05-09: The split adds no exported name and no interface; the five role files are internal-only, Engine stays the composition root
+- [Phase 05]: 05-10: The runbook's persistence additions are pinned one anchor literal per statement; the count gate is line-based (grep -c), so the anchor block's doc comment names the mandated phrases in prose while each literal still carries its own row
+- [Phase 05]: 05-10: TestOperationsDocFamilies extracts every supkv_ name from docs/OPERATIONS.md and requires it in internal/metrics/metrics.go, so a documented family with no exporter counterpart fails without a hardcoded duplicate list
+- [Phase 05]: 05-10: The memory model states peak live (one Records() copy + one record line + the 64 KiB writer) and names the copy's read-lock writer pause as residual; B/op churn is explicitly a different, larger number
 
 ### Pending Todos
 
@@ -363,7 +367,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T16:30:21.325Z
-Stopped at: Completed 05-09-PLAN.md
+Last session: 2026-11-22T16:43:28.626Z
+Stopped at: Completed 05-10-PLAN.md
 Resume file: None
 Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-10-PLAN.md is next)
