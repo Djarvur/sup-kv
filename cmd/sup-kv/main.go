@@ -41,6 +41,7 @@ import (
 	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/metrics"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
+	"github.com/Djarvur/sup-kv/internal/port"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -573,6 +574,7 @@ func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.Ca
 		ValueMaxBytes: cfg.valueMaxBytes,
 		OnChange:      hub.Ingest,
 	}, persist.Config{Debounce: cfg.dumpDebounce, MaxWait: cfg.dumpMaxWait})
+	logLoadStats(engine.LoadStats())
 	if discarded > 0 {
 		log.Printf("sup-kv: discarded %d undecodable dumped records at startup", discarded)
 	}
@@ -580,6 +582,84 @@ func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.Ca
 	engineDone := make(chan error, 1)
 	go func() { engineDone <- engine.Run(engineCtx) }()
 	return engine, engineCancel, engineDone
+}
+
+// logLoadStats reports one startup load in the one-line-per-class policy
+// (D-02, PERSIST-02/PERSIST-09): a Backup emits exactly one WARN naming the
+// main generation's path, cause and preservation error; an Unusable exactly
+// one ERROR carrying one attribute group per candidate that actually failed
+// — one or two, never a phantom — and both are silent for Prompt and Main.
+// A non-zero sweep count is one INFO and a sweep error one WARN; a clean
+// start therefore logs nothing here.
+func logLoadStats(stats persist.LoadStats) {
+	switch stats.Outcome {
+	case port.LoadBackup:
+		logBackupFallback(stats)
+	case port.LoadUnusable:
+		logUnusableGenerations(stats)
+	case port.LoadPrompt, port.LoadMain:
+	}
+	if stats.Swept > 0 {
+		slog.Info("Orphan temp sweep removed files", "count", stats.Swept)
+	}
+	if stats.SweepErr != nil {
+		slog.Warn("Orphan temp sweep failed", "detail", stats.SweepErr.Error())
+	}
+}
+
+// logBackupFallback emits the one WARN for a .prev fallback. The main
+// candidate is found by scanning Failures by Candidate — never by slice
+// index — so an absent main's recorded fs.ErrNotExist cause is what the line
+// names, and a contract-violating empty list degrades to a path-less WARN
+// instead of an index panic.
+func logBackupFallback(stats persist.LoadStats) {
+	failure, ok := candidateFailure(stats.Failures, port.GenMain)
+	if !ok {
+		slog.Warn("Dump generation fallback")
+		return
+	}
+	slog.Warn("Dump generation fallback",
+		"main_path", failure.Path,
+		"cause", errorText(failure.Cause),
+		"preserve_error", errorText(failure.PreserveErr))
+}
+
+// logUnusableGenerations emits the one ERROR for an unusable chain: one
+// <candidate>_path/<candidate>_cause/<candidate>_preserve_error group per
+// failure actually present, in the adapter's chain order. Iterating Failures
+// handles the absent-candidate case by construction — a single corrupt
+// generation yields one group and no phantom .prev entry.
+func logUnusableGenerations(stats persist.LoadStats) {
+	attrs := make([]any, 0, 3*len(stats.Failures))
+	for _, failure := range stats.Failures {
+		prefix := "prev"
+		if failure.Candidate == port.GenMain {
+			prefix = "main"
+		}
+		attrs = append(attrs,
+			prefix+"_path", failure.Path,
+			prefix+"_cause", errorText(failure.Cause),
+			prefix+"_preserve_error", errorText(failure.PreserveErr))
+	}
+	slog.Error("No usable dump generation", attrs...)
+}
+
+// candidateFailure returns the failure recorded for candidate.
+func candidateFailure(failures []port.GenerationFailure, candidate port.Generation) (port.GenerationFailure, bool) {
+	for _, failure := range failures {
+		if failure.Candidate == candidate {
+			return failure, true
+		}
+	}
+	return port.GenerationFailure{}, false
+}
+
+// errorText renders err for a log attribute, empty for nil.
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // wire builds the whole service graph in the plan-05-06 order and launches

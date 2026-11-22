@@ -84,6 +84,14 @@ type Engine struct {
 	// the two sides cannot disagree (PERSIST-01).
 	valueMaxBytes int
 
+	// loadStats is the startup load report Open captures over the port's
+	// LoadResult (D-02, PERSIST-02/PERSIST-11): the outcome, the accepted
+	// generation, the per-candidate failures, the accepted generation's decode
+	// census and the sweep result. It is written once by Open before the
+	// engine is returned and read-only afterwards, so LoadStats needs no lock.
+	// An engine built by New leaves it zero (Loaded false).
+	loadStats LoadStats
+
 	// dumpNanos, dumpTotal and dumpErrors carry DumpStats lock-free for
 	// scrapers (OBS-01): runDump is the single writer — the serialized
 	// dumper — so atomic reads need no engine mutex.
@@ -99,6 +107,26 @@ type DumpStats struct {
 	DurationSeconds float64
 	Total           uint64
 	Errors          uint64
+}
+
+// LoadStats is the startup load report Open stores on the engine (D-02,
+// PERSIST-02/PERSIST-11): the port's LoadResult mapped into the engine's own
+// report type — the port remains the seam, this is the engine's view of it.
+// Loaded distinguishes a real startup load from an engine built by New
+// (whose report stays zero); Outcome is Prompt/Main/Backup/Unusable,
+// Generation names the accepted candidate, Failures carries one entry per
+// rejected candidate, Decoded is the accepted generation's per-class discard
+// census (PERSIST-10), and Swept/SweepErr report the startup orphan sweep.
+// The binary turns this one report into exactly one WARN or ERROR per class
+// and the two load-metric families.
+type LoadStats struct {
+	Loaded     bool
+	Outcome    port.LoadOutcome
+	Generation port.Generation
+	Failures   []port.GenerationFailure
+	Decoded    DecodeStats
+	Swept      int
+	SweepErr   error
 }
 
 // New returns an engine persisting store's state through dumps. store and
@@ -154,7 +182,7 @@ func Open(
 		records, stats = decoded, decodedStats
 		return nil
 	}
-	dumps.Load(now(), decode)
+	result := dumps.Load(now(), decode)
 	if records == nil {
 		records = make(map[string]storage.Record)
 	}
@@ -162,7 +190,27 @@ func Open(
 	clk := clock.NewClock(now, initialL, initialC, driftWarn)
 	store := storage.NewStore(nodeID, clk, storeCfg)
 	mergeRecords(store, records)
-	return New(store, dumps, engineCfg), stats.Total()
+	eng = New(store, dumps, engineCfg)
+	eng.loadStats = LoadStats{
+		Loaded:     true,
+		Outcome:    result.Outcome,
+		Generation: result.Generation,
+		Failures:   slices.Clone(result.Failures),
+		Decoded:    stats,
+		Swept:      result.Swept,
+		SweepErr:   result.SweepErr,
+	}
+	return eng, stats.Total()
+}
+
+// LoadStats returns the startup load report Open captured — a value copy,
+// with the failure slice cloned so a caller can never mutate the engine's
+// record. Engines built by New carry the zero value: Loaded false and the
+// Prompt outcome, which the exporter renders as four zero outcome samples.
+func (e *Engine) LoadStats() LoadStats {
+	report := e.loadStats
+	report.Failures = slices.Clone(report.Failures)
+	return report
 }
 
 // mergeRecords installs every record via Merge, skipping one the

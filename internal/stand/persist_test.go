@@ -123,10 +123,12 @@ func persistCorruptFiles(t *testing.T, p *standPair) []string {
 	if err != nil {
 		t.Fatalf("read the dump directory: %v", err)
 	}
-	prefix := filepath.Base(p.dumpA) + ".corrupt-"
+	base := filepath.Base(p.dumpA)
+	mainPrefix := base + ".corrupt-"
+	prevPrefix := base + ".prev.corrupt-"
 	var names []string
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), prefix) {
+		if strings.HasPrefix(entry.Name(), mainPrefix) || strings.HasPrefix(entry.Name(), prevPrefix) {
 			names = append(names, entry.Name())
 		}
 	}
