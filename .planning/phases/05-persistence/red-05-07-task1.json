@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/app/persist/ -v -run '^TestEngine_injectedClock$'",
+  "exitCode": 1,
+  "output": "=== RUN   TestEngine_injectedClock\n=== PAUSE TestEngine_injectedClock\n=== CONT  TestEngine_injectedClock\n    engine_test.go:486: the engine never read the injected Config.Now\n    engine_test.go:489: the engine armed 0 timer channels through Config.After, want the debounce and the deadline\n--- FAIL: TestEngine_injectedClock (0.00s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/app/persist\t0.009s\nFAIL\n",
+  "targetTest": "TestEngine_injectedClock",
+  "targetFile": "internal/app/persist/engine_test.go",
+  "expected": "The engine reads the supplied Config.Now and arms its debounce/deadline channels through Config.After; the confirmation lands at exactly the Debounce virtual instant.",
+  "actual": "The engine ignored the supplied seam and used the wall-clock path: zero Config.Now reads and zero Config.After arms were observed, while the virtual timing assertion passed because the default wall clock was the bubble clock.",
+  "semanticAssessment": "The target test executed and failed only on its planned seam assertions (engine never read Config.Now, armed 0 channels through Config.After). The timing assertions passed because the package still used time.Now/time.NewTimer, which inside the synctest bubble are the same virtual clock — exactly the fallback the test exists to forbid. No build, fixture or unrelated failure; the target test is the only test run."
+}

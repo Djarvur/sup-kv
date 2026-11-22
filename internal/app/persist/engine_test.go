@@ -409,6 +409,88 @@ func startDumper(t *testing.T, eng *persist.Engine) (stop func()) {
 	}
 }
 
+// recordingSeam is the injected clock/timer seam's recorder: it delegates to
+// the bubble's virtual clock, so the timing assertions stay exact, and counts
+// every read and arm so a test can prove the engine used the supplied
+// functions instead of the wall clock.
+type recordingSeam struct {
+	mu     sync.Mutex
+	nows   int
+	afters int
+}
+
+// Now returns the bubble's virtual time and counts the read.
+func (r *recordingSeam) Now() time.Time {
+	r.mu.Lock()
+	r.nows++
+	r.mu.Unlock()
+	return time.Now()
+}
+
+// After arms the bubble's virtual timer and counts the arm.
+func (r *recordingSeam) After(d time.Duration) <-chan time.Time {
+	r.mu.Lock()
+	r.afters++
+	r.mu.Unlock()
+	return time.After(d)
+}
+
+// counts returns the recorded read and arm counts.
+func (r *recordingSeam) counts() (nows, afters int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nows, r.afters
+}
+
+// TestEngine_injectedClock proves the PERSIST-12 seam: a supplied Now/After
+// pair is the engine's only clock and timer source. A Set at virtual t=0
+// resolves exactly at Debounce, the dump lands at that same instant, and the
+// recorder observes the reads and arms — while the defaults preserve the
+// existing behavior the rest of the suite exercises.
+func TestEngine_injectedClock(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		seam := &recordingSeam{}
+		dumps := &fakeDumpPort{}
+		// The store keeps the bubble clock directly, so every counting call
+		// the recorder sees is the ENGINE's — the seam under test.
+		clk := clock.NewClock(time.Now, 0, 0, time.Minute)
+		store := storage.NewStore(synctestNodeID, clk, storage.Config{})
+		eng := persist.New(store, dumps, persist.Config{Now: seam.Now, After: seam.After})
+		defer startDumper(t, eng)()
+
+		start := time.Now()
+		returned := make(chan time.Time, 1)
+		go func() {
+			_, _, err := eng.Set("seam", []byte("seam-value"))
+			if err != nil {
+				t.Errorf("Set(seam) error = %v, want nil", err)
+			}
+			returned <- time.Now()
+		}()
+		returnedAt := <-returned
+		synctest.Wait()
+
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("save count = %d, want exactly 1", got)
+		}
+		want := start.Add(synctestDebounce)
+		if !dumps.save(0).at.Equal(want) {
+			t.Errorf("the dump landed at %v, want exactly %v", dumps.save(0).at, want)
+		}
+		if !returnedAt.Equal(want) {
+			t.Errorf("Set returned at %v, want exactly the dump instant %v", returnedAt, want)
+		}
+		nows, afters := seam.counts()
+		if nows == 0 {
+			t.Error("the engine never read the injected Config.Now")
+		}
+		if afters < 2 {
+			t.Errorf("the engine armed %d timer channels through Config.After, want the debounce and the deadline", afters)
+		}
+	})
+}
+
 // TestEngine_confirmDebounceTiming proves the write-confirmation timing law
 // exactly in virtual time (PERS-04, D-04): a Set at t=0 registers its
 // waiter, the debounced dumper waits out the full 50 ms quiet window, the

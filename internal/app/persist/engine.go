@@ -32,6 +32,14 @@ const (
 type Config struct {
 	Debounce time.Duration
 	MaxWait  time.Duration
+
+	// Now is the engine's clock and After its timer seam (PERSIST-12): every
+	// read and every armed timer goes through them so the simulator can drive
+	// the dump loop on its own virtual time. A nil pair defaults to
+	// time.Now/time.After in normalized (the only wall-clock references the
+	// package keeps).
+	Now   func() time.Time
+	After func(time.Duration) <-chan time.Time
 }
 
 // normalized returns cfg with zero or negative fields replaced by the
