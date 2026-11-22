@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
@@ -59,6 +60,22 @@ func testReplicationDatagram(t *testing.T, keyLen, valueLen int, deleted bool, c
 // record is never a tombstone (tombstone-with-data is a receive-side discard
 // class); an empty value covers both an empty Set and a tombstone.
 func testMaximalLegalDeleted(valueLen int) bool { return valueLen == 0 }
+
+// TestMaxDatagramBytes_matchesCoreChunkBudget pins the two constants that must
+// agree across the core/adapter seam (WR-06): the core's accepted chunk budget
+// ceiling and the adapter's datagram ceiling are the same IPv4 UDP payload
+// size. A core budget above it would describe a chunk the adapter cannot send;
+// below it, the budget would needlessly waste payload headroom.
+func TestMaxDatagramBytes_matchesCoreChunkBudget(t *testing.T) {
+	t.Parallel()
+	if repl.MaxSyncChunkBytes != udprepl.MaxDatagramBytes {
+		t.Fatalf("repl.MaxSyncChunkBytes = %d, want udprepl.MaxDatagramBytes = %d (WR-06)",
+			repl.MaxSyncChunkBytes, udprepl.MaxDatagramBytes)
+	}
+	if testDatagramCeiling != udprepl.MaxDatagramBytes {
+		t.Fatalf("the test's datagram ceiling %d drifted from udprepl.MaxDatagramBytes %d", testDatagramCeiling, udprepl.MaxDatagramBytes)
+	}
+}
 
 // TestMaxRecordDatagramBytes proves the oracle never undercounts and agrees
 // with the research's measured ceiling: the boundary rows sit at or below

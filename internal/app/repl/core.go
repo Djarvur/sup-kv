@@ -39,6 +39,20 @@ import (
 // it would restore the first-chunk reading this version removes (PROTO-01).
 const SupportedProtoVersion = 2
 
+// MaxSyncChunkBytes is the largest accepted Config.SyncChunkBytes budget: the
+// IPv4 UDP payload ceiling — 65 535 bytes less the 20-byte IP header and the
+// 8-byte UDP header — the same value as udprepl.MaxDatagramBytes (the
+// udprepl cross-seam test pins the two constants together). The chunk
+// budget's contract is that a budgeted chunk's real encoded datagram is at
+// most SyncChunkBytes (see entryOverheadBytes and chunkOverheadBytes), so a
+// budget above this ceiling describes a chunk no datagram can carry; worse,
+// the listing build now caches its chunks for the build's lifetime, so an
+// unlimited budget pre-allocated from the byte budget would pin its oversized
+// first chunk for the whole cache age instead of releasing it as transient
+// garbage (WR-06). [Config.normalized] clamps to this value and
+// cmd/sup-kv rejects an explicit out-of-range flag before any bind.
+const MaxSyncChunkBytes = 65507
+
 // The discard class tokens passed to [Config.OnDiscard] (D-08): stable
 // first-class strings — one per DiscardStats counter — that the
 // observability surfaces (structured log attrs, later the metrics labels)
@@ -307,6 +321,12 @@ func (c Config) normalized() Config {
 	}
 	if c.SyncChunkBytes <= 0 {
 		c.SyncChunkBytes = defaultSyncChunkBytes
+	}
+	if c.SyncChunkBytes > MaxSyncChunkBytes {
+		// A budget above the datagram ceiling describes a chunk no datagram can
+		// carry, and the cached listing build would pin the oversized
+		// allocation for its whole age (WR-06).
+		c.SyncChunkBytes = MaxSyncChunkBytes
 	}
 	if c.SyncResponseRate <= 0 || c.SyncResponseRate > maxSyncResponseRate {
 		c.SyncResponseRate = defaultSyncResponseRate
@@ -2612,18 +2632,22 @@ func (c *Core) listingChunks() [][]port.SyncEntry {
 // sequence — the walk is over the sorted listing, never a map (probe #11).
 func chunkSyncEntries(entries []port.SyncEntry, budget int) [][]port.SyncEntry {
 	var chunks [][]port.SyncEntry
-	// A budgeted chunk holds at most budget/entryOverheadBytes entries
-	// (every entry estimates at least entryOverheadBytes), so that is the
-	// capacity bound; a closed chunk's backing array is never reused —
-	// cur resets to nil, not cur[:0], or every chunk after the first would
-	// alias its predecessor's memory.
-	cur := make([]port.SyncEntry, 0, budget/entryOverheadBytes)
+	// A budgeted chunk holds at most budget/entryOverheadBytes entries (every
+	// entry estimates at least entryOverheadBytes) and never more than the
+	// listing itself, so the capacity hint is the smaller of the two: the byte
+	// budget sizes a bucket, it never promises the walk will fill it (WR-06 —
+	// an out-of-range budget once pre-allocated tens of millions of entries,
+	// and the cached build then pinned that allocation). A closed chunk's
+	// backing array is never reused — cur resets to nil, not cur[:0], or every
+	// chunk after the first would alias its predecessor's memory.
+	hint := min(len(entries), budget/entryOverheadBytes)
+	cur := make([]port.SyncEntry, 0, hint)
 	used := chunkOverheadBytes
-	for _, entry := range entries {
+	for i, entry := range entries {
 		est := len(entry.Key) + entryOverheadBytes
 		if len(cur) > 0 && used+est > budget {
 			chunks = append(chunks, cur)
-			cur = nil
+			cur = make([]port.SyncEntry, 0, min(len(entries)-i, budget/entryOverheadBytes))
 			used = chunkOverheadBytes
 		}
 		cur = append(cur, entry)

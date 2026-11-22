@@ -62,6 +62,7 @@ var (
 	errLogFormatEnv      = errors.New("must be json or text")
 	errIncompleteCertSet = errors.New("the metrics certificate envs must be set together")
 	errDatagramCeiling   = errors.New("value-max-bytes exceeds the datagram ceiling")
+	errSyncChunkBytes    = errors.New("sync-chunk-bytes exceeds the datagram ceiling")
 	errStartupGateRange  = errors.New("startup gate must be positive")
 )
 
@@ -444,7 +445,26 @@ func finalizeConfig(cfg *config, nodeID uint64, envErr error) error {
 	if err != nil {
 		return err
 	}
-	return checkDatagramCeiling(*cfg)
+	err = checkDatagramCeiling(*cfg)
+	if err != nil {
+		return err
+	}
+	return checkSyncChunkBytes(*cfg)
+}
+
+// checkSyncChunkBytes rejects an explicit --sync-chunk-bytes above the UDP
+// datagram ceiling before any bind (WR-06): a chunk budget above 65 507
+// describes a chunk no datagram can carry, and the core's defensive clamp
+// would silently ship smaller chunks than the operator configured. The
+// ceiling is the core's own constant (repl.MaxSyncChunkBytes, pinned to the
+// adapter's datagram ceiling by a cross-seam test). A zero or negative value
+// stays legal — the core normalizes it to the design default.
+func checkSyncChunkBytes(cfg config) error {
+	if cfg.syncChunkBytes > repl.MaxSyncChunkBytes {
+		return fmt.Errorf("%w: --sync-chunk-bytes=%d (at most %d, the largest IPv4 UDP payload)",
+			errSyncChunkBytes, cfg.syncChunkBytes, repl.MaxSyncChunkBytes)
+	}
+	return nil
 }
 
 // checkMetricsCerts enforces D-02's all-or-nothing contract before any bind

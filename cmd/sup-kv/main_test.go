@@ -617,6 +617,33 @@ func TestMain_startupGateEmptyRange(t *testing.T) {
 	}
 }
 
+// TestMain_syncChunkBytesCeiling pins the WR-06 binary boundary: an explicit
+// --sync-chunk-bytes above the datagram ceiling aborts through the usage path
+// (exit 2) with a message naming the knob, its value and the ceiling, before
+// any bind — the core's clamp is defense in depth, never a silent substitute
+// for telling the operator their budget is unsendable.
+func TestMain_syncChunkBytesCeiling(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), startupGateRangeProbe)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, bin,
+		"--node-id=1",
+		"--bind-addr=127.0.0.1:9",
+		"--broadcast-addr=127.255.255.255:9",
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--sync-chunk-bytes=65508",
+	)
+	out, err := cmd.CombinedOutput()
+	assertExitCode(t, err, exitUsageCode)
+	for _, want := range []string{"sync-chunk-bytes exceeds the datagram ceiling", "--sync-chunk-bytes=65508", "65507"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("the over-ceiling sync-chunk-bytes run's output does not contain %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestMain_startupGateEmptySelection pins the D-02 empty-vs-data selection end
 // to end through health timing only: a node that loaded no records waits the
 // empty backstop — still NOT_SERVING after the normal gate would have opened,
