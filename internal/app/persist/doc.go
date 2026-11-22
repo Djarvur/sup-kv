@@ -9,10 +9,14 @@
 // caller launches Run in its own goroutine, Run exits when the context is
 // cancelled resolving every stranded waiter with ErrClosed, and the engine
 // itself spawns no goroutine. A write blocks inside Set, SetIfAbsent or
-// Delete until a dump containing it completed or failed — nil confirms the
-// write is on disk (PERS-04), ErrDumpFailed reports the failed dump while
-// the record stays readable in memory (D-05). Reads are never gated on
-// dumps. No callbacks, no events — results only (Phase 2 D-01 tradition).
+// Delete until its covering dump resolves in one of three ways: nil confirms
+// the write is on disk (PERS-04); ErrDumpFailed reports the failed dump while
+// the record stays readable in memory (D-05); ErrUnconfirmed reports that the
+// dump did not complete within Config.ConfirmTimeout — the record is in
+// memory and not yet durable (PERSIST-08, D-07). Flush, FlushTimeout,
+// Snapshot and Restore are bounded by the same confirmation deadline, so a
+// hung fsync can never park them. Reads are never gated on dumps. No
+// callbacks, no events — results only (Phase 2 D-01 tradition).
 //
 // The package is split into five internal roles (D-10, PERSIST-11): the
 // loader/composition root (Open, mergeRecords and the load report), the
@@ -29,9 +33,13 @@
 // later than the oldest unconfirmed write plus MaxWait, because the
 // deadline timer is armed from the clean-to-dirty transition and only the
 // debounce timer resets on later changes, so bursts can coalesce but never
-// starve confirmation. After a failed dump the next attempt starts one
-// debounce interval later — the re-armed timer, never a tight retry loop —
-// and it also carries the failed era's surviving records.
+// starve confirmation. After a failed dump the next attempt is armed at the
+// failure instant plus a bounded ladder — 100 ms doubling to a 5 s cap,
+// reset by a success (D-05, PERSIST-05) — never a tight retry loop, and it
+// also carries the failed era's surviving records. A flush request cannot
+// bypass that ladder: while a rung is pending it answers with the last
+// classified failure instead of forcing an extra attempt and an extra ERROR
+// line at the caller's rate.
 //
 // Snapshots (PERS-05, D-08..D-10): Snapshot first forces the current dump
 // to complete — a clean engine skips the redundant dump, a dirty one is
