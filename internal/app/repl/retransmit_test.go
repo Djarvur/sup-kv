@@ -1466,6 +1466,113 @@ func TestReplication_equalVersionContentLaw(t *testing.T) {
 	})
 }
 
+// traceDecision is one wire decision the same-seed trace compares: the
+// unicast kind, destination handle and the key/version/record it carries
+// (empty record fields for an Ack).
+type traceDecision struct {
+	handle  string
+	kind    string
+	key     string
+	version version.RecordVersion
+	data    string
+	deleted bool
+}
+
+// TestReplication_equalVersionSameSeedTrace proves the equal-version wire rule
+// is a pure function of the records (PERSIST-07, ADR 0012): two freshly built
+// cores are seeded identically and fed the same fixed ordered sequence of
+// equal-version DataReplication datagrams — an incoming tie-break win, a
+// stored tie-break win and an identical redelivery — and the emitted Ack and
+// reply decisions must be identical, as must the resulting store state. It
+// claims replay determinism of the wire decisions only: cross-node
+// convergence through a real notification path is plan 05-07's proof, because
+// a locally seeded store emits no replication message.
+func TestReplication_equalVersionSameSeedTrace(t *testing.T) {
+	t.Parallel()
+	v := version.PackVersion(testNowMs, 7, peerID1)
+	seed := []string{keyAlpha, keyBeta, keyGamma}
+	steps := []struct {
+		key string
+		rec storage.Record
+	}{
+		// Incoming wins: "zulu" sorts after the stored "base".
+		{key: keyAlpha, rec: storage.Record{Version: v, Data: []byte("zulu")}},
+		// Stored wins: "alpha" sorts before the stored "base".
+		{key: keyBeta, rec: storage.Record{Version: v, Data: []byte("alpha")}},
+		// Identical content: the old no-op Ack path.
+		{key: keyGamma, rec: storage.Record{Version: v, Data: []byte("base")}},
+	}
+	collect := func(drained []port.Outbound) []traceDecision {
+		var decisions []traceDecision
+		for _, ob := range drained {
+			if ob.Broadcast {
+				continue
+			}
+			switch msg := ob.Msg.(type) {
+			case port.Ack:
+				decisions = append(decisions, traceDecision{handle: ob.To, kind: "ack", key: msg.Key, version: msg.Version})
+			case port.DataReplication:
+				decisions = append(decisions, traceDecision{
+					handle:  ob.To,
+					kind:    "replication",
+					key:     msg.Key,
+					version: msg.Record.Version,
+					data:    string(msg.Record.Data),
+					deleted: msg.Record.Deleted,
+				})
+			}
+		}
+		return decisions
+	}
+	run := func() ([]traceDecision, map[string]storage.Record) {
+		now := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+		for _, key := range seed {
+			seedVersion(t, st, key, storage.Record{Version: v, Data: []byte("base")})
+		}
+		var decisions []traceDecision
+		for _, step := range steps {
+			core.HandleDatagram(now, replFrom(peerID1, step.key, step.rec), &out)
+			decisions = append(decisions, collect(out.Drain())...)
+			// Drain every queued answer at the same cadence in both runs, so a
+			// stored-win reply is part of the compared decision sequence.
+			for core.QueuedSends() > 0 {
+				now = now.Add(listingDrainStep)
+				core.Advance(now, &out)
+				decisions = append(decisions, collect(out.Drain())...)
+			}
+		}
+		return decisions, st.store.Records()
+	}
+
+	firstDecisions, firstState := run()
+	secondDecisions, secondState := run()
+	if !slices.Equal(firstDecisions, secondDecisions) {
+		t.Fatalf("same-fixture runs decided differently:\nfirst:  %+v\nsecond: %+v", firstDecisions, secondDecisions)
+	}
+	for key, first := range firstState {
+		second, ok := secondState[key]
+		if !ok || !recordsEqual(first, second) {
+			t.Fatalf("same-fixture runs ended with different records under %q:\nfirst:  %+v\nsecond: %+v", key, first, second)
+		}
+	}
+	if len(firstState) != len(secondState) {
+		t.Fatalf("same-fixture runs ended with %d vs %d stored keys", len(firstState), len(secondState))
+	}
+
+	want := []traceDecision{
+		{handle: handleFor(peerID1), kind: "ack", key: keyAlpha, version: v},
+		{handle: handleFor(peerID1), kind: "replication", key: keyBeta, version: v, data: "base"},
+		{handle: handleFor(peerID1), kind: "ack", key: keyGamma, version: v},
+	}
+	if !slices.Equal(firstDecisions, want) {
+		t.Fatalf("decision sequence = %+v, want %+v — the incoming win Acks, the stored win replies and the identical record Acks", firstDecisions, want)
+	}
+}
+
 // TestReplication_newerApplied proves the strictly-newer outcome: a held
 // k@v5 that receives k@v6 applies it through ApplyRemote (one displaced-
 // version conflict) and Acks v6, emitting no reply.
