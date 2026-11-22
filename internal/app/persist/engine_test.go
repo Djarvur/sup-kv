@@ -1547,9 +1547,10 @@ func TestEngine_restoreFailedFlushReturnsReplayed(t *testing.T) {
 
 // TestEngine_restoreSkipsReplay proves skipped shapes are absent from the
 // report (PROTO-08): a tombstone with no live record to beat and a value
-// over the store's reduced limit are both skips — Restore returns an empty
-// list and nil, installs nothing, and never notifies what it did not
-// replay.
+// over the store's reduced limit are both skips — the value-limit record is
+// discarded at decode (the codec now applies the configured limit), the
+// tombstone at replay — so Restore returns an empty list and nil, installs
+// nothing, and never notifies what it did not replay.
 func TestEngine_restoreSkipsReplay(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -1666,11 +1667,12 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 }
 
 // TestEngine_configShrunkValueLimits pins the config-shrink resilience
-// paths: Open skips a dumped record the shrunk store limit rejects instead
-// of aborting startup, Restore skips the same class instead of failing, and
-// a direct Set surfaces storage.ErrValueTooLarge unchanged with no waiter
-// registered (PERS-02/PERS-05 — the codec's 61440 envelope does not shrink
-// with the config, so these are the belt-and-braces skips).
+// paths: Open discards a dumped record the shrunk value limit rejects at
+// decode — the codec applies the configured limit, so the record counts in
+// the value-limit class and never reaches the merge belt — Restore skips the
+// same class instead of failing, and a direct Set surfaces
+// storage.ErrValueTooLarge unchanged with no waiter registered
+// (PERSIST-01/PERS-02/PERS-05).
 //
 // Decision 14.11 (ADR 0011): the ~60 KiB single-value limit stays — this
 // test narrows only the configurable envelope under it, so the accepted
@@ -1704,8 +1706,8 @@ func TestEngine_configShrunkValueLimits(t *testing.T) {
 		persistfile.New(dumpPath),
 		storage.Config{ValueMaxBytes: shrunkValueLimit}, persist.Config{},
 	)
-	if discarded != 0 {
-		t.Errorf("shrunk Open() discarded = %d, want 0 (the skip is at merge, not codec)", discarded)
+	if discarded != 1 {
+		t.Errorf("shrunk Open() discarded = %d, want 1 (the codec applies the configured value limit)", discarded)
 	}
 	_, err = shrunk.Get("fat")
 	if !errors.Is(err, storage.ErrNotFound) {
