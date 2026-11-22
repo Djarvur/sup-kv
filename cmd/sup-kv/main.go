@@ -56,14 +56,15 @@ var (
 // Configuration-error sentinels the startup path wraps with the offending
 // detail; callers match them with [errors.Is], never identity comparison.
 var (
-	errNodeIDRange       = errors.New("node-id exceeds the 16-bit node ID space")
-	errMissingRequired   = errors.New("missing required knobs")
-	errNodeIDEnv         = errors.New("must be an integer within the 16-bit node ID space")
-	errLogFormatEnv      = errors.New("must be json or text")
-	errIncompleteCertSet = errors.New("the metrics certificate envs must be set together")
-	errDatagramCeiling   = errors.New("value-max-bytes exceeds the datagram ceiling")
-	errSyncChunkBytes    = errors.New("sync-chunk-bytes exceeds the datagram ceiling")
-	errStartupGateRange  = errors.New("startup gate must be positive")
+	errNodeIDRange        = errors.New("node-id exceeds the 16-bit node ID space")
+	errMissingRequired    = errors.New("missing required knobs")
+	errNodeIDEnv          = errors.New("must be an integer within the 16-bit node ID space")
+	errLogFormatEnv       = errors.New("must be json or text")
+	errIncompleteCertSet  = errors.New("the metrics certificate envs must be set together")
+	errDatagramCeiling    = errors.New("value-max-bytes exceeds the datagram ceiling")
+	errValueMaxBytesRange = errors.New("value-max-bytes must be positive")
+	errSyncChunkBytes     = errors.New("sync-chunk-bytes exceeds the datagram ceiling")
+	errStartupGateRange   = errors.New("startup gate must be positive")
 )
 
 // Process exit codes: a configuration error (missing or malformed knob)
@@ -444,6 +445,10 @@ func finalizeConfig(cfg *config, nodeID uint64, envErr error) error {
 	if err != nil {
 		return err
 	}
+	err = checkValueMaxBytes(*cfg)
+	if err != nil {
+		return err
+	}
 	err = checkDatagramCeiling(*cfg)
 	if err != nil {
 		return err
@@ -498,6 +503,19 @@ func checkStartupGates(cfg config) error {
 	return nil
 }
 
+// checkValueMaxBytes rejects a non-positive --value-max-bytes before any bind
+// (PERSIST-01, T-5-02): the store normalizes such a value to the default, so
+// silently accepting it would hide an operator typo behind what looks like a
+// deliberate setting. The error names the flag, and finalizeConfig's caller
+// exits with the usage code. A positive value is passed through unchanged —
+// the datagram-ceiling relation is checkDatagramCeiling's.
+func checkValueMaxBytes(cfg config) error {
+	if cfg.valueMaxBytes <= 0 {
+		return fmt.Errorf("%w: --value-max-bytes=%d", errValueMaxBytesRange, cfg.valueMaxBytes)
+	}
+	return nil
+}
+
 // checkDatagramCeiling enforces XPORT-03's startup half: the largest record
 // the write API accepts — a key of storage.MaxKeyBytes with a value of
 // value_max_bytes — must encode into one UDP datagram. The size comes from
@@ -509,12 +527,12 @@ func checkStartupGates(cfg config) error {
 // same effective value. The probe width is bounded by the ceiling itself: a
 // misconfigured multi-gigabyte value is over the ceiling before any key or
 // envelope byte, and materializing it just to measure would turn a config
-// typo into an out-of-memory startup. The effective value for a non-positive
-// setting is storage.ValueMaxBytes — the store's one default — exactly as
-// the store itself normalizes it. Called by finalizeConfig, before any
-// bind or socket work, so a bad combination exits with the usage code (2)
-// rather than starting a node whose largest confirmed write could never
-// replicate.
+// typo into an out-of-memory startup. A non-positive setting never reaches
+// this check — checkValueMaxBytes rejects it first — so the
+// storage.ValueMaxBytes fallback keeps the probe total over its input.
+// Called by finalizeConfig, before any bind or socket work, so a bad
+// combination exits with the usage code (2) rather than starting a node
+// whose largest confirmed write could never replicate.
 func checkDatagramCeiling(cfg config) error {
 	valueBytes := cfg.valueMaxBytes
 	if valueBytes <= 0 {

@@ -44,7 +44,7 @@ var operationsAnchors = []struct {
 	{"sync_interval", "REPL-10 partition-heal bound component (2 × sync_interval + response)"},
 	{"## Scale envelope", "the scale-envelope section"},
 	{"60 KiB", "the value envelope in human units"},
-	{"61440", "the envelope constant exactly as the code carries it (defaultValueMaxBytes)"},
+	{"61440", "the envelope constant exactly as the code carries it (storage.ValueMaxBytes)"},
 	{"--value-max-bytes", "the flag that tunes the envelope"},
 	{"SUPKV_VALUE_MAX_BYTES", "the envelope flag's env twin"},
 	{"InvalidArgument", "larger values are rejected with InvalidArgument"},

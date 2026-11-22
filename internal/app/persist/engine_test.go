@@ -1983,7 +1983,8 @@ func TestEngine_exactValueLimitRestart(t *testing.T) {
 	if discarded != 0 {
 		t.Fatalf("Open() on an empty directory discarded = %d, want 0", discarded)
 	}
-	defer startDumper(t, eng)()
+	stop := startDumper(t, eng)
+	t.Cleanup(stop)
 
 	value := []byte("12345678") // exactly smallLimit bytes.
 	_, _, err := eng.Set("exact", value)
