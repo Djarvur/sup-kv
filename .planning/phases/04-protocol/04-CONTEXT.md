@@ -101,3 +101,15 @@ None — discussion stayed within phase scope.
 
 *Phase: 4-Protocol*
 *Context gathered: 2026-11-22*
+
+## Research resolutions (2026-11-22, phase-planning addendum)
+
+Applied to the decisions above, with the research's evidence:
+- **D-03 refined:** a **strictly older** `DataReplication` is answered with exactly one unicast newer record and NO Ack; an **equal-version** record is still Acked (the retransmission drain depends on it — R-02 would regress otherwise). S-PROTO-16's equal-Ack reading wins over the first "≤" draft.
+- Delete on a listed-but-not-arrived key keeps local `NotFound` (14.5(6) names reads; no acceptance requires Unavailable for Delete).
+- Three-node real-socket tests use in-process shared-port adapters (recommended).
+- Listing drift does not feed `MergeStats` (OBSV-05 owns drift).
+- `startup_gate_empty` gets basic relation validation now; Phase 7's one-point validation formalizes the catalog.
+- The mixed 3-node window where the gate opens on an empty peer's complete listing is documented, not changed (D-01 stands).
+- Wire constants: proto version 1→2; `sync_id` uint64 + `chunk_index`/`chunk_count` uint32; `chunkOverheadBytes` 64→96 (boundary fixtures re-derived).
+- The frozen tests survive via one harness rule: the harness derives `--startup-gate-empty` from an explicit `--startup-gate` in extras (otherwise the new empty-gate default opens the replaced node after 1 s and the closed-side assertions race).
