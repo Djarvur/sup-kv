@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -412,5 +413,98 @@ func TestFsops_emptyDumpRoundTrip(t *testing.T) {
 	}
 	if len(res.Dump) != 0 {
 		t.Errorf("Load() = %d bytes, want zero records (the empty dump)", len(res.Dump))
+	}
+}
+
+// TestEnsureDir_newDirectorySyncsParent proves the parent-directory sync of
+// a newly created dump directory (D-08): a nested, not-yet-existing path
+// records syncDir(parent) before write, then the exact five-step save order,
+// so the directory's own entry is durable before the generation lands.
+func TestEnsureDir_newDirectorySyncsParent(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dumpPath := filepath.Join(root, "nested", "sub", "dump.json")
+	dumpDir := filepath.Dir(dumpPath)
+	parentDir := filepath.Dir(dumpDir)
+	store := New(dumpPath)
+	rec := &recordingFSOps{}
+	store.ops = rec
+	err := store.Save([]byte(fsopsOldGen))
+	if err != nil {
+		t.Fatalf("Save() error = %v, want nil", err)
+	}
+	wantOps := []fsopStep{fsopSyncDir, fsopWrite, fsopFsync, fsopRotate, fsopRename, fsopSyncDir}
+	got := rec.recordedOps()
+	if !slices.Equal(got, wantOps) {
+		t.Fatalf("recorded ops = %v, want exactly %v", got, wantOps)
+	}
+	if !slices.Equal(rec.calls[0].args, []string{parentDir}) {
+		t.Errorf("parent sync args = %v, want the new directory's parent %s", rec.calls[0].args, parentDir)
+	}
+	if !slices.Equal(rec.calls[1].args, []string{dumpDir}) {
+		t.Errorf("write args = %v, want the new dump dir %s", rec.calls[1].args, dumpDir)
+	}
+	if !slices.Equal(rec.calls[5].args, []string{dumpDir}) {
+		t.Errorf("dir sync args = %v, want the dump dir %s", rec.calls[5].args, dumpDir)
+	}
+	fsopsGeneration(t, dumpPath, fsopsOldGen)
+}
+
+// TestEnsureDir_existingDirectoryNoParentSync proves the existing-directory
+// half: the temp-dir convention every pre-existing order test uses records
+// no parent sync, so the five-step TEST-03 order is unchanged.
+func TestEnsureDir_existingDirectoryNoParentSync(t *testing.T) {
+	t.Parallel()
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json") // t.TempDir already exists
+	store := New(dumpPath)
+	rec := &recordingFSOps{}
+	store.ops = rec
+	err := store.Save([]byte(fsopsOldGen))
+	if err != nil {
+		t.Fatalf("Save() error = %v, want nil", err)
+	}
+	if got := rec.recordedOps(); !slices.Equal(got, fsopsOrder) {
+		t.Errorf("recorded ops = %v, want exactly %v (no parent sync for an existing directory)", got, fsopsOrder)
+	}
+}
+
+// TestSyncDirTolerant pins the directory-only tolerance (T-5-15): ENOTSUP
+// and EINVAL mean the filesystem cannot fsync a directory and are skipped;
+// every other error — and only the directory step uses this helper — is
+// returned unchanged, so a file-data fsync failure can never be masked.
+func TestSyncDirTolerant(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		err     error
+		wantNil bool
+	}{
+		{name: "nil", err: nil, wantNil: true},
+		{name: "ENOTSUP", err: syscall.ENOTSUP, wantNil: true},
+		{
+			name:    "wrapped EINVAL",
+			err:     &os.PathError{Op: "fsync", Path: "dump-dir", Err: syscall.EINVAL},
+			wantNil: true,
+		},
+		{name: "EACCES", err: syscall.EACCES, wantNil: false},
+		{name: "ENOSPC", err: syscall.ENOSPC, wantNil: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tolerateDirSyncErr(tt.err)
+			if tt.wantNil {
+				if got != nil {
+					t.Errorf("tolerateDirSyncErr(%v) = %v, want nil", tt.err, got)
+				}
+				return
+			}
+			if !errors.Is(got, tt.err) {
+				t.Errorf("tolerateDirSyncErr(%v) = %v, want the original error", tt.err, got)
+			}
+		})
 	}
 }

@@ -205,3 +205,14 @@ func targetExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
+
+// tolerateDirSyncErr is the directory-step tolerance (T-5-15): a filesystem
+// that cannot fsync a directory reports ENOTSUP or EINVAL, documented as a
+// skip because the rename's durability is then at the filesystem's
+// discretion; every other error is returned unchanged. Only syncDir uses
+// this helper — the file-data fsync path keeps every error, so an ENOSPC on
+// data can never be masked. EINTR needs no retry loop here: [os.File.Sync]
+// already retries it through internal/poll on Linux and darwin.
+func tolerateDirSyncErr(err error) error {
+	return err
+}

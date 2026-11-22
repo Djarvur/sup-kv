@@ -1,6 +1,7 @@
 package port
 
 import (
+	"errors"
 	"io"
 	"time"
 )
@@ -106,4 +107,51 @@ type LoadResult struct {
 	Failures   []GenerationFailure
 	Swept      int
 	SweepErr   error
+}
+
+// FailureClass is the save-failure vocabulary crossing the port (D-05): the
+// adapter keeps the errno knowledge and the core consumes only the class, so
+// internal/app never imports syscall (T-5-16). The values are the metric
+// label vocabulary.
+type FailureClass uint8
+
+// The three save-failure classes.
+const (
+	// FailureOther is an unclassified save failure.
+	FailureOther FailureClass = iota
+	// FailureDiskFull is ENOSPC: the filesystem is out of space.
+	FailureDiskFull
+	// FailurePermission is EACCES or fs.ErrPermission: the write was denied.
+	FailurePermission
+)
+
+// String returns the class's stable label — the metric label and the log
+// attribute value.
+func (c FailureClass) String() string {
+	switch c {
+	case FailureDiskFull:
+		return "disk_full"
+	case FailurePermission:
+		return "permission"
+	case FailureOther:
+		return "other"
+	}
+	return "other"
+}
+
+// ClassedError is an error carrying a FailureClass across the port without
+// exposing errno text to the core (D-05).
+type ClassedError interface {
+	error
+	FailureClass() FailureClass
+}
+
+// FailureClassOf returns err's class, or FailureOther when err carries no
+// class.
+func FailureClassOf(err error) FailureClass {
+	classed, ok := errors.AsType[ClassedError](err)
+	if !ok {
+		return FailureOther
+	}
+	return classed.FailureClass()
 }
