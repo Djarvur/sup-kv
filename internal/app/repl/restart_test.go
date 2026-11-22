@@ -123,7 +123,7 @@ func TestRestart_runIDChangeTriggersFullSync(t *testing.T) {
 	r1, r2 := runIDFor(1), runIDFor(2)
 	core.HandleDatagram(now, helloFromRun(r1), &out)
 	if got := len(out.Drain()); got != 0 {
-		t.Fatalf("the learn Hello from the unknown node emitted %d messages, want 0 — no targeted listing before the node is known", got)
+		t.Fatalf("the learn Hello from the unknown node emitted %d messages synchronously, want 0 — its first-seen listing is queued on the pacer", got)
 	}
 
 	core.HandleDatagram(now, helloFromRun(r2), &out)
@@ -155,44 +155,201 @@ func TestRestart_runIDChangeTriggersFullSync(t *testing.T) {
 	}
 }
 
-// TestRestart_newPeerNoFullSync proves the discrimination edge: a first
-// Hello from a brand-new node_id is learned into the peer table but never
-// targeted — the reaction fires only on a run_id CHANGE of a known node, so
-// a new node reconciles through its own startup DataSync and the periodic
-// rounds (a per-Hello full listing at hello_interval cadence would be a
-// self-inflicted listing flood).
-func TestRestart_newPeerNoFullSync(t *testing.T) {
+// TestRestart_firstHelloExactlyOneListing proves PROTO-04's first-seen half:
+// an unknown node_id is learned into the peer table and receives exactly one
+// targeted, complete listing — one chunk for a small store, with the chunk
+// header and every stored key — without waiting for a sync_interval tick.
+func TestRestart_firstHelloExactlyOneListing(t *testing.T) {
 	t.Parallel()
-	t.Helper()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out) // startup Hello + startup empty listing
+	out.Drain()
+	_, _, err := st.store.Set(keyAlpha, []byte("v"))
+	if err != nil {
+		t.Fatalf("store Set(%q): %v", keyAlpha, err)
+	}
+
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	drained := advanceDrain(core, &out, now)
+	got := targetedSyncs(t, drained, handleFor(peerID1))
+	if len(got) != 1 {
+		t.Fatalf("the first Hello emitted %d targeted DataSync chunks, want exactly 1 — a newly seen peer gets one complete listing", len(got))
+	}
+	if len(drained) != len(got) {
+		t.Fatalf("the first Hello drained %d messages of which %d are targeted listing chunks, want exactly the listing and nothing else",
+			len(drained), len(got))
+	}
+	if sync := got[0]; sync.ChunkIndex != 1 || sync.ChunkCount != 1 || len(sync.Entries) != 1 || sync.Entries[0].Key != keyAlpha {
+		t.Fatalf("the first-seen listing chunk = %+v, want the one complete chunk carrying %q", sync, keyAlpha)
+	}
+	if _, ok := core.PeerSnapshot()[peerID1]; !ok {
+		t.Fatal("the first Hello was not learned into PeerSnapshot")
+	}
+	if got := core.ListingDropped(); got != 0 {
+		t.Fatalf("ListingDropped() = %d after one first-seen listing, want 0", got)
+	}
+}
+
+// TestRestart_repeatHelloNoListing pins the repeat contract: a second Hello
+// with the already-remembered run_id refreshes liveness and emits nothing.
+func TestRestart_repeatHelloNoListing(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	advanceDrain(core, &out, now) // the first-seen listing, outside the assertion
+	out.Drain()
+	core.HandleDatagram(at(time.Millisecond), helloFrom(peerID1), &out)
+	drained := advanceDrain(core, &out, at(time.Millisecond))
+	if len(drained) != 0 {
+		t.Fatalf("a repeat Hello with the remembered run_id emitted %d messages, want 0 — idempotence: refresh only", len(drained))
+	}
+}
+
+// TestRestart_returningAfterEvictionGetsListing proves the returning half
+// (PROTO-04): a peer evicted by peer_timeout is unknown again, so its next
+// Hello takes the first-seen path and gets exactly one complete listing.
+func TestRestart_returningAfterEvictionGetsListing(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	advanceDrain(core, &out, now) // the initial first-seen listing
+	out.Drain()
+
+	core.Advance(at(peerTimeout), &out) // lastHello+peer_timeout evicts
+	out.Drain()
+	if _, ok := core.PeerSnapshot()[peerID1]; ok {
+		t.Fatal("the silent peer survived peer_timeout; the eviction probe is vacuous")
+	}
+
+	helloAt := at(peerTimeout + 100*time.Millisecond)
+	core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
+	drained := advanceDrain(core, &out, helloAt)
+	got := targetedSyncs(t, drained, handleFor(peerID1))
+	if len(got) != 1 {
+		t.Fatalf("the evicted peer's returning Hello emitted %d targeted DataSync chunks, want exactly 1 — a returning peer is a first-seen peer", len(got))
+	}
+	if _, ok := core.PeerSnapshot()[peerID1]; !ok {
+		t.Fatal("the returning peer was not re-learned into PeerSnapshot")
+	}
+}
+
+// TestRestart_firstHelloStillFlushesPending proves the two first-Hello
+// behaviors are not mutually exclusive (Pitfall 5): a Hello that ends an empty
+// table both enqueues the targeted listing AND flushes every pending write, so
+// the discovery flush's R-02 drain bound survives the first-seen listing.
+func TestRestart_firstHelloStillFlushesPending(t *testing.T) {
+	t.Parallel()
 	now := at(0)
 	core, st := newTestCore()
 	var out port.Outbox
 	core.Advance(now, &out)
 	out.Drain()
-	core.HandleDatagram(now, helloFrom(peerID1), &out)
-	out.Drain()
-	for i, keyLen := range graduatedKeyLens[:4] {
-		_, _, err := st.store.Set(graduatedKey(i, keyLen), []byte("v"))
-		if err != nil {
-			t.Fatalf("store Set(graduated key %d): %v", i, err)
-		}
+	ver := localWrite(t, core, st, now, keyAlpha, "one")
+	if _, ok := core.PendingSnapshot()[keyAlpha]; !ok {
+		t.Fatalf("the pending write %q left tracking while the table was empty", keyAlpha)
 	}
 
-	core.HandleDatagram(now, helloFrom(strangerID), &out)
-	drained := out.Drain()
-	if got := targetedSyncs(t, drained, handleFor(strangerID)); len(got) != 0 {
-		t.Fatalf("a brand-new node_id received %d targeted DataSync chunks, want 0", len(got))
+	helloAt := at(time.Millisecond)
+	core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
+	drained := advanceDrain(core, &out, helloAt)
+	if got := targetedSyncs(t, drained, handleFor(peerID1)); len(got) != 1 {
+		t.Fatalf("the first Hello emitted %d targeted listing chunks, want exactly 1 beside the discovery flush", len(got))
 	}
-	if len(drained) != 0 {
-		t.Fatalf("the learn Hello from the brand-new node emitted %d messages, want 0", len(drained))
+	repls := broadcastRepls(drained)
+	if len(repls) != 1 || repls[0].Key != keyAlpha || repls[0].Record.Version != ver {
+		t.Fatalf("the first Hello flushed %v, want exactly one DataReplication for (%s, %x) — the discovery flush was dropped",
+			replKeys(repls), keyAlpha, ver[:])
 	}
-	snap := core.PeerSnapshot()
-	if _, ok := snap[strangerID]; !ok {
-		t.Fatal("the brand-new node was not learned into PeerSnapshot")
+	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1})
+}
+
+// TestRestart_helloDoesNotLeakListingsToStranger proves the two-destination
+// independence: two alternating unknown identities each get exactly their own
+// one-chunk first-seen listing, repeats add nothing, and both destinations fit
+// under the cap with no counted drop.
+func TestRestart_helloDoesNotLeakListingsToStranger(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+	for range 2 {
+		core.HandleDatagram(now, helloFrom(peerID1), &out)
+		core.HandleDatagram(now, helloFrom(strangerID), &out)
 	}
-	if q := core.QueuedResponses(); q != 0 {
-		t.Fatalf("after the learn QueuedResponses() = %d, want 0", q)
+	drained := advanceDrain(core, &out, now)
+	perHandle := make(map[string]int, 2)
+	for _, ob := range drained {
+		sync, ok := ob.Msg.(port.DataSync)
+		if !ok || ob.Broadcast {
+			continue
+		}
+		perHandle[ob.To]++
+		if len(sync.Entries) != 0 {
+			t.Fatalf("an empty-store first-seen listing carries %d entries, want the one empty chunk", len(sync.Entries))
+		}
 	}
+	for _, handle := range []string{handleFor(peerID1), handleFor(strangerID)} {
+		if got := perHandle[handle]; got != 1 {
+			t.Fatalf("handle %q received %d listing chunks, want exactly 1 (per-handle counts: %v)", handle, got, perHandle)
+		}
+	}
+	if got := core.ListingDropped(); got != 0 {
+		t.Fatalf("ListingDropped() = %d with two destinations under the cap, want 0", got)
+	}
+}
+
+// TestRestart_generationInvalidatesCachedListing is the freshness regression
+// the generation check exists for: both subtests fire the startup Advance
+// (caching an empty build), seed the store afterwards, and then trigger a
+// listing. The emitted chunks must equal a fresh listing of the seeded store —
+// a reused pre-mutation build would emit the empty listing and fail.
+func TestRestart_generationInvalidatesCachedListing(t *testing.T) {
+	t.Parallel()
+	r1, r2 := runIDFor(1), runIDFor(2)
+	t.Run("a restart after a cached build and a store mutation emits the mutated store", func(t *testing.T) {
+		t.Parallel()
+		now := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out) // caches the startup build over the empty store
+		out.Drain()
+		core.HandleDatagram(now, helloFromRun(r1), &out) // learn, reuses the empty build
+		out.Drain()
+		seedGraduatedKeys(t, st)
+		want := freshListing(t, st)
+		core.HandleDatagram(now, helloFromRun(r2), &out)
+		got := targetedSyncs(t, advanceDrain(core, &out, now), handleFor(peerID1))
+		if !dataSyncsEqual(got, want) {
+			t.Fatalf("the post-mutation restart listing = %v, want the fresh seeded listing %v — a cached pre-mutation build was served", got, want)
+		}
+	})
+	t.Run("a first-seen Hello after a cached build and a store mutation emits the mutated store", func(t *testing.T) {
+		t.Parallel()
+		now := at(0)
+		core, st := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out) // caches the startup build over the empty store
+		out.Drain()
+		seedGraduatedKeys(t, st)
+		want := freshListing(t, st)
+		core.HandleDatagram(now, helloFrom(strangerID), &out)
+		got := targetedSyncs(t, advanceDrain(core, &out, now), handleFor(strangerID))
+		if !dataSyncsEqual(got, want) {
+			t.Fatalf("the post-mutation first-seen listing = %v, want the fresh seeded listing %v — a cached pre-mutation build was served", got, want)
+		}
+	})
 }
 
 // TestRestart_staleRunIdAndInFlight pins the three adversarial run_id edges
@@ -311,8 +468,10 @@ func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 
 		core.HandleDatagram(now0, helloFromRun(r1), &out)
 		if got := len(out.Drain()); got != 0 {
-			t.Fatalf("the learn Hello emitted %d messages, want 0", got)
+			t.Fatalf("the learn Hello emitted %d messages synchronously, want 0", got)
 		}
+		advanceDrain(core, &out, now0) // the learn's first-seen listing
+		out.Drain()
 		core.Advance(at(100*time.Millisecond), &out)
 		if got := len(out.Drain()); got != 0 {
 			t.Fatalf("the Advance after the learn emitted %d messages, want 0", got)
