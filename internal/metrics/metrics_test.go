@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -299,6 +300,55 @@ func TestMetrics_families(t *testing.T) {
 	}
 }
 
+// otherSample extracts the class="other" dump-failure value from a rendered
+// snapshot, failing when the sample is absent or unparsable.
+func otherSample(t *testing.T, out string) float64 {
+	t.Helper()
+	const prefix = `supkv_dumps_failures_total{class="other"} `
+	for line := range strings.SplitSeq(out, "\n") {
+		value, ok := strings.CutPrefix(line, prefix)
+		if !ok {
+			continue
+		}
+		sample, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			t.Fatalf("parse %q: %v", line, err)
+		}
+		return sample
+	}
+	t.Fatalf("rendered snapshot lacks %q:\n%s", prefix, out)
+	return 0
+}
+
+// TestMetrics_dumpOtherMonotone is the IN-03 regression: a failed dump
+// increments its error total before it classifies the failure, so a scrape
+// can land between the two increments. The "other" sample must be the
+// explicitly counted class, never Errors minus the other classes — the
+// derived form renders 1 on the first scrape and 0 on the next, a counter
+// decrease that rate()/increase() interpret as a reset. These two snapshots
+// replay that window and must never decrease.
+func TestMetrics_dumpOtherMonotone(t *testing.T) {
+	t.Parallel()
+	scrapes := []persist.DumpStats{
+		{Total: 1, Errors: 1},           // between the error total and the class increment
+		{Total: 1, Errors: 1, Other: 1}, // the class counter has landed
+	}
+	previous := -1.0
+	for i, stats := range scrapes {
+		src := zeroSources()
+		src.DumpStats = func() persist.DumpStats { return stats }
+		got := otherSample(t, renderTo(t, metrics.Snapshot(src)))
+		if got < previous {
+			t.Fatalf("scrape %d rendered class=\"other\" = %v after %v — a counter decrease reads as a reset",
+				i, got, previous)
+		}
+		previous = got
+	}
+	if previous != 1 {
+		t.Errorf("the settled scrape rendered class=\"other\" = %v, want 1", previous)
+	}
+}
+
 // TestMetrics_values pins the by-effect half of the metrics surface: Sources
 // carrying nonzero readings render those exact values — the four XPORT-07
 // emission families and the five wire-validation discard classes. A wiring
@@ -323,7 +373,7 @@ func TestMetrics_values(t *testing.T) {
 	src.EgressDropped = func() uint64 { return 3 }
 	src.ReadErrors = func() uint64 { return 5 }
 	src.DumpStats = func() persist.DumpStats {
-		return persist.DumpStats{Errors: 6, DiskFull: 2, Permission: 3, Unconfirmed: 4}
+		return persist.DumpStats{Errors: 6, DiskFull: 2, Permission: 3, Other: 1, Unconfirmed: 4}
 	}
 	src.LoadStats = func() persist.LoadStats {
 		return persist.LoadStats{

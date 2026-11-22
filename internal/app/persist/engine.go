@@ -117,16 +117,20 @@ type Engine struct {
 // the total dump attempts, and the failed ones, split by the adapter's
 // failure class so a persistent ENOSPC and a persistent EACCES are
 // distinguishable without parsing the log (PERSIST-05). Errors stays the
-// total failed attempts; DiskFull and Permission are subsets of it.
-// Unconfirmed counts writes answered with ErrUnconfirmed before their
-// covering dump completed (PERSIST-08) — a durability answer independent of
-// the failure counters.
+// total failed attempts; DiskFull, Permission and Other are its three
+// class subsets, each incremented in its own failure branch — counted
+// explicitly rather than derived, so every published series is monotone
+// even for a scrape that lands between the error total and the class
+// increment (WR-02/IN-03). Unconfirmed counts writes answered with
+// ErrUnconfirmed before their covering dump completed (PERSIST-08) — a
+// durability answer independent of the failure counters.
 type DumpStats struct {
 	DurationSeconds float64
 	Total           uint64
 	Errors          uint64
 	DiskFull        uint64
 	Permission      uint64
+	Other           uint64
 	Unconfirmed     uint64
 }
 

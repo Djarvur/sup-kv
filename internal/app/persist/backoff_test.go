@@ -321,9 +321,9 @@ func TestEngine_dumpFailureClasses(t *testing.T) {
 		if stats.Total != uint64(len(cases)) || stats.Errors != uint64(len(cases)) {
 			t.Errorf("DumpStats() = %+v, want Total and Errors = %d", stats, len(cases))
 		}
-		if stats.DiskFull != 1 || stats.Permission != 1 {
-			t.Errorf("DumpStats() class counters = (disk_full %d, permission %d), want (1, 1)",
-				stats.DiskFull, stats.Permission)
+		if stats.DiskFull != 1 || stats.Permission != 1 || stats.Other != 1 {
+			t.Errorf("DumpStats() class counters = (disk_full %d, permission %d, other %d), want (1, 1, 1)",
+				stats.DiskFull, stats.Permission, stats.Other)
 		}
 	})
 }

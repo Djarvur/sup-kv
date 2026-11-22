@@ -34,6 +34,7 @@ type dumpStats struct {
 	errors        atomic.Uint64
 	diskFull      atomic.Uint64
 	permission    atomic.Uint64
+	other         atomic.Uint64
 	unconfirmed   atomic.Uint64
 }
 
@@ -257,6 +258,7 @@ func (s *scheduler) handleDumpFailure(err error) {
 	case port.FailurePermission:
 		s.stats.permission.Add(1)
 	case port.FailureOther:
+		s.stats.other.Add(1)
 	}
 	if s.cfg.OnDumpFailure != nil {
 		s.cfg.OnDumpFailure(err, class)
@@ -309,6 +311,7 @@ func (e *Engine) DumpStats() DumpStats {
 		Errors:          stats.errors.Load(),
 		DiskFull:        stats.diskFull.Load(),
 		Permission:      stats.permission.Load(),
+		Other:           stats.other.Load(),
 		Unconfirmed:     stats.unconfirmed.Load(),
 	}
 }

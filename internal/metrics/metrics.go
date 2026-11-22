@@ -394,16 +394,15 @@ func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family
 // dumpFamilies builds the persistence-cycle families over one reading of the
 // engine's DumpStats seam: the last duration, the attempt and error totals,
 // the failure-class split (PERSIST-05) and the confirmation-timeout count
-// (PERSIST-08). The class family always renders all three values; "other" is
-// the residual between the error total and the two classed counters (Errors
-// is their superset), clamped so a scrape racing a dump's counter updates
-// never renders a negative sample. Unconfirmed is independent of the error
-// counters: a timed-out confirmation says nothing about the dump's outcome.
+// (PERSIST-08). The class family always renders all three values; each class
+// is read from its own explicitly counted counter (Other is counted in the
+// failure's branch, not derived as Errors minus the classified ones), so
+// every published series is monotone by construction — a scrape landing
+// between the error total's increment and the class increment cannot render a
+// decrease that rate()/increase() would read as a counter reset (IN-03).
+// Unconfirmed is independent of the error counters: a timed-out confirmation
+// says nothing about the dump's outcome.
 func dumpFamilies(stats persist.DumpStats) []Family {
-	other := uint64(0)
-	if classified := stats.DiskFull + stats.Permission; stats.Errors > classified {
-		other = stats.Errors - classified
-	}
 	return []Family{
 		{
 			Name: "supkv_dumps_duration_seconds", Type: Gauge,
@@ -432,7 +431,7 @@ func dumpFamilies(stats persist.DumpStats) []Family {
 			Samples: []Sample{
 				{Labels: []Label{{Name: labelClass, Value: "disk_full"}}, Value: float64(stats.DiskFull)},
 				{Labels: []Label{{Name: labelClass, Value: "permission"}}, Value: float64(stats.Permission)},
-				{Labels: []Label{{Name: labelClass, Value: "other"}}, Value: float64(other)},
+				{Labels: []Label{{Name: labelClass, Value: "other"}}, Value: float64(stats.Other)},
 			},
 		},
 		{
