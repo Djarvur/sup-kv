@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 8
+current_plan: 9
 status: executing
-stopped_at: Completed 05-07-PLAN.md
-last_updated: "2026-11-22T15:38:37.580Z"
+stopped_at: Completed 05-08-PLAN.md
+last_updated: "2026-11-22T16:05:45.039Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 5 executing; 05-06 complete, 05-07 next
-state_head: 10e1eac718c8a9dc66426708e8da340fecda4404
+last_activity_desc: Phase 5 executing; 05-08 complete, 05-09 next
+state_head: 8da1a1957d7d19c922f111582cd0762ea5f7c350
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 54
+  completed_plans: 55
 ---
 
 # Project State
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 5 (Persistence) — executing
-Current Plan: 8
+Current Plan: 9
 Total Plans in Phase: 12
-Status: Executing (05-06 complete, 05-07 next)
-Last activity: 2026-11-22 — 05-06 complete; 05-07 next
+Status: Executing (05-08 complete, 05-09 next)
+Last activity: 2026-11-22 — 05-08 complete; 05-09 next
 
 Progress: [███░░░░░░░] 33%
 
@@ -112,6 +112,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P05 | 829s | 3 tasks | 10 files |
 | Phase 05 P06 | 881 | 3 tasks | 9 files |
 | Phase 05 P07 | 1114 | 3 tasks | 10 files |
+| Phase 05 P08 | 924 | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -332,6 +333,9 @@ Recent decisions affecting current work:
 - [Phase 05]: Health stays SERVING under a persistent dump failure: the failure surfaces as Unavailable writes, one static ERROR per attempt with the class, and the class counter; the SERVING transition remains gate-only
 - [Phase 05]: The simulator Scheduler takes a lock (Schedule/ScheduleAfter/Now) because the engine arms timers from its own goroutine; RunUntil remains the single driver and releases the lock around callbacks
 - [Phase 05]: Cluster.NotifyInstalled runs the production author notification without re-Setting, so the engine's stamp and the confirmed record survive; exact ladder instants stay in synctest while the simulator pins the interaction
+- [Phase 05]: A waiter is claimed at resolution, never at capture, so a dump hanging after capture cannot block the caller's timeout; the timeout removes its waiter and counts the outcome
+- [Phase 05]: Flush() is FlushTimeout(0); one deadline bounds both the flush-channel send and the reply, and Restore keeps ErrUnconfirmed distinguishable from ErrDumpFailed
+- [Phase 05]: The binary bounds shutdown with FlushTimeout(shutdownGrace) plus a grace-bounded engineDone wait that abandons a stuck dumper with one WARN; ErrUnconfirmed is total on the RPC path and published as supkv_dumps_unconfirmed_total
 
 ### Pending Todos
 
@@ -354,7 +358,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T15:38:37.173Z
-Stopped at: Completed 05-07-PLAN.md
+Last session: 2026-11-22T16:05:44.602Z
+Stopped at: Completed 05-08-PLAN.md
 Resume file: None
-Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-02-PLAN.md is next)
+Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-09-PLAN.md is next)
