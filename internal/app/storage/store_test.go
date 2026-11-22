@@ -1390,3 +1390,26 @@ func TestStore_generationContentOnly(t *testing.T) {
 	store.Observe(version.PackVersion(testNowMs+10_000, 0, nodeB))
 	requireGeneration(t, store, 5)
 }
+
+// TestStorage_valueLimit pins the single-source value limit (PERSIST-01):
+// the exported constant is the documented 61 440 default, Config.ValueLimit
+// resolves both the zero case and an explicit configured limit, and a store
+// built from a positive Config reports that same effective limit through its
+// accessor. The literal in this package's constants is the pin; production
+// derives every use from storage.ValueMaxBytes.
+func TestStorage_valueLimit(t *testing.T) {
+	t.Parallel()
+	if got := storage.ValueMaxBytes; got != valueMax {
+		t.Errorf("storage.ValueMaxBytes = %d, want %d", got, valueMax)
+	}
+	if got := (storage.Config{}).ValueLimit(); got != valueMax {
+		t.Errorf("Config{}.ValueLimit() = %d, want %d", got, valueMax)
+	}
+	if got := (storage.Config{ValueMaxBytes: 8}).ValueLimit(); got != 8 {
+		t.Errorf("Config{ValueMaxBytes: 8}.ValueLimit() = %d, want 8", got)
+	}
+	store := storage.NewStore(testNodeID, clock.NewClock(fixedNow(), 0, 0, testDriftWarn), storage.Config{ValueMaxBytes: 8})
+	if got := store.ValueMaxBytes(); got != 8 {
+		t.Errorf("NewStore(ValueMaxBytes: 8).ValueMaxBytes() = %d, want 8", got)
+	}
+}

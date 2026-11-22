@@ -1964,3 +1964,59 @@ func TestEngine_keyCountAndObserveGeneration(t *testing.T) {
 		t.Fatalf("Generation() after the second Set = %d, want 2", got)
 	}
 }
+
+// TestEngine_exactValueLimitRestart pins the configured limit's inclusive
+// boundary end to end at an accepted small flag value (PERSIST-01): a value
+// of exactly ValueMaxBytes is confirmed, lands in the dump and comes back
+// whole after a reopen, while one byte more is rejected by the store. At
+// 8 bytes the datagram ceiling is irrelevant, which is the small-value
+// direction of the boundary the frozen P-01 tests prove at 64 000.
+func TestEngine_exactValueLimitRestart(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	const smallLimit = 8
+	cfg := storage.Config{ValueMaxBytes: smallLimit}
+	eng, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), cfg, persist.Config{},
+	)
+	if discarded != 0 {
+		t.Fatalf("Open() on an empty directory discarded = %d, want 0", discarded)
+	}
+	defer startDumper(t, eng)()
+
+	value := []byte("12345678") // exactly smallLimit bytes.
+	_, _, err := eng.Set("exact", value)
+	if err != nil {
+		t.Fatalf("Set(exact) of a %d-byte value with ValueMaxBytes=%d error = %v, want nil",
+			len(value), smallLimit, err)
+	}
+	// Set returned, so the covering dump completed (PERS-04): the record is
+	// on disk before the reopen.
+	dump, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read the dump %s after Set returned: %v", dumpPath, err)
+	}
+	if !strings.Contains(string(dump), `"key":"exact"`) {
+		t.Fatalf("the confirmed %d-byte record is not in the dump %s after Set returned", len(value), dumpPath)
+	}
+
+	reopened, discardedAfter := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), cfg, persist.Config{},
+	)
+	if discardedAfter != 0 {
+		t.Fatalf("reopened Open() discarded = %d, want 0", discardedAfter)
+	}
+	rec, err := reopened.Get("exact")
+	if err != nil {
+		t.Fatalf("the confirmed %d-byte record is gone after reopening the dump: %v", len(value), err)
+	}
+	if !bytes.Equal(rec.Data, value) {
+		t.Fatalf("the value after reopening = %q, want %q", rec.Data, value)
+	}
+	_, _, err = reopened.Set("over", []byte("123456789"))
+	if !errors.Is(err, storage.ErrValueTooLarge) {
+		t.Errorf("Set(over) of a %d-byte value error = %v, want ErrValueTooLarge", smallLimit+1, err)
+	}
+}

@@ -576,6 +576,45 @@ func TestMain_valueMaxDatagram(t *testing.T) {
 	}
 }
 
+// TestMain_valueMaxNonPositive pins the value-limit positivity contract at
+// the binary boundary (PERSIST-01): a zero or negative --value-max-bytes is
+// a configuration error through the usage path (exit 2), naming the flag —
+// never a silent fall back to the default limit. The probe bound only stops
+// a RED-state binary, which would start and serve, from hanging the test.
+func TestMain_valueMaxNonPositive(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	for _, tc := range []struct {
+		name string
+		flag string
+	}{
+		{"a zero value limit exits 2", "--value-max-bytes=0"},
+		{"a negative value limit exits 2", "--value-max-bytes=-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), valueMaxRangeProbe)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin,
+				"--node-id=1",
+				"--bind-addr=127.0.0.1:"+strconv.Itoa(freeUDPPort(t)),
+				"--broadcast-addr=127.255.255.255:9",
+				"--grpc-addr=127.0.0.1:"+strconv.Itoa(freeTCPPort(t)),
+				"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+				tc.flag,
+			)
+			out, err := cmd.CombinedOutput()
+			assertExitCode(t, err, exitUsageCode)
+			for _, want := range []string{"value-max-bytes must be positive", tc.flag} {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("the non-positive value-max-bytes run's output does not contain %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
 // TestMain_startupGateEmptyRange pins the startup-gate positivity contract at
 // the binary boundary (T-4-12): a non-positive --startup-gate-empty or
 // --startup-gate aborts through the usage path (exit 2) with a message naming
@@ -1112,6 +1151,11 @@ const (
 	// stops a RED-state binary (which would serve until the runner's kill)
 	// from hanging the test.
 	startupGateRangeProbe = 3 * time.Second
+
+	// valueMaxRangeProbe bounds the non-positive value-max-bytes rows for the
+	// same reason: the validation rejects before any bind, and the bound only
+	// stops a RED-state binary from serving until the runner's kill.
+	valueMaxRangeProbe = 3 * time.Second
 
 	// The empty-vs-data selection bounds: the empty node must still be closed
 	// this far past a 50 ms normal gate, and the seeded node must open inside
