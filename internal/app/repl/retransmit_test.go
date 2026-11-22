@@ -410,12 +410,14 @@ func TestRetransmit_backoffLadder(t *testing.T) {
 }
 
 // TestRetransmit_suspendAndFlush proves the suspension and flush-on-discovery
-// semantics (REPL-02, the pinned A6 reading): with no known peer the
-// retransmission scanner fires nothing and advances no timer across a long
-// virtual window — the entry and its ladder state are retained, not dropped
-// — and the first Hello that ends the empty table flushes every pending
-// entry in that same event, adds the peer to the wait-set and restarts the
-// ladder at ack_timeout.
+// semantics (REPL-02, the pinned A6 reading, the 06-11 split): with no known
+// peer the retransmission scanner fires nothing and advances no timer across
+// a long virtual window — the entry and its ladder state are retained, not
+// dropped — and the first Hello that ends the empty table flushes every
+// pending entry in that same event: it enqueues the record send and restarts
+// the ladder at ack_timeout, but it does NOT add the new peer to the
+// wait-set. The promise stays exactly the write-time capture (empty here);
+// the new peer still receives the record (IN-05 closes).
 func TestRetransmit_suspendAndFlush(t *testing.T) {
 	t.Parallel()
 	t.Helper()
@@ -451,9 +453,11 @@ func TestRetransmit_suspendAndFlush(t *testing.T) {
 
 	// The first Hello ends the empty table: the same HandleDatagram call
 	// enqueues the pending record on the paced queue (it emits no
-	// DataReplication itself, only the identity echo, CR-01), gains the peer
-	// as its only waiter and restarts the ladder at ack_timeout; the next
-	// Advance drains the queued send.
+	// DataReplication itself, only the identity echo, CR-01) and restarts the
+	// ladder at ack_timeout. It does NOT gain the peer as a waiter: the
+	// promise is the write-time capture, which named nobody, so the wait-set
+	// stays empty. The next Advance drains the queued send, so the record
+	// still reaches the new peer.
 	helloAt := at(suspendWindow + time.Second)
 	core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
 	if got := out.Drain(); len(got) != 1 {
@@ -467,7 +471,7 @@ func TestRetransmit_suspendAndFlush(t *testing.T) {
 		t.Fatalf("discovery flush emitted %v, want exactly one DataReplication for (%s, %x)", repls, keyAlpha, ver[:])
 	}
 	snap = core.PendingSnapshot()
-	assertPending(t, snap, keyAlpha, ver, []uint16{peerID1})
+	assertPending(t, snap, keyAlpha, ver, nil)
 	if got := snap[keyAlpha].NextRetry; !got.Equal(helloAt.Add(ackTimeout)) {
 		t.Fatalf("post-flush NextRetry = %v, want the restarted ladder step %v", got, helloAt.Add(ackTimeout))
 	}

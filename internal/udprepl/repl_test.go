@@ -485,26 +485,21 @@ func awaitReport(t *testing.T, reports <-chan replicationReport) replicationRepo
 }
 
 // TestWaitReplicated_ackCoverage proves the tracker seam on a real event
-// loop (XPORT-12): a wait-requesting local write's tracker is created
-// before the notification is enqueued, a Hello's discovery flush makes the
-// peer a waiter, and that peer's Ack resolves the wait as full coverage
-// (true, 1/1). Everything reads through the adapter's public seam from this
-// goroutine — never the single-driver core.
+// loop (XPORT-12, the 06-11 promise-set shape): a wait-requesting local write
+// captures the peer known at write time, its tracker is created before the
+// notification is enqueued, and that captured peer's Ack resolves the wait
+// as full coverage (true, 1/1). Discovery happens before the write on
+// purpose: the promise is the write-time capture, so a peer discovered after
+// acceptance can never be required (IN-05). Everything reads through the
+// adapter's public seam from this goroutine — never the single-driver core.
 func TestWaitReplicated_ackCoverage(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(nodeIDA)
 	adapter, udpPort := newMirrorAdapterWithStore(t, st, repl.Config{})
 	tx := peerSocket(t)
 
-	rec := writeStoredRecord(t, st, []byte("wait me"))
-	ver := rec.Version
-	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true, adapter.KnownPeerIDs())
-	if notifyErr != nil {
-		t.Fatalf("NotifyLocalWrite(%q, track=true): %v", mirrorKey, notifyErr)
-	}
-
-	// Discovery: the Hello ends the empty peer table, so the flush makes the
-	// announcing peer a waiter on the tracked write.
+	// Discovery: the Hello ends the empty peer table, so the write below
+	// captures B from the adapter's peer-id mirror.
 	datagram, err := udprepl.EncodeDatagramForTest(port.Hello{}, nodeIDB, runIDB)
 	if err != nil {
 		t.Fatalf("encode Hello: %v", err)
@@ -513,6 +508,13 @@ func TestWaitReplicated_ackCoverage(t *testing.T) {
 	waitFor(t, mirrorWait, "discovery to surface as KnownPeers == 1", func() bool {
 		return adapter.KnownPeers() == 1
 	})
+
+	rec := writeStoredRecord(t, st, []byte("wait me"))
+	ver := rec.Version
+	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true, adapter.KnownPeerIDs())
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(%q, track=true): %v", mirrorKey, notifyErr)
+	}
 	waitFor(t, mirrorWait, "the tracked write to surface in the unacked gauge", func() bool {
 		return adapter.UnackedStats().Count == 1
 	})
@@ -531,11 +533,11 @@ func TestWaitReplicated_ackCoverage(t *testing.T) {
 	}
 }
 
-// TestWaitReplicated_strangerAckCounts proves the WR-01 counting behavior
-// through the tracker: an Ack from a node outside the write-time peer
-// snapshot does not resolve the wait and cannot inflate the report — only
-// the real waiter's Ack drains the tracked write, and the report stays
-// (true, 1) with the count clamped to the write-time total.
+// TestWaitReplicated_strangerAckCounts proves the captured-set boundary
+// through the tracker (T-06-04): an Ack from a node outside the write-time
+// peer snapshot does not resolve the wait and cannot inflate the report —
+// the tracker counts only captured-peer Acks — while the real waiter's Ack
+// drains the tracked write, so the report stays (true, 1).
 func TestWaitReplicated_strangerAckCounts(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(nodeIDA)
@@ -563,8 +565,9 @@ func TestWaitReplicated_strangerAckCounts(t *testing.T) {
 	})
 	reports := startWait(t, adapter, ver)
 
-	// A stranger's Ack joins the core's acked set (WR-01) but is not a
-	// waiter, so it resolves nothing.
+	// A stranger's Ack still reaches the core's result stream (WR-01), but
+	// the tracker ignores a peer outside its captured set: it resolves
+	// nothing and adds no count.
 	datagram, err = udprepl.EncodeDatagramForTest(port.Ack{Key: mirrorKey, Version: ver}, nodeIDStranger, runIDB)
 	if err != nil {
 		t.Fatalf("encode stranger Ack: %v", err)
@@ -620,15 +623,75 @@ func TestWaitReplicated_evictionNotAck(t *testing.T) {
 	}
 }
 
+// TestWaitReplicated_waitSetEmptyImmediate proves the captured-but-gone
+// boundary (A-01, D-01): the write-time capture can name a peer that has
+// already left the table by the time the notification is handled. On a real
+// event loop, the core intersects the capture with the live peer table,
+// finds nobody who could ever Ack, and emits ResultWaitSetEmpty — the
+// adapter's tracker resolves (false, 0) without waiting out the caller's
+// timeout.
+func TestWaitReplicated_waitSetEmptyImmediate(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(nodeIDA)
+	adapter, udpPort := newMirrorAdapterWithStore(t, st, repl.Config{PeerTimeout: 300 * time.Millisecond})
+	tx := peerSocket(t)
+
+	datagram, err := udprepl.EncodeDatagramForTest(port.Hello{}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Hello: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "discovery to surface as KnownPeers == 1", func() bool {
+		return adapter.KnownPeers() == 1
+	})
+
+	// The peer times out before the write's notification reaches the core.
+	waitFor(t, mirrorWait, "the captured peer to be evicted", func() bool {
+		return adapter.KnownPeers() == 0
+	})
+
+	rec := writeStoredRecord(t, st, []byte("gone already"))
+	ver := rec.Version
+	// The capture still names B — it was taken before the write — but the
+	// live table no longer holds it.
+	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true, []uint16{nodeIDB})
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(%q, track=true): %v", mirrorKey, notifyErr)
+	}
+
+	start := time.Now()
+	acked, count := adapter.WaitReplicated(t.Context(), mirrorKey, ver, 1, 2*time.Second)
+	elapsed := time.Since(start)
+	if acked || count != 0 {
+		t.Fatalf("wait report = (%v, %d), want the honest false (false, 0)", acked, count)
+	}
+	// WaitSetEmpty is emitted inside the notification's handler call, so the
+	// wait returns promptly; 250ms is a generous CI bound under -race.
+	if elapsed >= 250*time.Millisecond {
+		t.Fatalf("wait for a captured-but-gone peer took %v, want an immediate WaitSetEmpty resolution", elapsed)
+	}
+}
+
 // TestWaitReplicated_superseded proves the other honest-false rule: a
 // strictly greater remote version displaces the tracked write, whose Acks
 // did not all arrive — the wait resolves (false, 0) and never reports the
-// superseding version's coverage.
+// superseding version's coverage. The peer is discovered before the write so
+// the tracker's promise set is the captured [B] and the wait genuinely
+// observes the Superseded result rather than a zero-peer release.
 func TestWaitReplicated_superseded(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(nodeIDA)
 	adapter, udpPort := newMirrorAdapterWithStore(t, st, repl.Config{})
 	tx := peerSocket(t)
+
+	datagram, err := udprepl.EncodeDatagramForTest(port.Hello{}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Hello: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, datagram)
+	waitFor(t, mirrorWait, "discovery to surface as KnownPeers == 1", func() bool {
+		return adapter.KnownPeers() == 1
+	})
 
 	rec := writeStoredRecord(t, st, []byte("supersede me"))
 	ver := rec.Version
@@ -646,7 +709,7 @@ func TestWaitReplicated_superseded(t *testing.T) {
 	// pipeline rejects a mismatched one as bad_checksum before the apply, and
 	// this test must observe the supersession the record is meant to trigger.
 	newer.Checksum = storage.RecordChecksum(mirrorKey, newer.Version, newer.Data, newer.Deleted)
-	datagram, err := udprepl.EncodeDatagramForTest(port.DataReplication{Key: mirrorKey, Record: newer}, nodeIDB, runIDB)
+	datagram, err = udprepl.EncodeDatagramForTest(port.DataReplication{Key: mirrorKey, Record: newer}, nodeIDB, runIDB)
 	if err != nil {
 		t.Fatalf("encode DataReplication: %v", err)
 	}

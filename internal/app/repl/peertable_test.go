@@ -89,7 +89,8 @@ func TestPeerTable_lifecycle(t *testing.T) {
 
 	// Its next Hello re-learns it exactly like a first Hello — no blacklist.
 	// The table was not empty, so the flush rule does not apply and the
-	// wait-sets gain nothing (only discovery adds waiters).
+	// wait-sets gain nothing (no Hello ever adds waiters: the promise is the
+	// write-time capture).
 	core.HandleDatagram(at(peerTimeout+100*time.Millisecond), helloFrom(peerID3), &out)
 	out.Drain()
 	if _, ok := core.PeerSnapshot()[peerID3]; !ok {
@@ -216,10 +217,12 @@ func TestPeerTable_solePeer(t *testing.T) {
 		assertPending(t, core.PendingSnapshot(), keyAlpha, ver, nil)
 
 		// The peer returns: the Hello ends the empty table, so the same event
-		// enqueues the flush send, re-adds the waiter and restarts the ladder;
-		// the next Advance drains the queued send, and the peer's Ack then
-		// drains the entry. The handler's only synchronous emission is the
-		// identity echo (CR-01) — the flush itself only enqueues.
+		// enqueues the flush send and restarts the ladder; the wait-set stays
+		// empty because the promise is the write-time capture, and the flush
+		// stops re-adding discovered peers (IN-05). The next Advance drains
+		// the queued send, and the peer's Ack then drains the entry: a
+		// matching Ack against an empty wait-set still completes the drain
+		// once peers exist.
 		backAt := at(peerTimeout + 2*time.Second)
 		core.HandleDatagram(backAt, helloFrom(peerID1), &out)
 		if got := out.Drain(); len(got) != 1 {
@@ -233,7 +236,7 @@ func TestPeerTable_solePeer(t *testing.T) {
 				got, keyAlpha, ver[:])
 		}
 		snap := core.PendingSnapshot()
-		assertPending(t, snap, keyAlpha, ver, []uint16{peerID1})
+		assertPending(t, snap, keyAlpha, ver, nil)
 		if got := snap[keyAlpha].NextRetry; !got.Equal(backAt.Add(ackTimeout)) {
 			t.Fatalf("post-return NextRetry = %v, want the restarted ladder step %v", got, backAt.Add(ackTimeout))
 		}

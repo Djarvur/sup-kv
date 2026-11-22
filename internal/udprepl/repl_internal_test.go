@@ -182,8 +182,10 @@ func sendTrackerDatagram(t *testing.T, conn net.Conn, msg port.Message, nodeID u
 // (XPORT-12): NotifyLocalWrite(track=true) creates the tracker synchronously
 // BEFORE the notification is enqueued, so the tracker exists before Run can
 // ever dequeue the write — a wait starting immediately after the call always
-// finds it. track=false creates none; Run resolves the tracker through the
-// result stream; and a tracked notify after Run exited reports
+// finds it. track=false creates none. A pre-Run tracked write captured zero
+// peers, so its wait is the honest zero-peer release; a tracked write
+// accepted after discovery captures the known peer and its Ack resolves
+// through the result stream. A tracked notify after Run exited reports
 // ErrRunLoopExited and leaves the map empty.
 func TestNotify_createsTrackerBeforeCore(t *testing.T) {
 	t.Parallel()
@@ -225,21 +227,39 @@ func TestNotify_createsTrackerBeforeCore(t *testing.T) {
 		return adapter.UnackedStats().Count == 2
 	})
 
-	// Discovery makes B a waiter on the tracked write, then B's Ack resolves
-	// the tracker through the core's result stream. One sender socket keeps
-	// B's handle stable across both datagrams.
+	// Discovery teaches the core B; one sender socket keeps B's handle
+	// stable across every datagram.
 	sender := trackerSender(t, adapter)
 	sendTrackerDatagram(t, sender, port.Hello{}, trackerNodeB, trackerRunIDB)
 	awaitCondition(t, "discovery to mirror KnownPeers == 1", func() bool {
 		return adapter.KnownPeers() == 1
 	})
 
+	// The pre-Run write's write-time capture was empty, so its wait is the
+	// honest zero-peer release — not an acknowledgement — and the tracker is
+	// gone afterwards.
+	acked, count := adapter.WaitReplicated(t.Context(), key, ver, 0, 0)
+	if acked || count != 0 {
+		t.Fatalf("pre-discovery wait report = (%v, %d), want the honest false (false, 0)", acked, count)
+	}
+	if trackerPresent(adapter, trackerKey{key: key, version: ver}) {
+		t.Fatal("the zero-peer release left its tracker behind, want the map entry deleted")
+	}
+
+	// A write accepted after discovery captures B in its promise set; B's
+	// Ack then resolves the tracker through the core's result stream.
+	postKey := "tracker/after-discovery"
+	postVer := version.PackVersion(1730000000000, 2, trackerNodeA)
+	notifyErr = adapter.NotifyLocalWrite(postKey, storage.Record{Version: postVer, Data: []byte("v")}, true, adapter.KnownPeerIDs())
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(post-discovery track=true): %v", notifyErr)
+	}
 	reports := make(chan replicationResult, 1)
 	go func() {
-		acked, count := adapter.WaitReplicated(t.Context(), key, ver, 1, 2*time.Second)
+		acked, count := adapter.WaitReplicated(t.Context(), postKey, postVer, 1, 2*time.Second)
 		reports <- replicationResult{acked: acked, count: count}
 	}()
-	sendTrackerDatagram(t, sender, port.Ack{Key: key, Version: ver}, trackerNodeB, trackerRunIDB)
+	sendTrackerDatagram(t, sender, port.Ack{Key: postKey, Version: postVer}, trackerNodeB, trackerRunIDB)
 	select {
 	case report := <-reports:
 		if !report.acked || report.count != 1 {
@@ -256,7 +276,7 @@ func TestNotify_createsTrackerBeforeCore(t *testing.T) {
 	// just-created tracker.
 	cancel()
 	<-runDone
-	postVer := version.PackVersion(1730000000000, 2, trackerNodeA)
+	postVer = version.PackVersion(1730000000000, 3, trackerNodeA)
 	err := adapter.NotifyLocalWrite("tracker/after-run", storage.Record{Version: postVer, Data: []byte("v")}, true, adapter.KnownPeerIDs())
 	if !errors.Is(err, ErrRunLoopExited) {
 		t.Fatalf("post-Run tracked notify = %v, want ErrRunLoopExited", err)
@@ -272,10 +292,11 @@ type replicationResult struct {
 	count uint32
 }
 
-// TestWaitReplicated_zeroPeersReleases pins the D-11 release point: a
-// zero-peer wait reports (true, 0) immediately and deletes the tracker the
-// write created at notify time — the zero-peer path never enters the
-// waiting loop, so this call is its only release.
+// TestWaitReplicated_zeroPeersReleases pins the D-11 release point (the
+// 06-11 verdict): a zero-peer wait reports the honest (false, 0) immediately
+// — no peer was captured, so no peer acknowledged anything — and deletes the
+// tracker the write created at notify time. The zero-peer path never enters
+// the waiting loop, so this call is its only release.
 func TestWaitReplicated_zeroPeersReleases(t *testing.T) {
 	t.Parallel()
 	adapter := newTrackerTestAdapter(t)
@@ -286,12 +307,82 @@ func TestWaitReplicated_zeroPeersReleases(t *testing.T) {
 		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
 	}
 	acked, count := adapter.WaitReplicated(t.Context(), key, ver, 0, 0)
-	if !acked || count != 0 {
-		t.Fatalf("zero-peer wait report = (%v, %d), want (true, 0)", acked, count)
+	if acked || count != 0 {
+		t.Fatalf("zero-peer wait report = (%v, %d), want the honest false (false, 0)", acked, count)
 	}
 	if got := trackerCount(adapter); got != 0 {
 		t.Fatalf("zero-peer wait left %d trackers, want the map empty", got)
 	}
+}
+
+// TestWaitReplicated_trackerCapturedPeersOnly pins the tracker's promise-set
+// arithmetic (A-01, T-06-04): the tracker stores the captured slice it was
+// created with — both the total and the membership set — and counts a
+// ResultAck only when the peer is in that set. A matching Ack from an
+// outside peer still reaches the core's result stream (WR-01) but cannot
+// inflate the count, and a partial captured set can never be reported as
+// full coverage merely because a ResultDrained resolved the tracker. White
+// box: the results are injected directly through the adapter's drain so the
+// arithmetic is observed without a socket race.
+func TestWaitReplicated_trackerCapturedPeersOnly(t *testing.T) {
+	t.Parallel()
+
+	const stranger = uint16(99)
+
+	t.Run("an outside Ack cannot inflate the captured count", func(t *testing.T) {
+		t.Parallel()
+		adapter := newTrackerTestAdapter(t)
+		key := "tracker/captured-count"
+		ver := version.PackVersion(1730000000000, 0, trackerNodeA)
+		notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, []uint16{trackerNodeB})
+		if notifyErr != nil {
+			t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
+		}
+
+		var out port.Outbox
+		out.Ack(key, ver, stranger)     // outside the captured set: filtered.
+		out.Ack(key, ver, trackerNodeB) // the captured peer: counted.
+		out.Drained(key, ver)
+		adapter.applyResults(&out)
+
+		// The caller's total is deliberately the handler's larger view: the
+		// tracker's captured total (1) is authoritative, so the report is the
+		// honest full coverage of the one captured peer — not (true, 2) from
+		// the two Acknowledging ids.
+		acked, count := adapter.WaitReplicated(t.Context(), key, ver, 2, time.Second)
+		if !acked || count != 1 {
+			t.Fatalf("wait report = (%v, %d), want (true, 1) — the stranger Ack must not inflate the count", acked, count)
+		}
+		if got := trackerCount(adapter); got != 0 {
+			t.Fatalf("the wait left %d trackers, want the map empty", got)
+		}
+	})
+
+	t.Run("a partial captured set is never full coverage", func(t *testing.T) {
+		t.Parallel()
+		adapter := newTrackerTestAdapter(t)
+		key := "tracker/captured-partial"
+		ver := version.PackVersion(1730000000000, 0, trackerNodeA)
+		captured := []uint16{trackerNodeB, trackerNodeB + 1}
+		notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, captured)
+		if notifyErr != nil {
+			t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
+		}
+
+		var out port.Outbox
+		out.Ack(key, ver, stranger)    // outside the captured set: filtered.
+		out.Ack(key, ver, captured[0]) // one captured peer of two.
+		out.Drained(key, ver)
+		adapter.applyResults(&out)
+
+		acked, count := adapter.WaitReplicated(t.Context(), key, ver, 2, time.Second)
+		if acked || count != 1 {
+			t.Fatalf("wait report = (%v, %d), want the honest false (false, 1) — two captured peers, one captured Ack", acked, count)
+		}
+		if got := trackerCount(adapter); got != 0 {
+			t.Fatalf("the wait left %d trackers, want the map empty", got)
+		}
+	})
 }
 
 // TestWaitReplicated_timeoutReleases pins the timeout abandonment path: an
