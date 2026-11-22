@@ -2096,7 +2096,13 @@ func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
 // version is NOT GREATER than the version the core already tracks for that
 // key — a regressive write or an equal duplicate — is ignored: no broadcast,
 // no ledger entry or other tracking change, and one NotificationsRegressed
-// count. The comparison is against the tracked pending version, never
+// count. A STRICTLY OLDER notification additionally resolves its own waiter
+// with a Superseded result naming the notified version (WR-03): the tracked,
+// greater write already displaced it, exactly as removeSupersededLocal
+// reports a newer local write, so a wait_for_replication for the displaced
+// write learns the honest false immediately instead of blocking for its
+// client-chosen timeout; an equal duplicate displaced nothing and only
+// counts. The comparison is against the tracked pending version, never
 // store.Version: the store already holds the first notified version when
 // this call runs, so a <= store comparison would swallow the normal path.
 // A key's first notification (no tracked entry) always proceeds.
@@ -2106,9 +2112,21 @@ func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
 // — local supersession (REPL-02). Replication progress is never a
 // precondition of the write path: this enqueues-and-returns (D-05).
 func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
-	if tracked, ok := c.trackedVersion(key); ok && rec.Version.Compare(tracked) <= 0 {
-		c.notificationsRegressed++
-		return
+	if tracked, ok := c.trackedVersion(key); ok {
+		switch cmp := rec.Version.Compare(tracked); {
+		case cmp < 0:
+			// The arriving write is older than the tracked one: the tracked
+			// write already displaced it, so its waiter resolves now with the
+			// honest false instead of waiting out its timeout (WR-03). The
+			// mirror and the tracking stay on the greater version.
+			out.Superseded(key, rec.Version)
+			c.notificationsRegressed++
+			return
+		case cmp == 0:
+			// An equal duplicate displaced nothing: count it, resolve nothing.
+			c.notificationsRegressed++
+			return
+		}
 	}
 	c.removeSupersededLocal(key, rec.Version, out)
 	pk := pendingKey{key: key, version: rec.Version}
@@ -2843,9 +2861,10 @@ func (c *Core) Retransmissions() uint64 {
 
 // NotificationsRegressed returns the number of local-write notifications the
 // not-greater-than-tracked guard ignored (PROTO-05, D-05) — both regressive
-// notifications (an older version) and equal duplicate notifications of the
-// tracked version. A value read like the discard counters; Phase 7's OBSV
-// surface owns publishing it (no adapter mirror this phase).
+// notifications (a strictly older version, whose waiter also resolves as
+// Superseded, WR-03) and equal duplicate notifications of the tracked
+// version. A value read like the discard counters; Phase 7's OBSV surface owns
+// publishing it (no adapter mirror this phase).
 func (c *Core) NotificationsRegressed() uint64 {
 	return c.notificationsRegressed
 }

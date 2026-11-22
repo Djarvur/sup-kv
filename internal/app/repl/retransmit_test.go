@@ -1480,6 +1480,9 @@ func TestNotify_equalTrackedIgnored(t *testing.T) {
 	if got := len(out.Drain()); got != 0 {
 		t.Fatalf("an equal duplicate notification emitted %d messages, want 0 — it must never reach the wire", got)
 	}
+	if results := out.DrainResults(); len(results) != 0 {
+		t.Fatalf("an equal duplicate emitted %d results, want 0 — nothing was displaced (WR-03): %+v", len(results), results)
+	}
 	if got := core.NotificationsRegressed(); got != 1 {
 		t.Fatalf("NotificationsRegressed() = %d after one equal duplicate, want 1", got)
 	}
@@ -1490,9 +1493,11 @@ func TestNotify_equalTrackedIgnored(t *testing.T) {
 }
 
 // TestNotify_regressedIgnored proves the regressive half of the guard
-// (PROTO-05, D-05): notifying a version older than the tracked one
-// broadcasts nothing, keeps the newer tracking entry and counts one
-// regression.
+// (PROTO-05, D-05, WR-03): notifying a version older than the tracked one
+// broadcasts nothing, keeps the newer tracking entry, counts one regression
+// and resolves the arriving write's waiter as Superseded — the tracked,
+// greater write displaced it, so a wait_for_replication must not block for
+// its full timeout.
 func TestNotify_regressedIgnored(t *testing.T) {
 	t.Parallel()
 	now := at(0)
@@ -1512,6 +1517,14 @@ func TestNotify_regressedIgnored(t *testing.T) {
 	core.NotifyLocalWrite(now, keyAlpha, older, &out)
 	if got := len(out.Drain()); got != 0 {
 		t.Fatalf("a regressive notification emitted %d messages, want 0 — it must never reach the wire", got)
+	}
+	results := out.DrainResults()
+	if len(results) != 1 {
+		t.Fatalf("a regressive notification emitted %d results, want exactly 1 Superseded: %+v", len(results), results)
+	}
+	if res := results[0]; res.Kind != port.ResultSuperseded || res.Key != keyAlpha || res.Version != older.Version {
+		t.Fatalf("the regressive notification's result = %+v, want Superseded for (%s, %x) — the displaced write's waiter must resolve (WR-03)",
+			res, keyAlpha, older.Version[:])
 	}
 	if got := core.NotificationsRegressed(); got != 1 {
 		t.Fatalf("NotificationsRegressed() = %d after one regressive notification, want 1", got)
