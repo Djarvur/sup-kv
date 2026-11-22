@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -641,6 +642,356 @@ func TestScenario_longPartition(t *testing.T) {
 			scnAssertConverged(t, cluster, model, seed, test)
 		})
 	}
+}
+
+// scnDataSyncPartsBySource counts, per source handle, the DataSync deliveries
+// the virtual network's trace recorded toward toHandle. The completeness
+// window is observed through exported seams only: a listing part is a DataSync
+// delivery (the trace's unit), and the per-source counts are how the test knows
+// the final part of a round landed without reading core-internal stream state.
+// Deliveries from toHandle itself are excluded — the simulator delivers the
+// sender's own broadcast echo and the core discards it as OwnEcho.
+func scnDataSyncPartsBySource(trace, toHandle string) map[string]int {
+	counts := make(map[string]int)
+	for line := range strings.SplitSeq(trace, "\n") {
+		fields := strings.Split(line, "|")
+		if len(fields) != 4 {
+			continue
+		}
+		from, to, kind := fields[1], fields[2], fields[3]
+		if to == toHandle && from != toHandle && kind == "port.DataSync" {
+			counts[from]++
+		}
+	}
+	return counts
+}
+
+// runThreeNodeScenario drives PROTO-09's simulator scenario at N=3: three nodes
+// over one scheduler, a distinct write originated on every node and converged,
+// then a directed block of node 3 (n3) held open through a mutable predicate
+// captured when the network is built — Network's Policy is fixed at
+// construction, so a nil predicate could never be applied or healed. A write
+// on node 1 inside the split must reach the other live node and never the
+// blocked one, and clearing the flag must converge inside the documented
+// partition-heal bound. t is threaded through so the mid-partition teeth (the
+// blocked node must NOT have converged) are asserted where that state exists;
+// the returned digest is the same-seed comparison artifact.
+func runThreeNodeScenario(t *testing.T, seed int64) (*simnet.Cluster, string) {
+	t.Helper()
+	const test = "threeNode"
+	rng := simRNG(seed)
+
+	var isolated bool
+	policy := simFixedDelay(func(from, to string, _ time.Time) bool {
+		return isolated && ((from == "n3") != (to == "n3"))
+	})
+	sched := simnet.NewScheduler(at(0))
+	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{}, policy)
+	quiesceDiscovery(t, sched, cluster)
+
+	// Phase 1 — a write originated on every node, fully converged before any
+	// fault: the N=3 baseline this scenario exists to prove.
+	originWrites := make([]scnWritten, 0, 3)
+	for i := range 3 {
+		sched.RunUntil(sched.Now().Add(time.Millisecond))
+		key := fmt.Sprintf("three/origin/%d", i)
+		originWrites = append(originWrites, scnWritten{
+			key: key,
+			rec: cluster.Write(i, key, []byte(fmt.Sprintf("from-node-%d", i))),
+		})
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the N=3 cluster did not quiesce after the origin writes %s", scnReplay(seed, test))
+	}
+	scnAssertConverged(t, cluster, chaosModelStore(cluster.WriteLog()), seed, test)
+
+	// Phase 2 — the block: node 3 is isolated from both peers for one virtual
+	// second. The write on node 1 must reach the other live node and never the
+	// blocked one; the blocked store must differ from the kept-write model.
+	partStart := sched.Now()
+	isolated = true
+	sched.RunUntil(partStart.Add(500 * time.Millisecond))
+	blocked := cluster.Write(0, "three/blocked", []byte("written while node 3 is isolated"))
+	sched.RunUntil(partStart.Add(time.Second))
+	for _, i := range []int{0, 1} {
+		served, err := cluster.Store(i).Get("three/blocked")
+		if err != nil || !recordsEqual(served, blocked) {
+			t.Fatalf("node %d serves (%+v, %v) for the split write, want the byte-equal record %+v — the block must isolate node 3 only %s",
+				i, served, err, blocked, scnReplay(seed, test))
+		}
+	}
+	partModel := chaosModelStore(cluster.WriteLog())
+	_, blockedErr := cluster.Store(2).Get("three/blocked")
+	if blockedErr == nil {
+		t.Fatalf("the blocked node already serves the split write — the directed block is vacuous %s", scnReplay(seed, test))
+	}
+	if recordMapsEqual(cluster.Store(2).Records(), partModel.Records()) {
+		t.Fatalf("the blocked node's store equals the kept-write model — node 3 converged inside the block %s", scnReplay(seed, test))
+	}
+
+	// Phase 3 — the heal: clearing the flag clears the block, and the cluster
+	// must reach the pointwise supremum inside the documented heal bound — no
+	// fresh loss, no widened range.
+	partEnd := sched.Now()
+	isolated = false
+	healBound := boundPartitionHeal(len(cluster.WriteLog()))
+	if _, ok := scnConvergeBy(sched, cluster, partModel, partEnd.Add(healBound)); !ok {
+		t.Fatalf("the cluster did not converge within the documented heal bound %v after the block healed %s",
+			healBound, scnReplay(seed, test))
+	}
+	scnAssertRecordsPresent(t, cluster, append(originWrites, scnWritten{key: "three/blocked", rec: blocked}), seed, test)
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the cluster did not quiesce after the block healed %s", scnReplay(seed, test))
+	}
+	scnAssertConverged(t, cluster, partModel, seed, test)
+
+	return cluster, cluster.Network().TraceDigest()
+}
+
+// TestScenario_threeNode proves TEST-13's N=3 evidence anchor (PROTO-09):
+// every origin's write converges on all three nodes, a block applied and
+// healed through the mutable predicate holds the documented heal bound, and
+// the same seeded scenario run twice yields identical trace digests —
+// scenario-local determinism in addition to the suite replay pins. Decision
+// 14.9 (ADR 0009): three-or-more-node support is completed by this scenario
+// plus the real-socket TestSmoke_threeNodeBroadcastConvergence, which is the
+// wiring proof over the same contract.
+func TestScenario_threeNode(t *testing.T) {
+	t.Parallel()
+	seed := chaosSeed(t)
+	const test = "threeNode"
+	t.Logf("%s", scnReplay(seed, test))
+
+	first, digest1 := runThreeNodeScenario(t, seed)
+	_, digest2 := runThreeNodeScenario(t, seed)
+	if digest1 == "" {
+		t.Fatal("the trace digest is empty — the same-seed comparison would be vacuous")
+	}
+	if digest1 != digest2 {
+		t.Fatalf("seed %d produced two different N=3 traces (%d vs %d digest bytes) — a nondeterminism source entered the scenario %s",
+			seed, len(digest1), len(digest2), scnReplay(seed, test))
+	}
+
+	// The first run's final state: every origin's write is visible on all
+	// three, and every node holds the pointwise supremum.
+	for _, w := range first.WriteLog() {
+		for i := range first.Nodes() {
+			served, err := first.Store(i).Get(w.Key)
+			if err != nil || !recordsEqual(served, w.Rec) {
+				t.Fatalf("node %d serves (%+v, %v) under %q, want the byte-equal written record %+v %s",
+					i, served, err, w.Key, w.Rec, scnReplay(seed, test))
+			}
+		}
+	}
+	scnAssertConverged(t, first, chaosModelStore(first.WriteLog()), seed, test)
+	if got := first.Network().FaultStats().Partitioned; got == 0 {
+		t.Fatalf("the scenario observed no partitioned send — the mutable block never applied %s", scnReplay(seed, test))
+	}
+}
+
+// TestScenario_joinerWaitsForCompleteListing proves PROTO-01's completeness
+// window in virtual time: a joining node's SyncArrived/ListingComplete signal
+// stays false while listing PARTS of a multi-part round have arrived and flips
+// only when the final part lands. SyncChunkBytes sits below one entry's
+// estimate (len(key)+entryOverhead), so the chunker closes after every entry
+// and the round has one part per key — four parts for the store below, above
+// the required three. The scheduler is stepped one listing-pacing slot at a
+// time so every intermediate part is observable without racing wall clocks.
+func TestScenario_joinerWaitsForCompleteListing(t *testing.T) {
+	t.Parallel()
+	seed := chaosSeed(t)
+	const test = "joinerWaitsForCompleteListing"
+	t.Logf("%s", scnReplay(seed, test))
+	rng := simRNG(seed)
+
+	const (
+		keys       = 4
+		chunkBytes = 100
+	)
+	cfg := repl.Config{SyncChunkBytes: chunkBytes}
+	sched := simnet.NewScheduler(at(0))
+	cluster := simnet.NewCluster(sched, rng, 2, cfg, simFixedDelay(nil))
+	quiesceDiscovery(t, sched, cluster)
+	for i := range keys {
+		sched.RunUntil(sched.Now().Add(time.Millisecond))
+		cluster.Write(i%2, fmt.Sprintf("joiner/key/%d", i), []byte(fmt.Sprintf("value-%d", i)))
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the seed cluster did not quiesce before the join %s", scnReplay(seed, test))
+	}
+	model := chaosModelStore(cluster.WriteLog())
+	scnAssertConverged(t, cluster, model, seed, test)
+
+	// The join: a fresh node id, derived run id and empty store.
+	tJoin := sched.Now()
+	joiner := cluster.AddNode(0)
+	if got := cluster.Nodes(); got != 3 {
+		t.Fatalf("the cluster holds %d nodes after the join, want 3", got)
+	}
+	sched.RunUntil(tJoin) // fire the joiner's startup pump at tJoin exactly
+
+	// The listing bound, from the mechanism: the joiner's first Hello crosses
+	// in one one-way delay; each peer answers its first-seen Hello with one
+	// targeted listing whose first part emits immediately and whose remaining
+	// keys-1 parts are spaced at most one pacing slot plus its +10% jitter
+	// apart, each crossing in one one-way delay — the empty-disk bound's
+	// shape reduced to the single listing round.
+	pace := time.Second / time.Duration(simDefaultResponseRate)
+	maxSpacing := pace + pace/10
+	listingBound := simOneWay + time.Duration(keys-1)*maxSpacing + simOneWay + 2*maxSpacing
+	deadline := tJoin.Add(listingBound)
+	partsTo := func() map[string]int {
+		return scnDataSyncPartsBySource(cluster.Network().TraceDigest(), cluster.Handle(joiner))
+	}
+
+	sawPart, sawIntermediate, flipped := false, false, false
+	for {
+		next := sched.Now().Add(pace)
+		if next.After(deadline) {
+			next = deadline
+		}
+		sched.RunUntil(next)
+		parts := partsTo()
+		total := 0
+		for _, n := range parts {
+			total += n
+		}
+		core := cluster.Core(joiner)
+		if total > 0 && !sawPart {
+			sawPart = true
+			if core.SyncArrived() {
+				t.Fatalf("the joiner's completeness signal flipped at the first observed part (%d delivered) — a part is not a listing %s",
+					total, scnReplay(seed, test))
+			}
+		}
+		if total > 0 && !core.SyncArrived() && !recordMapsEqual(cluster.Store(joiner).Records(), model.Records()) {
+			sawIntermediate = true
+		}
+		if core.SyncArrived() {
+			// The flip step: the completing peer's round must have every part
+			// delivered (the final part is what opened the signal), and the
+			// second completeness read must move with it.
+			completeParts := 0
+			for _, n := range parts {
+				completeParts = max(completeParts, n)
+			}
+			if completeParts != keys {
+				t.Fatalf("the completeness signal flipped with only %d of %d parts of the completing peer's round delivered %s",
+					completeParts, keys, scnReplay(seed, test))
+			}
+			if !core.ListingComplete() {
+				t.Fatalf("SyncArrived() flipped but ListingComplete() is false — the two reads disagree %s", scnReplay(seed, test))
+			}
+			flipped = true
+			break
+		}
+		if !next.Before(deadline) {
+			break
+		}
+	}
+	if !sawPart {
+		t.Fatalf("no listing part ever arrived within the listing bound %v %s", listingBound, scnReplay(seed, test))
+	}
+	if !sawIntermediate {
+		t.Fatalf("no part arrived while the joiner was still incomplete — the partial window was not observed %s", scnReplay(seed, test))
+	}
+	if !flipped {
+		t.Fatalf("the joiner's completeness signal never flipped within the listing bound %v %s", listingBound, scnReplay(seed, test))
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the cluster did not quiesce after the join %s", scnReplay(seed, test))
+	}
+	scnAssertConverged(t, cluster, model, seed, test)
+}
+
+// TestScenario_f14ReplacedNode proves PROTO-01's value-preservation
+// consequence at simulator level: a node restarted onto a stale preserved
+// snapshot does not open on the seed — a seeded store is not a complete
+// listing — and once the complete listing arrives the peer's newer value wins,
+// so the stale seed never displaces it (F14). The status assertions read the
+// exported completeness contract; the value assertions read Cluster.Store.
+func TestScenario_f14ReplacedNode(t *testing.T) {
+	t.Parallel()
+	seed := chaosSeed(t)
+	const test = "f14ReplacedNode"
+	t.Logf("%s", scnReplay(seed, test))
+	rng := simRNG(seed)
+
+	const key = "f14/user-value"
+	sched := simnet.NewScheduler(at(0))
+	cluster := simnet.NewCluster(sched, rng, 2, repl.Config{}, simFixedDelay(nil))
+	quiesceDiscovery(t, sched, cluster)
+
+	// Node A (index 0) writes the value; the cluster converges, then node B's
+	// (index 1) records are captured as the stale preserved snapshot.
+	staleValue := cluster.Write(0, key, []byte("user-value"))
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the cluster did not quiesce after the seed write %s", scnReplay(seed, test))
+	}
+	if !recordMapsEqual(cluster.Store(1).Records(), cluster.Store(0).Records()) {
+		t.Fatalf("the two nodes did not converge before the stale snapshot %s", scnReplay(seed, test))
+	}
+	stale := cluster.Store(1).Records()
+
+	// Node A's newer value replaces it everywhere before the restart.
+	newer := cluster.Write(0, key, []byte("user-value-updated"))
+	if newer.Version.Compare(staleValue.Version) <= 0 {
+		t.Fatalf("the newer write's version %x does not strictly dominate the stale snapshot's %x %s",
+			newer.Version[:], staleValue.Version[:], scnReplay(seed, test))
+	}
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the cluster did not quiesce after the newer write %s", scnReplay(seed, test))
+	}
+	scnAssertConverged(t, cluster, chaosModelStore(cluster.WriteLog()), seed, test)
+
+	// The replacement: node B's fresh core boots onto the stale preserved
+	// snapshot. The seed records are not a listing, so both completeness reads
+	// must still be false at the restart instant.
+	tReplace := sched.Now()
+	cluster.ReplaceNodeWithState(1, scnRunID(2, 9), 0, stale)
+	if cluster.Core(1).SyncArrived() {
+		t.Fatalf("the replaced node reports SyncArrived() immediately after restart — the seeded snapshot must never count as a listing %s",
+			scnReplay(seed, test))
+	}
+	if cluster.Core(1).ListingComplete() {
+		t.Fatalf("the replaced node reports ListingComplete() immediately after restart — the seeded snapshot must never count as a listing %s",
+			scnReplay(seed, test))
+	}
+	seeded, seededErr := cluster.Store(1).Get(key)
+	if seededErr != nil || !recordsEqual(seeded, staleValue) {
+		t.Fatalf("the replacement's seeded store serves (%+v, %v) under %q, want the stale snapshot record %+v — the F14 premise is missing %s",
+			seeded, seededErr, key, staleValue, scnReplay(seed, test))
+	}
+
+	// Past the listing bound, from the mechanism: the replacement's first Hello
+	// crosses in one one-way delay; the peer answers its first-seen Hello with
+	// one targeted listing whose single chunk emits immediately and crosses in
+	// one more delay, plus pacing slack (the empty-disk bound's shape for a
+	// one-key store).
+	const storedKeys = 1
+	pace := time.Second / time.Duration(simDefaultResponseRate)
+	listingBound := simOneWay + time.Duration(2*storedKeys+4)*pace
+	sched.RunUntil(tReplace.Add(listingBound))
+	if !cluster.Core(1).SyncArrived() {
+		t.Fatalf("the replaced node's SyncArrived() is still false past the listing bound %v %s", listingBound, scnReplay(seed, test))
+	}
+	if !cluster.Core(1).ListingComplete() {
+		t.Fatalf("the replaced node's ListingComplete() is still false past the listing bound %v %s", listingBound, scnReplay(seed, test))
+	}
+
+	if ok := scnQuiesce(sched, cluster); !ok {
+		t.Fatalf("the cluster did not quiesce after the seeded restart %s", scnReplay(seed, test))
+	}
+	// Both stores serve node A's newer value, byte-equal — the stale seed never
+	// displaces it (F14).
+	for i := range cluster.Nodes() {
+		served, err := cluster.Store(i).Get(key)
+		if err != nil || !recordsEqual(served, newer) {
+			t.Fatalf("node %d serves (%+v, %v) under %q, want node A's byte-equal newer record %+v — the stale seed displaced it %s",
+				i, served, err, key, newer, scnReplay(seed, test))
+		}
+	}
+	scnAssertConverged(t, cluster, chaosModelStore(cluster.WriteLog()), seed, test)
 }
 
 // combinedFailuresMargin is the documented allowance the combined-failure
