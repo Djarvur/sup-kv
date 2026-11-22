@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -623,16 +624,30 @@ func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	restored := make([]RestoredRecord, 0, len(records))
 	if restoreChanges(e.store.Records(), records) {
 		for _, key := range slices.Sorted(maps.Keys(records)) {
-			_, _, err = replayRecord(e.store, key, records[key])
+			ver, replayed, err := replayRecord(e.store, key, records[key])
 			if err != nil {
 				return nil, err
 			}
+			if !replayed {
+				continue
+			}
+			restored = append(restored, RestoredRecord{
+				Key:     key,
+				Version: ver,
+				Data:    bytes.Clone(records[key].Data),
+				Deleted: records[key].Deleted,
+			})
 		}
 		e.markDirty()
 	}
-	return nil, e.flush()
+	err = e.flush()
+	if err != nil && !errors.Is(err, ErrClosed) {
+		return restored, fmt.Errorf("%w: %w", ErrDumpFailed, err)
+	}
+	return restored, err
 }
 
 // restoreChanges reports whether replaying the snapshot's records would
@@ -666,17 +681,23 @@ func restoreChanges(current, snap map[string]storage.Record) bool {
 // entry.
 func replayRecord(store *storage.Store, key string, rec storage.Record) (version.RecordVersion, bool, error) {
 	if rec.Deleted {
-		_, _, err := store.Delete(key)
+		ver, _, err := store.Delete(key)
 		if errors.Is(err, storage.ErrNotFound) {
 			return version.RecordVersion{}, false, nil
 		}
-		return version.RecordVersion{}, false, err
+		if err != nil {
+			return version.RecordVersion{}, false, err
+		}
+		return ver, true, nil
 	}
-	_, _, err := store.Set(key, rec.Data)
+	ver, _, err := store.Set(key, rec.Data)
 	if errors.Is(err, storage.ErrValueTooLarge) {
 		return version.RecordVersion{}, false, nil
 	}
-	return version.RecordVersion{}, false, err
+	if err != nil {
+		return version.RecordVersion{}, false, err
+	}
+	return ver, true, nil
 }
 
 // Flush is the shutdown seam (D-19): the binary's signal path calls it
