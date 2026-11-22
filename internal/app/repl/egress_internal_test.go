@@ -151,14 +151,80 @@ func TestEgress_identitySeparates(t *testing.T) {
 	t.Parallel()
 	core := newEgressCore()
 	now := egressNow()
-	core.enqueueResponse(now, "peer-a", port.DataRequest{Key: "cfg/k"})
-	core.enqueueResponse(now, "peer-a", port.DataRequest{Key: "cfg/k"})
-	core.enqueueResponse(now, "peer-b", port.DataRequest{Key: "cfg/k"})
-	rec := storage.Record{Version: version.PackVersion(egressTestNowMs, 0, egressTestPeer), Data: []byte("v")}
-	core.enqueueResponse(now, "peer-a", port.DataReplication{Key: "cfg/k", Record: rec})
+	core.enqueueResponse(now, "peer-a", egressDataRequest, "cfg/k")
+	core.enqueueResponse(now, "peer-a", egressDataRequest, "cfg/k")
+	core.enqueueResponse(now, "peer-b", egressDataRequest, "cfg/k")
+	core.enqueueResponse(now, "peer-a", egressDataReplication, "cfg/k")
 
 	if got := core.QueuedResponses(); got != 3 {
 		t.Fatalf("QueuedResponses() = %d, want 3 (one duplicate collapsed, two handles and two kinds kept apart)", got)
+	}
+}
+
+// TestEgress_identityOnly proves the queue entry is the identity alone and
+// the drain builds the message from current store state (CR-02): a
+// DataReplication answer enqueued before the record is overwritten emits the
+// NEW value, and an answer whose key vanished after enqueue is skipped at the
+// drain without consuming a pacer slot — the next live answer emits at the
+// same slot.
+func TestEgress_identityOnly(t *testing.T) {
+	t.Parallel()
+	core := newEgressCore()
+	st, ok := core.store.(*egressStore)
+	if !ok {
+		t.Fatalf("newEgressCore store is a %T, want the white-box *egressStore", core.store)
+	}
+	now := egressNow()
+	var out port.Outbox
+	core.Advance(now, &out) // startup Hello + empty listing, outside the assertion
+	out.Drain()
+
+	old := storage.Record{Version: version.PackVersion(egressTestNowMs, 0, egressTestPeer), Data: []byte("old")}
+	st.records["cfg/k"] = old
+	st.versions["cfg/k"] = old.Version
+	core.enqueueResponse(now, "peer", egressDataReplication, "cfg/k")
+
+	updated := storage.Record{Version: version.PackVersion(egressTestNowMs+1, 0, egressTestPeer), Data: []byte("new")}
+	st.records["cfg/k"] = updated
+	st.versions["cfg/k"] = updated.Version
+
+	core.Advance(now, &out)
+	drained := out.Drain()
+	if len(drained) != 1 || drained[0].Broadcast || drained[0].To != "peer" {
+		t.Fatalf("the drain emitted %v, want exactly one unicast answer to %q", drained, "peer")
+	}
+	reply, ok := drained[0].Msg.(port.DataReplication)
+	if !ok {
+		t.Fatalf("the answer is a %T, want port.DataReplication", drained[0].Msg)
+	}
+	if reply.Key != "cfg/k" || !bytes.Equal(reply.Record.Data, []byte("new")) || reply.Record.Version != updated.Version {
+		t.Fatalf("the answer = (%q, %+v), want the record current at drain time (%q, %+v)", reply.Key, reply.Record, "cfg/k", updated)
+	}
+
+	// A vanished key skips at the drain and consumes no slot: one dead
+	// identity ahead of a live one still lets the live answer emit at the
+	// next slot.
+	st.records["gone/k"] = storage.Record{Version: version.PackVersion(egressTestNowMs, 1, egressTestPeer), Data: []byte("gone")}
+	st.versions["gone/k"] = st.records["gone/k"].Version
+	core.enqueueResponse(now, "peer", egressDataReplication, "gone/k")
+	st.records["live/k"] = storage.Record{Version: version.PackVersion(egressTestNowMs, 2, egressTestPeer), Data: []byte("live")}
+	st.versions["live/k"] = st.records["live/k"].Version
+	core.enqueueResponse(now, "peer", egressDataReplication, "live/k")
+	delete(st.records, "gone/k")
+	delete(st.versions, "gone/k")
+
+	next := now.Add(core.syncResponseInterval)
+	core.Advance(next, &out)
+	drained = out.Drain()
+	if len(drained) != 1 || drained[0].Broadcast || drained[0].To != "peer" {
+		t.Fatalf("the drain emitted %v, want exactly one unicast answer for the live key", drained)
+	}
+	reply, ok = drained[0].Msg.(port.DataReplication)
+	if !ok || reply.Key != "live/k" {
+		t.Fatalf("the emission = %v, want the live key's DataReplication (the skipped entry consumed no pacer slot)", drained[0].Msg)
+	}
+	if got := core.QueuedResponses(); got != 0 {
+		t.Fatalf("QueuedResponses() = %d after the drain, want 0", got)
 	}
 }
 
@@ -172,9 +238,9 @@ func TestEgress_capDropsOldest(t *testing.T) {
 	core := newEgressCore()
 	now := egressNow()
 	evicted := "cap/000000"
-	core.enqueueResponse(now, "peer", port.DataRequest{Key: evicted})
+	core.enqueueResponse(now, "peer", egressDataRequest, evicted)
 	for i := 1; i <= maxEgressEntries; i++ {
-		core.enqueueResponse(now, "peer", port.DataRequest{Key: fmt.Sprintf("cap/%06d", i)})
+		core.enqueueResponse(now, "peer", egressDataRequest, fmt.Sprintf("cap/%06d", i))
 	}
 
 	if got := core.QueuedResponses(); got != maxEgressEntries {
@@ -190,7 +256,7 @@ func TestEgress_capDropsOldest(t *testing.T) {
 		t.Fatal("the evicted identity is still in the dedupe map — a later identical request would be silently starved")
 	}
 
-	core.enqueueResponse(now, "peer", port.DataRequest{Key: evicted})
+	core.enqueueResponse(now, "peer", egressDataRequest, evicted)
 	if got := core.EgressDropped(); got != 2 {
 		t.Fatalf("re-enqueueing the evicted identity left EgressDropped() = %d, want 2 — it was treated as already queued", got)
 	}
@@ -213,9 +279,10 @@ func TestEgress_capDropsOldest(t *testing.T) {
 // amplification) — only the cumulative counter observes both. The bound is
 // deliberately generous, a small fraction of a single value's volume and far
 // below the ≈15 MiB the defect would allocate.
-func TestEgress_noValueRetention(t *testing.T) {
-	// Not parallel: the allocation probe needs a quiet package — a parallel
-	// sibling's allocations would contaminate TotalAlloc.
+func TestEgress_noValueRetention(t *testing.T) { //nolint:paralleltest // allocation probe requires a quiet package; a parallel sibling's allocations would contaminate TotalAlloc
+	// Not parallel (see the nolint above): the allocation probe needs a quiet
+	// package — a parallel sibling's allocations would contaminate
+	// TotalAlloc.
 	core := newEgressCore()
 	st, ok := core.store.(*egressStore)
 	if !ok {
@@ -272,7 +339,7 @@ func TestEgress_drainSkipsGoneRecords(t *testing.T) {
 	rec := storage.Record{Version: version.PackVersion(egressTestNowMs, 0, egressTestPeer), Data: []byte("v")}
 	st.records["gone/key"] = rec
 	st.versions["gone/key"] = rec.Version
-	core.enqueueResponse(now, "peer", port.DataReplication{Key: "gone/key", Record: rec})
+	core.enqueueResponse(now, "peer", egressDataReplication, "gone/key")
 	delete(st.records, "gone/key")
 	delete(st.versions, "gone/key")
 

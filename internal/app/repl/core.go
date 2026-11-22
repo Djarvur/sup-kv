@@ -302,8 +302,10 @@ type StateStore interface {
 	Version(key string) (version.RecordVersion, bool)
 
 	// Lookup returns a copy of the stored record for key, tombstones
-	// included. This is the exact-record reply source for DataRequest and
-	// for the strictly-newer DataSync response.
+	// included. This is the drain-time exact-record source for every queued
+	// DataReplication answer (a DataRequest reply or a strictly-newer DataSync
+	// or stale-record response), so no producer needs a value copy before the
+	// egress dedupe check (CR-02).
 	Lookup(key string) (storage.Record, bool)
 
 	// Versions returns a fresh map from every key — tombstones included — to
@@ -413,8 +415,11 @@ const (
 // egressKey is the egress queue's dedupe identity — (handle, kind, key),
 // exactly the RESEARCH RPL-11 wording (T-3-20/T-3-21). The record version is
 // deliberately excluded: a DataRequest carries none, and a DataReplication
-// answer re-reads the stored record at drain time, so the queue never pins
-// Data and an updated record simply ships as its current version.
+// answer re-reads the stored record at drain time. The queue never pins Data
+// and no producer looks a record up before the dedupe check (CR-02): a
+// queued answer costs a key plus this small struct, so a remote listing that
+// reveals every key cannot make the node retain a value copy per entry, and a
+// repeated request allocates nothing before the identity collapses it.
 type egressKey struct {
 	handle string
 	kind   egressKind
@@ -423,15 +428,17 @@ type egressKey struct {
 
 // queuedUnicast is one reactive unicast response waiting in the egress queue
 // (REPL-05's rate limiter): its dedupe identity — destination handle (D-03),
-// kind and key — and the message. Exactly two producer shapes exist —
-// DataRequest emissions, DataRequest replies and DataSync-newer responses
-// (the egress-limiter scope pin) — and nothing else ever queues: proactive
-// traffic (Hello, listings, retransmits) bypasses the limiter, which is what
-// bounds an empty node's recovery instead of letting it become a flood
-// (T-04-07).
+// kind and key — and NOTHING else. No message is retained: the drain builds
+// the DataRequest or DataReplication from the identity (resolveQueuedResponse),
+// so an updated record simply ships as its current version and a vanished key
+// emits nothing. Exactly three producers feed it — a DataRequest for a
+// missing-or-older listing entry, a DataRequest reply, and a DataSync
+// local-newer answer (the egress-limiter scope pin) — and nothing else ever
+// queues: proactive traffic (Hello, listings, retransmits) bypasses the
+// limiter, which is what bounds an empty node's recovery instead of letting
+// it become a flood (T-04-07).
 type queuedUnicast struct {
-	id  egressKey
-	msg port.Message
+	id egressKey
 }
 
 // listingFIFO is one destination's in-flight DataSync listing: the round's
@@ -1266,23 +1273,23 @@ func ackedInsert(acked []uint16, id uint16) []uint16 {
 	return slices.Insert(acked, pos, id)
 }
 
-// handleDataRequest answers one DataRequest (REPL-04): one point Lookup
-// serves the whole handler call — the view discipline, never a whole-store
-// snapshot — and a key the store holds (tombstones included, so deletes
-// heal through the same LWW path as writes) enqueues one unicast
-// DataReplication carrying the exact stored record on the egress queue,
-// which Advance drains at the sync_response_rate cadence. A key the store
-// does not hold produces nothing at all — no error reply, no nack,
-// nothing enqueued, ever. The reply addresses the datagram's source handle
-// regardless of peer-table membership: a stranger's DataRequest is still
-// protocol traffic from a live node, and replies are unicast only — a
-// broadcast reply would amplify one request into N datagrams.
+// handleDataRequest answers one DataRequest (REPL-04): one O(1)
+// Version presence probe serves the whole handler call — the view
+// discipline, never a whole-store snapshot and never a Data copy before the
+// dedupe check (CR-02) — and a key the store holds (tombstones included, so
+// deletes heal through the same LWW path as writes) enqueues one unicast
+// DataReplication IDENTITY on the egress queue; the drain re-reads the
+// current record and builds the message. A key the store does not hold
+// produces nothing at all — no error reply, no nack, nothing enqueued, ever.
+// The reply addresses the datagram's source handle regardless of peer-table
+// membership: a stranger's DataRequest is still protocol traffic from a live
+// node, and replies are unicast only — a broadcast reply would amplify one
+// request into N datagrams.
 func (c *Core) handleDataRequest(now time.Time, source, key string) {
-	rec, ok := c.store.Lookup(key)
-	if !ok {
+	if _, ok := c.store.Version(key); !ok {
 		return
 	}
-	c.enqueueResponse(now, source, port.DataReplication{Key: key, Record: rec})
+	c.enqueueResponse(now, source, egressDataReplication, key)
 }
 
 // handleDataSync processes one DataSync part (REPL-05, PROTO-01). The header
@@ -1300,10 +1307,13 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 // content actually changed, and opens the gate (syncArrived) — all in this
 // same handler, so no partial listing can open it. The part's entries then
 // compare per key against the store exactly as before: a locally absent key
-// or a strictly newer listing version enqueues a unicast DataRequest; a
-// strictly newer local record — read through one point Lookup, tombstones
-// included, so a local delete heals the sender's live copy — enqueues a
-// unicast exact-record DataReplication; equal versions produce silence.
+// or a strictly newer listing version enqueues a unicast DataRequest
+// identity; a strictly newer local record — the point Version probe already
+// proved presence, and the drain re-reads the current record (tombstones
+// included, so a local delete heals the sender's live copy) — enqueues a
+// unicast DataReplication identity; equal versions produce silence. Both
+// enqueues are identity-only, so no Data is copied and no record is looked
+// up before the dedupe check (CR-02).
 // Entries are processed in received order (the compare is per key and
 // order-independent by construction) and every response flows through the
 // single rate-limited egress queue — the scope pin; no reactive unicast has a
@@ -1323,15 +1333,11 @@ func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.D
 		local, present := c.store.Version(entry.Key)
 		switch {
 		case !present || local.Compare(entry.Version) < 0:
-			c.enqueueResponse(now, in.Source, port.DataRequest{Key: entry.Key})
+			c.enqueueResponse(now, in.Source, egressDataRequest, entry.Key)
 		case local.Compare(entry.Version) > 0:
-			rec, ok := c.store.Lookup(entry.Key)
-			if !ok {
-				// The store changed between the probe and the read: the entry
-				// is gone, so there is nothing newer to send.
-				continue
-			}
-			c.enqueueResponse(now, in.Source, port.DataReplication{Key: entry.Key, Record: rec})
+			// The probe above already proved presence; the drain owns the
+			// race between this probe and the record read.
+			c.enqueueResponse(now, in.Source, egressDataReplication, entry.Key)
 		}
 	}
 }
@@ -1623,53 +1629,40 @@ func sameListedKeys(old map[string]struct{}, entries map[string]version.RecordVe
 	return true
 }
 
-// enqueueResponse appends one reactive unicast to the egress queue
+// enqueueResponse appends one reactive unicast identity to the egress queue
 // (REPL-05): the FIFO drains inside Advance at exactly one
 // syncResponseInterval per response, enqueue order IS drain order, and the
 // first response after an idle queue emits immediately — nextSendAt clamps
 // to this call's now, so no head-of-line delay ever applies to the first
-// datagram of a burst. The queue is bounded and deduplicated (XPORT-07):
-// the identity is (handle, kind, key), so the same answer requested twice —
-// the two-listings-1000-missing-keys case — occupies one slot, and an
-// overflow drops the OLDEST entry together with its identity (T-3-21) while
-// counting the drop. Duplicates are silent: the existing answer already
-// covers the request.
-func (c *Core) enqueueResponse(now time.Time, handle string, msg port.Message) {
-	id, ok := egressIdentity(handle, msg)
-	if !ok {
-		return
-	}
+// datagram of a burst. The entry carries (handle, kind, key) and no message
+// (CR-02): the producer must not look a record up first, so a request for a
+// present key copies no Data, and the drain builds the message from the
+// current store state. The queue is bounded and deduplicated (XPORT-07): the
+// identity is (handle, kind, key), so the same answer requested twice — the
+// two-listings-1000-missing-keys case — occupies one slot, and an overflow
+// drops the OLDEST entry together with its identity (T-3-21) while counting
+// the drop. Duplicates are silent: the existing answer already covers the
+// request.
+func (c *Core) enqueueResponse(now time.Time, handle string, kind egressKind, key string) {
+	id := egressKey{handle: handle, kind: kind, key: key}
 	if _, dup := c.egressIDs[id]; dup {
 		return
 	}
 	if len(c.egress) == 0 {
 		c.nextSendAt = now
 	}
-	c.egress = append(c.egress, queuedUnicast{id: id, msg: msg})
+	c.egress = append(c.egress, queuedUnicast{id: id})
 	c.egressIDs[id] = struct{}{}
 	if len(c.egress) > maxEgressEntries {
 		c.dropOldestEgress()
 	}
 }
 
-// egressIdentity derives the dedupe identity of one queueable reactive
-// message. The only queueable shapes are a DataRequest and a
-// DataReplication; anything else is not a reactive unicast and is never
-// queued.
-func egressIdentity(handle string, msg port.Message) (egressKey, bool) {
-	switch m := msg.(type) {
-	case port.DataRequest:
-		return egressKey{handle: handle, kind: egressDataRequest, key: m.Key}, true
-	case port.DataReplication:
-		return egressKey{handle: handle, kind: egressDataReplication, key: m.Key}, true
-	}
-	return egressKey{}, false
-}
-
 // dropOldestEgress evicts the queue's oldest entry and deletes its dedupe
 // identity in the same operation: a retained identity would make a later
 // identical request look already queued and silently starve it (T-3-21,
-// RESEARCH Pitfall 10). The emptied slot is nilled to release its message.
+// RESEARCH Pitfall 10). The emptied slot is cleared to release its identity
+// strings.
 func (c *Core) dropOldestEgress() {
 	oldest := c.egress[0]
 	c.egress[0] = queuedUnicast{}
@@ -1709,20 +1702,23 @@ func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
 	}
 }
 
-// resolveQueuedResponse returns the message to emit for one dequeued
-// response. A DataRequest is emitted as queued; a DataReplication answer
+// resolveQueuedResponse builds the message to emit for one dequeued
+// response. A DataRequest is key-only by nature; a DataReplication answer
 // re-reads the record through Lookup and reports false when the key is gone
 // — the queue pins no Data, so the answer always carries the current record
-// (XPORT-07).
+// (XPORT-07, CR-02).
 func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
-	if q.id.kind != egressDataReplication {
-		return q.msg, true
+	switch q.id.kind {
+	case egressDataReplication:
+		rec, ok := c.store.Lookup(q.id.key)
+		if !ok {
+			return nil, false
+		}
+		return port.DataReplication{Key: q.id.key, Record: rec}, true
+	case egressDataRequest:
+		return port.DataRequest{Key: q.id.key}, true
 	}
-	rec, ok := c.store.Lookup(q.id.key)
-	if !ok {
-		return nil, false
-	}
-	return port.DataReplication{Key: q.id.key, Record: rec}, true
+	return nil, false
 }
 
 // NotifyLocalWrite is the explicit call a write's author makes after the
