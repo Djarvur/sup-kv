@@ -112,7 +112,12 @@ type failingFSOps struct {
 
 func (f *failingFSOps) write(dir string, fill func(io.Writer) error) error {
 	if f.failAt == fsopWrite {
-		return f.err // nothing is held yet: no temp exists to clean
+		// The injected failure happens before a temp exists, so there is
+		// nothing to clean; the fill still runs into a discard sink so the
+		// row exercises the production streamed-write shape rather than
+		// bypassing the caller's callback.
+		_ = fill(io.Discard)
+		return f.err
 	}
 	return f.fileFSOps.write(dir, fill)
 }

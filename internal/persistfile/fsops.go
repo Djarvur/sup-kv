@@ -94,8 +94,8 @@ var _ fsops = (*fileFSOps)(nil)
 // write implements TEST-03 order step 1 (see fsops): CreateTemp in dir —
 // the caller's MkdirAll already made dir exist — then run fill through a
 // maxDumpBufioBytes buffer and flush it. The open handle and path are held
-// for fsync. A fill or flush failure returns the error with the temp still
-// held; the failure-hygiene completion consumes that state next.
+// for fsync. A fill or flush failure closes the handle and removes the temp
+// before returning, so a failed stream never litters (Pitfall 23).
 func (o *fileFSOps) write(dir string, fill func(io.Writer) error) error {
 	tmp, err := os.CreateTemp(dir, tempPattern)
 	if err != nil {
@@ -104,10 +104,14 @@ func (o *fileFSOps) write(dir string, fill func(io.Writer) error) error {
 	o.tmp, o.tmpName = tmp, tmp.Name()
 	bufw := bufio.NewWriterSize(tmp, maxDumpBufioBytes)
 	err = fill(bufw)
+	if err == nil {
+		err = bufw.Flush()
+	}
 	if err != nil {
+		o.closeRemoveTemp()
 		return err
 	}
-	return bufw.Flush()
+	return nil
 }
 
 // fsync implements TEST-03 order step 2 (see fsops): [os.File.Sync] on the
