@@ -172,7 +172,8 @@ func TestEngine_confirmationTimeout(t *testing.T) {
 func assertWriteTimeout(t *testing.T, cfg persist.Config, want time.Duration) {
 	t.Helper()
 	eng, dumps := newTimeoutEngine(cfg)
-	defer startDumper(t, eng)()
+	stop := startDumper(t, eng)
+	defer stop()
 	defer dumps.releaseAll()
 
 	start := time.Now()

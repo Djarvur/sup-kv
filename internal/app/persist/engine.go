@@ -19,15 +19,16 @@ import (
 )
 
 // Design defaults a zero or negative Config field is normalized to (D-04),
-// and the bounded dump-failure ladder's base and cap (D-05, PERSIST-05): the
+// the bounded dump-failure ladder's base and cap (D-05, PERSIST-05): the
 // first failure retries after the base delay, every later one doubles it, and
-// the cap bounds the wait — the confirmation timeout of the next plan sits
-// above it.
+// the cap bounds the wait — the confirmation timeout sits above it — and the
+// confirmation deadline itself (PERSIST-08, D-07).
 const (
-	defaultDebounce  = 50 * time.Millisecond
-	defaultMaxWait   = time.Second
-	defaultRetryBase = 100 * time.Millisecond
-	defaultRetryCap  = 5 * time.Second
+	defaultDebounce       = 50 * time.Millisecond
+	defaultMaxWait        = time.Second
+	defaultRetryBase      = 100 * time.Millisecond
+	defaultRetryCap       = 5 * time.Second
+	defaultConfirmTimeout = 10 * time.Second
 
 	// retryGrowth is the ladder's growth factor: every failure doubles the
 	// previous wait until the cap binds.
@@ -76,6 +77,9 @@ func (c Config) normalized() Config {
 	if c.MaxWait <= 0 {
 		c.MaxWait = defaultMaxWait
 	}
+	if c.ConfirmTimeout <= 0 {
+		c.ConfirmTimeout = defaultConfirmTimeout
+	}
 	if c.Now == nil {
 		c.Now = time.Now
 	}
@@ -85,26 +89,35 @@ func (c Config) normalized() Config {
 	return c
 }
 
-// waiter is one write's confirmation ticket: done is closed exactly once —
-// by a covering dump's success or failure fan-out, or by Run's exit sweep —
-// and err, written before the close, carries the resolution. The ticket
+// waiter is one write's confirmation ticket: done is closed exactly once,
+// and err — written before the close — carries the resolution. The ticket
 // needs no version: runDump captures the list before taking the Records
 // snapshot, so every captured waiter is covered by that dump (see
 // confirmWaiters). Channel close over [sync.Cond] because only channels
 // broadcast an error to every waiter (D-03, D-05).
+//
+// claimed is the single-claim protocol's guard (PERSIST-08, T-5-26): every
+// resolver — a dump's success or failure fan-out, Run's exit sweep, or the
+// awaiting caller's timeout — sets it under the engine mutex before writing
+// err and closing done, and a resolver that finds it already set leaves both
+// untouched. Capture alone never claims: a dump that merely took the waiter
+// into its captured slice never owns it, so a dump hanging after capture
+// cannot keep the caller's timeout from resolving the write.
 type waiter struct {
-	done chan struct{}
-	err  error
+	done    chan struct{}
+	err     error
+	claimed bool
 }
 
 // Engine is the write-confirmation engine over one storage.Store: a local
 // write registers a waiter and blocks until a dump whose snapshot contains
-// that record completed (nil — the write is on disk, PERS-04) or failed
-// (ErrDumpFailed — the record stays readable in memory, D-05). Engine is
-// safe for concurrent use by multiple goroutines; the engine mutex is held
-// only to swap waiter lists and the dirty epoch, never across codec or port
-// I/O, and exactly one dumper goroutine — the caller-launched Run —
-// serializes every Save.
+// that record completed (nil — the write is on disk, PERS-04), failed
+// (ErrDumpFailed — the record stays readable in memory, D-05), or did not
+// complete within ConfirmTimeout (ErrUnconfirmed — the record is installed
+// but not yet durable, PERSIST-08). Engine is safe for concurrent use by
+// multiple goroutines; the engine mutex is held only to swap waiter lists and
+// the dirty epoch, never across codec or port I/O, and exactly one dumper
+// goroutine — the caller-launched Run — serializes every Save.
 type Engine struct {
 	mu      sync.Mutex
 	store   *storage.Store
@@ -144,7 +157,10 @@ type Engine struct {
 	// scrapers (OBS-01): runDump is the single writer — the serialized
 	// dumper — so atomic reads need no engine mutex. dumpDiskFull and
 	// dumpPermission split the failed attempts by the adapter's class
-	// (PERSIST-05); both are subsets of dumpErrors.
+	// (PERSIST-05); both are subsets of dumpErrors. dumpUnconfirmed counts
+	// confirmation timeouts (PERSIST-08): its writers are the awaiting write
+	// goroutines, one increment per timed-out waiter, and it is no subset of
+	// dumpErrors — the dump's outcome may still be unknown.
 	dumpNanos       atomic.Int64
 	dumpTotal       atomic.Uint64
 	dumpErrors      atomic.Uint64
@@ -159,6 +175,9 @@ type Engine struct {
 // failure class so a persistent ENOSPC and a persistent EACCES are
 // distinguishable without parsing the log (PERSIST-05). Errors stays the
 // total failed attempts; DiskFull and Permission are subsets of it.
+// Unconfirmed counts writes answered with ErrUnconfirmed before their
+// covering dump completed (PERSIST-08) — a durability answer independent of
+// the failure counters.
 type DumpStats struct {
 	DurationSeconds float64
 	Total           uint64
@@ -407,17 +426,25 @@ func (e *Engine) rearm(deadline, retry <-chan time.Time) (nextDebounce, nextDead
 // the exiting Run — the reply channels are buffered, so the sends never
 // block (Pitfall 4). Run closes runDone only after the sweep returns: a
 // reply observed once runDone is closed is exactly one the sweep answered,
-// so flush can tell the answered from the stranded apart.
+// so flush can tell the answered from the stranded apart. A waiter the
+// caller's timeout already claimed is skipped — the timeout owns its close
+// (PERSIST-08, T-5-26).
 func (e *Engine) sweepClosed() {
 	e.mu.Lock()
 	e.closed = true
 	stranded := e.waiters
 	e.waiters = nil
+	claimed := make([]*waiter, 0, len(stranded))
 	for _, w := range stranded {
+		if w.claimed {
+			continue
+		}
+		w.claimed = true
 		w.err = ErrClosed
+		claimed = append(claimed, w)
 	}
 	e.mu.Unlock()
-	for _, w := range stranded {
+	for _, w := range claimed {
 		close(w.done)
 	}
 	for {
@@ -554,12 +581,22 @@ func (e *Engine) DumpStats() DumpStats {
 // snapshot the dump saved, and confirmation always means on-disk
 // containment, never elapsed time (PERS-04, RESEARCH Pitfall 15). A write
 // that loses the race to the capture is not in captured; it stays
-// registered and the next dump — or Run's exit sweep — resolves it.
-func (*Engine) confirmWaiters(captured []*waiter) {
+// registered and the next dump — or Run's exit sweep — resolves it. A
+// captured waiter the caller's timeout already claimed is skipped: the
+// timeout owns its resolution and close (PERSIST-08, T-5-26).
+func (e *Engine) confirmWaiters(captured []*waiter) {
+	e.mu.Lock()
+	claimed := make([]*waiter, 0, len(captured))
 	for _, w := range captured {
+		if w.claimed {
+			continue
+		}
+		w.claimed = true
 		w.err = nil
+		claimed = append(claimed, w)
 	}
-	for _, w := range captured {
+	e.mu.Unlock()
+	for _, w := range claimed {
 		close(w.done)
 	}
 }
@@ -567,7 +604,8 @@ func (*Engine) confirmWaiters(captured []*waiter) {
 // failWaiters resolves every current waiter — the captured list plus any
 // registered during the failed dump — with ErrDumpFailed, and re-dirties
 // the engine from a fresh epoch so the surviving records reach the next
-// successful dump.
+// successful dump. Waiters the caller's timeout already claimed are skipped:
+// the timeout owns their resolution and close (PERSIST-08, T-5-26).
 func (e *Engine) failWaiters(captured []*waiter) {
 	e.mu.Lock()
 	stranded := make([]*waiter, 0, len(captured)+len(e.waiters))
@@ -576,11 +614,17 @@ func (e *Engine) failWaiters(captured []*waiter) {
 	e.waiters = nil
 	e.dirty = true
 	e.oldest = e.cfg.Now()
+	claimed := make([]*waiter, 0, len(stranded))
 	for _, w := range stranded {
+		if w.claimed {
+			continue
+		}
+		w.claimed = true
 		w.err = ErrDumpFailed
+		claimed = append(claimed, w)
 	}
 	e.mu.Unlock()
-	for _, w := range stranded {
+	for _, w := range claimed {
 		close(w.done)
 	}
 }
@@ -622,12 +666,22 @@ func (e *Engine) SetIfAbsent(key string, data []byte) (version.RecordVersion, ti
 
 // await registers a waiter — the caller's record is freshly installed in the
 // store — marks the engine dirty and blocks until a dump resolution closes
-// the waiter. Registering under the same mutex hold that marks dirty is what
-// lets runDump treat every captured waiter as covered: the store write
-// happened before this call, and the dump's capture cannot interleave
-// between that write and the append. The dirty-mark path is generic — any
-// state change dirties; only local writes register waiters, and remote
-// merges reuse the dirty path without waiters.
+// the waiter or the confirmation timeout expires. Registering under the same
+// mutex hold that marks dirty is what lets runDump treat every captured
+// waiter as covered: the store write happened before this call, and the
+// dump's capture cannot interleave between that write and the append. The
+// dirty-mark path is generic — any state change dirties; only local writes
+// register waiters, and remote merges reuse the dirty path without waiters.
+//
+// The timeout branch is the single-claim protocol's other half (PERSIST-08,
+// T-5-26/T-5-27): under the mutex it first re-checks claimed — a resolver
+// that won the race set the error and owns the close, so await only waits
+// for that close and returns the resolver's answer. Otherwise it claims the
+// waiter, stores ErrUnconfirmed, removes it from the slice so a permanently
+// hung dumper cannot grow memory, unlocks, counts the unconfirmed outcome and
+// returns. The record stays installed; the engine stays dirty exactly as the
+// capture proof promises. Only ErrUnconfirmed is returned — never nil,
+// never ErrDumpFailed.
 func (e *Engine) await() error {
 	w := &waiter{done: make(chan struct{})}
 	e.mu.Lock()
@@ -645,8 +699,24 @@ func (e *Engine) await() error {
 	case e.changed <- struct{}{}:
 	default:
 	}
-	<-w.done
-	return w.err
+	timeout := e.cfg.After(e.cfg.ConfirmTimeout)
+	select {
+	case <-w.done:
+		return w.err
+	case <-timeout:
+	}
+	e.mu.Lock()
+	if w.claimed {
+		e.mu.Unlock()
+		<-w.done // the resolver owns the close; return its answer.
+		return w.err
+	}
+	w.claimed = true
+	w.err = ErrUnconfirmed
+	e.waiters = slices.DeleteFunc(e.waiters, func(candidate *waiter) bool { return candidate == w })
+	e.mu.Unlock()
+	e.dumpUnconfirmed.Add(1)
+	return ErrUnconfirmed
 }
 
 // ApplyRemote joins one remotely replicated record into the store and,
