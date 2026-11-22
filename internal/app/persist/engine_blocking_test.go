@@ -11,6 +11,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // Blocking-proof constants: the node identity and drift tolerance of the
@@ -69,17 +70,10 @@ func (b *blockingDumpPort) SaveStream(fill func(io.Writer) error) error {
 	return nil
 }
 
-// Save is the byte-slice convenience over SaveStream; the blocking proof
-// drives the engine's streamed path.
-func (b *blockingDumpPort) Save(dump []byte) error {
-	return b.SaveStream(func(w io.Writer) error {
-		_, err := w.Write(dump)
-		return err
-	})
+// Load reports the empty start: the blocking proof never restarts.
+func (*blockingDumpPort) Load(_ time.Time, _ func([]byte) error) port.LoadResult {
+	return port.LoadResult{}
 }
-
-// Load is the empty start; the blocking proof never restarts.
-func (*blockingDumpPort) Load(_ func([]byte) error) ([]byte, bool) { return nil, false }
 
 // CreateSnapshot and ReadSnapshot mirror the fake port's in-memory
 // semantics — nothing is on disk to copy or read.

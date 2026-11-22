@@ -154,7 +154,7 @@ func Open(
 		records, stats = decoded, decodedStats
 		return nil
 	}
-	dumps.Load(decode)
+	dumps.Load(now(), decode)
 	if records == nil {
 		records = make(map[string]storage.Record)
 	}

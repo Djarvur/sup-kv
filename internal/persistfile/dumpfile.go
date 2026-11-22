@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/Djarvur/sup-kv/internal/port"
 )
@@ -86,24 +87,15 @@ func (f *FileStore) SaveStream(fill func(io.Writer) error) error {
 	return saveAtomically(f.ops, f.path, f.path+prevSuffix, fill)
 }
 
-// Load resolves the fallback chain main then .prev and returns the first
-// generation whose bytes pass parse; a read error or an oracle rejection —
-// a truncated or unparseable file counts as unreadable, D-02 — advances
-// the chain. Both generations exhausted is the empty start, ok false.
-// Every per-generation fault is chain business, so Load never reports an
-// error.
-func (f *FileStore) Load(parse func([]byte) error) (dump []byte, ok bool) {
-	for _, candidate := range []string{f.path, f.path + prevSuffix} {
-		data, err := os.ReadFile(candidate) //nolint:gosec // G304: candidate derives from the configured dump path, never caller input
-		if err != nil {
-			continue
-		}
-		if parse(data) != nil {
-			continue
-		}
-		return data, true
-	}
-	return nil, false
+// Load resolves the fallback chain main then .prev and reports the first
+// generation whose bytes pass parse together with the outcome, accepted
+// generation and every candidate fault (D-02). A read error or an oracle
+// rejection — a truncated or unparseable file counts as unreadable — is
+// recorded against its candidate and advances the chain; an absent candidate
+// is not a failure. No candidate at all is the prompt start, and candidates
+// that all fail are unusable. Load never deletes evidence.
+func (f *FileStore) Load(_ time.Time, _ func([]byte) error) port.LoadResult {
+	return port.LoadResult{}
 }
 
 // saveAtomically implements the canonical atomic-write sequence (PERS-02,

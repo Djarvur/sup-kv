@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // fsops-test constants: the three dump generations the order and failure
@@ -403,11 +406,11 @@ func TestFsops_emptyDumpRoundTrip(t *testing.T) {
 	if info.Size() != 0 {
 		t.Errorf("main size = %d, want 0 (zero records)", info.Size())
 	}
-	got, ok := store.Load(func([]byte) error { return nil })
-	if !ok {
-		t.Fatal("Load() ok = false, want the empty generation")
+	res := store.Load(time.Now(), func([]byte) error { return nil })
+	if res.Outcome != port.LoadMain {
+		t.Fatalf("Load() outcome = %v, want LoadMain for the empty generation", res.Outcome)
 	}
-	if len(got) != 0 {
-		t.Errorf("Load() = %d bytes, want zero records (the empty dump)", len(got))
+	if len(res.Dump) != 0 {
+		t.Errorf("Load() = %d bytes, want zero records (the empty dump)", len(res.Dump))
 	}
 }

@@ -71,15 +71,6 @@ type fakeDumpStore struct {
 	snapshot []byte
 }
 
-// Save is the byte-slice convenience over SaveStream for fixtures that
-// already hold a generation.
-func (f *fakeDumpStore) Save(dump []byte) error {
-	return f.SaveStream(func(w io.Writer) error {
-		_, err := w.Write(dump)
-		return err
-	})
-}
-
 // SaveStream runs fill into memory and records the generation, or fails
 // while failSave is set — the injection point for persist.ErrDumpFailed.
 func (f *fakeDumpStore) SaveStream(fill func(io.Writer) error) error {
@@ -99,8 +90,8 @@ func (f *fakeDumpStore) SaveStream(fill func(io.Writer) error) error {
 
 // Load reports the empty start: every test begins as a fresh node — the
 // fallback chain (main, .prev) is startup business no API test needs.
-func (*fakeDumpStore) Load(_ func([]byte) error) ([]byte, bool) {
-	return nil, false
+func (*fakeDumpStore) Load(_ time.Time, _ func([]byte) error) port.LoadResult {
+	return port.LoadResult{}
 }
 
 // CreateSnapshot and ReadSnapshot complete the port.DumpStore interface;

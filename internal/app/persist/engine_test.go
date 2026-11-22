@@ -23,6 +23,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // Tracer-test constants: the shared node ID and drift tolerance of the
@@ -274,17 +275,6 @@ type fakeDumpPort struct {
 	gate      chan struct{}
 }
 
-// Save records the dump at the current virtual time, failing the leading
-// configured saves; a configured gate parks the save before it records —
-// the dump is in flight, not attempted, while parked. It is the byte-slice
-// convenience over SaveStream for fixtures that already hold a generation.
-func (f *fakeDumpPort) Save(dump []byte) error {
-	return f.SaveStream(func(w io.Writer) error {
-		_, err := w.Write(dump)
-		return err
-	})
-}
-
 // SaveStream runs fill into memory and records the resulting generation at
 // the current virtual time, failing the leading configured saves; a
 // configured gate parks the save before it records — the dump is in flight,
@@ -312,8 +302,10 @@ func (f *fakeDumpPort) SaveStream(fill func(io.Writer) error) error {
 	return nil
 }
 
-// Load is the empty start; the synctest suite never restarts.
-func (*fakeDumpPort) Load(_ func([]byte) error) ([]byte, bool) { return nil, false }
+// Load reports the empty start: the synctest suite never restarts.
+func (*fakeDumpPort) Load(_ time.Time, _ func([]byte) error) port.LoadResult {
+	return port.LoadResult{}
+}
 
 // CreateSnapshot stores an in-memory copy of the latest completed save
 // under the name.
