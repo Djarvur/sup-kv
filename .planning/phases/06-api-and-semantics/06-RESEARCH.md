@@ -854,7 +854,7 @@ Handler algorithm:
    is an empty token.
 
 Proposed constants (discretion, must be tied to the message-size ceilings):
-`defaultListPageSize = 64`, `maxListPageSize = 256`, `listPageByteBudget = 6 << 20`,
+`maxListPageSize = 256`, `listPageByteBudget = 6 << 20`, (the `defaultListPageSize = 64` proposal here is SUPERSEDED by the frozen-R-01 reconciliation: `page_size` unset/0 returns the legacy all-keys listing, and pagination is opt-in),
 `apiMaxSendBytes` computed to cover the budget plus envelope overhead, and a test that
 marshals a synthetic worst-case page and asserts it fits.
 
@@ -1659,7 +1659,7 @@ version (`internal/app/storage/store.go:293-304` comment) `[VERIFIED: internal/a
 | A1 | A wall-clock 20 ms assertion is too flaky under `-race`; a deterministic Outbox assertion plus a generous real-adapter bound is the honest proof | D-01, Pitfall 2 | A plan that writes the literal 20 ms test may flake; the property is still correct |
 | A2 | "Values ride only for the entries of the page" means value-bearing pages; a keys-only page is an acceptable fallback if the planner reads it as vacuous | D-02 | A keys-only implementation may be judged to under-deliver D-02, or a value-bearing page may be judged beyond A-02's minimum |
 | A3 | The Watch snapshot should stay the current in-memory state rather than a confirmed-only view | D-04 | If the owner wants a fully durable snapshot, the hub needs a subscribe-time pending filter and an overflow policy for it |
-| A4 | Page defaults (64/256, 6 MiB budget) and keepalive values (2 m/20 s, 30 s) are appropriate for the trusted-LAN small-cluster envelope | D-02, D-05 | Tunable constants; wrong values are a UX/performance issue, not a contract break |
+| A4 | Page bounds (opt-in pages, 256 max, 6 MiB serialized budget; unset/0 = legacy all-keys per the frozen R-01) and keepalive values (2 m/20 s, 30 s) are appropriate for the trusted-LAN small-cluster envelope | D-02, D-05 | Tunable constants; wrong values are a UX/performance issue, not a contract break |
 | A5 | Keeping `ListResponse.keys` populated alongside `records` is worth the redundancy for shape compatibility | D-02 | Removing it would be a cleaner schema but a larger client break |
 
 **If this table is not empty:** the planner should treat A1-A5 as discretion choices to pin
