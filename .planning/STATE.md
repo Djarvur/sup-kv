@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 06-03-PLAN.md
-last_updated: "2026-11-22T22:58:37.391Z"
+stopped_at: Completed 06-04-PLAN.md
+last_updated: "2026-11-22T23:24:00.342Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: 149d7993dbdc4b34b2cf728414c38baee7dca36b
+state_head: e93bc0427d9ef77a49e47df2494452f9e395b72c
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 62
+  completed_plans: 63
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
@@ -121,6 +121,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P01 | 721s | 3 tasks | 30 files |
 | Phase 06 P02 | 8min | 1 tasks | 19 files |
 | Phase 06 P03 | 7min | 3 tasks | 7 files |
+| Phase 06 P04 | 7min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -367,6 +368,11 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-03: examples/client is a nested Go module (require github.com/Djarvur/sup-kv v0.0.0 + replace ../.. ) importing only the public api/supkvapi/v1 package plus gRPC; go mod tidy reclassified protobuf as indirect, and the committed tidy form is the canonical one. It is gated by one make client-example target and a dedicated client-example CI job (APIS-06).
 - [Phase 06]: 06-03: The example README states the last-read-value cache is consumer-library territory per ADR 0007 (14.7) and lists the deliberate omissions (no auth, retries, cache or snapshot RPCs). APIS-06's REQUIREMENTS.md checkbox stays pending because sibling plans 06-09/06-10/06-13 also declare it (#2388 shared-ID gate).
 - [Phase 06]: 06-03: /examples/client/client is gitignored because the plan's literal recipe (go build ./... inside the nested module) writes the executable beside main.go; the target itself is unchanged. The stale gsd-plan-head-before-06-03 ledger was reset to fc4ab65 before measuring (06-01 precedent).
+- [Phase 06]: 06-04: mapError is one ordered total table — persist.ErrDumpFailed before the port-class rows (a write answers Unavailable with the pinned sentinel, while CreateSnapshot surfaces its class as ResourceExhausted/PermissionDenied), persistfile.ErrNoDump before the fs rows, context through the matched sentinel — and the fallback logs the detail via slog then answers exactly "internal error".
+- [Phase 06]: 06-04: CreateSnapshot classifies its ensureDir, non-ErrNoDump main-dump read and atomic-save failures with classifySaveError while passing ErrNoDump through unchanged; FailureClassOf(ErrNoDump) stays FailureOther with no port.ClassedError, so the mapper can tell no-dump from a filesystem fault.
+- [Phase 06]: 06-04: The RPC path-shape matrix builds one DumpStore fake per errno variant whose save/create/read seams all return a path-bearing *fs.PathError; SnapshotCreate's forced flush fails on the save seam before CreateSnapshot, so that row proves the ErrDumpFailed constant while the class mapping is proven by the adapter test and the total table.
+- [Phase 06]: 06-04: Task 2's test-only tdd=true task was an investigated unexpected GREEN — Task 1's files implement exactly the rows it pins, so the test commit is the deliverable (04-07 precedent) and no RED was fabricated.
+- [Phase 06]: 06-04: APIS-03's checkbox stays pending because requirements ready-ids reports it blocked (the #2388 shared-ID gate); the stale plan-head ledger was reset to dabd55e before measuring, so actuals.commits: 4 is measured.
 
 ### Pending Todos
 
@@ -389,7 +395,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T22:58:36.803Z
-Stopped at: Completed 06-03-PLAN.md
+Last session: 2026-11-22T23:23:59.555Z
+Stopped at: Completed 06-04-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
