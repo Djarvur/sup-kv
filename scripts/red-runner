@@ -101,16 +101,15 @@ MUTANT_SOURCES=(
 # mutant moved to storage.Versions): "sync without tombstones" is killed by
 # exactly one seed (848612892191557850 — the tombstone listing is only
 # load-bearing when a node never held the key at all, so the newer-flooding
-# reply cannot heal it), while "periodic sync disabled" is killed by three
-# (8612631937004137123, 5033908244225396622, 5619387756189613155). Every
-# seed below is a verified kill for its mutant; the control passes on every
-# corpus seed and on the union below.
+# reply cannot heal it). Re-scanned again on 2026-11-22 (plan 04-13, after
+# first-seen listings landed): the first-seen targeted listing is now an
+# independent reconciliation path (RESEARCH Pitfall 7), so "periodic sync
+# disabled" survives on 15 of the 16 corpus seeds and is killed by exactly
+# one — 848612892191557850, the seed where the periodic broadcast is still
+# load-bearing. Every seed below is a verified kill for its mutant; the
+# control passes on every corpus seed and on the union below.
 MUTANT_SEEDS_SYNC_WITHOUT_TOMBSTONES=(848612892191557850)
-MUTANT_SEEDS_PERIODIC_SYNC_DISABLED=(
-	8612631937004137123
-	5033908244225396622
-	5619387756189613155
-)
+MUTANT_SEEDS_PERIODIC_SYNC_DISABLED=(848612892191557850)
 CONTROL_SEEDS=(
 	848612892191557850
 	8612631937004137123
