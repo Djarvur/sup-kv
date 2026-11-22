@@ -1828,14 +1828,26 @@ func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
 // (key, version) tracking entry — wait-set seeded with every currently-known
 // peer, ladder armed at cfg.AckTimeout — and broadcasts the record as a
 // DataReplication datagram from a defensive copy (the author may reuse its
-// buffer once the call returns). A newer local write under the same key
-// REPLACES the older tracking: every entry with a strictly smaller version
-// leaves, fresh wait-set, ladder reset — local supersession (REPL-02). An
-// equal version is a no-op for tracking (a duplicate notification re-arms
-// nothing), while a stale smaller write still broadcasts without displacing
-// the newer entry. Replication progress is never a precondition of the write
-// path: this enqueues-and-returns (D-05).
+// buffer once the call returns).
+//
+// The notification guard runs first (PROTO-05, D-05): a notification whose
+// version is NOT GREATER than the version the core already tracks for that
+// key — a regressive write or an equal duplicate — is ignored: no broadcast,
+// no ledger entry or other tracking change, and one NotificationsRegressed
+// count. The comparison is against the tracked pending version, never
+// store.Version: the store already holds the first notified version when
+// this call runs, so a <= store comparison would swallow the normal path.
+// A key's first notification (no tracked entry) always proceeds.
+//
+// A newer local write under the same key REPLACES the older tracking: every
+// entry with a strictly smaller version leaves, fresh wait-set, ladder reset
+// — local supersession (REPL-02). Replication progress is never a
+// precondition of the write path: this enqueues-and-returns (D-05).
 func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
+	if tracked, ok := c.trackedVersion(key); ok && rec.Version.Compare(tracked) <= 0 {
+		c.notificationsRegressed++
+		return
+	}
 	c.removeSupersededLocal(key, rec.Version, out)
 	pk := pendingKey{key: key, version: rec.Version}
 	_, tracked := c.pending[pk]
@@ -2719,6 +2731,20 @@ func (c *Core) removePending(pk pendingKey) {
 	for id := range entry.waitSet {
 		c.ledgerRemove(id, pk)
 	}
+}
+
+// trackedVersion returns the version currently tracked for key, if any.
+// The notification guard keeps the pending set at most one pair per key: a
+// not-greater notification never creates a second entry, and a newer one
+// first removes every smaller pair (removeSupersededLocal). The scan is over
+// the pending set, never the store — see NotifyLocalWrite for why.
+func (c *Core) trackedVersion(key string) (version.RecordVersion, bool) {
+	for pk := range c.pending {
+		if pk.key == key {
+			return pk.version, true
+		}
+	}
+	return version.RecordVersion{}, false
 }
 
 // removeSupersededLocal deletes every tracked pair under key whose version is
