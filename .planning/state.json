@@ -26,7 +26,7 @@
     {
       "number": "5",
       "name": "gRPC API and Binary",
-      "status": "complete"
+      "status": "in_progress"
     },
     {
       "number": "6",
@@ -89,5 +89,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 5 of 9 · executing"
   },
-  "updated_at": "2026-11-22T12:32:57.769Z"
+  "updated_at": "2026-11-22T12:52:10.426Z"
 }

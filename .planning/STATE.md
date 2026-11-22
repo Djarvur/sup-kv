@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 6
+current_plan: 2
 status: executing
-stopped_at: Phase 5 context gathered
-last_updated: "2026-11-22T12:32:57.750Z"
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-11-22T12:52:26.737Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 4 complete, transitioned to Phase 5
-state_head: b6b4adb547742cf9f513f5321654645e0e865e1d
+state_head: 84376e29cf82681b58e647a8dcdd224ece1f481a
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 47
+  completed_plans: 48
 ---
 
 # Project State
@@ -25,15 +25,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-19)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 4 — Protocol
+**Current focus:** Phase 5 — Persistence
 
 ## Current Position
 
-Phase: 5 (Persistence) — READY TO EXECUTE
-Current Plan: 6
+Phase: 5 (Persistence) — executing
+Current Plan: 2
 Total Plans in Phase: 12
-Status: Ready to execute
-Last activity: 2026-11-22 — Phase 4 complete, transitioned to Phase 5
+Status: Executing (05-01 complete, 05-02 next)
+Last activity: 2026-11-22 — 05-01 complete; 05-02 next
 
 Progress: [███░░░░░░░] 33%
 
@@ -105,6 +105,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P11 | 780 | 2 tasks | 2 files |
 | Phase 04 P12 | 272s | 2 tasks | 3 files |
 | Phase 04 P13 | 1178 | 3 tasks | 10 files |
+| Phase 05 P01 | 761s | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -292,6 +293,9 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-13: the periodic-sync-disabled kill list was re-selected after a 16-seed scan — first-seen listings now heal 15 seeds, leaving 848612892191557850 as the verified kill; the four-seed control arm is unchanged.
 - [Phase 04]: 04-13: CR-01 is closed naming plan 04-08/commit 1e06c58 and CR-02 naming plan 04-05/commit e42a20a, each with its named regression tests in the Phase-3 disposition ledger.
 - [Phase 04]: 04-13: the Phase-4 gate ran green on the final tree (tidy, lint, tests, red-runner with mutants, buf lint/breaking, determinism, bench probes, darwin build/vet); the one IN-03 wall-clock ratio flake was proven standalone/rerun and deferred to Phase 8 without touching any bound.
+- [Phase 05]: 05-01: The value limit is one exported storage.ValueMaxBytes; Config.ValueLimit serves the pre-store decode and NewStore normalizes through it, so the decode bound and the enforcement point cannot diverge (PERSIST-01, D-01).
+- [Phase 05]: 05-01: Open keeps its frozen (*Engine, int) signature — the decode uses storeCfg.ValueLimit() before the clock seed and NewStore; the engine captures Store.ValueMaxBytes() for runDump and Restore.
+- [Phase 05]: 05-01: An over-limit encode is a wrapped storage.ErrValueTooLarge naming the key (a store-invariant tripwire), never a silent skip; a non-positive --value-max-bytes exits 2 through the usage path instead of falling back to the default.
 
 ### Pending Todos
 
@@ -314,7 +318,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T08:50:29.966Z
-Stopped at: Phase 5 context gathered
+Last session: 2026-11-22T12:52:26.323Z
+Stopped at: Completed 05-01-PLAN.md
 Resume file: None
-Next action: continue Phase 4 with `/gsd:execute-phase 4` (04-08-PLAN.md is next)
+Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-02-PLAN.md is next)
