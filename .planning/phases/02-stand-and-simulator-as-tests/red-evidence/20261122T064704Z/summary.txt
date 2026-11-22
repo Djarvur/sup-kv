@@ -1,0 +1,17 @@
+test	expected	observed	package	verdict
+TestRed_R03_gateClosedUntilFullList	green	pass,run	github.com/Djarvur/sup-kv/internal/grpcapi	OK
+TestRed_R01_pacedSync20k	green	pass,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_R02_unackedDrain	green	pass,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_R02_burst	green	pass,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_R03_f14ReplacedNode	green	pass,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_P01_valueLimit	red	fail,run	github.com/Djarvur/sup-kv/internal/stand	OK
+TestRed_P01_valueLimitEngine	red	fail,run	github.com/Djarvur/sup-kv/internal/persistfile	OK
+
+# mutation stage (D-02 overlay probes)
+probe	name	seed	expected	observed	verdict
+control	-	848612892191557850	pass	pass	OK
+control	-	8612631937004137123	pass	pass	OK
+control	-	5033908244225396622	pass	pass	OK
+control	-	5619387756189613155	pass	pass	OK
+mutant	sync-without-tombstones	848612892191557850	fail	fail	OK
+mutant	periodic-sync-disabled	8612631937004137123	fail	pass	ERROR
