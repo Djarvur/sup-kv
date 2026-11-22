@@ -61,6 +61,13 @@ const (
 	DiscardTombstoneWithData = "tombstone_with_data"
 	DiscardBadChecksum       = "bad_checksum"
 	DiscardBadVersion        = "bad_version"
+
+	// DiscardBadSyncHeader is the DataSync header class (PROTO-01, T-4-02):
+	// a listing part whose chunk_count/chunk_index pair is outside its domain
+	// — count 0, an index outside 1..count, a count above the stream cap, or
+	// a count disagreeing with the live round — is discarded before any
+	// accumulation, clock call or entry comparison.
+	DiscardBadSyncHeader = "bad_sync_header"
 )
 
 // Design defaults a zero or negative Config field is normalized to, from
@@ -338,6 +345,12 @@ type DiscardStats struct {
 	TombstoneWithData uint64
 	BadChecksum       uint64
 	BadVersion        uint64
+
+	// BadSyncHeader covers the DataSync completeness header's domain
+	// (PROTO-01): a part outside chunk_count>=1, 1<=chunk_index<=count,
+	// count<=maxSyncChunks, or inconsistent with a live round is discarded
+	// before any accumulation or clock update.
+	BadSyncHeader uint64
 }
 
 // MergeStats counts the remote-merge observability signals (OBS-01, D-10):

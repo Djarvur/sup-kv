@@ -24,6 +24,11 @@ const (
 	cloneHandle         = "n2-clone"
 	defaultMaxClockLead = 60 * time.Second
 	longKeyLen          = storage.MaxKeyBytes + 1
+
+	// tooManySyncChunks is one above the core's maxSyncChunks (65 536), the
+	// first rejected chunk count. Kept as a literal because this external
+	// test package cannot see the unexported constant.
+	tooManySyncChunks = 65537
 )
 
 // newDiscardCore returns a fresh local-node core whose Config.Log appends to
@@ -98,6 +103,11 @@ func TestDiscard_classes(t *testing.T) {
 				Msg:          port.Hello{},
 			},
 			want: repl.DiscardStats{BadProtoVersion: 1},
+		},
+		{
+			name: "data sync with chunk_count 0 classifies BadSyncHeader",
+			in:   datagramFrom(peerID1, port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 0}),
+			want: repl.DiscardStats{BadSyncHeader: 1},
 		},
 		{
 			name: "own node_id with own run_id classifies OwnEcho",
@@ -309,6 +319,9 @@ func validateClass(msg port.Message, now time.Time) string {
 			return class
 		}
 	case port.DataSync:
+		if class := syncHeaderViolation(m); class != "" {
+			return class
+		}
 		for _, entry := range m.Entries {
 			if class := keyViolation(entry.Key); class != "" {
 				return class
@@ -317,6 +330,16 @@ func validateClass(msg port.Message, now time.Time) string {
 				return "BadVersion"
 			}
 		}
+	}
+	return ""
+}
+
+// syncHeaderViolation mirrors the completeness-header domain: count at least
+// 1, a 1-based index inside the round, and a count at or under the stream
+// cap.
+func syncHeaderViolation(msg port.DataSync) string {
+	if msg.ChunkCount < 1 || msg.ChunkIndex < 1 || msg.ChunkIndex > msg.ChunkCount || msg.ChunkCount > tooManySyncChunks {
+		return "BadSyncHeader"
 	}
 	return ""
 }
@@ -363,6 +386,8 @@ func bump(stats *repl.DiscardStats, class string) {
 		stats.BadChecksum++
 	case "BadVersion":
 		stats.BadVersion++
+	case "BadSyncHeader":
+		stats.BadSyncHeader++
 	}
 }
 
@@ -443,10 +468,16 @@ func randBody(rng *rand.Rand) port.Message {
 		for i := range entries {
 			entries[i] = port.SyncEntry{Key: randWireKey(rng), Version: testutil.RandNearVersion(rng)}
 		}
-		return port.DataSync{Entries: entries}
+		return syncPart(entries...)
 	default:
 		return port.SyncEntry{Key: randWireKey(rng), Version: testutil.RandNearVersion(rng)}
 	}
+}
+
+// syncPart stamps the 1-of-1 completeness header on entries — the shape an
+// honest sender uses for a listing that fits one chunk.
+func syncPart(entries ...port.SyncEntry) port.DataSync {
+	return port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: entries}
 }
 
 // randWireKey draws a key from the validation domain: mostly a small-space
@@ -735,16 +766,18 @@ func onlyClass(class string) repl.DiscardStats {
 		stats.BadChecksum = 1
 	case repl.DiscardBadVersion:
 		stats.BadVersion = 1
+	case repl.DiscardBadSyncHeader:
+		stats.BadSyncHeader = 1
 	}
 	return stats
 }
 
 // sumDiscards totals every discard class — the conservation check across all
-// ten counters.
+// eleven counters.
 func sumDiscards(stats repl.DiscardStats) uint64 {
 	return stats.BadCRC + stats.Undecodable + stats.BadProtoVersion + stats.OwnEcho +
 		stats.DuplicateNodeID + stats.EmptyKey + stats.KeyTooLong + stats.TombstoneWithData +
-		stats.BadChecksum + stats.BadVersion
+		stats.BadChecksum + stats.BadVersion + stats.BadSyncHeader
 }
 
 // validationRow is one TestDiscard_validationClasses table row: the datagram,
@@ -863,42 +896,42 @@ func TestDiscard_validationClasses(t *testing.T) {
 		},
 		{
 			name: "data sync entry with an empty key",
-			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-				{Key: "", Version: validWireVersion(7)},
-			}}),
+			in: datagramFrom(peerID1, syncPart(
+				port.SyncEntry{Key: "", Version: validWireVersion(7)},
+			)),
 			wantClass: repl.DiscardEmptyKey,
 		},
 		{
 			name: "data sync entry with a key over the limit",
-			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-				{Key: longKey, Version: validWireVersion(8)},
-			}}),
+			in: datagramFrom(peerID1, syncPart(
+				port.SyncEntry{Key: longKey, Version: validWireVersion(8)},
+			)),
 			wantClass: repl.DiscardKeyTooLong,
 			secret:    longKey,
 		},
 		{
 			name: "data sync entry with a far-future version",
-			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-				{Key: "sync/future", Version: futureWireVersion()},
-			}}),
+			in: datagramFrom(peerID1, syncPart(
+				port.SyncEntry{Key: "sync/future", Version: futureWireVersion()},
+			)),
 			wantClass: repl.DiscardBadVersion,
 			secret:    "sync/future",
 		},
 		{
 			name: "mixed data sync: the second entry invalidates the whole datagram",
-			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-				{Key: "sync/valid", Version: validWireVersion(9)},
-				{Key: "sync/poison", Version: futureWireVersion()},
-			}}),
+			in: datagramFrom(peerID1, syncPart(
+				port.SyncEntry{Key: "sync/valid", Version: validWireVersion(9)},
+				port.SyncEntry{Key: "sync/poison", Version: futureWireVersion()},
+			)),
 			wantClass: repl.DiscardBadVersion,
 			secret:    "sync/poison",
 		},
 		{
 			name: "order: an earlier entry's version is reported before a later entry's key",
-			in: datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-				{Key: "sync/future", Version: futureWireVersion()},
-				{Key: "", Version: validWireVersion(10)},
-			}}),
+			in: datagramFrom(peerID1, syncPart(
+				port.SyncEntry{Key: "sync/future", Version: futureWireVersion()},
+				port.SyncEntry{Key: "", Version: validWireVersion(10)},
+			)),
 			wantClass: repl.DiscardBadVersion,
 			secret:    "sync/future",
 		},
@@ -1005,7 +1038,205 @@ func assertDiscardedDatagram(t *testing.T, row validationRow, core *repl.Core, s
 	}
 }
 
-// countingClock is T-3-24's proof seam: it counts Tick and Update calls and
+// TestDiscard_badSyncHeader proves the listing-header class (PROTO-01,
+// T-4-02): each of the four header-domain violations is discarded as
+// bad_sync_header, counted once, WARNed once, with a detail naming the
+// offending values — and no clock call, no store write and no gate opening
+// happens. The last two rows prove the pipeline position: a valid part after
+// a rejected one still accumulates (the rejection created no stream), and a
+// part whose chunk_count disagrees with a live round is rejected without
+// disturbing the round's stored count.
+func TestDiscard_badSyncHeader(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	entry := port.SyncEntry{Key: "hdr/key", Version: validWireVersion(1)}
+	rows := []struct {
+		name       string
+		in         port.InboundDatagram
+		wantDetail []string
+	}{
+		{
+			name:       "chunk_count 0",
+			in:         datagramFrom(peerID1, port.DataSync{SyncID: 1, ChunkIndex: 0, ChunkCount: 0, Entries: []port.SyncEntry{entry}}),
+			wantDetail: []string{"chunk_count 0"},
+		},
+		{
+			name:       "chunk_index 0",
+			in:         datagramFrom(peerID1, port.DataSync{SyncID: 1, ChunkIndex: 0, ChunkCount: 2, Entries: []port.SyncEntry{entry}}),
+			wantDetail: []string{"chunk_index 0"},
+		},
+		{
+			name:       "chunk_index past chunk_count",
+			in:         datagramFrom(peerID1, port.DataSync{SyncID: 1, ChunkIndex: 3, ChunkCount: 2, Entries: []port.SyncEntry{entry}}),
+			wantDetail: []string{"chunk_index 3", "chunk_count 2"},
+		},
+		{
+			name:       "chunk_count above the stream cap",
+			in:         datagramFrom(peerID1, port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: tooManySyncChunks, Entries: []port.SyncEntry{entry}}),
+			wantDetail: []string{fmt.Sprintf("chunk_count %d", tooManySyncChunks)},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			var events []discardEvent
+			var logs []string
+			clk := &countingClock{inner: clock.NewClock(func() time.Time { return time.UnixMilli(testNowMs) }, 0, 0, testDriftWarn)}
+			st := &stateStore{store: storage.NewStore(localID, clk, storage.Config{})}
+			core := repl.New(localID, testRunID(localID), st, repl.Config{
+				OnDiscard: func(class, detail string) { events = append(events, discardEvent{class: class, detail: detail}) },
+				Log:       func(msg string) { logs = append(logs, msg) },
+			})
+			var out port.Outbox
+			core.HandleDatagram(now, row.in, &out)
+			out.Drain()
+
+			if got, want := core.Discards(), (repl.DiscardStats{BadSyncHeader: 1}); got != want {
+				t.Fatalf("Discards() = %+v, want exactly %+v — one datagram, one class", got, want)
+			}
+			if len(events) != 1 || events[0].class != repl.DiscardBadSyncHeader {
+				t.Fatalf("OnDiscard events = %+v, want exactly one %q event", events, repl.DiscardBadSyncHeader)
+			}
+			for _, want := range row.wantDetail {
+				if !strings.Contains(events[0].detail, want) {
+					t.Errorf("OnDiscard detail %q does not name %q — the header verdict must name the offending values", events[0].detail, want)
+				}
+			}
+			if core.SyncArrived() || core.ListingComplete() {
+				t.Fatal("a rejected header opened the gate, want both flags false — no accumulation may run")
+			}
+			if clk.ticks != 0 || clk.updates != 0 {
+				t.Errorf("clock calls (Tick %d, Update %d) for a rejected header, want zero of each", clk.ticks, clk.updates)
+			}
+			if got := len(st.store.Records()); got != 0 {
+				t.Errorf("store holds %d records after a rejected header, want none", got)
+			}
+			if len(logs) != 1 || !strings.Contains(logs[0], repl.DiscardBadSyncHeader) {
+				t.Fatalf("Config.Log = %v, want exactly one WARN naming %q", logs, repl.DiscardBadSyncHeader)
+			}
+		})
+	}
+
+	t.Run("a valid part after a rejected one still accumulates", func(t *testing.T) {
+		t.Parallel()
+		core, _ := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+
+		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 5, ChunkIndex: 0, ChunkCount: 0, Entries: []port.SyncEntry{entry}}), &out)
+		out.Drain()
+		if got, want := core.Discards(), (repl.DiscardStats{BadSyncHeader: 1}); got != want {
+			t.Fatalf("Discards() = %+v, want %+v after the rejected part", got, want)
+		}
+		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 5, ChunkIndex: 1, ChunkCount: 2, Entries: []port.SyncEntry{entry}}), &out)
+		out.Drain()
+		if core.SyncArrived() {
+			t.Fatal("SyncArrived() = true after chunk 1 of 2, want false — the rejected part must not have completed anything")
+		}
+		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 5, ChunkIndex: 2, ChunkCount: 2, Entries: []port.SyncEntry{entry}}), &out)
+		out.Drain()
+		if !core.SyncArrived() {
+			t.Fatal("SyncArrived() = false after the valid round completed, want true — the rejected part did not poison the stream")
+		}
+		if got, want := core.Discards(), (repl.DiscardStats{BadSyncHeader: 1}); got != want {
+			t.Fatalf("Discards() = %+v, want %+v — the valid parts must not add a discard", got, want)
+		}
+	})
+
+	t.Run("a part disagreeing with the live round keeps the round's count", func(t *testing.T) {
+		t.Parallel()
+		core, _ := newTestCore()
+		var out port.Outbox
+		core.Advance(now, &out)
+		out.Drain()
+
+		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 7, ChunkIndex: 1, ChunkCount: 3, Entries: []port.SyncEntry{entry}}), &out)
+		out.Drain()
+		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 7, ChunkIndex: 2, ChunkCount: 5, Entries: []port.SyncEntry{entry}}), &out)
+		out.Drain()
+		if got, want := core.Discards(), (repl.DiscardStats{BadSyncHeader: 1}); got != want {
+			t.Fatalf("Discards() = %+v, want %+v after the disagreeing part", got, want)
+		}
+		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 7, ChunkIndex: 2, ChunkCount: 3, Entries: []port.SyncEntry{entry}}), &out)
+		out.Drain()
+		if core.SyncArrived() {
+			t.Fatal("SyncArrived() = true after chunks 1 and 2 of 3, want false")
+		}
+		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 7, ChunkIndex: 3, ChunkCount: 3, Entries: []port.SyncEntry{entry}}), &out)
+		out.Drain()
+		if !core.SyncArrived() {
+			t.Fatal("SyncArrived() = false after the round completed at its original count 3, want true — the disagreeing part must not have replaced the stored count")
+		}
+	})
+}
+
+// TestDiscard_warnRateLimitedPerPeer proves the WARN limiter's key is
+// (node_id, class) on event time (D-06/D-07, T-4-04): one peer's repeated
+// foreign-version flood WARNs once per interval, while a second peer's first
+// occurrence inside the same interval gets its own WARN — one peer can never
+// suppress another's signal. The counters and the per-datagram OnDiscard
+// seam are untouched by the limiter.
+func TestDiscard_warnRateLimitedPerPeer(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	const warnInterval = 10 * time.Second // the pinned discardWarnInterval
+	var logs []string
+	var events []discardEvent
+	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
+	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
+	core := repl.New(localID, testRunID(localID), st, repl.Config{
+		OnDiscard: func(class, detail string) { events = append(events, discardEvent{class: class, detail: detail}) },
+		Log:       func(msg string) { logs = append(logs, msg) },
+	})
+	var out port.Outbox
+	feed := func(peer uint16, at time.Time) {
+		t.Helper()
+		core.HandleDatagram(at, port.InboundDatagram{
+			Source:       handleFor(peer),
+			Status:       port.ProtoVersionMismatch,
+			ProtoVersion: repl.SupportedProtoVersion + 1,
+			NodeID:       peer,
+			RunID:        testRunID(peer),
+		}, &out)
+		out.Drain()
+	}
+
+	feed(peerID1, now)
+	feed(peerID1, now)
+	feed(peerID2, now)
+	if len(logs) != 2 {
+		t.Fatalf("Config.Log fired %d time(s) for two peers in one interval, want 2 (one per peer): %v", len(logs), logs)
+	}
+	if len(events) != 3 {
+		t.Fatalf("OnDiscard fired %d time(s), want 3 — the seam stays per datagram", len(events))
+	}
+	if got := core.Discards().BadProtoVersion; got != 3 {
+		t.Fatalf("BadProtoVersion = %d, want 3 — the limiter never suppresses the counter", got)
+	}
+
+	feed(peerID2, now.Add(warnInterval-time.Nanosecond))
+	if len(logs) != 2 {
+		t.Fatalf("Config.Log fired %d time(s) inside the interval, want still 2: %v", len(logs), logs)
+	}
+	feed(peerID1, now.Add(warnInterval))
+	if len(logs) != 3 {
+		t.Fatalf("Config.Log fired %d time(s) at peer 1's interval boundary, want 3: %v", len(logs), logs)
+	}
+	feed(peerID2, now.Add(warnInterval))
+	if len(logs) != 4 {
+		t.Fatalf("Config.Log fired %d time(s) at peer 2's interval boundary, want 4: %v", len(logs), logs)
+	}
+	for _, event := range events {
+		if event.class != repl.DiscardBadProtoVersion {
+			t.Errorf("OnDiscard class = %q, want %q", event.class, repl.DiscardBadProtoVersion)
+		}
+		if event.detail != handleFor(peerID1) && event.detail != handleFor(peerID2) {
+			t.Errorf("OnDiscard detail = %q, want the datagram's source handle", event.detail)
+		}
+	}
+}
+
 // otherwise delegates to a real clock, so a test asserts an invalid datagram
 // never reaches the clock at all — not merely that its reading was unused.
 type countingClock struct {
@@ -1067,19 +1298,27 @@ func TestDiscard_beforeClock(t *testing.T) {
 		{"long key request", datagramFrom(peerID1, port.DataRequest{Key: longKey})},
 		{"empty key ack", datagramFrom(peerID1, port.Ack{Key: "", Version: validWireVersion(5)})},
 		{"long key ack", datagramFrom(peerID1, port.Ack{Key: longKey, Version: validWireVersion(6)})},
-		{"sync empty key", datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-			{Key: "", Version: validWireVersion(7)},
-		}})},
-		{"sync long key", datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-			{Key: longKey, Version: validWireVersion(8)},
-		}})},
-		{"sync future version", datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-			{Key: "t/sync-future", Version: futureWireVersion()},
-		}})},
-		{"sync valid then poisoned entry", datagramFrom(peerID1, port.DataSync{Entries: []port.SyncEntry{
-			{Key: "t/sync-ok", Version: validWireVersion(9)},
-			{Key: "t/sync-poison", Version: futureWireVersion()},
-		}})},
+		{"sync empty key", datagramFrom(peerID1, syncPart(
+			port.SyncEntry{Key: "", Version: validWireVersion(7)},
+		))},
+		{"sync long key", datagramFrom(peerID1, syncPart(
+			port.SyncEntry{Key: longKey, Version: validWireVersion(8)},
+		))},
+		{"sync future version", datagramFrom(peerID1, syncPart(
+			port.SyncEntry{Key: "t/sync-future", Version: futureWireVersion()},
+		))},
+		{"sync valid then poisoned entry", datagramFrom(peerID1, syncPart(
+			port.SyncEntry{Key: "t/sync-ok", Version: validWireVersion(9)},
+			port.SyncEntry{Key: "t/sync-poison", Version: futureWireVersion()},
+		))},
+		{"sync header chunk_count 0", datagramFrom(peerID1, port.DataSync{
+			SyncID: 1, ChunkIndex: 0, ChunkCount: 0,
+			Entries: []port.SyncEntry{{Key: "t/sync-header", Version: validWireVersion(10)}},
+		})},
+		{"sync header index past count", datagramFrom(peerID1, port.DataSync{
+			SyncID: 1, ChunkIndex: 3, ChunkCount: 2,
+			Entries: []port.SyncEntry{{Key: "t/sync-header", Version: validWireVersion(11)}},
+		})},
 	}
 
 	clk := &countingClock{inner: clock.NewClock(func() time.Time { return time.UnixMilli(testNowMs) }, 0, 0, testDriftWarn)}

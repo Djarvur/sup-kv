@@ -139,7 +139,10 @@ func BenchmarkHandleDataSync(b *testing.B) {
 func benchHandleDataSync(b *testing.B, keys int) {
 	b.Helper()
 	core, head := benchFixture(b, keys)
-	in := benchDatagram(port.DataSync{Entries: head})
+	// The 1-of-1 completeness header keeps the datagram on the compare path:
+	// without it the handler would reject the fixture as a malformed listing
+	// and the benchmark would measure the discard branch.
+	in := benchDatagram(port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: head})
 	var out port.Outbox
 	b.ReportAllocs()
 	b.ReportMetric(float64(keys), "store-keys")

@@ -268,6 +268,7 @@ func TestMetrics_families(t *testing.T) {
 		"supkv_datagrams_discarded_total{class=\"tombstone_with_data\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"bad_checksum\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"bad_version\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"bad_sync_header\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"hello\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"data\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"ack\"} 0\n",
@@ -296,6 +297,7 @@ func TestMetrics_values(t *testing.T) {
 			TombstoneWithData: 13,
 			BadChecksum:       14,
 			BadVersion:        15,
+			BadSyncHeader:     16,
 		}
 	}
 	src.Paced = func() uint64 { return 7001 }
@@ -313,6 +315,7 @@ func TestMetrics_values(t *testing.T) {
 		"supkv_datagrams_discarded_total{class=\"tombstone_with_data\"} 13\n",
 		"supkv_datagrams_discarded_total{class=\"bad_checksum\"} 14\n",
 		"supkv_datagrams_discarded_total{class=\"bad_version\"} 15\n",
+		"supkv_datagrams_discarded_total{class=\"bad_sync_header\"} 16\n",
 	} {
 		if !strings.Contains(out, line) {
 			t.Errorf("output lacks the by-effect sample line %q:\n%s", line, out)
