@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 9
+current_plan: 10
 status: executing
-stopped_at: Completed 04-08-PLAN.md
-last_updated: "2026-11-22T05:31:54.896Z"
+stopped_at: Completed 04-09-PLAN.md
+last_updated: "2026-11-22T05:55:44.622Z"
 last_activity: 2026-11-22
 last_activity_desc: Completed 04-07-PLAN.md (three-node broadcast convergence)
-state_head: 70ff0dd648235fbc4f34e798f5644bc98bdd1514
+state_head: 4fd41d5da4edac0523ec58bb0c87df81007376d6
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 42
+  completed_plans: 43
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 9
+Current Plan: 10
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Completed 04-07-PLAN.md
@@ -99,6 +99,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P06 | 294 | 2 tasks | 5 files |
 | Phase 04 P07 | 287s | 1 tasks | 1 files |
 | Phase 04 P08 | 1800s | 3 tasks | 9 files |
+| Phase 04 P09 | 847 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -267,6 +268,9 @@ Recent decisions affecting current work:
 - [Phase 04]: One immutable listingBuild is shared by every FIFO while it is younger than sync_interval and StateStore.Generation is unchanged; any store mutation forces exactly one rebuild before the next listing (T-4-24).
 - [Phase 04]: Only a restart advances the per-peer listing rotation; the first-seen round starts at chunk 0, preserving the pinned rotation contracts while restarts keep covering the key space.
 - [Phase 04]: The first-seen Hello enqueues one targeted listing and falls through to the discovery flush instead of returning early, so R-02's pending-write drain bound survives PROTO-04.
+- [Phase 04]: The notification guard compares against the tracked pending version, never store.Version: the store already holds the first notified version when NotifyLocalWrite runs, so a <= store comparison would swallow the normal path; absent tracking always proceeds and the first notification still broadcasts (PROTO-05).
+- [Phase 04]: peer.seenRuns is a fixed 8-entry ring of previously current run_ids: an unseen run is a restart with one listing, while a seen non-current run is a counted, rate-limited configuration error dropped with no listing and no row/liveness change; nine runs keep the first, the tenth evicts it (PROTO-06).
+- [Phase 04]: All three duplicate-node_id paths route through one per-(node_id, class) rate-limited WARN helper, and the discard totality model now mirrors the bounded seen-run history so counter conservation stays exact.
 
 ### Pending Todos
 
@@ -289,7 +293,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T05:31:54.586Z
-Stopped at: Completed 04-08-PLAN.md
+Last session: 2026-11-22T05:55:44.353Z
+Stopped at: Completed 04-09-PLAN.md
 Resume file: None
 Next action: continue Phase 4 with `/gsd:execute-phase 4` (04-08-PLAN.md is next)
