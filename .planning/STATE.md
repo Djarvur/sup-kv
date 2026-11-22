@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 10
+current_plan: 11
 status: executing
-stopped_at: Completed 04-09-PLAN.md
-last_updated: "2026-11-22T05:55:44.622Z"
+stopped_at: Completed 04-10-PLAN.md
+last_updated: "2026-11-22T06:12:55.071Z"
 last_activity: 2026-11-22
 last_activity_desc: Completed 04-07-PLAN.md (three-node broadcast convergence)
-state_head: 4fd41d5da4edac0523ec58bb0c87df81007376d6
+state_head: 14b69580caade663982db7da5d535a57969a097b
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 43
+  completed_plans: 44
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 10
+Current Plan: 11
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Completed 04-07-PLAN.md
@@ -100,6 +100,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P07 | 287s | 1 tasks | 1 files |
 | Phase 04 P08 | 1800s | 3 tasks | 9 files |
 | Phase 04 P09 | 847 | 2 tasks | 5 files |
+| Phase 04 P10 | 397s | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -271,6 +272,12 @@ Recent decisions affecting current work:
 - [Phase 04]: The notification guard compares against the tracked pending version, never store.Version: the store already holds the first notified version when NotifyLocalWrite runs, so a <= store comparison would swallow the normal path; absent tracking always proceeds and the first notification still broadcasts (PROTO-05).
 - [Phase 04]: peer.seenRuns is a fixed 8-entry ring of previously current run_ids: an unseen run is a restart with one listing, while a seen non-current run is a counted, rate-limited configuration error dropped with no listing and no row/liveness change; nine runs keep the first, the tenth evicts it (PROTO-06).
 - [Phase 04]: All three duplicate-node_id paths route through one per-(node_id, class) rate-limited WARN helper, and the discard totality model now mirrors the bounded seen-run history so counter conservation stays exact.
+- [Phase 04]: 04-10: The N=3 simulator scenario asserts same-seed TraceDigest equality in addition to final convergence, so scenario-local determinism is pinned where listing traffic grows.
+- [Phase 04]: 04-10: runThreeNodeScenario threads *testing.T so the mid-partition teeth (node 3 must not have converged) are asserted in the factored body; the returned cluster+digest contract is as planned.
+- [Phase 04]: 04-10: The joiner's partial-listing window is observed through TraceDigest DataSync deliveries and the exported SyncArrived/ListingComplete reads — no test-only production counter.
+- [Phase 04]: 04-10: ReplaceNodeWithState onto a stale snapshot opens no gate — both completeness reads stay false at the restart instant and node A's newer value survives (F14 at simulator level).
+- [Phase 04]: 04-10: 14.9's decision index names TestScenario_threeNode; the real-socket three-node test is recorded as the wiring proof.
+- [Phase 04]: 04-10: First-seen listing traffic moved no simnet extension bound or determinism expectation; the audit is recorded in comments (same-seed equality, budget armed after discovery listings).
 
 ### Pending Todos
 
@@ -293,7 +300,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T05:55:44.353Z
-Stopped at: Completed 04-09-PLAN.md
+Last session: 2026-11-22T06:12:54.760Z
+Stopped at: Completed 04-10-PLAN.md
 Resume file: None
 Next action: continue Phase 4 with `/gsd:execute-phase 4` (04-08-PLAN.md is next)
