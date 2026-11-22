@@ -59,6 +59,15 @@ type ServerOptions struct {
 	// defaultStartupGate.
 	StartupGate time.Duration
 
+	// ListedKey reports whether a peer's complete listing named key — the
+	// adapter's listing-mirror membership (D-01, rule 14.5(6)). Nil means
+	// no listing knowledge: the single-node configuration and tests. The
+	// production adapter publishes completeness and membership in one
+	// atomic snapshot, so a gate open implies the listed keys are visible;
+	// the handlers consult this seam only AFTER the gate, because a closed
+	// node answers Unavailable for every read whatever the listing says.
+	ListedKey func(key string) bool
+
 	// KnownPeers reports the known-peer count for the wait_for_replication
 	// aggregate (D-08/D-10): the wait captures it exactly once before any
 	// waiting, so peers discovered mid-wait never extend the awaited set.

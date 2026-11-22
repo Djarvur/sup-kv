@@ -2,6 +2,7 @@ package grpcapi_test
 
 import (
 	"bytes"
+	"context"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -53,17 +54,36 @@ func newGateServer(t *testing.T, opts grpcapi.ServerOptions) *testHarness {
 	return buildTestServer(t, testServerConfig{gate: opts})
 }
 
-// TestGate_writesUnavailableReadsOK proves the API-04 gate from the closed
-// side: with the sync fake never flipping and the StartupGate backstop an
-// hour away, Set and Delete return Unavailable — the gate check is the
-// handlers' first statement, so even an empty key surfaces Unavailable,
-// not InvalidArgument — while Get, List and a Watch subscription are
-// served normally. The Watch row rides a record applied through the engine
-// seam: peers' writes merging during the gate is exactly the window
-// API-04's read service exists for, and the subscriber must see them.
-func TestGate_writesUnavailableReadsOK(t *testing.T) {
+// assertWatchCode checks the status code a Watch subscription ends with: a
+// server-streaming call may surface the handler's rejection either from the
+// call itself or from the first receive, and both are the same verdict. The
+// bounded receive keeps a mis-behaving handler from hanging the test.
+func assertWatchCode(t *testing.T, ts *testHarness, what string, want codes.Code) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), gateWait)
+	defer cancel()
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{})
+	if err != nil {
+		assertCode(t, what, err, want)
+		return
+	}
+	_, err = stream.Recv()
+	assertCode(t, what, err, want)
+}
+
+// TestGate_readsAndWritesUnavailable proves the API-04/D-01 gate from the
+// closed side: with the sync fake never flipping and the StartupGate
+// backstop an hour away, every data RPC — Get, List, Watch, Set, Delete,
+// SnapshotCreate, SnapshotLoad — answers Unavailable, and health mirrors
+// the closed state as NOT_SERVING (API-06). The non-nil ListedKey seam
+// claims every key is listed and changes nothing: the gate check is the
+// handlers' first statement, before any listing knowledge or request
+// validation.
+func TestGate_readsAndWritesUnavailable(t *testing.T) {
 	t.Parallel()
-	ts := newGateServer(t, closedGateOptions())
+	opts := closedGateOptions()
+	opts.ListedKey = func(string) bool { return true }
+	ts := newGateServer(t, opts)
 	ctx := t.Context()
 
 	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gate/a", Value: []byte("v")})
@@ -71,36 +91,83 @@ func TestGate_writesUnavailableReadsOK(t *testing.T) {
 	if status.Convert(err).Message() != "startup gate: waiting for first sync round or startup_gate" {
 		t.Fatalf("Set during the gate message: want the gate wording, got %q", status.Convert(err).Message())
 	}
-	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "", Value: []byte("v")})
-	assertCode(t, "Set empty key during the gate", err, codes.Unavailable)
 	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "gate/a"})
 	assertCode(t, "Delete during the gate", err, codes.Unavailable)
 
 	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: "gate/a"})
-	assertCode(t, "Get during the gate", err, codes.NotFound)
-	list, err := ts.client.List(ctx, &apiproto.ListRequest{})
+	assertCode(t, "Get during the gate", err, codes.Unavailable)
+	_, err = ts.client.List(ctx, &apiproto.ListRequest{})
+	assertCode(t, "List during the gate", err, codes.Unavailable)
+	assertWatchCode(t, ts, "Watch during the gate", codes.Unavailable)
+
+	_, err = ts.client.SnapshotCreate(ctx, &apiproto.SnapshotCreateRequest{Name: "gated"})
+	assertCode(t, "SnapshotCreate during the gate", err, codes.Unavailable)
+	_, err = ts.client.SnapshotLoad(ctx, &apiproto.SnapshotLoadRequest{Name: "gated"})
+	assertCode(t, "SnapshotLoad during the gate", err, codes.Unavailable)
+
+	resp, err := ts.health.Check(ctx, &healthpb.HealthCheckRequest{})
 	if err != nil {
-		t.Fatalf("List during the gate: want OK, got error: %v", err)
+		t.Fatalf("Check during the gate: want OK, got error: %v", err)
 	}
-	if keys := list.GetKeys(); len(keys) != 0 {
-		t.Fatalf("List during the gate: want no keys, got %v", keys)
+	if resp.GetStatus() != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("health during the gate: want NOT_SERVING, got %v", resp.GetStatus())
+	}
+}
+
+// TestGate_emptyKeyStillUnavailable proves the gate check precedes request
+// validation: a Get with an empty key while closed is Unavailable, not
+// InvalidArgument — the A7 empty-key check runs only past the gate.
+func TestGate_emptyKeyStillUnavailable(t *testing.T) {
+	t.Parallel()
+	ts := newGateServer(t, closedGateOptions())
+	ctx := t.Context()
+
+	_, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: ""})
+	assertCode(t, "Get empty key during the gate", err, codes.Unavailable)
+}
+
+// TestGate_openRestoresReads proves the open side: once the sync flip opens
+// the gate, Get and List serve the engine's answers again — including the
+// records peers merged during the closed window.
+func TestGate_openRestoresReads(t *testing.T) {
+	t.Parallel()
+	var sync atomic.Bool
+	ts := newGateServer(t, grpcapi.ServerOptions{
+		SyncArrived: sync.Load,
+		StartupGate: gateTestNeverBackstop,
+	})
+	ctx := t.Context()
+
+	_, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: "gate/restored"})
+	assertCode(t, "Get before the gate opens", err, codes.Unavailable)
+	_, err = ts.client.List(ctx, &apiproto.ListRequest{})
+	assertCode(t, "List before the gate opens", err, codes.Unavailable)
+
+	peer := storage.Record{
+		Version: version.PackVersion(time.Now().UnixMilli()+2, 0, 0x0BBB),
+		Data:    []byte("restored"),
+	}
+	_, _, err = ts.engine.ApplyRemote("gate/restored", peer)
+	if err != nil {
+		t.Fatalf("ApplyRemote while the gate is closed: want nil, got error: %v", err)
 	}
 
-	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{})
+	sync.Store(true)
+	awaitGateOpen(t, ts)
+
+	get, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: "gate/restored"})
 	if err != nil {
-		t.Fatalf("Watch during the gate: want OK, got error: %v", err)
+		t.Fatalf("Get after the gate opens: want OK, got error: %v", err)
 	}
-	nowMs := time.Now().UnixMilli()
-	peer := storage.Record{Version: version.PackVersion(nowMs+2, 0, 0x0BBB), Data: []byte("peer-write")}
-	_, _, err = ts.engine.ApplyRemote("gate/peer", peer)
+	if !bytes.Equal(get.GetRecord().GetValue(), []byte("restored")) {
+		t.Fatalf("Get after the gate opens: want %q, got %q", "restored", get.GetRecord().GetValue())
+	}
+	list, err := ts.client.List(ctx, &apiproto.ListRequest{})
 	if err != nil {
-		t.Fatalf("ApplyRemote during the gate: want nil, got error: %v", err)
+		t.Fatalf("List after the gate opens: want OK, got error: %v", err)
 	}
-	ev := recvEvent(t, stream)
-	if ev.GetRecord().GetKey() != "gate/peer" ||
-		!bytes.Equal(ev.GetRecord().GetValue(), []byte("peer-write")) {
-		t.Fatalf("watch event during the gate = (%s, %q), want (gate/peer, peer-write)",
-			ev.GetRecord().GetKey(), ev.GetRecord().GetValue())
+	if keys := list.GetKeys(); len(keys) != 1 || keys[0] != "gate/restored" {
+		t.Fatalf("List after the gate opens: want [gate/restored], got %v", keys)
 	}
 }
 
