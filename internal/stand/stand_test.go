@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
 	"github.com/Djarvur/sup-kv/internal/app/storage"
@@ -620,4 +621,123 @@ func TestStand_oversizeKeyF2c(t *testing.T) {
 	signalAndWaitExit(t, nodeA)
 	assertNoPanic(t, nodeA, "the key-bound node A")
 	assertNoPanic(t, nodeB, "the boundary-replicating node B")
+}
+
+// The startup-gate-empty stand proofs' knobs: the lone node's explicit pair
+// (the empty gate far past the normal one), the closed-side probes, the
+// derivation gate, and the two-empty-node backstop with its much shorter
+// serving bound (a third of the backstop, so only the complete-list exchange
+// can satisfy it).
+const (
+	standLoneNormalGate    = 200 * time.Millisecond
+	standLoneEmptyGate     = 2 * time.Second
+	standLoneClosedProbe   = 600 * time.Millisecond
+	standDerivedGate       = 3 * time.Second
+	standDerivedServeWait  = 5 * time.Second
+	standFrozenClosedProbe = 2 * time.Second
+	standTwoEmptyBackstop  = 30 * time.Second
+)
+
+// awaitHealthReachable waits until the endpoint's health service answers at all
+// (a transport-level reply, whatever its status) — the closed-side probes'
+// precondition, so their timed check never races the listener's startup.
+func awaitHealthReachable(t *testing.T, addr string, timeout time.Duration) {
+	t.Helper()
+	waitFor(t, timeout, "health answering on "+addr, func() bool {
+		_, err := standHealthStatus(t, addr)
+		return err == nil
+	})
+}
+
+// TestStand_startupGateEmptyLoneNode pins the harness yield rule together with
+// the lone empty node's wait: with an explicit --startup-gate-empty=2s in the
+// extras the node is still NOT_SERVING at 600 ms — past the 200 ms normal gate
+// — and then opens on the explicit empty gate. A harness that appended a
+// derived empty gate after the extras would overwrite the 2 s with 200 ms and
+// serve by the 600 ms probe (ADR 0006: the two parameters are separate, and a
+// scenario's explicit empty gate always wins).
+func TestStand_startupGateEmptyLoneNode(t *testing.T) {
+	t.Parallel()
+	p := newStandPair(t)
+	started := time.Now()
+	node := startStandNode(t, p, standNodeAID,
+		"--startup-gate="+standLoneNormalGate.String(),
+		"--startup-gate-empty="+standLoneEmptyGate.String(),
+	)
+	awaitHealthReachable(t, p.grpcA, servingDeadline)
+	if elapsed := time.Since(started); elapsed < standLoneClosedProbe {
+		time.Sleep(standLoneClosedProbe - elapsed)
+	}
+	got, err := standHealthStatus(t, p.grpcA)
+	if err != nil || got != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("the lone empty node's health at >= %v = (%v, err=%v), want NOT_SERVING: the explicit --startup-gate-empty=%v must govern, not the derived %v",
+			standLoneClosedProbe, got, err, standLoneEmptyGate, standLoneNormalGate)
+	}
+	awaitServing(t, p.grpcA, standDerivedServeWait)
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the lone empty-gate node")
+}
+
+// TestStand_startupGateEmptyDerivedFromExtras pins the harness rule that keeps
+// the frozen R-03 test deterministic (RESEARCH Pitfall 1, T-4-13): the harness
+// derives --startup-gate-empty from an explicit --startup-gate in the scenario
+// extras, so the explicit normal gate governs BOTH timers. The first row is
+// the executable proof — without the derivation the 60 s production default
+// would keep the lone node closed past the 5 s wait; the second row pins the
+// frozen 30 s shape closed at 2 s without waiting the timer out.
+func TestStand_startupGateEmptyDerivedFromExtras(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the explicit normal gate governs the derived empty backstop", func(t *testing.T) {
+		t.Parallel()
+		p := newStandPair(t)
+		started := time.Now()
+		node := startStandNode(t, p, standNodeAID, "--startup-gate="+standDerivedGate.String())
+		// A lone node hears no peer, so only the derived backstop can open
+		// the gate; if the harness did not derive it, the 60 s production
+		// default governs and this wait fails.
+		awaitServing(t, p.grpcA, standDerivedServeWait)
+		if elapsed := time.Since(started); elapsed < standDerivedGate {
+			t.Fatalf("the derived empty gate opened %v after launch, want at least the explicit --startup-gate=%v",
+				elapsed, standDerivedGate)
+		}
+		signalAndWaitExit(t, node)
+		assertNoPanic(t, node, "the derived-empty-gate node")
+	})
+
+	t.Run("the frozen 30 s shape stays closed at 2 s", func(t *testing.T) {
+		t.Parallel()
+		p := newStandPair(t)
+		node := startStandNode(t, p, standNodeAID, "--startup-gate="+redR03StartupGate.String())
+		awaitHealthReachable(t, p.grpcA, servingDeadline)
+		time.Sleep(standFrozenClosedProbe)
+		got, err := standHealthStatus(t, p.grpcA)
+		if err != nil || got != healthpb.HealthCheckResponse_NOT_SERVING {
+			t.Fatalf("the frozen %v shape's health after %v = (%v, err=%v), want NOT_SERVING (the R-03 closed-side window)",
+				redR03StartupGate, standFrozenClosedProbe, got, err)
+		}
+		signalAndWaitExit(t, node)
+		assertNoPanic(t, node, "the frozen-shape node")
+	})
+}
+
+// TestStand_startupGateEmptyTwoEmptyNodes pins ADR 0006's first-start rule: two
+// empty nodes exchange complete empty listings and both open well before the
+// 30 s empty backstop — the 10 s serving bound is a third of the backstop, so a
+// broken complete-listing path leaves both closed past the deadline instead of
+// passing on the timeout. The explicit --startup-gate-empty in the extras also
+// re-proves the harness yield rule on the pair's shared extras.
+func TestStand_startupGateEmptyTwoEmptyNodes(t *testing.T) {
+	t.Parallel()
+	p, nodeA, nodeB := startStandPair(t, "--startup-gate-empty="+standTwoEmptyBackstop.String())
+	started := time.Now()
+	deadline := started.Add(servingDeadline)
+	awaitServing(t, p.grpcA, time.Until(deadline))
+	awaitServing(t, p.grpcB, time.Until(deadline))
+	t.Logf("both empty nodes served %v after launch, well inside the %v empty backstop",
+		time.Since(started), standTwoEmptyBackstop)
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the first empty node")
+	assertNoPanic(t, nodeB, "the second empty node")
 }

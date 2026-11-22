@@ -485,7 +485,7 @@ func assertExitCode(t *testing.T, err error, want int) {
 // awaitServing polls the gRPC health Check over real TCP until it reports
 // SERVING — the startup gate opened. Each poll uses a fresh client so the
 // poll cadence never couples to one connection's reconnect backoff.
-func awaitServing(t *testing.T, addr string, timeout time.Duration) { //nolint:unparam // every stand caller passes servingDeadline; stable harness shape, moved not rebuilt (D-03).
+func awaitServing(t *testing.T, addr string, timeout time.Duration) {
 	t.Helper()
 	waitFor(t, timeout, "health SERVING on "+addr, func() bool {
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -624,12 +624,13 @@ func startStandLoggedNode(t *testing.T, p *standPair, nodeID int, extra ...strin
 
 // startStandPair launches both nodes of a fresh topology — the scenarios
 // whose nodes start together; the empty-disk scenario drives the pieces
-// itself.
-func startStandPair(t *testing.T) (p *standPair, nodeA, nodeB *standNode) {
+// itself. The variadic extras are appended to BOTH nodes (the zero-arg call
+// sites stay unchanged), so a scenario-wide flag reaches the pair at once.
+func startStandPair(t *testing.T, extra ...string) (p *standPair, nodeA, nodeB *standNode) {
 	t.Helper()
 	p = newStandPair(t)
-	nodeA = startStandNode(t, p, standNodeAID)
-	nodeB = startStandNode(t, p, standNodeBID)
+	nodeA = startStandNode(t, p, standNodeAID, extra...)
+	nodeB = startStandNode(t, p, standNodeBID, extra...)
 	return p, nodeA, nodeB
 }
 

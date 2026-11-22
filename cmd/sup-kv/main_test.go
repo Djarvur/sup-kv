@@ -309,7 +309,7 @@ func assertExitCode(t *testing.T, err error, want int) {
 // awaitServing polls the gRPC health Check over real TCP until it reports
 // SERVING — the startup gate opened. Each poll uses a fresh client so the
 // poll cadence never couples to one connection's reconnect backoff.
-func awaitServing(t *testing.T, addr string, timeout time.Duration) { //nolint:unparam // every caller passes servingDeadline; stable harness shape, extended not rebuilt (06-07).
+func awaitServing(t *testing.T, addr string, timeout time.Duration) {
 	t.Helper()
 	waitFor(t, timeout, "health SERVING on "+addr, func() bool {
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -394,6 +394,7 @@ func TestMain_precedence(t *testing.T) {
 		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udp1),
 		"--dump-path="+dump1,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	awaitServing(t, envAddr, servingDeadline)
 	signalAndWaitExit(t, node1)
@@ -408,6 +409,7 @@ func TestMain_precedence(t *testing.T) {
 		"--dump-path="+dump2,
 		"--grpc-addr="+flagAddr,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	awaitServing(t, flagAddr, servingDeadline)
 	signalAndWaitExit(t, node2)
@@ -537,6 +539,7 @@ func TestMain_valueMaxDatagram(t *testing.T) {
 				"--grpc-addr="+addr,
 				"--dump-path="+dumpPath,
 				"--startup-gate=10ms",
+				"--startup-gate-empty=10ms",
 				"--value-max-bytes="+strconv.Itoa(tc.valueMax),
 			)
 			awaitServing(t, addr, servingDeadline)
@@ -614,6 +617,120 @@ func TestMain_startupGateEmptyRange(t *testing.T) {
 	}
 }
 
+// TestMain_startupGateEmptySelection pins the D-02 empty-vs-data selection end
+// to end through health timing only: a node that loaded no records waits the
+// empty backstop — still NOT_SERVING after the normal gate would have opened,
+// then SERVING once the empty gate elapses — while a node restarted over a
+// dump holding one key opens on the normal gate inside its bound. A seeded
+// node never consults startup_gate_empty, and no engine internals are read.
+func TestMain_startupGateEmptySelection(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	t.Run("an empty node waits the empty backstop", func(t *testing.T) {
+		t.Parallel()
+		dumpPath := filepath.Join(t.TempDir(), "dump.json")
+		udpPort := freeUDPPort(t)
+		addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+		const normalGate, emptyGate = 50 * time.Millisecond, 1500 * time.Millisecond
+		started := time.Now()
+		node := startNode(t, bin, nil,
+			"--node-id=1",
+			"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+			"--dump-path="+dumpPath,
+			"--grpc-addr="+addr,
+			"--startup-gate="+normalGate.String(),
+			"--startup-gate-empty="+emptyGate.String(),
+		)
+		// A lone empty node hears no peer, so only a backstop can open the
+		// gate. The 300 ms probe is six normal gates past launch: a node
+		// that chose the normal backstop is SERVING well before it.
+		waitFor(t, servingDeadline, "the empty node's health endpoint answering", func() bool {
+			_, _, ok := healthAnswer(t, addr)
+			return ok
+		})
+		if elapsed := time.Since(started); elapsed < startupGateSelectionProbe {
+			time.Sleep(startupGateSelectionProbe - elapsed)
+		}
+		status, _, ok := healthAnswer(t, addr)
+		if !ok || status != healthpb.HealthCheckResponse_NOT_SERVING {
+			t.Fatalf("the empty node's health at >= %v after launch = (%v, ok=%t), want NOT_SERVING: the empty backstop (%v), not the normal gate (%v), must govern",
+				startupGateSelectionProbe, status, ok, emptyGate, normalGate)
+		}
+		awaitServing(t, addr, 5*time.Second)
+		signalAndWaitExit(t, node)
+		assertNoPanic(t, node, "the empty-gate node")
+	})
+
+	t.Run("a seeded node opens on the normal gate", func(t *testing.T) {
+		t.Parallel()
+		dumpPath := filepath.Join(t.TempDir(), "dump.json")
+		udpPort := freeUDPPort(t)
+		addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+		seedKey := "startup-gate-empty/seed"
+		const normalGate, emptyGate = 50 * time.Millisecond, 1500 * time.Millisecond
+		baseFlags := []string{
+			"--node-id=1",
+			"--bind-addr=0.0.0.0:" + strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:" + strconv.Itoa(udpPort),
+			"--dump-path=" + dumpPath,
+			"--grpc-addr=" + addr,
+		}
+
+		// First run: a fast empty-gated node writes one key and exits
+		// cleanly, so the restart's dump holds exactly one record.
+		seed := startNode(t, bin, nil, append(baseFlags,
+			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
+		)...)
+		awaitServing(t, addr, servingDeadline)
+		client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
+		ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+		_, err := client.Set(ctx, &apiproto.SetRequest{Key: seedKey, Value: []byte(smokeValue)})
+		cancel()
+		if err != nil {
+			t.Fatalf("Set(%q) on the seeding run: %v", seedKey, err)
+		}
+		signalAndWaitExit(t, seed)
+
+		// The restart loads the record, so the normal gate governs: 300 ms
+		// leaves room for process start plus the 50 ms gate while staying far
+		// below the empty backstop a broken selection would choose.
+		started := time.Now()
+		node := startNode(t, bin, nil, append(baseFlags,
+			"--startup-gate="+normalGate.String(),
+			"--startup-gate-empty="+emptyGate.String(),
+		)...)
+		awaitServing(t, addr, servingDeadline)
+		if elapsed := time.Since(started); elapsed > startupGateSeededBound {
+			t.Fatalf("the seeded node opened %v after launch, want within %v (the normal gate, not the %v empty backstop)",
+				elapsed, startupGateSeededBound, emptyGate)
+		}
+		signalAndWaitExit(t, node)
+		assertNoPanic(t, node, "the seeded-gate node")
+	})
+}
+
+// healthAnswer performs one health Check against addr. ok is false when the
+// listener is not up yet — a transient transport error — so polls treat it as
+// not-yet rather than failing.
+func healthAnswer(t *testing.T, addr string) (healthpb.HealthCheckResponse_ServingStatus, error, bool) {
+	t.Helper()
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return healthpb.HealthCheckResponse_SERVICE_UNKNOWN, err, false
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
+	defer cancel()
+	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		return healthpb.HealthCheckResponse_SERVICE_UNKNOWN, err, false
+	}
+	return resp.GetStatus(), nil, true
+}
+
 // bindAddrWarnMsg is the stable substring of XPORT-09's non-wildcard bind
 // WARN — the message, not its detail attr, so the assertion pins the one
 // startup line the operator sees.
@@ -639,6 +756,7 @@ func TestMain_bindAddrWarn(t *testing.T) {
 			"--grpc-addr="+grpcAddr,
 			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
 		)
 		awaitServing(t, grpcAddr, servingDeadline)
 		waitFor(t, servingDeadline, "the non-wildcard bind WARN", func() bool {
@@ -661,6 +779,7 @@ func TestMain_bindAddrWarn(t *testing.T) {
 			"--grpc-addr="+grpcAddr,
 			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
 		)
 		// The WARN is emitted synchronously before wire, so a serving node
 		// has already decided the question.
@@ -700,6 +819,7 @@ func TestMain_duplicateBind(t *testing.T) {
 		"--grpc-addr=127.0.0.1:"+strconv.Itoa(freeTCPPort(t)),
 		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	assertExitCode(t, err, 1)
 	if !strings.Contains(out, "address already in use") {
@@ -729,6 +849,7 @@ func TestMain_lifecycle(t *testing.T) {
 		"--dump-path="+dumpPath,
 		"--grpc-addr="+addr,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	awaitServing(t, addr, servingDeadline)
 
@@ -782,6 +903,7 @@ func TestMain_socketBuffersLogged(t *testing.T) {
 		"--dump-path="+dumpPath,
 		"--grpc-addr="+fmt.Sprintf("127.0.0.1:%d", grpcPort),
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	waitFor(t, servingDeadline, "the static Socket buffers startup line with positive sizes", func() bool {
 		recv, send, ok := parseSocketBuffersLine(node.stderr.String())
@@ -848,6 +970,7 @@ func TestShutdown_secondSignal(t *testing.T) {
 		"--dump-path="+dumpPath,
 		"--grpc-addr="+addr,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 
 	// The stream GracefulStop waits on. A reader goroutine drains the
@@ -949,6 +1072,12 @@ const (
 	// from hanging the test.
 	startupGateRangeProbe = 3 * time.Second
 
+	// The empty-vs-data selection bounds: the empty node must still be closed
+	// this far past a 50 ms normal gate, and the seeded node must open inside
+	// this bound — far below the 1500 ms empty backstop.
+	startupGateSelectionProbe = 300 * time.Millisecond
+	startupGateSeededBound    = 300 * time.Millisecond
+
 	// startupBoundaryValue is the largest --value-max-bytes whose maximal-key
 	// record encodes to exactly 65 507 bytes; equality passes because the
 	// startup check is `>`. One byte more crosses the ceiling.
@@ -1047,6 +1176,7 @@ func startLogPair(t *testing.T, bin string, envA []string, portA, portB int) (no
 		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 		"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcA),
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	nodeB = startNode(t, bin, nil,
 		"--node-id=1",
@@ -1055,6 +1185,7 @@ func startLogPair(t *testing.T, bin string, envA []string, portA, portB int) (no
 		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 		"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcB),
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	return nodeA, nodeB
 }
@@ -1228,6 +1359,7 @@ func TestMetrics_optIn(t *testing.T) {
 		"--grpc-addr="+grpcAddr,
 		"--metrics-addr=127.0.0.1:"+strconv.Itoa(metricsPort),
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	awaitServing(t, grpcAddr, servingDeadline)
 
@@ -1295,6 +1427,7 @@ func TestMetrics_noDefaultListener(t *testing.T) {
 			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 			"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcPort),
 			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
 		), fmt.Sprintf("127.0.0.1:%d", grpcPort)
 	}
 	nodeA, addrA := launch(1)
@@ -1457,6 +1590,7 @@ func startMTLSNode(t *testing.T, bin string, certs metricsCertSuite, metricsPort
 		"--grpc-addr="+grpcAddr,
 		"--metrics-addr="+metricsAddr,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	awaitServing(t, grpcAddr, servingDeadline)
 	return node, metricsAddr
