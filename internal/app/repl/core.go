@@ -1472,8 +1472,10 @@ func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, 
 //   - strictly newer or absent: fall through to ApplyRemote and Ack after
 //     the in-memory apply — nothing here waits for a dump (REPL-03).
 //
-// The probe is one point Version read before ApplyRemote, so the merge can
-// never change the verdict mid-decision. A store error on the apply path
+// The Version probe before ApplyRemote selects the stale, identical or merge
+// path; the reply verdict itself is re-derived from the stored record read
+// after the merge, because an equal-version tie-break win or loss cannot be
+// named by the version bytes. A store error on the apply path
 // (for example a value over the configured limit) is surfaced through Log,
 // never a panic: a hostile or oversized datagram must not take the node
 // down, and a record the store refused is never confirmed — no Ack and no
