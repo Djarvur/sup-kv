@@ -573,6 +573,47 @@ func TestMain_valueMaxDatagram(t *testing.T) {
 	}
 }
 
+// TestMain_startupGateEmptyRange pins the startup-gate positivity contract at
+// the binary boundary (T-4-12): a non-positive --startup-gate-empty or
+// --startup-gate aborts through the usage path (exit 2) with a message naming
+// the offending parameter, so a zero or negative value can never mean "stay
+// closed forever". The configuration error fires before any bind, so the
+// addresses are placeholders; the context bound is only a RED-state safety net
+// for a value the validation does not reach.
+func TestMain_startupGateEmptyRange(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	for _, tc := range []struct {
+		name      string
+		flag      string
+		wantParam string
+	}{
+		{"a negative empty gate exits 2", "--startup-gate-empty=-1s", "--startup-gate-empty=-1s"},
+		{"a zero normal gate exits 2", "--startup-gate=0", "--startup-gate=0s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), startupGateRangeProbe)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin,
+				"--node-id=1",
+				"--bind-addr=127.0.0.1:9",
+				"--broadcast-addr=127.255.255.255:9",
+				"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+				tc.flag,
+			)
+			out, err := cmd.CombinedOutput()
+			assertExitCode(t, err, exitUsageCode)
+			for _, want := range []string{"startup gate must be positive", tc.wantParam} {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("the non-positive startup-gate run's output does not contain %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
 // bindAddrWarnMsg is the stable substring of XPORT-09's non-wildcard bind
 // WARN — the message, not its detail attr, so the assertion pins the one
 // startup line the operator sees.
@@ -901,6 +942,12 @@ const (
 	logProbeWait        = 300 * time.Millisecond
 	exitUsageCode       = 2
 	datagramCeilingLine = "datagram ceiling"
+
+	// startupGateRangeProbe bounds the non-positive startup-gate rows: the
+	// validation is expected to reject before any bind, so the bound only
+	// stops a RED-state binary (which would serve until the runner's kill)
+	// from hanging the test.
+	startupGateRangeProbe = 3 * time.Second
 
 	// startupBoundaryValue is the largest --value-max-bytes whose maximal-key
 	// record encodes to exactly 65 507 bytes; equality passes because the
