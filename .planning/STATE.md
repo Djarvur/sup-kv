@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 11
+current_plan: 12
 status: executing
-stopped_at: Completed 05-10-PLAN.md
-last_updated: "2026-11-22T16:43:29.086Z"
+stopped_at: Completed 05-11-PLAN.md
+last_updated: "2026-11-22T16:51:06.364Z"
 last_activity: 2026-11-22
-last_activity_desc: Phase 5 executing; 05-09 complete, 05-10 next
-state_head: 4a0e04e5a7b497eab5bf561514c08bf397390406
+last_activity_desc: Phase 5 executing; 05-11 complete, 05-12 next
+state_head: 1f79eef40f6b0519781e163bb7a02d37a750038e
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 57
+  completed_plans: 58
 ---
 
 # Project State
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 5 (Persistence) — executing
-Current Plan: 11
+Current Plan: 12
 Total Plans in Phase: 12
-Status: Executing (05-09 complete, 05-10 next)
-Last activity: 2026-11-22 — 05-09 complete; 05-10 next
+Status: Executing (05-11 complete, 05-12 next)
+Last activity: 2026-11-22 — 05-11 complete; 05-12 next
 
 Progress: [███░░░░░░░] 33%
 
@@ -115,6 +115,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P08 | 924 | 3 tasks | 10 files |
 | Phase 05 P09 | 12min | 3 tasks | 7 files |
 | Phase 05 P10 | 3min | 2 tasks | 2 files |
+| Phase 05 P11 | 134 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -345,6 +346,8 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-10: The runbook's persistence additions are pinned one anchor literal per statement; the count gate is line-based (grep -c), so the anchor block's doc comment names the mandated phrases in prose while each literal still carries its own row
 - [Phase 05]: 05-10: TestOperationsDocFamilies extracts every supkv_ name from docs/OPERATIONS.md and requires it in internal/metrics/metrics.go, so a documented family with no exporter counterpart fails without a hardcoded duplicate list
 - [Phase 05]: 05-10: The memory model states peak live (one Records() copy + one record line + the 64 KiB writer) and names the copy's read-lock writer pause as residual; B/op churn is explicitly a different, larger number
+- [Phase 05]: 05-11: S-PAR-05 and S-PERS-09 flipped to implemented and S-PERS-08 kept implemented with the port.LoadBackup outcome and one-WARN evidence; S-HLC-07 kept accepted-deviation with the ADR 0012 link; S-DM-04/05/08 cite ValueMaxBytes, MergeChanged/join/RecordsEqual and the tie-break tests
+- [Phase 05]: 05-11: the preamble names ADR 0012 separately from the 0001–0011 / 14.1–14.11 mapping because 0012 records P-07, not an owner decision; the diff-scope gate proved exactly the eight rows changed and task 2 made no no-op commit
 
 ### Pending Todos
 
@@ -367,7 +370,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T16:43:28.626Z
-Stopped at: Completed 05-10-PLAN.md
+Last session: 2026-11-22T16:51:05.861Z
+Stopped at: Completed 05-11-PLAN.md
 Resume file: None
 Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-10-PLAN.md is next)

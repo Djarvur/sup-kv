@@ -200,7 +200,7 @@ Plans:
   3. Failure handling is bounded and honest: after a backup or empty start the engine is marked dirty so the first rotation never displaces the last good generation (and `SnapshotCreate` right after such a start decodes back to the in-memory state); each dump failure logs one ERROR with the underlying error (ENOSPC, EACCES) and retries with a growing pause up to a cap, with health behavior documented; records skipped due to a reduced value limit are counted and logged, not silently dropped
   4. Resources are bounded: streaming encode keeps a dump cycle at most two state sizes with the memory model documented; a hung fsync cannot block writes, snapshots or shutdown indefinitely; orphan temp files are collected, new directories are synced at the parent, and `fsync_darwin.go` is removed or handles EINTR/ENOTSUP
   5. Structure serves the seams: `persist.Engine` is split along its responsibilities (loader/composition root, store facade, dump scheduler, confirmation accounting, snapshot orchestration) with the `DumpStore` port returning the load outcome and failure cause; `internal/app/persist` timers and `time.Now()` sit behind the same seam as the repl core so the simulator exercises the dump↔replication interaction; equal-version-different-content is resolved by a recorded ADR decision (random tail or deterministic tie-break), implemented and tested
-**Plans**: 10/12 plans executed
+**Plans**: 11/12 plans executed
 
 Plans:
 **Wave 1**
@@ -232,7 +232,7 @@ Plans:
 
 **Wave 10** *(blocked on Wave 9)*
 - [x] 05-10-PLAN.md — OPERATIONS runbook: load outcomes, retry/health, evidence files, memory model, new metrics (PERSIST-02, PERSIST-05, PERSIST-06)
-- [ ] 05-11-PLAN.md — SPEC-DEVIATIONS: exactly eight rows amended with current evidence (PERSIST-01, PERSIST-02, PERSIST-07)
+- [x] 05-11-PLAN.md — SPEC-DEVIATIONS: exactly eight rows amended with current evidence (PERSIST-01, PERSIST-02, PERSIST-07)
 
 **Wave 11** *(blocked on Wave 10)*
 - [ ] 05-12-PLAN.md — Phase gate: flip the two P-01 rows, 7/7 red-runner with mutants, lint/test/darwin/bench
@@ -296,7 +296,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 2. Engine — HLC Versioning and LWW Store | v1.0 | 17/17 | Complete    | 2026-11-21 |
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 13/13 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 13/13 | Complete    | 2026-11-22 |
-| 5. gRPC API and Binary | v1.0 | 10/12 | In Progress |  |
+| 5. gRPC API and Binary | v1.0 | 11/12 | In Progress |  |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete | 2026-11-16 |
 | 7. v1.0 — Docs, Examples and Release | v1.0 | 5/5 | Complete | 2026-11-18 |
 | 1. Spec Reference and Decisions | v1.1 | 4/4 | Complete | 2026-11-19 |
