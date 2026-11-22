@@ -515,7 +515,7 @@ func TestWire_deleteRoundTrip(t *testing.T) {
 				Checksum: storage.RecordChecksum("neg/delete-roundtrip/dump", ver, nil, true),
 			},
 		}
-		dump, err := persist.Encode(records)
+		dump, err := persist.Encode(records, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("encode tombstone dump: %v", err)
 		}
@@ -524,7 +524,7 @@ func TestWire_deleteRoundTrip(t *testing.T) {
 		if !strings.Contains(string(dump), `"deleted":true`) {
 			t.Fatalf("encoded dump does not carry the greppable \"deleted\":true marker:\n%s", dump)
 		}
-		decoded, discarded, err := persist.Decode(dump)
+		decoded, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("decode tombstone dump: %v", err)
 		}
@@ -562,11 +562,11 @@ func TestWire_deleteRoundTrip(t *testing.T) {
 				Checksum: storage.RecordChecksum(key, ver, data, true),
 			},
 		}
-		dump, err := persist.Encode(records)
+		dump, err := persist.Encode(records, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("encode tombstone-with-data dump: %v", err)
 		}
-		decoded, discarded, err := persist.Decode(dump)
+		decoded, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("decode tombstone-with-data dump: %v", err)
 		}

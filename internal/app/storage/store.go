@@ -9,12 +9,18 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
-// Design default NewStore substitutes for a zero Config field, and the
-// checksum flag bytes of the RecordChecksum domain, from docs/IDEA.md.
+// ValueMaxBytes is the one authoritative value-size limit (PERSIST-01,
+// ADR 0011): the design default from docs/IDEA.md, exported so every
+// consumer — the launch flag's default, the pre-store dump decode and the
+// codec — derives the limit from this single definition. The store default,
+// the codec's encode/decode bound and the binary's ceiling check all read it
+// through Config.ValueLimit() or Store.ValueMaxBytes(); no second copy of the
+// number exists in production. The checksum flag bytes of the
+// RecordChecksum domain sit beside it.
 const (
-	defaultValueMaxBytes = 61440
-	notDeletedFlag       = 0
-	deletedFlag          = 1
+	ValueMaxBytes  = 61440
+	notDeletedFlag = 0
+	deletedFlag    = 1
 )
 
 // MaxKeyBytes is the documented key-length ceiling (XPORT-03): a longer key
@@ -27,8 +33,8 @@ const (
 const MaxKeyBytes = 1024
 
 // Config holds the store tuning parameters; it is immutable once handed to
-// NewStore. A zero or negative ValueMaxBytes is normalized to the design
-// default of 61440, and a nil OnChange to a no-op: the store is total over
+// NewStore. A zero or negative ValueMaxBytes is normalized to
+// ValueMaxBytes, and a nil OnChange to a no-op: the store is total over
 // any Config (the repl.Config.Log precedent). Clock tuning — the drift
 // tolerance and the restart watermark (VERS-04) — is constructor state of
 // the injected clock (clock.NewClock), not store configuration.
@@ -115,16 +121,34 @@ func NewStore(nodeID uint16, clk Clock, cfg Config) *Store {
 	}
 }
 
-// normalized returns cfg with a zero or negative ValueMaxBytes replaced by
-// the design default and a nil OnChange replaced by a no-op.
-func (c Config) normalized() Config {
+// ValueLimit returns the effective value-size limit this Config describes:
+// the configured ValueMaxBytes when positive, ValueMaxBytes otherwise.
+// NewStore normalizes through this same helper, so a caller that must know
+// the limit before a store exists — persist.Open's pre-store dump decode
+// runs before the clock seed and the store construction — reads exactly the
+// value the store will enforce.
+func (c Config) ValueLimit() int {
 	if c.ValueMaxBytes <= 0 {
-		c.ValueMaxBytes = defaultValueMaxBytes
+		return ValueMaxBytes
 	}
+	return c.ValueMaxBytes
+}
+
+// normalized returns cfg with a zero or negative ValueMaxBytes replaced by
+// ValueMaxBytes through ValueLimit and a nil OnChange replaced by a no-op.
+func (c Config) normalized() Config {
+	c.ValueMaxBytes = c.ValueLimit()
 	if c.OnChange == nil {
 		c.OnChange = func(_ string, _ Record) {}
 	}
 	return c
+}
+
+// ValueMaxBytes returns the effective value-size limit this store enforces.
+// It is fixed by NewStore (Config is immutable afterwards) and reads without
+// the store lock.
+func (s *Store) ValueMaxBytes() int {
+	return s.cfg.ValueMaxBytes
 }
 
 // tombstoneFlag carries the Record deleted flag into the checksum domain.

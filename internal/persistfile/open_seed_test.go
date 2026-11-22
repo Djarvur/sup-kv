@@ -69,7 +69,7 @@ func seedFixedNow(ms int64) func() time.Time {
 // the real file the adapter's fallback chain serves to persist.Open.
 func seedDump(t *testing.T, dumpPath string, records map[string]storage.Record) {
 	t.Helper()
-	block, err := persist.Encode(records)
+	block, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("Encode() error = %v, want nil", err)
 	}

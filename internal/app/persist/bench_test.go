@@ -78,7 +78,7 @@ func BenchmarkDump10kKeys(b *testing.B) {
 	var totalBytes, lastSize int64
 	for range b.N {
 		start := time.Now()
-		block, err := persist.Encode(store.Records())
+		block, err := persist.Encode(store.Records(), storage.ValueMaxBytes)
 		if err != nil {
 			b.Fatalf("Encode 10k-key dump: %v", err)
 		}

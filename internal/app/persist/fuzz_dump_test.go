@@ -69,7 +69,7 @@ func FuzzDumpDecode(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, dump []byte) {
-		records, discarded, err := persist.Decode(dump)
+		records, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
 		if err != nil {
 			if records != nil {
 				t.Fatalf("Decode returned %d records alongside the generation-level fault: %v", len(records), err)
@@ -104,11 +104,11 @@ func FuzzDumpDecode(f *testing.F) {
 // guarantees for every record it accepted.
 func fuzzDumpAssertEcho(t *testing.T, records map[string]storage.Record) {
 	t.Helper()
-	again, err := persist.Encode(records)
+	again, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("re-Encode of %d accepted records: %v", len(records), err)
 	}
-	back, backDiscarded, err := persist.Decode(again)
+	back, backDiscarded, err := persist.Decode(again, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("re-Decode of the re-encoded dump: %v", err)
 	}
@@ -149,7 +149,7 @@ func fuzzDumpSeeds() ([][]byte, error) {
 			Deleted:  true,
 			Checksum: storage.RecordChecksum(fuzzDumpTombstoneKey, ver, nil, true),
 		},
-	})
+	}, storage.ValueMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("encode valid seed dump: %w", err)
 	}

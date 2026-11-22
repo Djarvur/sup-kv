@@ -142,7 +142,6 @@ const (
 	// ADR 0006): a node that loaded no records has nothing local to answer
 	// with, so it waits longer for a peer listing than a node with data.
 	defaultStartupGateEmpty = 60 * time.Second
-	defaultValueMaxBytes    = 61440
 	defaultSyncChunkBytes   = 1400
 	defaultHelloInterval    = time.Second
 	defaultPeerTimeout      = 5 * time.Second
@@ -354,7 +353,7 @@ func registerConfig(cfg *config, nodeID *uint64, showVersion *bool) error {
 		"empty-disk gate backstop: a node with no loaded records waits this long for a peer listing (env SUPKV_STARTUP_GATE_EMPTY)")
 	flag.DurationVar(&cfg.waitTimeout, "wait-timeout", envDur(envWaitTimeout, defaultWaitTimeout),
 		"default wait_for_replication bound (env SUPKV_WAIT_TIMEOUT)")
-	flag.IntVar(&cfg.valueMaxBytes, "value-max-bytes", envNum(envValueMaxBytes, defaultValueMaxBytes),
+	flag.IntVar(&cfg.valueMaxBytes, "value-max-bytes", envNum(envValueMaxBytes, storage.ValueMaxBytes),
 		"maximum value size in bytes (env SUPKV_VALUE_MAX_BYTES)")
 	flag.IntVar(&cfg.syncChunkBytes, "sync-chunk-bytes", envNum(envSyncChunkBytes, defaultSyncChunkBytes),
 		"DataSync chunk byte budget (env SUPKV_SYNC_CHUNK_BYTES)")
@@ -510,14 +509,16 @@ func checkStartupGates(cfg config) error {
 // same effective value. The probe width is bounded by the ceiling itself: a
 // misconfigured multi-gigabyte value is over the ceiling before any key or
 // envelope byte, and materializing it just to measure would turn a config
-// typo into an out-of-memory startup. Called by finalizeConfig, before any
+// typo into an out-of-memory startup. The effective value for a non-positive
+// setting is storage.ValueMaxBytes — the store's one default — exactly as
+// the store itself normalizes it. Called by finalizeConfig, before any
 // bind or socket work, so a bad combination exits with the usage code (2)
 // rather than starting a node whose largest confirmed write could never
 // replicate.
 func checkDatagramCeiling(cfg config) error {
 	valueBytes := cfg.valueMaxBytes
 	if valueBytes <= 0 {
-		valueBytes = defaultValueMaxBytes
+		valueBytes = storage.ValueMaxBytes
 	}
 	probe := min(valueBytes, udprepl.MaxDatagramBytes)
 	size := udprepl.MaxRecordDatagramBytes(storage.MaxKeyBytes, probe)

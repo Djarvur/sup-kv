@@ -944,7 +944,7 @@ func TestServer_snapshotLoadNotifies(t *testing.T) {
 		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
 		fixture[key] = rec
 	}
-	dump, err := persist.Encode(fixture)
+	dump, err := persist.Encode(fixture, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
 	}
@@ -1013,7 +1013,7 @@ func TestServer_snapshotLoadUsesReplaySeam(t *testing.T) {
 		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
 		fixture[key] = rec
 	}
-	dump, err := persist.Encode(fixture)
+	dump, err := persist.Encode(fixture, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
 	}
@@ -1052,7 +1052,7 @@ func TestServer_snapshotLoadReplayFallsBackToLive(t *testing.T) {
 		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
 		fixture[key] = rec
 	}
-	dump, err := persist.Encode(fixture)
+	dump, err := persist.Encode(fixture, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
 	}

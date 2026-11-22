@@ -78,6 +78,11 @@ type Engine struct {
 	runDone chan struct{}
 	closed  bool
 
+	// valueMaxBytes is the store's effective value limit, captured once at
+	// construction: the dump encoder and the snapshot decoder both pass it, so
+	// the two sides cannot disagree (PERSIST-01).
+	valueMaxBytes int
+
 	// dumpNanos, dumpTotal and dumpErrors carry DumpStats lock-free for
 	// scrapers (OBS-01): runDump is the single writer — the serialized
 	// dumper — so atomic reads need no engine mutex.
@@ -100,12 +105,13 @@ type DumpStats struct {
 // launches Run, whose lifecycle is the documented API contract.
 func New(store *storage.Store, dumps port.DumpStore, cfg Config) *Engine {
 	return &Engine{
-		store:   store,
-		dumps:   dumps,
-		cfg:     cfg.normalized(),
-		changed: make(chan struct{}, 1),
-		flushCh: make(chan chan error, 1),
-		runDone: make(chan struct{}),
+		store:         store,
+		dumps:         dumps,
+		cfg:           cfg.normalized(),
+		changed:       make(chan struct{}, 1),
+		flushCh:       make(chan chan error, 1),
+		runDone:       make(chan struct{}),
+		valueMaxBytes: store.ValueMaxBytes(),
 	}
 }
 
@@ -122,6 +128,12 @@ func New(store *storage.Store, dumps port.DumpStore, cfg Config) *Engine {
 // guard after Load was dead code for every contract-honoring DumpStore
 // (Decode is the readability oracle over the same bytes, codec.go) and
 // is gone (03 IN-01, D-15).
+//
+// The decode runs before any store exists — its clock is seeded from the
+// decoded records — so it reads the configured limit through
+// storeCfg.ValueLimit(), the same helper NewStore normalizes with: the bound
+// the decoder applies and the limit the store enforces cannot diverge
+// (PERSIST-01).
 func Open(
 	nodeID uint16,
 	now func() time.Time,
@@ -130,9 +142,10 @@ func Open(
 	storeCfg storage.Config,
 	engineCfg Config,
 ) (eng *Engine, discarded int) {
+	limit := storeCfg.ValueLimit()
 	var records map[string]storage.Record
 	decode := func(dump []byte) error {
-		decoded, count, err := Decode(dump)
+		decoded, count, err := Decode(dump, limit)
 		if err != nil {
 			return err
 		}
@@ -152,8 +165,8 @@ func Open(
 
 // mergeRecords installs every record via Merge, skipping one the
 // config-shrunk value limit rejects — an oversized record must never abort
-// startup (the belt over the codec's maxRecordBytes bound; Merge has no
-// other error).
+// startup. The decoder already applies the same configured limit, so this
+// skip is the belt over that bound: Merge has no other error.
 func mergeRecords(store *storage.Store, records map[string]storage.Record) {
 	for key, rec := range records {
 		_, _, err := store.Merge(key, rec)
@@ -300,7 +313,7 @@ func (e *Engine) runDump() error {
 	e.mu.Unlock()
 
 	start := time.Now()
-	block, err := Encode(e.store.Records())
+	block, err := Encode(e.store.Records(), e.valueMaxBytes)
 	if err == nil {
 		err = e.dumps.Save(block)
 	}
@@ -624,7 +637,7 @@ func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	records, _, err := Decode(data)
+	records, _, err := Decode(data, e.valueMaxBytes)
 	if err != nil {
 		return nil, err
 	}

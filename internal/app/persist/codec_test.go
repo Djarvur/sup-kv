@@ -21,7 +21,6 @@ import (
 // fixture versions' clock readings.
 const (
 	codecPropertySteps = 500
-	maxRecordBytes     = 61440
 	oversizeBy         = 1
 	// watermarkOrderScans re-scans the equal-counter fixture: map iteration
 	// order is random per call, so the law is asserted over many orders.
@@ -103,12 +102,23 @@ func baseRecords() map[string]storage.Record {
 	}
 }
 
-// encodeRecords merges base with extras and encodes it.
+// encodeRecords merges base with extras and encodes it at the default value
+// limit.
 func encodeRecords(t *testing.T, extras map[string]storage.Record) []byte {
+	t.Helper()
+	return encodeRecordsAt(t, storage.ValueMaxBytes, extras)
+}
+
+// encodeRecordsAt merges base with extras and encodes it at limit. The
+// oversize-discard fixture passes a deliberately larger limit than its
+// decode so the encoder's tripwire cannot make the fixture unbuildable
+// (RESEARCH Pitfall 11): the dump must exist to prove Decode discards the
+// record.
+func encodeRecordsAt(t *testing.T, limit int, extras map[string]storage.Record) []byte {
 	t.Helper()
 	records := baseRecords()
 	maps.Copy(records, extras)
-	dump, err := persist.Encode(records)
+	dump, err := persist.Encode(records, limit)
 	if err != nil {
 		t.Fatalf("Encode() error = %v, want nil", err)
 	}
@@ -210,11 +220,11 @@ func adjacentLVersions(rng *rand.Rand) []version.RecordVersion {
 // through the round trip (PERS-01, D-06).
 func assertCodecRoundTrip(t *testing.T, step int, records map[string]storage.Record) {
 	t.Helper()
-	dump, err := persist.Encode(records)
+	dump, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("step %d Encode() error = %v, want nil", step, err)
 	}
-	decoded, discarded, err := persist.Decode(dump)
+	decoded, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("step %d Decode() error = %v, want nil (replay with the property seed above)",
 			step, err)
@@ -226,7 +236,7 @@ func assertCodecRoundTrip(t *testing.T, step int, records map[string]storage.Rec
 	if !recordsEqual(decoded, records) {
 		t.Fatalf("step %d round trip changed the records (replay with the property seed above)", step)
 	}
-	again, err := persist.Encode(decoded)
+	again, err := persist.Encode(decoded, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("step %d re-Encode() error = %v, want nil", step, err)
 	}
@@ -282,11 +292,11 @@ func TestCodec_byteStability(t *testing.T) {
 	t.Parallel()
 	rng := testutil.NewRNG(t)
 	records := testutil.RandStore(rng).Records()
-	first, err := persist.Encode(records)
+	first, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("Encode() error = %v, want nil", err)
 	}
-	second, err := persist.Encode(records)
+	second, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("second Encode() error = %v, want nil", err)
 	}
@@ -317,9 +327,9 @@ func TestCodec_discardClasses(t *testing.T) {
 		"victim", func(rec *dumpLine) { rec.Checksum++ })
 	malformed := rewriteLine(t, encodeRecords(t, map[string]storage.Record{"victim": victim}),
 		"victim", func(rec *dumpLine) { rec.Version = strings.Repeat("z", len(rec.Version)) })
-	oversize := bytes.Repeat([]byte("x"), maxRecordBytes+oversizeBy)
+	oversize := bytes.Repeat([]byte("x"), storage.ValueMaxBytes+oversizeBy)
 	bigVer := version.PackVersion(1003, 4, 1)
-	oversized := encodeRecords(t, map[string]storage.Record{
+	oversized := encodeRecordsAt(t, storage.ValueMaxBytes+oversizeBy, map[string]storage.Record{
 		"big": sealed("big", storage.Record{Version: bigVer, Data: oversize}),
 	})
 	tests := []struct {
@@ -352,7 +362,7 @@ func TestCodec_discardClasses(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			decoded, discarded, err := persist.Decode(tt.dump)
+			decoded, discarded, err := persist.Decode(tt.dump, storage.ValueMaxBytes)
 			if (err != nil) != tt.wantDecodeErr {
 				t.Errorf("Decode() error = %v, want error=%t", err, tt.wantDecodeErr)
 			}
@@ -378,7 +388,7 @@ func TestCodec_discardClasses(t *testing.T) {
 		firstLines := strings.Split(strings.TrimSuffix(string(first), "\n"), "\n")
 		secondLines := strings.Split(strings.TrimSuffix(string(second), "\n"), "\n")
 		joined := []byte(strings.Join([]string{firstLines[0], firstLines[1], secondLines[1]}, "\n") + "\n")
-		decoded, discarded, err := persist.Decode(joined)
+		decoded, discarded, err := persist.Decode(joined, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Decode(joined) error = %v, want nil", err)
 		}
@@ -394,18 +404,18 @@ func TestCodec_discardClasses(t *testing.T) {
 	})
 	t.Run("an empty input is a generation-level fault, not a valid empty dump", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := persist.Decode(nil)
+		_, _, err := persist.Decode(nil, storage.ValueMaxBytes)
 		if err == nil {
 			t.Error("Decode(nil) error = nil, want a generation-level error")
 		}
 	})
 	t.Run("a valid empty map encodes to a header-only dump that reloads empty", func(t *testing.T) {
 		t.Parallel()
-		dump, err := persist.Encode(make(map[string]storage.Record))
+		dump, err := persist.Encode(make(map[string]storage.Record), storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Encode(empty) error = %v, want nil", err)
 		}
-		decoded, discarded, err := persist.Decode(dump)
+		decoded, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
 		if err != nil || discarded != 0 || len(decoded) != 0 {
 			t.Errorf("Decode(empty dump) = (%d records, %d discarded, %v), want empty, 0, nil",
 				len(decoded), discarded, err)
@@ -502,11 +512,11 @@ func TestCodec_truncatedGenerationUnreadable(t *testing.T) {
 		"tail": sealed("tail", storage.Record{Version: version.PackVersion(1006, 6, 1), Data: []byte("tail-value")}),
 	})
 	torn := dump[:len(dump)-tornTailCut]
-	_, _, err := persist.Decode(torn)
+	_, _, err := persist.Decode(torn, storage.ValueMaxBytes)
 	if err == nil {
 		t.Error("Decode(torn) error = nil, want a generation-level error, not the records before the tear")
 	}
-	_, _, err = persist.Decode(dump)
+	_, _, err = persist.Decode(dump, storage.ValueMaxBytes)
 	if err != nil {
 		t.Errorf("Decode(intact) error = %v, want nil", err)
 	}

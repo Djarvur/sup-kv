@@ -429,7 +429,7 @@ func TestEngine_confirmDebounceTiming(t *testing.T) {
 			t.Errorf("Set returned at %v, want exactly the dump instant %v",
 				returnedAt, start.Add(synctestDebounce))
 		}
-		records, discarded, err := persist.Decode(save.dump)
+		records, discarded, err := persist.Decode(save.dump, storage.ValueMaxBytes)
 		if err != nil || discarded != 0 {
 			t.Fatalf("Decode() = (%d discarded, %v), want (0, nil)", discarded, err)
 		}
@@ -547,7 +547,7 @@ func TestEngine_dumpFailureFansOut(t *testing.T) {
 		if got := dumps.saveCount(); got != 1 {
 			t.Fatalf("completed saves = %d, want 1", got)
 		}
-		records, discarded, err := persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
+		records, discarded, err := persist.Decode(dumps.save(dumps.saveCount()-1).dump, storage.ValueMaxBytes)
 		if err != nil || discarded != 0 {
 			t.Fatalf("Decode(second dump) = (%d discarded, %v), want (0, nil)", discarded, err)
 		}
@@ -748,7 +748,7 @@ func TestFlush_remoteDirtiness(t *testing.T) {
 		if saves := dumps.saveCount(); saves != 1 {
 			t.Fatalf("completed saves = %d, want exactly the one covering dump", saves)
 		}
-		records, discarded, err := persist.Decode(dumps.save(0).dump)
+		records, discarded, err := persist.Decode(dumps.save(0).dump, storage.ValueMaxBytes)
 		if err != nil || discarded != 0 {
 			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", discarded, err)
 		}
@@ -848,7 +848,7 @@ func TestEngine_writeSurface(t *testing.T) {
 			t.Fatalf("SetIfAbsent confirmed without a covering dump: saves %d, before %d",
 				got, savesBefore)
 		}
-		records, _, err := persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
+		records, _, err := persist.Decode(dumps.save(dumps.saveCount()-1).dump, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Decode() error = %v, want nil", err)
 		}
@@ -862,7 +862,7 @@ func TestEngine_writeSurface(t *testing.T) {
 			t.Fatalf("Delete(live) error = %v, want nil", err)
 		}
 		synctest.Wait()
-		records, _, err = persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
+		records, _, err = persist.Decode(dumps.save(dumps.saveCount()-1).dump, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Decode() error = %v, want nil", err)
 		}
@@ -1208,7 +1208,7 @@ func TestEngine_snapshotFlushForcesDump(t *testing.T) {
 		if !bytes.Equal(copied, dumps.save(0).dump) {
 			t.Error("snapshot copy differs from the forced save's bytes")
 		}
-		records, discarded, err := persist.Decode(copied)
+		records, discarded, err := persist.Decode(copied, storage.ValueMaxBytes)
 		if err != nil || discarded != 0 {
 			t.Fatalf("Decode(snapshot) = (%d discarded, %v), want (0, nil)", discarded, err)
 		}
@@ -1398,7 +1398,7 @@ func snapshotFixture(t *testing.T, records map[string]storage.Record) []byte {
 		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
 		records[key] = rec
 	}
-	dump, err := persist.Encode(records)
+	dump, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
 	}
@@ -1628,7 +1628,7 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 			t.Errorf("ApplyRemote returned at %v, not before the dump at %v — it registered a waiter",
 				returnedAt, save.at)
 		}
-		records, discarded, err := persist.Decode(save.dump)
+		records, discarded, err := persist.Decode(save.dump, storage.ValueMaxBytes)
 		if err != nil || discarded != 0 {
 			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", discarded, err)
 		}
@@ -1825,7 +1825,7 @@ func TestEngine_redundantDirty(t *testing.T) {
 		if got := dumps2.saveCount(); got != 1 {
 			t.Fatalf("the remote change plus the local waiter ran %d saves, want exactly 1 covering dump", got)
 		}
-		records, discarded, err := persist.Decode(dumps2.save(0).dump)
+		records, discarded, err := persist.Decode(dumps2.save(0).dump, storage.ValueMaxBytes)
 		if err != nil || discarded != 0 {
 			t.Fatalf("Decode(covering dump) = (%d discarded, %v), want (0, nil)", discarded, err)
 		}

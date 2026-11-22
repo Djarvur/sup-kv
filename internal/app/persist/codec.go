@@ -19,11 +19,6 @@ import (
 // fallback chain advances (research A4).
 const dumpFormatVersion = 1
 
-// maxRecordBytes is the design envelope from docs/IDEA.md — the codec's
-// decode-side size bound: a record whose Data exceeds it is discarded, the
-// config-shrink class (research Open Question 5).
-const maxRecordBytes = 61440
-
 // versionBytes is the fixed size of a version.RecordVersion — the byte
 // length a dump line's record_version hex string must decode to exactly.
 const versionBytes = 16
@@ -59,7 +54,14 @@ type recordLine struct {
 // stability across generations of the same state is the contract.
 // SetEscapeHTML(false) keeps keys containing ampersand, less-than and
 // greater-than literal and greppable.
-func Encode(records map[string]storage.Record) ([]byte, error) {
+//
+// valueMaxBytes is the configured value limit the store enforces
+// (PERSIST-01): a record whose Data exceeds it is an invariant violation,
+// never a silent skip — the encoder returns an error wrapping
+// storage.ErrValueTooLarge naming the key. The tripwire sits over the
+// store's own write check, so a confirmed write can never fail to encode for
+// size.
+func Encode(records map[string]storage.Record, valueMaxBytes int) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -69,6 +71,10 @@ func Encode(records map[string]storage.Record) ([]byte, error) {
 	}
 	for _, key := range slices.Sorted(maps.Keys(records)) {
 		rec := records[key]
+		if len(rec.Data) > valueMaxBytes {
+			return nil, fmt.Errorf("persist: record %q is %d bytes, over the configured value limit %d: %w",
+				key, len(rec.Data), valueMaxBytes, storage.ErrValueTooLarge)
+		}
 		line := recordLine{
 			Key:      key,
 			Version:  hex.EncodeToString(rec.Version[:]),
@@ -89,12 +95,16 @@ func Encode(records map[string]storage.Record) ([]byte, error) {
 // empty generation, or one announcing an unknown format_version, is a
 // generation-level error — the fallback chain advances (D-02); a per-record
 // fault — a version that is not exactly 16 bytes of hex, Data over
-// maxRecordBytes, or a checksum mismatch against storage.RecordChecksum —
+// valueMaxBytes, or a checksum mismatch against storage.RecordChecksum —
 // discards only that record and counts it in discarded, so one torn record
 // never collapses its generation to the empty start (PERS-02). A duplicate
 // key in a hand-edited file is last-wins. The returned records own their
 // Data slices.
-func Decode(dump []byte) (records map[string]storage.Record, discarded int, err error) {
+//
+// valueMaxBytes is the configured value limit (PERSIST-01) — the same
+// Config.ValueLimit() value the store normalizes and enforces, so a record
+// the store accepted at any accepted flag value survives the next start.
+func Decode(dump []byte, valueMaxBytes int) (records map[string]storage.Record, discarded int, err error) {
 	dec := json.NewDecoder(bytes.NewReader(dump))
 	var h header
 	err = dec.Decode(&h)
@@ -114,7 +124,7 @@ func Decode(dump []byte) (records map[string]storage.Record, discarded int, err 
 			}
 			return nil, 0, fmt.Errorf("persist: dump record unreadable: %w", err)
 		}
-		rec, ok := decodeRecord(line)
+		rec, ok := decodeRecord(line, valueMaxBytes)
 		if !ok {
 			discarded++
 			continue
@@ -125,18 +135,18 @@ func Decode(dump []byte) (records map[string]storage.Record, discarded int, err 
 
 // decodeRecord validates one decoded line against the record domain and
 // returns the storage record it carries with defensively copied Data; a
-// hex-undecodable or wrong-length version, Data over maxRecordBytes or a
+// hex-undecodable or wrong-length version, Data over valueMaxBytes or a
 // checksum mismatch discards the record (ok false). It never panics on any
 // bit pattern: [hex.DecodeString] is total, Unpack is total and the
 // checksum comparison is arithmetic (T-3-01).
-func decodeRecord(line recordLine) (storage.Record, bool) {
+func decodeRecord(line recordLine, valueMaxBytes int) (storage.Record, bool) {
 	raw, err := hex.DecodeString(line.Version)
 	if err != nil || len(raw) != versionBytes {
 		return storage.Record{}, false
 	}
 	var ver version.RecordVersion
 	copy(ver[:], raw)
-	if len(line.Data) > maxRecordBytes {
+	if len(line.Data) > valueMaxBytes {
 		return storage.Record{}, false
 	}
 	if storage.RecordChecksum(line.Key, ver, line.Data, line.Deleted) != line.Checksum {
