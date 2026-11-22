@@ -1708,7 +1708,8 @@ func TestEngine_keyCountAndObserveGeneration(t *testing.T) {
 
 	// Set blocks until a covering dump completed, so the count is read after
 	// the record is both in memory and on disk.
-	if _, _, err := eng.Set("alpha", []byte("alpha-value")); err != nil {
+	_, _, err := eng.Set("alpha", []byte("alpha-value"))
+	if err != nil {
 		t.Fatalf("Set(alpha) error = %v, want nil", err)
 	}
 	if got := eng.KeyCount(); got != 1 {
@@ -1719,7 +1720,8 @@ func TestEngine_keyCountAndObserveGeneration(t *testing.T) {
 	}
 
 	// Read paths move neither counter, dump state or not.
-	if _, err := eng.Get("alpha"); err != nil {
+	_, err = eng.Get("alpha")
+	if err != nil {
 		t.Fatalf("Get(alpha) error = %v, want nil", err)
 	}
 	_, _ = eng.Lookup("alpha")

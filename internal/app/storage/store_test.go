@@ -1159,7 +1159,8 @@ func requireGeneration(t *testing.T, store *storage.Store, want uint64) {
 func TestStore_observeAdvancesClock(t *testing.T) {
 	t.Parallel()
 	store := newStore()
-	if _, _, err := store.Set("seat", []byte("seat")); err != nil {
+	_, _, err := store.Set("seat", []byte("seat"))
+	if err != nil {
 		t.Fatalf("seed Set() error = %v, want nil", err)
 	}
 	beforeLen := store.Len()
@@ -1211,7 +1212,8 @@ func TestStore_observeReturnsDrift(t *testing.T) {
 	t.Run("an in-tolerance version returns zero drift", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
-		if _, _, err := store.Set("seat", []byte("seat")); err != nil {
+		_, _, err := store.Set("seat", []byte("seat"))
+		if err != nil {
 			t.Fatalf("seed Set() error = %v, want nil", err)
 		}
 		drift := store.Observe(version.PackVersion(testNowMs+1000, 0, nodeB))
@@ -1223,7 +1225,8 @@ func TestStore_observeReturnsDrift(t *testing.T) {
 	t.Run("a version beyond the drift threshold drives a nonzero drift after its absorption", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
-		if _, _, err := store.Set("seat", []byte("seat")); err != nil {
+		_, _, err := store.Set("seat", []byte("seat"))
+		if err != nil {
 			t.Fatalf("seed Set() error = %v, want nil", err)
 		}
 		far := version.PackVersion(testNowMs+int64(testDriftWarn/time.Millisecond)+1000, 0, nodeB)
@@ -1248,43 +1251,50 @@ func TestStore_len(t *testing.T) {
 	if got := store.Len(); got != 0 {
 		t.Fatalf("fresh store Len() = %d, want 0", got)
 	}
-	if _, _, err := store.Set("live", []byte("v")); err != nil {
+	_, _, err := store.Set("live", []byte("v"))
+	if err != nil {
 		t.Fatalf("Set() error = %v, want nil", err)
 	}
 	if got := store.Len(); got != 1 {
 		t.Fatalf("Len() after Set = %d, want 1", got)
 	}
-	if _, _, err := store.SetIfAbsent("absent", []byte("v")); err != nil {
+	_, _, err = store.SetIfAbsent("absent", []byte("v"))
+	if err != nil {
 		t.Fatalf("SetIfAbsent() error = %v, want nil", err)
 	}
 	if got := store.Len(); got != 2 {
 		t.Fatalf("Len() after successful SetIfAbsent = %d, want 2", got)
 	}
-	if _, _, err := store.SetIfAbsent("live", []byte("dup")); !errors.Is(err, storage.ErrAlreadyExists) {
+	_, _, err = store.SetIfAbsent("live", []byte("dup"))
+	if !errors.Is(err, storage.ErrAlreadyExists) {
 		t.Fatalf("SetIfAbsent(existing) error = %v, want ErrAlreadyExists", err)
 	}
 	if got := store.Len(); got != 2 {
 		t.Fatalf("Len() after rejected SetIfAbsent = %d, want the unchanged 2", got)
 	}
-	if _, _, err := store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("m")}); err != nil {
+	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("m")})
+	if err != nil {
 		t.Fatalf("Merge() error = %v, want nil", err)
 	}
 	if got := store.Len(); got != 3 {
 		t.Fatalf("Len() after Merge install = %d, want 3", got)
 	}
-	if _, _, err := store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("x")}); err != nil {
+	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("x")})
+	if err != nil {
 		t.Fatalf("equal Merge() error = %v, want nil", err)
 	}
 	if got := store.Len(); got != 3 {
 		t.Fatalf("Len() after equal-version Merge = %d, want the unchanged 3", got)
 	}
-	if _, _, err := store.Delete("live"); err != nil {
+	_, _, err = store.Delete("live")
+	if err != nil {
 		t.Fatalf("Delete() error = %v, want nil", err)
 	}
 	if got := store.Len(); got != 3 {
 		t.Fatalf("Len() after Delete = %d, want 3 (the tombstone stays a record)", got)
 	}
-	if _, _, err := store.Delete("missing"); !errors.Is(err, storage.ErrNotFound) {
+	_, _, err = store.Delete("missing")
+	if !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("Delete(missing) error = %v, want ErrNotFound", err)
 	}
 	if got := store.Len(); got != 3 {
@@ -1303,13 +1313,15 @@ func TestStore_generationContentOnly(t *testing.T) {
 	store := newStore()
 	requireGeneration(t, store, 0)
 
-	if _, _, err := store.Set("k", []byte("v")); err != nil {
+	_, _, err := store.Set("k", []byte("v"))
+	if err != nil {
 		t.Fatalf("Set() error = %v, want nil", err)
 	}
 	requireGeneration(t, store, 1)
 
 	// Every read path leaves it unchanged.
-	if _, err := store.Get("k"); err != nil {
+	_, err = store.Get("k")
+	if err != nil {
 		t.Fatalf("Get() error = %v, want nil", err)
 	}
 	_, _ = store.Version("k")
@@ -1320,48 +1332,56 @@ func TestStore_generationContentOnly(t *testing.T) {
 	requireGeneration(t, store, 1)
 
 	// A rejected SetIfAbsent installs nothing.
-	if _, _, err := store.SetIfAbsent("k", []byte("dup")); !errors.Is(err, storage.ErrAlreadyExists) {
+	_, _, err = store.SetIfAbsent("k", []byte("dup"))
+	if !errors.Is(err, storage.ErrAlreadyExists) {
 		t.Fatalf("SetIfAbsent(existing) error = %v, want ErrAlreadyExists", err)
 	}
 	requireGeneration(t, store, 1)
 
 	// A successful SetIfAbsent is an install.
-	if _, _, err := store.SetIfAbsent("created", []byte("v")); err != nil {
+	_, _, err = store.SetIfAbsent("created", []byte("v"))
+	if err != nil {
 		t.Fatalf("SetIfAbsent() error = %v, want nil", err)
 	}
 	requireGeneration(t, store, 2)
 
 	// Deleting a missing key burns no version and installs nothing.
-	if _, _, err := store.Delete("missing"); !errors.Is(err, storage.ErrNotFound) {
+	_, _, err = store.Delete("missing")
+	if !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("Delete(missing) error = %v, want ErrNotFound", err)
 	}
 	requireGeneration(t, store, 2)
 
 	// A successful Delete installs its tombstone.
-	if _, _, err := store.Delete("k"); err != nil {
+	_, _, err = store.Delete("k")
+	if err != nil {
 		t.Fatalf("Delete() error = %v, want nil", err)
 	}
 	requireGeneration(t, store, 3)
 
 	// A merge into a missing key installs with no displacement.
 	stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
-	if _, _, err := store.Merge("merged", stored); err != nil {
+	_, _, err = store.Merge("merged", stored)
+	if err != nil {
 		t.Fatalf("Merge() error = %v, want nil", err)
 	}
 	requireGeneration(t, store, 4)
 
 	// Equal and older merges are no-ops.
-	if _, _, err := store.Merge("merged", storage.Record{Version: stored.Version, Data: []byte("x")}); err != nil {
+	_, _, err = store.Merge("merged", storage.Record{Version: stored.Version, Data: []byte("x")})
+	if err != nil {
 		t.Fatalf("equal Merge() error = %v, want nil", err)
 	}
 	requireGeneration(t, store, 4)
-	if _, _, err := store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL-1, 0, nodeB), Data: []byte("old")}); err != nil {
+	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL-1, 0, nodeB), Data: []byte("old")})
+	if err != nil {
 		t.Fatalf("older Merge() error = %v, want nil", err)
 	}
 	requireGeneration(t, store, 4)
 
 	// A strictly greater merge installs.
-	if _, _, err := store.Merge("merged", storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeB), Data: []byte("b")}); err != nil {
+	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeB), Data: []byte("b")})
+	if err != nil {
 		t.Fatalf("greater Merge() error = %v, want nil", err)
 	}
 	requireGeneration(t, store, 5)

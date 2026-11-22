@@ -374,7 +374,8 @@ func TestSync_generationPassThrough(t *testing.T) {
 	if got := st.Generation(); got != 0 {
 		t.Fatalf("Generation() on a fresh store = %d, want 0", got)
 	}
-	if _, _, err := st.store.Set("local/older", []byte("local")); err != nil {
+	_, _, err := st.store.Set("local/older", []byte("local"))
+	if err != nil {
 		t.Fatalf("seed Set() error = %v, want nil", err)
 	}
 	if got := st.Generation(); got != 1 {
@@ -393,7 +394,8 @@ func TestSync_generationPassThrough(t *testing.T) {
 	}
 
 	// A real store mutation moves it exactly once more.
-	if _, _, err := st.store.Set("local/newer", []byte("v")); err != nil {
+	_, _, err = st.store.Set("local/newer", []byte("v"))
+	if err != nil {
 		t.Fatalf("Set() error = %v, want nil", err)
 	}
 	if got := st.Generation(); got != 2 {
