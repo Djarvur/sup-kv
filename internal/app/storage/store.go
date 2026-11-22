@@ -95,6 +95,11 @@ type Store struct {
 	cfg     Config
 	records map[string]Record
 	clock   Clock
+
+	// generation is the content generation: it moves by exactly one per
+	// install (every stored-record change converges there) and never for a
+	// no-op or read path. Guarded by mu, like records.
+	generation uint64
 }
 
 // NewStore returns a store for nodeID whose writes are stamped by clk, with
@@ -288,7 +293,9 @@ func (s *Store) Merge(key string, rec Record) (conflicts []Conflict, drift time.
 // (the same seam Merge's trailing Update uses). The returned drift is the
 // clock's own signal, exactly like Merge's.
 func (s *Store) Observe(ver version.RecordVersion) time.Duration {
-	return 0
+	l, c, _ := ver.Unpack()
+	_, _, drift := s.clock.Update(l, c)
+	return drift
 }
 
 // Len returns the number of stored records — tombstones included — in
@@ -296,7 +303,9 @@ func (s *Store) Observe(ver version.RecordVersion) time.Duration {
 // startup empty-vs-data selection probe (PROTO-02, T-4-11); Records() would
 // clone every value.
 func (s *Store) Len() int {
-	return 0
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.records)
 }
 
 // Generation returns the store's monotone content generation: it moves by
@@ -307,7 +316,9 @@ func (s *Store) Len() int {
 // clock-only Observe and every read path therefore leave it unchanged: a
 // content generation, never a call count (T-4-43).
 func (s *Store) Generation() uint64 {
-	return 0
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.generation
 }
 
 // join compares rec against the stored record by the full 16-byte version
@@ -332,12 +343,13 @@ func (s *Store) join(key string, rec Record) []Conflict {
 }
 
 // install defensively copies rec and stores it under key with a recomputed
-// checksum, then fires the Config.OnChange tap with the stored record.
-// install is the single convergence point of every change source — local
-// writes reach it through write, remote merges through the strictly-greater
-// join branch — so the tap fires exactly when a record became the stored
-// record (D-06) and observes commit order; the caller must hold the write
-// lock.
+// checksum, bumps the content generation and fires the Config.OnChange tap
+// with the stored record. install is the single convergence point of every
+// change source — local writes reach it through write, remote merges through
+// the strictly-greater join branch — so the tap fires exactly when a record
+// became the stored record (D-06) and observes commit order, and the
+// generation moves exactly once per actual change and never for a no-op; the
+// caller must hold the write lock.
 func (s *Store) install(key string, rec Record) {
 	data := bytes.Clone(rec.Data)
 	stored := Record{
@@ -347,6 +359,7 @@ func (s *Store) install(key string, rec Record) {
 		Checksum: RecordChecksum(key, rec.Version, data, rec.Deleted),
 	}
 	s.records[key] = stored
+	s.generation++
 	s.cfg.OnChange(key, stored)
 }
 
