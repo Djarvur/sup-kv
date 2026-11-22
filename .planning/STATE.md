@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-11-22T03:27:29.749Z"
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-11-22T03:40:58.479Z"
 last_activity: 2026-11-22
-last_activity_desc: Completed 04-01-PLAN.md (protocol header and listing completeness)
-state_head: d1760dba239548bfef1d08ae444f5c27ae060154
+last_activity_desc: Completed 04-02-PLAN.md (gated reads and listed-key RPC answers)
+state_head: a3a212419aabda81444614de51b01b7274369cff
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 35
+  completed_plans: 36
 ---
 
 # Project State
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 13
 Status: Ready to execute
-Last activity: 2026-11-22 — Completed 04-01-PLAN.md
+Last activity: 2026-11-22 — Completed 04-02-PLAN.md
 
 Progress: [███░░░░░░░] 33%
 
@@ -92,6 +92,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P12 | 1382s | 3 tasks | 17 files |
 | Phase 03 P13 | 1048s | 2 tasks | 10 files |
 | Phase 04 P01 | 23min | 3 tasks | 17 files |
+| Phase 04 P02 | 5min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -233,6 +234,11 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-01: Retained listed keys are capped at 131072 by whole-peer-set LRU eviction through refcounts; ListedKeysEvicted counts keys that actually left the union.
 - [Phase 04]: 04-01: proto_version is judged pre-CRC/body as ProtoVersionMismatch; bad_sync_header is a header-first class; both WARN per (node_id, class) on event time.
 - [Phase 04]: 04-01: chunkOverheadBytes 96 with both graduated lenses re-derived to sum 1112; sync_id is a monotone build-time counter and run_id is part of the accumulation key, keeping same-seed replay byte-identical.
+- [Phase 04]: 04-02: Get distinguishes a local tombstone from a listed-but-unarrived key with Engine.Version, never Engine.Get — Get hides tombstones, so probing it would answer Unavailable forever for a deleted listed key (RESEARCH Pitfall 10).
+- [Phase 04]: 04-02: ServerOptions.ListedKey is a nil-able seam (nil = no listing knowledge), preserving the single-node configuration and every pre-existing harness; production wiring is 04-06's.
+- [Phase 04]: 04-02: The gate is every data handler's first statement, before validation, listed-key knowledge and the nil-hub check; a closed node answers Unavailable for reads and writes alike.
+- [Phase 04]: 04-02: create_if_absent on any listed key is AlreadyExists before the engine call; the post-open race test models completeness+membership as one atomic.Pointer publication.
+- [Phase 04]: 04-02: Delete keeps local NotFound for a listed-but-unarrived key (rule 14.5(6) names reads; A7); the Watch send-error fixture now opens its gate through the resolver (Rule 3).
 
 ### Pending Todos
 
@@ -255,7 +261,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T03:26:54.291Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-11-22T03:40:50.218Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
 Next action: `/gsd:verify-work 3` (or `/gsd:execute-phase 4` after the phase gate is verified) — Phase 4 (Protocol) is unblocked
