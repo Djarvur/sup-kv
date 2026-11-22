@@ -239,3 +239,11 @@ None — no new trust-boundary surface. T-4-33 is mitigated as planned: both cha
 
 - The whole-suite green record and the adaptation table are ready for 04-12 (the phase artifact) and 04-13 (the phase gate and the two TSV flips).
 - Two plans remain in the phase; 04-12 is next.
+
+## Self-Check: PASSED
+
+- `internal/app/repl/merge_stats_test.go` — FOUND
+- `internal/app/repl/warn_test.go` — FOUND
+- Commit `4a352e8` (task 1) — FOUND (`git merge-base --is-ancestor 4a352e8 HEAD`)
+- Commit `a0b4d5c` (this SUMMARY + STATE/ROADMAP) — FOUND (`git log --oneline -1` at write time)
+- Frozen files — `git diff --exit-code` empty before and after the plan
