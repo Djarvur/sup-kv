@@ -160,6 +160,14 @@ const (
 	// counted in ListedKeysEvicted.
 	maxListedKeysTotal = 131072
 
+	// seenRunsCap bounds the per-peer history of previously current run_ids
+	// (PROTO-06, T-4-30): a fixed ring behind the alternating-identity
+	// discrimination, so a hostile flapping identity cannot grow per-peer
+	// memory without bound. When the ring wraps, the oldest entry is forgotten
+	// and an ancient run_id is treated as a restart again — documented,
+	// bounded behavior rather than unbounded memory.
+	seenRunsCap = 8
+
 	// jitterDivisor is the jitter envelope's denominator: timer jitter spans
 	// a tenth of the interval (positive-only), pacer jitter a tenth of the
 	// spacing (±).
@@ -409,12 +417,47 @@ type PeerInfo struct {
 // of every targeted (restart) listing toward this peer, so repeated rounds
 // cover the whole key space under buffer loss (D-01's targeted half). The
 // counter lives in the row across restarts, which keeps the rotation
-// advancing without any disk state.
+// advancing without any disk state. seenRuns is the bounded history of run
+// ids this row announced before the current one: every accepted run change
+// pushes the outgoing current run, so a return to an old identity is an
+// alternating-run_id configuration error instead of a restart (PROTO-06).
 type peer struct {
 	handle    string
 	runID     [16]byte
 	lastHello time.Time
 	rotation  uint64
+
+	// seenRuns is the fixed 8-slot ring behind the alternating-identity
+	// discrimination (T-4-27, T-4-30): a fixed array, never a growing slice,
+	// so a hostile flapping identity cannot grow per-peer memory without
+	// bound. seenLen counts the valid entries (from slot 0 while the ring has
+	// not wrapped) and seenPos is the next write position.
+	seenRuns [seenRunsCap][16]byte
+	seenLen  uint8
+	seenPos  uint8
+}
+
+// pushSeenRun records run as one of this row's previously current run_ids,
+// keeping the most recent seenRunsCap entries and overwriting the oldest when
+// the ring wraps.
+func (p *peer) pushSeenRun(run [16]byte) {
+	p.seenRuns[p.seenPos] = run
+	p.seenPos = (p.seenPos + 1) % seenRunsCap
+	if p.seenLen < seenRunsCap {
+		p.seenLen++
+	}
+}
+
+// seen reports whether run is one of the previously announced run_ids still
+// inside the bounded ring. Slots past seenLen are never consulted, so an
+// all-zero run_id only matches after it was genuinely announced.
+func (p *peer) seen(run [16]byte) bool {
+	for i := range p.seenLen {
+		if p.seenRuns[i] == run {
+			return true
+		}
+	}
+	return false
 }
 
 // egressKind separates the two reactive unicast message kinds that share the
@@ -864,11 +907,14 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 // both conflicting handles (REPL-08). The classifier never pre-empts the
 // restart branch (REPL-07, plan 04-04): this second variant requires run_id
 // EQUALITY with the remembered row, so a known node whose announced run_id
-// differs always reaches the Hello handler and fires its targeted-listing
-// restart reaction — a restart is never counted as a duplicate. Every
-// discard site additionally fires cfg.OnDiscard with its class token and a
-// metadata detail (D-08) — additive to the duplicate-node_id Log calls,
-// never their replacement.
+// differs always reaches the Hello handler, which classifies a run_id it has
+// seen before as the alternating-identity configuration error and only an
+// unseen run_id as the targeted-listing restart (PROTO-06) — a genuine
+// restart is never counted as a duplicate. Every discard site additionally
+// fires cfg.OnDiscard with its class token and a metadata detail (D-08) —
+// additive to the configuration-error Log calls, never their replacement;
+// those Log calls now share the per-(node_id, class) rate limiter, so a
+// flapping host cannot flood the log from any duplicate-node path (T-4-28).
 //
 // The surviving datagram then passes the wire-validation pipeline
 // ([Core.validate], XPORT-03/04/10, D-06) BEFORE handleMessage — the
@@ -930,7 +976,7 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		}
 		c.discards.DuplicateNodeID++
 		c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf("node_id %d at handle %q", in.NodeID, in.Source))
-		c.cfg.Log(fmt.Sprintf(
+		c.warnRateLimited(now, in.NodeID, DiscardDuplicateNodeID, fmt.Sprintf(
 			"sup-kv: configuration error: node_id %d announced by another run from handle %q, datagram discarded (REPL-08)",
 			in.NodeID, in.Source,
 		))
@@ -939,7 +985,7 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 	if known, ok := c.peers[in.NodeID]; ok && in.RunID == known.runID && in.Source != known.handle {
 		c.discards.DuplicateNodeID++
 		c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf("node_id %d handles %q/%q", in.NodeID, known.handle, in.Source))
-		c.cfg.Log(fmt.Sprintf(
+		c.warnRateLimited(now, in.NodeID, DiscardDuplicateNodeID, fmt.Sprintf(
 			"sup-kv: configuration error: node_id %d known at handle %q announced again from handle %q, datagram discarded (REPL-08)",
 			in.NodeID, known.handle, in.Source,
 		))
@@ -1100,18 +1146,30 @@ func (c *Core) discardValidated(now time.Time, nodeID uint16, class, detail stri
 	c.warnDiscard(now, nodeID, class)
 }
 
-// warnDiscard logs one discard-class WARN unless the same (node_id, class)
-// slot warned inside the last discardWarnInterval of event time — the shared
-// limiter every counted classification class uses, so one peer's flood can
-// never suppress another peer's first warning (D-06/D-07, T-4-04).
-func (c *Core) warnDiscard(now time.Time, nodeID uint16, class string) {
+// warnRateLimited logs msg unless the same (node_id, class) slot already
+// warned inside the last discardWarnInterval of event time — the one shared
+// limiter behind every counted classification WARN: the validation classes,
+// bad_sync_header and all three duplicate-node_id paths, so a flapping,
+// hostile or misconfigured peer can flood neither the log nor the listing
+// path (T-3-25, T-4-04, T-4-28). A slot's first warning always fires, and
+// the bookkeeping is a plain per-slot timestamp on the handler's now, never
+// a wall-clock read and never a global throttle.
+func (c *Core) warnRateLimited(now time.Time, nodeID uint16, class, msg string) {
 	key := scanDiscardKey{nodeID: nodeID, class: class}
 	last, warned := c.discardWarnAt[key]
 	if warned && now.Sub(last) < discardWarnInterval {
 		return
 	}
 	c.discardWarnAt[key] = now
-	c.cfg.Log(fmt.Sprintf(
+	c.cfg.Log(msg)
+}
+
+// warnDiscard logs one discard-class WARN through the shared limiter, naming
+// only the class — the operator's coarse hint beside the reliable counters,
+// while per-datagram discard logging stays the adapter's Debug-level
+// OnDiscard bridge (T-3-25, T-3-27).
+func (c *Core) warnDiscard(now time.Time, nodeID uint16, class string) {
+	c.warnRateLimited(now, nodeID, class, fmt.Sprintf(
 		"sup-kv: discarded inbound datagram: class %s from node %d (one warning per node and class per %s)",
 		class, nodeID, discardWarnInterval,
 	))
@@ -1152,10 +1210,18 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 //     only, never a second listing (a per-Hello full listing at hello_interval
 //     cadence would be a self-inflicted listing flood; the flap case is bounded
 //     by this idempotence, not by rate limiting).
-//   - a known node_id whose run_id differs from the remembered one is a
-//     detected restart — the duplicate-node_id classifier never pre-empts this
-//     branch (HandleDatagram's second variant requires run_id equality with
-//     the remembered row) — the old run's queued listing, retained keys and
+//   - a known node_id announcing a run_id it carried BEFORE but which is not
+//     current is the alternating-run_id configuration error (PROTO-06, R-12):
+//     counted as DuplicateNodeID, WARNed once per (node_id, class) interval
+//     through the shared limiter, dropped, and given NO listing — a flapping
+//     or hostile process must not be rewarded with a full listing per
+//     datagram. The row and its liveness stamp are untouched, so the
+//     currently remembered run remains authoritative.
+//   - a known node_id announcing an unseen run_id is a detected restart — the
+//     duplicate-node_id classifier never pre-empts this branch
+//     (HandleDatagram's second variant requires run_id equality with the
+//     remembered row) — the outgoing current run joins the row's bounded
+//     seen-run history, the old run's queued listing, retained keys and
 //     partial rounds are dropped so no dead state outlives the row, the entry
 //     updates in place (handle, runID, lastHello; the table stays keyed by
 //     node_id, one row per node — a change never forks a second row, which
@@ -1167,11 +1233,13 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // second implementation. The first-seen round starts at chunk 0; the restart
 // round uses and advances the row's rotation counter, so repeated restarts
 // cover the whole key space under buffer loss (D-01's targeted half).
-// Inequality with the remembered run_id is the only restart trigger: run_ids
-// are 16 random bytes per process start, so they carry no temporal order — a
-// stale run_id returning after a newer one was seen is indistinguishable from
-// a fresh restart and is handled as just another change (entry update plus one
-// idempotent re-sync; reconciliation no-ops on equal state). In-flight
+// The restart test is "run_id unseen by this row", not "run_id differs": the
+// bounded seen-run ring remembers the previous 8 current run_ids, so an
+// alternation back to a recent identity is the named configuration error
+// while a genuinely new run — 16 random bytes per process start, carrying no
+// temporal order — is still a restart. When the ring wraps, the oldest
+// identity is forgotten and treated as a restart again (documented, bounded
+// behavior: T-4-30). In-flight
 // protocol datagrams from the old run — Ack, DataReplication, DataSync —
 // process normally on their (key, version) merits, run_id-agnostic outside
 // this handler. The listing is proactive traffic on the shared listing pacer,
@@ -1201,25 +1269,43 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	c.helloSeen = true
 	discovery := len(c.peers) == 0
 	known, remembered := c.peers[in.NodeID]
-	if remembered && known.runID == in.RunID {
-		// A repeat Hello is idempotence: refresh the liveness stamp, emit
-		// nothing, never a second listing.
-		known.handle = in.Source
-		known.lastHello = now
-		c.peers[in.NodeID] = known
-		return
-	}
 	if remembered {
+		switch {
+		case known.runID == in.RunID:
+			// A repeat Hello is idempotence: refresh the liveness stamp, emit
+			// nothing, never a second listing.
+			known.handle = in.Source
+			known.lastHello = now
+			c.peers[in.NodeID] = known
+			return
+		case known.seen(in.RunID):
+			// A run_id this row carried before and no longer has is an
+			// alternating identity — a named configuration error (PROTO-06):
+			// counted, WARNed through the shared per-(node_id, class) limiter,
+			// dropped with no listing and no row change, so a flapping
+			// process cannot force a full listing per datagram.
+			c.discards.DuplicateNodeID++
+			c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf(
+				"node_id %d announced a previously seen run_id from handle %q", in.NodeID, in.Source))
+			c.warnRateLimited(now, in.NodeID, DiscardDuplicateNodeID, fmt.Sprintf(
+				"sup-kv: configuration error: node_id %d alternated to a previously seen run_id from handle %q, datagram discarded (PROTO-06)",
+				in.NodeID, in.Source,
+			))
+			return
+		}
 		// A new run under this node_id no longer stands behind the old run's
 		// listing: its keys leave the retained union (a content change the
 		// mirror must publish), its partial rounds are discarded and its
 		// queued FIFO is dropped, so neither the bounded listing queue nor the
-		// accumulator inherits dead state (CR-01).
+		// accumulator inherits dead state (CR-01). The outgoing current run
+		// joins the row's bounded history before the row moves on, which is
+		// what makes a later return to it an alternation.
 		if c.dropListedPeer(in.NodeID) > 0 {
 			c.listingGen++
 		}
 		c.dropPeerSyncStreams(in.NodeID)
 		c.dropListing(listingDst{nodeID: in.NodeID, runID: known.runID})
+		known.pushSeenRun(known.runID)
 	}
 	known.handle = in.Source
 	known.runID = in.RunID
@@ -2549,7 +2635,8 @@ func (c *Core) ListedKeysEvicted() uint64 {
 // timeouts, sync targets) and observability, without exposing core state.
 func (c *Core) PeerSnapshot() map[uint16]PeerInfo {
 	out := make(map[uint16]PeerInfo, len(c.peers))
-	for id, p := range c.peers {
+	for id := range c.peers {
+		p := c.peers[id]
 		out[id] = PeerInfo{Handle: p.handle, RunID: p.runID, LastHello: p.lastHello}
 	}
 	return out

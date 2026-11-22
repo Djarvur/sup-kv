@@ -268,11 +268,36 @@ func assertConfigErrorLog(t *testing.T, logs, mustName []string) {
 }
 
 // modelPeer mirrors the classification-relevant peer-table row: the handle
-// and run_id the second duplicate-node_id variant compares against. Only a
-// processed Hello ever writes it — exactly the core's own mutation rule.
+// and run_id the second duplicate-node_id variant compares against, plus the
+// bounded 8-entry history of previously current run_ids the alternating-
+// identity rule consults (PROTO-06). Only a processed Hello ever writes it —
+// exactly the core's own mutation rule.
 type modelPeer struct {
-	handle string
-	runID  [16]byte
+	handle   string
+	runID    [16]byte
+	seenRuns [8][16]byte
+	seenLen  uint8
+	seenPos  uint8
+}
+
+// pushSeenRun mirrors the core's ring push: the outgoing current run joins
+// the bounded history, overwriting the oldest slot when the ring wraps.
+func (p *modelPeer) pushSeenRun(run [16]byte) {
+	p.seenRuns[p.seenPos] = run
+	p.seenPos = (p.seenPos + 1) % 8
+	if p.seenLen < 8 {
+		p.seenLen++
+	}
+}
+
+// seenRun mirrors the core's ring lookup, consulting only the valid slots.
+func (p *modelPeer) seenRun(run [16]byte) bool {
+	for i := range p.seenLen {
+		if p.seenRuns[i] == run {
+			return true
+		}
+	}
+	return false
 }
 
 // classify mirrors the classifier's pinned decision for one datagram against
@@ -281,7 +306,10 @@ type modelPeer struct {
 // precedent, applied to the classification order (D-02) followed by the
 // wire-validation pipeline the core runs before handleMessage (XPORT-10,
 // D-06). now is the handler's event time, the clock the version bound reads.
-func classify(in port.InboundDatagram, peers map[uint16]modelPeer, now time.Time) string {
+// A Hello that survives every classification applies its identity transition
+// to the model row here (learn, refresh or restart with the seen-run push),
+// so the model stays in lockstep with the core's handleHello.
+func classify(in port.InboundDatagram, peers map[uint16]*modelPeer, now time.Time) string {
 	switch in.Status {
 	case port.BadCRC:
 		return "BadCRC"
@@ -297,10 +325,31 @@ func classify(in port.InboundDatagram, peers map[uint16]modelPeer, now time.Time
 		}
 		return "DuplicateNodeID"
 	}
-	if known, ok := peers[in.NodeID]; ok && in.RunID == known.runID && in.Source != known.handle {
-		return "DuplicateNodeID"
+	_, isHello := in.Msg.(port.Hello)
+	if known, ok := peers[in.NodeID]; ok {
+		switch {
+		case in.RunID == known.runID && in.Source != known.handle:
+			return "DuplicateNodeID"
+		case isHello && in.RunID != known.runID && known.seenRun(in.RunID):
+			return "DuplicateNodeID"
+		}
 	}
-	return validateClass(in.Msg, now)
+	if class := validateClass(in.Msg, now); class != "" {
+		return class
+	}
+	if isHello {
+		known, ok := peers[in.NodeID]
+		if !ok {
+			peers[in.NodeID] = &modelPeer{handle: in.Source, runID: in.RunID}
+			return ""
+		}
+		known.handle = in.Source
+		if known.runID != in.RunID {
+			known.pushSeenRun(known.runID)
+			known.runID = in.RunID
+		}
+	}
+	return ""
 }
 
 // validateClass mirrors the validation pipeline's pinned intra-message order
@@ -535,7 +584,7 @@ func TestDiscard_totality(t *testing.T) {
 	now := at(0)
 	var logs []string
 	core := newDiscardCore(&logs)
-	peers := map[uint16]modelPeer{
+	peers := map[uint16]*modelPeer{
 		peerID1: {handle: handleFor(peerID1), runID: testRunID(peerID1)},
 		peerID2: {handle: handleFor(peerID2), runID: testRunID(peerID2)},
 	}
@@ -554,9 +603,8 @@ func TestDiscard_totality(t *testing.T) {
 		core.HandleDatagram(now, in, &out)
 		out.Drain()
 		if class == "" {
-			if _, ok := in.Msg.(port.Hello); ok {
-				peers[in.NodeID] = modelPeer{handle: in.Source, runID: in.RunID}
-			}
+			// classify already applied the Hello's identity transition to the
+			// model row; nothing else mutates the table.
 			continue
 		}
 		discarded++
