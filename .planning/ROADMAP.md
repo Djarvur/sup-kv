@@ -200,7 +200,41 @@ Plans:
   3. Failure handling is bounded and honest: after a backup or empty start the engine is marked dirty so the first rotation never displaces the last good generation (and `SnapshotCreate` right after such a start decodes back to the in-memory state); each dump failure logs one ERROR with the underlying error (ENOSPC, EACCES) and retries with a growing pause up to a cap, with health behavior documented; records skipped due to a reduced value limit are counted and logged, not silently dropped
   4. Resources are bounded: streaming encode keeps a dump cycle at most two state sizes with the memory model documented; a hung fsync cannot block writes, snapshots or shutdown indefinitely; orphan temp files are collected, new directories are synced at the parent, and `fsync_darwin.go` is removed or handles EINTR/ENOTSUP
   5. Structure serves the seams: `persist.Engine` is split along its responsibilities (loader/composition root, store facade, dump scheduler, confirmation accounting, snapshot orchestration) with the `DumpStore` port returning the load outcome and failure cause; `internal/app/persist` timers and `time.Now()` sit behind the same seam as the repl core so the simulator exercises the dump↔replication interaction; equal-version-different-content is resolved by a recorded ADR decision (random tail or deterministic tie-break), implemented and tested
-**Plans**: TBD
+**Plans**: 12 plans
+
+Plans:
+**Wave 1**
+- [ ] 05-01-PLAN.md — Single-source value limit end to end (`storage.ValueMaxBytes` + `Config.ValueLimit` + `Store.ValueMaxBytes`, codec limit, cmd validation) (D-01/PERSIST-01, PERSIST-10)
+
+**Wave 2** *(blocked on Wave 1)*
+- [ ] 05-02-PLAN.md — Dump census (`record_count`) and line-oriented decode with four-class stats (D-03/PERSIST-03, PERSIST-10)
+- [ ] 05-03-PLAN.md — Deterministic equal-version tie-break in the store and on the wire, ADR 0012 (D-12/PERSIST-07)
+
+**Wave 3** *(blocked on Wave 2)*
+- [ ] 05-04-PLAN.md — Streaming save (`SaveStream`/`EncodeTo`) and the port's load-result contract (D-06, D-10/PERSIST-06, PERSIST-11)
+
+**Wave 4** *(blocked on Wave 3)*
+- [ ] 05-05-PLAN.md — Load outcomes, evidence preservation, orphan sweep, parent sync, dir-fsync tolerance, errno classes (D-02, D-08, D-09/PERSIST-02, PERSIST-09)
+
+**Wave 5** *(blocked on Wave 4)*
+- [ ] 05-06-PLAN.md — Engine load report, dirty-after-restore-start, markDirty nudge, skip accounting, binary log/metrics (D-04, D-02, D-09/PERSIST-04, PERSIST-02, PERSIST-10)
+
+**Wave 6** *(blocked on Wave 5)*
+- [ ] 05-07-PLAN.md — Injected now/after seam, bounded retry ladder with classes, simulator dump↔notify scenario (D-11, D-05/PERSIST-12, PERSIST-05)
+
+**Wave 7** *(blocked on Wave 6)*
+- [ ] 05-08-PLAN.md — Confirmation/flush/shutdown deadlines, `ErrUnconfirmed`, RPC totality (D-07/PERSIST-08)
+
+**Wave 8** *(blocked on Wave 7)*
+- [ ] 05-09-PLAN.md — Engine split into five internal roles, public API frozen (D-10/PERSIST-11)
+- [ ] 05-10-PLAN.md — OPERATIONS runbook: load outcomes, retry/health, evidence files, memory model, new metrics (PERSIST-02, PERSIST-05, PERSIST-06)
+
+**Wave 9** *(blocked on Wave 8)*
+- [ ] 05-11-PLAN.md — SPEC-DEVIATIONS: exactly seven rows amended with current evidence (PERSIST-01, PERSIST-02, PERSIST-07)
+
+**Wave 10** *(blocked on Wave 9)*
+- [ ] 05-12-PLAN.md — Phase gate: flip the two P-01 rows, 7/7 red-runner with mutants, lint/test/darwin/bench
+
 
 ### Phase 6: API and Semantics
 **Goal**: The gRPC API tells the truth — `wait_for_replication` reports what actually happened, errors are total and path-free, Watch and health behave as documented, and the proto is public so consumers can build against it.
