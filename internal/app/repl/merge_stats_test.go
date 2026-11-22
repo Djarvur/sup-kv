@@ -18,10 +18,11 @@ const driftLead = 2 * time.Minute
 // seam: a strictly greater remote version counts one conflict (the
 // displaced local version — an LWW loser is an ordinary overwrite, counted
 // and never journaled, D-10), an equal-version redelivery counts nothing
-// (merge idempotence), and a record stamped beyond the store clock's
-// drift-warn threshold — the signal clock.Update already gates to zero
-// within tolerance — counts one drift warning while a first record under an
-// absent key conflicts nothing.
+// (the equal branch Acks without merging, PROTO-03), and a record stamped
+// beyond the store clock's drift-warn threshold — the signal clock.Update
+// already gates to zero within tolerance — counts one drift warning on the
+// first apply AFTER its absorption, while a first record under an absent key
+// conflicts nothing.
 func TestMergeStats_counts(t *testing.T) {
 	t.Parallel()
 	core, st := newTestCoreWithConfig(repl.Config{MaxClockLead: driftLead})
@@ -50,8 +51,8 @@ func TestMergeStats_counts(t *testing.T) {
 		t.Fatalf("store serves (%x, %v) after the apply, want the remote version %x", served.Version[:], err, greater.Version[:])
 	}
 
-	// The identical redelivery conflicts nothing: merge idempotence, the
-	// equal-version full no-op.
+	// The identical redelivery conflicts nothing: the equal-version branch
+	// Acks and never merges, so the counters stay exactly as they were.
 	core.HandleDatagram(now, replFrom(peerID1, keyAlpha, greater), &out)
 	out.Drain()
 	if got := core.MergeStats(); got.Conflicts != 1 || got.DriftWarnings != 0 {
@@ -62,10 +63,11 @@ func TestMergeStats_counts(t *testing.T) {
 	// counter on the apply AFTER its absorption: clock.Update measures the
 	// clock's own divergence from the wall clock at the event (the Kulkarni
 	// receive rule advances l first), so the far-ahead stamp lands under
-	// keyBeta with no conflict and no warning yet, and the next apply — an
-	// equal redelivery of the same record — observes l one warning window
-	// past the wall clock and counts the warning. keyBeta holds no local
-	// record, so no conflict ever joins it.
+	// keyBeta with no conflict and no warning yet, and the next apply — a
+	// record under the still-absent keyGamma, since an equal-version
+	// redelivery now Acks without merging (PROTO-03) — observes l one
+	// warning window past the wall clock and counts the warning. keyGamma
+	// holds no local record, so no conflict ever joins it.
 	aheadMs := testNowMs + 5000 + int64(testDriftWarn/time.Millisecond) + 1000
 	ahead := remoteRecord(aheadMs, peerID1, "from-the-future")
 	core.HandleDatagram(now, replFrom(peerID1, keyBeta, ahead), &out)
@@ -73,7 +75,7 @@ func TestMergeStats_counts(t *testing.T) {
 	if got := core.MergeStats(); got.Conflicts != 1 || got.DriftWarnings != 0 {
 		t.Fatalf("after the far-ahead apply MergeStats() = %+v, want Conflicts 1, DriftWarnings 0 (the stamp is absorbed, not yet warned)", got)
 	}
-	core.HandleDatagram(now, replFrom(peerID1, keyBeta, ahead), &out)
+	core.HandleDatagram(now, replFrom(peerID1, keyGamma, ahead), &out)
 	out.Drain()
 	if got := core.MergeStats(); got.Conflicts != 1 || got.DriftWarnings != 1 {
 		t.Fatalf("after the post-absorption apply MergeStats() = %+v, want Conflicts still 1, DriftWarnings 1", got)

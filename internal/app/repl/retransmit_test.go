@@ -1267,7 +1267,8 @@ func TestRetransmit_skipDrainedAndSuperseded(t *testing.T) {
 // installed record (checksum included) for use as a wire fixture.
 func seedVersion(t *testing.T, st *stateStore, key string, rec storage.Record) storage.Record {
 	t.Helper()
-	if _, _, err := st.store.Merge(key, rec); err != nil {
+	_, _, err := st.store.Merge(key, rec)
+	if err != nil {
 		t.Fatalf("store Merge(%q): %v", key, err)
 	}
 	got, err := st.store.Get(key)
@@ -1325,7 +1326,8 @@ func TestReplication_staleAnsweredNotAcked(t *testing.T) {
 	if reply.Key != keyAlpha || reply.Record.Version != v5 || !bytes.Equal(reply.Record.Data, []byte("five")) {
 		t.Fatalf("the answer = (%q, %+v), want the held v5 record", reply.Key, reply.Record)
 	}
-	if got, err := st.store.Get(keyAlpha); err != nil || got.Version != v5 {
+	got, err := st.store.Get(keyAlpha)
+	if err != nil || got.Version != v5 {
 		t.Fatalf("store Get(%q) after the stale record = (%x, %v), want the untouched v5", keyAlpha, got.Version[:], err)
 	}
 	assertPending(t, core.PendingSnapshot(), keyAlpha, v5, []uint16{peerID1})
@@ -1354,7 +1356,8 @@ func TestReplication_equalVersionAcked(t *testing.T) {
 	if stats := core.MergeStats(); stats.Conflicts != 0 || stats.DriftWarnings != 0 {
 		t.Fatalf("the equal version counted merge stats %+v, want none", stats)
 	}
-	if got, err := st.store.Get(keyAlpha); err != nil || got.Version != v5 {
+	got, err := st.store.Get(keyAlpha)
+	if err != nil || got.Version != v5 {
 		t.Fatalf("store Get(%q) after the equal delivery = (%x, %v), want the unchanged v5", keyAlpha, got.Version[:], err)
 	}
 }
@@ -1380,7 +1383,8 @@ func TestReplication_newerApplied(t *testing.T) {
 	if stats := core.MergeStats(); stats.Conflicts != 1 {
 		t.Fatalf("MergeStats().Conflicts = %d after displacing v5, want 1", stats.Conflicts)
 	}
-	if got, err := st.store.Get(keyAlpha); err != nil || got.Version != v6 || !bytes.Equal(got.Data, []byte("six")) {
+	got, err := st.store.Get(keyAlpha)
+	if err != nil || got.Version != v6 || !bytes.Equal(got.Data, []byte("six")) {
 		t.Fatalf("store Get(%q) after the newer apply = (%x, %v), want v6", keyAlpha, got.Version[:], err)
 	}
 }
@@ -1397,12 +1401,13 @@ func TestReplication_absentApplies(t *testing.T) {
 	out.Drain()
 
 	v3 := version.PackVersion(testNowMs, 3, peerID1)
-	core.HandleDatagram(now, replFrom(peerID1, keyAlpha, storage.Record{Version: v3, Data: []byte("three")}), &out)
-	assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, v3)
+	core.HandleDatagram(now, replFrom(peerID1, keyGamma, storage.Record{Version: v3, Data: []byte("three")}), &out)
+	assertAck(t, out.Drain(), handleFor(peerID1), keyGamma, v3)
 	if got := core.QueuedResponses(); got != 0 {
 		t.Fatalf("QueuedResponses() = %d after an absent-key record, want 0", got)
 	}
-	if got, err := st.store.Get(keyAlpha); err != nil || got.Version != v3 {
-		t.Fatalf("store Get(%q) after the absent-key apply = (%x, %v), want v3", keyAlpha, got.Version[:], err)
+	got, err := st.store.Get(keyGamma)
+	if err != nil || got.Version != v3 {
+		t.Fatalf("store Get(%q) after the absent-key apply = (%x, %v), want v3", keyGamma, got.Version[:], err)
 	}
 }

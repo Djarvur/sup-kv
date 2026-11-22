@@ -379,7 +379,8 @@ func TestWaitIntegration_staleRecordNotAcked(t *testing.T) {
 	const staleKey = "wait/stale"
 	staleData := []byte("newer")
 	staleVersion := version.PackVersion(time.Now().UnixMilli()+10_000, 0, replNodeB)
-	if _, _, mergeErr := storeB.Merge(staleKey, storage.Record{Version: staleVersion, Data: staleData}); mergeErr != nil {
+	_, _, mergeErr := storeB.Merge(staleKey, storage.Record{Version: staleVersion, Data: staleData})
+	if mergeErr != nil {
 		t.Fatalf("seed node B's newer record: %v", mergeErr)
 	}
 

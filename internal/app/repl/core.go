@@ -1073,7 +1073,7 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 	case port.Hello:
 		c.handleHello(now, in)
 	case port.DataReplication:
-		c.applyRemote(in.Source, msg, out)
+		c.applyRemote(now, in.Source, msg, out)
 	case port.Ack:
 		c.handleAck(in.NodeID, msg, out)
 	case port.DataRequest:
@@ -1175,21 +1175,49 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	}
 }
 
-// applyRemote joins one replicated record through the store seam and Acks
-// it immediately after the in-memory apply — nothing here waits for a dump
-// (REPL-03). A store error (for example a value over the configured limit)
-// is surfaced through Log, never a panic: a hostile or oversized datagram
-// must not take the node down, and a record the store refused is never
-// confirmed — no Ack and no supersession of pending tracking, so the sender
-// keeps retransmitting and the unacked gauge keeps climbing: the truthful
-// signal of divergence, never a "delivered" report for a record that was
-// never stored. Merge idempotence keeps the error-free duplicate delivery
-// of an already-stored record a no-op that still Acks (REPL-09's adjacency
-// edge). The ApplyRemote returns feed the MergeStats counters (OBS-01,
-// D-10): every displaced-or-rejected version counts a conflict — counted
-// only, never journaled — and a nonzero drift return (the store clock's
-// beyond-threshold signal) counts a drift warning.
-func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Outbox) {
+// applyRemote resolves one inbound DataReplication against the store's
+// current state, with exactly three outcomes (PROTO-03, the refined D-03):
+//
+//   - strictly older incoming (a held version sorts after it): answer with
+//     exactly one unicast DataReplication carrying the held record and send
+//     NO Ack. The answer is queued as an identity-only egress entry and
+//     re-reads the stored record at drain time, so the newer data is always
+//     current. The store is not merged, the merge counters are untouched and
+//     the tracking ledger neither gains nor loses an entry — an Ack here
+//     would tell the sender a record it did not get was accepted.
+//   - equal version: Ack it and emit no reply. The record is already held
+//     (merge idempotence), and every equal duplicate must be confirmed or
+//     retransmission ladders never drain (S-PROTO-16, R-02). The clock
+//     already absorbed this version when the record was installed, so
+//     skipping the merge changes no state.
+//   - strictly newer or absent: fall through to ApplyRemote and Ack after
+//     the in-memory apply — nothing here waits for a dump (REPL-03).
+//
+// The probe is one point Version read before ApplyRemote, so the merge can
+// never change the verdict mid-decision. A store error on the apply path
+// (for example a value over the configured limit) is surfaced through Log,
+// never a panic: a hostile or oversized datagram must not take the node
+// down, and a record the store refused is never confirmed — no Ack and no
+// supersession of pending tracking, so the sender keeps retransmitting and
+// the unacked gauge keeps climbing: the truthful signal of divergence,
+// never a "delivered" report for a record that was never stored. The
+// ApplyRemote returns feed the MergeStats counters (OBS-01, D-10): every
+// displaced-or-rejected version counts a conflict — counted only, never
+// journaled — and a nonzero drift return (the store clock's beyond-threshold
+// signal) counts a drift warning.
+func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplication, out *port.Outbox) {
+	if held, present := c.store.Version(msg.Key); present {
+		switch cmp := held.Compare(msg.Record.Version); {
+		case cmp > 0:
+			// The sender is behind: answer with the held record, never Ack.
+			c.enqueueResponse(now, source, egressDataReplication, msg.Key)
+			return
+		case cmp == 0:
+			// Already held at this exact version: Ack and emit no reply.
+			out.Unicast(source, port.Ack{Key: msg.Key, Version: held})
+			return
+		}
+	}
 	conflicts, drift, err := c.store.ApplyRemote(msg.Key, msg.Record)
 	if err != nil {
 		c.cfg.Log(fmt.Sprintf("sup-kv: applying replicated record for key %q from handle %q: %v", msg.Key, source, err))
