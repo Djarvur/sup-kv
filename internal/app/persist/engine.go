@@ -43,6 +43,12 @@ type Config struct {
 	Debounce time.Duration
 	MaxWait  time.Duration
 
+	// ConfirmTimeout bounds every confirmation wait (PERSIST-08, D-07): a
+	// write whose covering dump has not completed by then resolves with
+	// ErrUnconfirmed, and a flush — Flush, Snapshot, Restore — is bounded the
+	// same way. A zero or negative value defaults to 10 s in normalized.
+	ConfirmTimeout time.Duration
+
 	// Now is the engine's clock and After its timer seam (PERSIST-12): every
 	// read and every armed timer goes through them so the simulator can drive
 	// the dump loop on its own virtual time. A nil pair defaults to
@@ -139,11 +145,12 @@ type Engine struct {
 	// dumper — so atomic reads need no engine mutex. dumpDiskFull and
 	// dumpPermission split the failed attempts by the adapter's class
 	// (PERSIST-05); both are subsets of dumpErrors.
-	dumpNanos      atomic.Int64
-	dumpTotal      atomic.Uint64
-	dumpErrors     atomic.Uint64
-	dumpDiskFull   atomic.Uint64
-	dumpPermission atomic.Uint64
+	dumpNanos       atomic.Int64
+	dumpTotal       atomic.Uint64
+	dumpErrors      atomic.Uint64
+	dumpDiskFull    atomic.Uint64
+	dumpPermission  atomic.Uint64
+	dumpUnconfirmed atomic.Uint64
 }
 
 // DumpStats is the dump-cycle gauge OBS-01 reads: the last dump's
@@ -158,6 +165,7 @@ type DumpStats struct {
 	Errors          uint64
 	DiskFull        uint64
 	Permission      uint64
+	Unconfirmed     uint64
 }
 
 // LoadStats is the startup load report Open stores on the engine (D-02,
@@ -534,6 +542,7 @@ func (e *Engine) DumpStats() DumpStats {
 		Errors:          e.dumpErrors.Load(),
 		DiskFull:        e.dumpDiskFull.Load(),
 		Permission:      e.dumpPermission.Load(),
+		Unconfirmed:     e.dumpUnconfirmed.Load(),
 	}
 }
 
