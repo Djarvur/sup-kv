@@ -113,6 +113,12 @@ At startup the node walks the fallback chain — the main dump file, then its
   per candidate that actually failed (one or two, never a phantom). The
   node starts empty and recovers from peers.
 
+A generation written before this format's `record_count` field carries no
+completeness census, so a truncation that lands exactly on a line boundary of
+such a legacy dump is undetectable and loads as authoritative — take a
+snapshot (or let one confirmed write rotate the main generation) after
+upgrading, after which the next generation carries the census.
+
 Discarded records are counted by class in
 `supkv_dump_records_discarded_total`: `checksum`, `version`, `malformed`
 and `value_limit`. A record skipped because it exceeds the configured value
