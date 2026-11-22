@@ -1,17 +1,17 @@
 package persist_test
 
-// The dump-codec fuzz target (TEST-08, D-08): FuzzDumpDecode feeds arbitrary
-// bytes to persist.Decode and asserts the codec's documented contract only —
-// never anything stronger than the code guarantees today:
+// The dump-codec fuzz target (TEST-08, D-08, PERSIST-03): FuzzDumpDecode
+// feeds arbitrary bytes to persist.Decode and asserts the codec's documented
+// contract only — never anything stronger than the code guarantees today:
 //
 //   - Decode never panics on any input (a panic is a fuzz failure);
-//   - a generation-level fault returns an error with no records and no
-//     discarded count (Decode returns nil, 0, err — the fallback-chain
-//     signal), so a torn record can never collapse into empty success;
-//   - a per-record fault only increments discarded: success still returns
-//     checksum-verified records, accepted lines are accounted for
-//     (len(records)+discarded <= parsed record lines), and every returned
-//     record re-encodes and round-trips unchanged;
+//   - a generation-level fault returns an error with nil records and a zero
+//     DecodeStats (the fallback-chain signal), so a torn record can never
+//     collapse into empty success;
+//   - a per-record fault only increments the matching DecodeStats class:
+//     success still returns checksum-verified records, every post-header
+//     line is accounted for (len(records)+stats.Total() <= record lines),
+//     and every returned record re-encodes and round-trips unchanged;
 //   - a returned tombstone (Deleted=true) carries Data only when the input
 //     itself carried Data under that key — the codec echoes, it never
 //     invents payloads for deletions (XPORT-10's current tombstone-with-data
@@ -19,13 +19,15 @@ package persist_test
 //
 // The committed seed corpus under testdata/fuzz/FuzzDumpDecode/ derives only
 // from persist.Encode over in-repo fixtures and their corruptions: a valid
-// multi-record dump with a tombstone, a header-only dump, an empty input, an
-// unsupported format version, a bad-checksum line, a torn final record, a
-// dump cut mid-line, and a flipped payload byte. Plain `go test` loads and
-// runs the corpus (the PR-CI smoke); deep coverage-guided runs happen on the
-// nightly schedule (plan 02-11) and always bound the run with -fuzztime
-// (RESEARCH Pitfall 4). One fuzz target per package: FuzzDecode lives in
-// internal/udprepl.
+// multi-record dump with a tombstone, a header-only dump, a legacy v1.0
+// header with no census, an empty input, an unsupported format version, a
+// bad-checksum line, a torn final record, a dump cut mid-line, a flipped
+// payload byte, a count larger than the record lines, a record line split by
+// an injected newline, and a line beyond the format's maximum. Plain
+// `go test` loads and runs the corpus (the PR-CI smoke); deep coverage-guided
+// runs happen on the nightly schedule (plan 02-11) and always bound the run
+// with -fuzztime (RESEARCH Pitfall 4). One fuzz target per package:
+// FuzzDecode lives in internal/udprepl.
 
 import (
 	"bytes"
@@ -41,15 +43,16 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
-// The fuzz seed identity and fixture constants: the version base, the dump
-// header literal, and the fixture records' keys and payload.
+// The fuzz seed identity and fixture constants: the version base, the legacy
+// v1.0 header literal, and the fixture records' keys and payload.
 const (
-	fuzzDumpNowMs        = int64(1_730_000_000_000)
-	fuzzDumpNodeID       = uint16(12)
-	fuzzDumpHeader       = "{\"format_version\":1}\n"
-	fuzzDumpDataKey      = "fuzz/data"
-	fuzzDumpTombstoneKey = "fuzz/tombstone"
-	fuzzDumpPayload      = "value"
+	fuzzDumpNowMs         = int64(1_730_000_000_000)
+	fuzzDumpNodeID        = uint16(12)
+	fuzzDumpLegacyHeader  = "{\"format_version\":1}\n"
+	fuzzDumpDataKey       = "fuzz/data"
+	fuzzDumpTombstoneKey  = "fuzz/tombstone"
+	fuzzDumpPayload       = "value"
+	fuzzDumpOverlongBytes = 1 << 20
 )
 
 // errFuzzDumpFixtureNoPayload is the flipped-byte construction guard: the
@@ -165,14 +168,33 @@ func fuzzDumpSeeds() ([][]byte, error) {
 
 	return [][]byte{
 		valid,
-		[]byte(fuzzDumpHeader),
+		fuzzDumpCensusHeader(0),
+		[]byte(fuzzDumpLegacyHeader),
 		{},
 		[]byte("{\"format_version\":2}\n"),
-		fuzzDumpJoin([]byte(fuzzDumpHeader), badChecksumLine),
-		fuzzDumpJoin([]byte(fuzzDumpHeader), validLine, []byte(`{"key":"fuzz/torn"`)),
+		fuzzDumpJoin(fuzzDumpCensusHeader(1), badChecksumLine),
+		fuzzDumpJoin(fuzzDumpCensusHeader(2), validLine, []byte(`{"key":"fuzz/torn"`)),
 		bytes.Clone(valid[:len(valid)-10]),
 		flipped,
+		fuzzDumpJoin(fuzzDumpCensusHeader(2), validLine),
+		fuzzDumpInjectedNewline(validLine),
+		fuzzDumpJoin(fuzzDumpCensusHeader(0), bytes.Repeat([]byte("x"), fuzzDumpOverlongBytes), []byte("\n")),
 	}, nil
+}
+
+// fuzzDumpCensusHeader renders a header announcing count record lines — the
+// census-bearing shape the new seeds carry.
+func fuzzDumpCensusHeader(count int) []byte {
+	return []byte(fmt.Sprintf("{\"format_version\":1,\"record_count\":%d}\n", count))
+}
+
+// fuzzDumpInjectedNewline splits one valid record line with an injected
+// newline: the census's line count grows by one, both fragments fail to
+// parse (two Malformed discards), and the rest of a generation still loads.
+func fuzzDumpInjectedNewline(line []byte) []byte {
+	content := bytes.TrimSuffix(line, []byte("\n"))
+	mid := len(content) / 2
+	return fuzzDumpJoin(fuzzDumpCensusHeader(2), content[:mid], []byte("\n"), content[mid:], []byte("\n"))
 }
 
 // fuzzDumpRecord renders one JSONL record line in the on-disk format
