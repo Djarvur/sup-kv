@@ -14,6 +14,16 @@
 // the record stays readable in memory (D-05). Reads are never gated on
 // dumps. No callbacks, no events — results only (Phase 2 D-01 tradition).
 //
+// The package is split into five internal roles (D-10, PERSIST-11): the
+// loader/composition root (Open, mergeRecords and the load report), the
+// store facade (the thin read and write forwards plus ApplyRemote), the
+// dump scheduler (Run, the dump cycle, the retry ladder and the dump
+// counters), confirmation accounting (the waiters, the dirty epoch, the
+// flush request channel and the single-claim resolution) and snapshot
+// orchestration (Snapshot, Restore and the replay helpers). Engine is the
+// composition of those values; the split adds no exported name and no
+// interface.
+//
 // Timing guarantees (D-04, PERS-03): under any write cadence a write is
 // confirmed within MaxWait plus one dump duration — the dump starts no
 // later than the oldest unconfirmed write plus MaxWait, because the
