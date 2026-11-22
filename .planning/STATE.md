@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-11-22T22:14:21.688Z"
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-11-22T22:47:49.577Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: 4cb5d4b2396602c76bcd8258561bada70a2dae07
+state_head: fdc7b60bd8eeb15962bee9f0536d1350a464053c
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 60
+  completed_plans: 61
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
@@ -119,6 +119,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P11 | 134 | 2 tasks | 1 files |
 | Phase 05 P12 | 30min | 2 tasks | 2 files |
 | Phase 06 P01 | 721s | 3 tasks | 30 files |
+| Phase 06 P02 | 8min | 1 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -358,6 +359,10 @@ Recent decisions affecting current work:
 - [Phase 06]: The legacy-path alias package keeps package apiproto and omits the machine-readable Deprecated: marker: the marker made staticcheck SA1019 fail the byte-frozen red tests, so deprecation is stated in prose plus a scoped, reasoned //nolint:revive set instead
 - [Phase 06]: 06-01 Tasks 1+2 landed as one atomic commit (amended once to be lint-clean), so no commit ever has every importer naming the deprecated alias; the RED record is the compile-clean TestSchema_listPageFields assertion failure because the go-test RED classifier refuses [build failed] runs
 - [Phase 06]: The public API schema lives at api/supkvapi/v1 (module root api) with a one-file FILE_SAME_GO_PACKAGE waiver proven load-bearing; sup-kv-public-api-no-internal denies github.com/Djarvur/sup-kv/internal under api/ and was probe-verified
+- [Phase 06]: Write-time capture: Set/Delete call the WritePeers seam exactly once immediately before the engine write and hand the same cloned slice to the notification and the wait report, so a peer discovered mid-wait can never move the total (A-01).
+- [Phase 06]: Zero captured peers and a nil WaitReplicated seam both report the honest (false, 0, 0); the zero-peer path still calls the seam with total 0 as the tracker release point (T-06-05).
+- [Phase 06]: The core seeds the tracked wait set from the captured ids intersected with the live peer table and emits WaitSetEmpty for a stale non-empty capture; the discovery-flush split and tracker promise-set enforcement stay with plan 06-11.
+- [Phase 06]: Core.PeerIDs/PeerGeneration feed a generation-gated Adapter.KnownPeerIDs atomic mirror; Adapter.KnownPeers stays for metrics only and ServerOptions.KnownPeers is removed.
 
 ### Pending Todos
 
@@ -380,7 +385,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T22:14:21.053Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-11-22T22:47:48.956Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
