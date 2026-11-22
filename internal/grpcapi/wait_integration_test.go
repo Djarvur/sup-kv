@@ -304,3 +304,142 @@ func TestWaitIntegration_ackedThroughRealAdapterTracker(t *testing.T) {
 		return err == nil && got.Version == ver && bytes.Equal(got.Data, []byte("integration"))
 	})
 }
+
+// TestWaitIntegration_staleRecordNotAcked drives PROTO-03 end to end over the
+// real adapter pair: node B already holds "wait/stale" under a version about
+// 10 s ahead of node A's clock, so A's write arrives as a strictly older
+// DataReplication. B answers with its newer record and sends no Ack, and A's
+// wait_for_replication reports acked=false — the truthful report the stale
+// outcome exists for. B's store keeps the newer record: the stale write is
+// answered, never merged.
+//
+// The seed happens after discovery on purpose: B's startup listing is built
+// in the same event-loop iteration that emits the Hello A observes, so it was
+// built from an empty store. Seeding earlier would let the listing carry the
+// future version to A, where Observe/HLC absorption would make A's write
+// strictly newer and turn B's stale branch into a normal apply. The core
+// table (TestReplication_staleAnsweredNotAcked) owns the wire-level
+// Ack/reply counting; this test asserts only what the real adapter's tracker
+// reported and what the peer store retains.
+func TestWaitIntegration_staleRecordNotAcked(t *testing.T) {
+	t.Parallel()
+
+	portA := integrationUDPPort(t)
+	portB := integrationUDPPort(t)
+	probeLoopbackBroadcast(t, portB)
+
+	hub := grpcapi.NewWatchHub()
+	eng, _ := persist.Open(
+		42,
+		time.Now,
+		time.Minute,
+		&fakeDumpStore{},
+		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
+		persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond},
+	)
+	engCtx, cancelEng := context.WithCancel(t.Context())
+	go func() { _ = eng.Run(engCtx) }()
+	t.Cleanup(cancelEng)
+	hubCtx, cancelHub := context.WithCancel(t.Context())
+	go func() { _ = hub.Run(hubCtx) }()
+	t.Cleanup(cancelHub)
+
+	adapterA, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", portA),
+		fmt.Sprintf("127.255.255.255:%d", portB),
+		replNodeA, eng, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("node A adapter: %v", err)
+	}
+
+	// Peer node B: a plain storage store behind the repl.StateStore wrapper.
+	storeB := storage.NewStore(replNodeB, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
+	adapterB, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", portB),
+		fmt.Sprintf("127.255.255.255:%d", portA),
+		replNodeB, peerStore{store: storeB}, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("node B adapter: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() { _ = adapterA.Run(ctx) }()
+	go func() { _ = adapterB.Run(ctx) }()
+
+	waitFor(t, integrationDeadline, "adapter A to discover adapter B", func() bool {
+		return adapterA.KnownPeers() == 1
+	})
+
+	// Seed B with a version ~10 s ahead of A's clock (inside the 60 s
+	// max_clock_lead), now that B's startup listing is known to have been
+	// built from the empty store.
+	const staleKey = "wait/stale"
+	staleData := []byte("newer")
+	staleVersion := version.PackVersion(time.Now().UnixMilli()+10_000, 0, replNodeB)
+	if _, _, mergeErr := storeB.Merge(staleKey, storage.Record{Version: staleVersion, Data: staleData}); mergeErr != nil {
+		t.Fatalf("seed node B's newer record: %v", mergeErr)
+	}
+
+	opts := openGateOptions()
+	opts.KnownPeers = adapterA.KnownPeers
+	opts.WaitReplicated = adapterA.WaitReplicated
+	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
+	gateCtx, cancelGate := context.WithCancel(t.Context())
+	t.Cleanup(cancelGate)
+	go api.RunGate(gateCtx)
+
+	srv := grpc.NewServer()
+	apiproto.RegisterSupKVServiceServer(srv, api)
+	healthpb.RegisterHealthServer(srv, api.Health())
+
+	lis := bufconn.Listen(1 << 20)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient(
+		"passthrough:bufnet",
+		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStaticStreamWindowSize(testFlowWindowSize),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: want nil, got error: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := apiproto.NewSupKVServiceClient(conn)
+	health := healthpb.NewHealthClient(conn)
+	waitFor(t, gateWait, "the health endpoint to flip SERVING (gate open)", func() bool {
+		resp, err := health.Check(t.Context(), &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
+
+	resp, err := client.Set(t.Context(), &apiproto.SetRequest{
+		Key:                staleKey,
+		Value:              []byte("older"),
+		WaitForReplication: true,
+		WaitTimeoutMs:      100,
+	})
+	if err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", staleKey, err)
+	}
+	if resp.GetAcked() {
+		t.Fatalf("stale-write report: want acked=false, got acked=true %d/%d — B answered with its newer record instead of Acking",
+			resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+	if resp.GetTotalPeers() != 1 {
+		t.Fatalf("stale-write report total peers = %d, want 1 — A knew B at write time", resp.GetTotalPeers())
+	}
+
+	// B answered, never merged: its newer record is untouched.
+	got, err := storeB.Get(staleKey)
+	if err != nil {
+		t.Fatalf("store B Get(%q) after the stale write: %v", staleKey, err)
+	}
+	if got.Version != staleVersion || !bytes.Equal(got.Data, staleData) {
+		t.Fatalf("store B holds (%x, %q), want the untouched newer record (%x, %q) — the stale write was merged",
+			got.Version[:], got.Data, staleVersion[:], staleData)
+	}
+}

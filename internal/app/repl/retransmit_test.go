@@ -1,6 +1,7 @@
 package repl_test
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"testing"
@@ -1259,4 +1260,149 @@ func TestRetransmit_skipDrainedAndSuperseded(t *testing.T) {
 			t.Fatal("the stale retry did not remove the untrustworthy entry")
 		}
 	})
+}
+
+// seedVersion joins rec under key through the store's LWW merge — the
+// exact-version seeding the replication-outcome rows need — and returns the
+// installed record (checksum included) for use as a wire fixture.
+func seedVersion(t *testing.T, st *stateStore, key string, rec storage.Record) storage.Record {
+	t.Helper()
+	if _, _, err := st.store.Merge(key, rec); err != nil {
+		t.Fatalf("store Merge(%q): %v", key, err)
+	}
+	got, err := st.store.Get(key)
+	if err != nil {
+		t.Fatalf("store Get(%q) after seeding: %v", key, err)
+	}
+	return got
+}
+
+// TestReplication_staleAnsweredNotAcked proves the strictly-older outcome
+// (D-03 refined, PROTO-03): a held k@v5 that receives k@v3 from a peer
+// answers with exactly one unicast DataReplication carrying the held record
+// and sends NO Ack. The store is not merged (no conflict, no record change),
+// the tracking ledger is untouched — the stale datagram neither creates nor
+// removes an entry — and the reply leaves through the same paced egress queue
+// as any other answer.
+func TestReplication_staleAnsweredNotAcked(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out) // startup Hello + empty listing
+	out.Drain()
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	out.Drain()
+
+	v5 := version.PackVersion(testNowMs, 5, peerID1)
+	held := seedVersion(t, st, keyAlpha, storage.Record{Version: v5, Data: []byte("five")})
+	core.NotifyLocalWrite(now, keyAlpha, held, &out)
+	out.Drain()
+	assertPending(t, core.PendingSnapshot(), keyAlpha, v5, []uint16{peerID1})
+
+	stale := storage.Record{Version: version.PackVersion(testNowMs, 3, peerID1), Data: []byte("three")}
+	core.HandleDatagram(now, replFrom(peerID1, keyAlpha, stale), &out)
+	if got := len(out.Drain()); got != 0 {
+		t.Fatalf("the stale DataReplication emitted %d messages directly, want 0 — the answer queues", got)
+	}
+	if got := core.QueuedResponses(); got != 1 {
+		t.Fatalf("QueuedResponses() = %d after the stale record, want 1", got)
+	}
+	if stats := core.MergeStats(); stats.Conflicts != 0 || stats.DriftWarnings != 0 {
+		t.Fatalf("the stale record counted merge stats %+v, want none — the store was not merged", stats)
+	}
+	assertPending(t, core.PendingSnapshot(), keyAlpha, v5, []uint16{peerID1})
+
+	drained := advanceDrain(core, &out, now)
+	answered := unicasts(drained)
+	if len(answered) != 1 || answered[0].To != handleFor(peerID1) {
+		t.Fatalf("the drain emitted %v, want exactly one unicast answer to %q and no Ack", answered, handleFor(peerID1))
+	}
+	reply, ok := answered[0].Msg.(port.DataReplication)
+	if !ok {
+		t.Fatalf("the answer is a %T, want port.DataReplication — a stale record must never be Acked", answered[0].Msg)
+	}
+	if reply.Key != keyAlpha || reply.Record.Version != v5 || !bytes.Equal(reply.Record.Data, []byte("five")) {
+		t.Fatalf("the answer = (%q, %+v), want the held v5 record", reply.Key, reply.Record)
+	}
+	if got, err := st.store.Get(keyAlpha); err != nil || got.Version != v5 {
+		t.Fatalf("store Get(%q) after the stale record = (%x, %v), want the untouched v5", keyAlpha, got.Version[:], err)
+	}
+	assertPending(t, core.PendingSnapshot(), keyAlpha, v5, []uint16{peerID1})
+}
+
+// TestReplication_equalVersionAcked proves the equal-version outcome
+// (S-PROTO-16): a held k@v5 that receives k@v5 emits exactly one Ack and no
+// reply, with no merge-side conflict counted. Equality must keep Acking or
+// retransmission ladders never drain (R-02).
+func TestReplication_equalVersionAcked(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	v5 := version.PackVersion(testNowMs, 5, peerID1)
+	held := seedVersion(t, st, keyAlpha, storage.Record{Version: v5, Data: []byte("five")})
+
+	core.HandleDatagram(now, replFrom(peerID1, keyAlpha, held), &out)
+	assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, v5)
+	if got := core.QueuedResponses(); got != 0 {
+		t.Fatalf("QueuedResponses() = %d after an equal-version record, want 0 — equality Acks and never replies", got)
+	}
+	if stats := core.MergeStats(); stats.Conflicts != 0 || stats.DriftWarnings != 0 {
+		t.Fatalf("the equal version counted merge stats %+v, want none", stats)
+	}
+	if got, err := st.store.Get(keyAlpha); err != nil || got.Version != v5 {
+		t.Fatalf("store Get(%q) after the equal delivery = (%x, %v), want the unchanged v5", keyAlpha, got.Version[:], err)
+	}
+}
+
+// TestReplication_newerApplied proves the strictly-newer outcome: a held
+// k@v5 that receives k@v6 applies it through ApplyRemote (one displaced-
+// version conflict) and Acks v6, emitting no reply.
+func TestReplication_newerApplied(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	seedVersion(t, st, keyAlpha, storage.Record{Version: version.PackVersion(testNowMs, 5, peerID1), Data: []byte("five")})
+	v6 := version.PackVersion(testNowMs, 6, peerID1)
+	core.HandleDatagram(now, replFrom(peerID1, keyAlpha, storage.Record{Version: v6, Data: []byte("six")}), &out)
+	assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, v6)
+	if got := core.QueuedResponses(); got != 0 {
+		t.Fatalf("QueuedResponses() = %d after a strictly newer record, want 0", got)
+	}
+	if stats := core.MergeStats(); stats.Conflicts != 1 {
+		t.Fatalf("MergeStats().Conflicts = %d after displacing v5, want 1", stats.Conflicts)
+	}
+	if got, err := st.store.Get(keyAlpha); err != nil || got.Version != v6 || !bytes.Equal(got.Data, []byte("six")) {
+		t.Fatalf("store Get(%q) after the newer apply = (%x, %v), want v6", keyAlpha, got.Version[:], err)
+	}
+}
+
+// TestReplication_absentApplies proves the absent-key outcome: with no local
+// record, an incoming k@v3 applies and Acks — there is no stale case without
+// a held record.
+func TestReplication_absentApplies(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.Advance(now, &out)
+	out.Drain()
+
+	v3 := version.PackVersion(testNowMs, 3, peerID1)
+	core.HandleDatagram(now, replFrom(peerID1, keyAlpha, storage.Record{Version: v3, Data: []byte("three")}), &out)
+	assertAck(t, out.Drain(), handleFor(peerID1), keyAlpha, v3)
+	if got := core.QueuedResponses(); got != 0 {
+		t.Fatalf("QueuedResponses() = %d after an absent-key record, want 0", got)
+	}
+	if got, err := st.store.Get(keyAlpha); err != nil || got.Version != v3 {
+		t.Fatalf("store Get(%q) after the absent-key apply = (%x, %v), want v3", keyAlpha, got.Version[:], err)
+	}
 }
