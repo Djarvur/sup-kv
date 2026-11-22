@@ -17,7 +17,7 @@ created: "2026-11-21"
 
 | Property | Value |
 |----------|-------|
-| **Framework** | `go test -race` + shell/test gates; red-gated suite via `scripts/red-runner` (expectation table now 5 green / 2 red) |
+| **Framework** | `go test -race` + shell/test gates; red-gated suite via `scripts/red-runner` (expectation table now 3 green / 4 red — R-03 x2 and P-01 x2 stay red for Phases 4/5) |
 | **Config file** | Makefile (lint/test/red-run/bench-smoke/race-soak) |
 | **Quick run command** | `bash scripts/red-runner` (7 rows + mutation stage) |
 | **Full suite command** | `make lint && make test` |
