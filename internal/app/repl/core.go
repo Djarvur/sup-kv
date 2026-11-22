@@ -445,6 +445,15 @@ type queuedListingChunk struct {
 	entries []port.SyncEntry
 }
 
+// scanDiscardKey identifies one WARN rate-limit slot: a datagram's node_id
+// and its discard class (D-06/D-07, T-4-04). The peer identity belongs in the
+// key — a duplicate-node-id or foreign-version flood from one peer must not
+// suppress the first WARN another peer deserves.
+type scanDiscardKey struct {
+	nodeID uint16
+	class  string
+}
+
 // syncStreamKey identifies one peer's in-flight listing round: its node_id,
 // its run_id and the round's sync_id. run_id belongs in the key so a
 // restarted peer's fresh sync_id counter can never collide with the partial
@@ -672,12 +681,12 @@ type Core struct {
 
 	discards DiscardStats
 
-	// discardWarnAt is the per-class rate-limit state of the validation
-	// WARNs (T-3-25): the event-loop time of the last WARN per class. An
-	// absent entry (never warned) always fires; afterwards a class warns at
-	// most once per discardWarnInterval of event time. Map access is
+	// discardWarnAt is the per-(node_id, class) rate-limit state of the
+	// validation WARNs (T-3-25, T-4-04): the event-loop time of the last WARN
+	// per slot. An absent entry (never warned) always fires; afterwards a slot
+	// warns at most once per discardWarnInterval of event time. Map access is
 	// driver-goroutine-only, like every other core field (D-04).
-	discardWarnAt map[string]time.Time
+	discardWarnAt map[scanDiscardKey]time.Time
 
 	// mergeStats counts the remote-merge signals (OBS-01); retransmitted
 	// counts the ladder's retransmission emissions — driver-goroutine-only
@@ -755,7 +764,7 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 		listingByDst:         make(map[string]*listingFIFO),
 		recordQueued:         make(map[pendingKey]struct{}),
 		egressIDs:            make(map[egressKey]struct{}),
-		discardWarnAt:        make(map[string]time.Time),
+		discardWarnAt:        make(map[scanDiscardKey]time.Time),
 		syncs:                make(map[syncStreamKey]*syncStream),
 		listedByPeer:         make(map[uint16]map[string]struct{}),
 		listedRefs:           make(map[string]int),
@@ -770,7 +779,9 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 // HandleDatagram processes one inbound datagram. The classification order
 // is pinned (D-02, REPL-08, REPL-09): a BadCRC framing verdict counts
 // BadCRC (the adapter never decoded the body); Undecodable counts
-// Undecodable; a wrong ProtoVersion counts BadProtoVersion; a datagram
+// Undecodable; a ProtoVersionMismatch verdict — or a Decoded verdict whose
+// ProtoVersion field differs, the defence-in-depth check for direct inputs —
+// counts BadProtoVersion without any body; a datagram
 // carrying our own node_id counts OwnEcho when its run_id equals ours (an
 // impostor cannot guess a 16-byte random run_id, so run_id equality is the
 // robust own-echo test — the sender's own broadcast really does loop back)
@@ -829,9 +840,10 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		// The adapter judged the envelope's version before decoding the body
 		// (D-07: a foreign version's body need not follow this version's CRC
 		// contract), so there is no message — only the counted, attributed
-		// discard.
+		// discard, WARNed at most once per (node_id, class) per interval.
 		c.discards.BadProtoVersion++
 		c.cfg.OnDiscard(DiscardBadProtoVersion, in.Source)
+		c.warnDiscard(now, in.NodeID, DiscardBadProtoVersion)
 		return
 	}
 	if in.ProtoVersion != SupportedProtoVersion {
@@ -863,7 +875,7 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		return
 	}
 	if class, detail, valid := c.validate(now, in); !valid {
-		c.discardValidated(now, class, detail)
+		c.discardValidated(now, in.NodeID, class, detail)
 		return
 	}
 	c.handleMessage(now, in, out)
@@ -881,9 +893,11 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 //     beyond now+cfg.MaxClockLead;
 //   - DataRequest and Ack: empty key, then key too long (an Ack carries no
 //     record, so no checksum or version validation applies);
-//   - DataSync: every entry in received order — empty key, key too long,
-//     version beyond the bound; the first failing entry discards the whole
-//     datagram;
+//   - DataSync: the completeness header first — chunk_count>=1,
+//     1<=chunk_index<=chunk_count, chunk_count<=maxSyncChunks, and a count
+//     consistent with a live round — then every entry in received order:
+//     empty key, key too long, version beyond the bound; the first failing
+//     item discards the whole datagram;
 //   - Hello, a standalone SyncEntry and a nil Msg: nothing (a Hello carries
 //     no key or version, a standalone SyncEntry never travels, and a nil
 //     Msg on a Decoded verdict violates the adapter contract).
@@ -900,7 +914,7 @@ func (c *Core) validate(now time.Time, in port.InboundDatagram) (class, detail s
 	case port.Ack:
 		return keyVerdict(in.Source, msg.Key)
 	case port.DataSync:
-		return c.validateSync(now, in.Source, msg.Entries)
+		return c.validateSync(now, in, msg)
 	}
 	return "", "", true
 }
@@ -927,16 +941,31 @@ func (c *Core) validateReplication(now time.Time, source string, msg port.DataRe
 	return "", "", true
 }
 
-// validateSync applies the per-entry order — key domain, then version — in
-// received order: the first failing entry discards the whole datagram, so a
-// listing cannot smuggle one bad entry past a per-chunk verdict.
-func (c *Core) validateSync(now time.Time, source string, entries []port.SyncEntry) (class, detail string, valid bool) {
-	for _, entry := range entries {
+// validateSync applies the listing pipeline in pinned order: the completeness
+// header FIRST (chunk_count>=1, 1<=chunk_index<=chunk_count,
+// chunk_count<=maxSyncChunks, and a chunk_count consistent with a live
+// round), then every entry in received order — key domain, then version. The
+// first failing item discards the whole datagram, so a listing cannot smuggle
+// one bad entry or one impossible header past a per-chunk verdict, and a
+// rejected header leaves the live round's stored count untouched (T-4-02).
+func (c *Core) validateSync(now time.Time, in port.InboundDatagram, msg port.DataSync) (class, detail string, valid bool) {
+	if !validSyncHeader(msg) {
+		return DiscardBadSyncHeader, fmt.Sprintf(
+			"%s: chunk_count %d chunk_index %d", in.Source, msg.ChunkCount, msg.ChunkIndex,
+		), false
+	}
+	key := syncStreamKey{peer: in.NodeID, run: in.RunID, id: msg.SyncID}
+	if stream, ok := c.syncs[key]; ok && stream.count != msg.ChunkCount {
+		return DiscardBadSyncHeader, fmt.Sprintf(
+			"%s: chunk_count %d disagrees with the live round's %d", in.Source, msg.ChunkCount, stream.count,
+		), false
+	}
+	for _, entry := range msg.Entries {
 		if violation := keyClass(entry.Key); violation != "" {
-			return violation, source, false
+			return violation, in.Source, false
 		}
 		if !c.versionAccepted(now, entry.Version) {
-			return DiscardBadVersion, source, false
+			return DiscardBadVersion, in.Source, false
 		}
 	}
 	return "", "", true
@@ -975,13 +1004,13 @@ func (c *Core) versionAccepted(now time.Time, ver version.RecordVersion) bool {
 
 // discardValidated records one wire-validation rejection: it counts the
 // class's own counter, fires cfg.OnDiscard with the class and the source
-// detail, and logs a per-class rate-limited WARN naming only the class
-// (T-3-25, T-3-27). The rate limit is driven by the event-loop's now — the
-// lastWarn bookkeeping is a plain per-class timestamp, never a wall clock
-// read and never a global throttle. Counters stay the reliable signal; the
-// WARN is the operator's coarse hint, and per-datagram discard logging
-// stays the adapter's Debug-level OnDiscard bridge.
-func (c *Core) discardValidated(now time.Time, class, detail string) {
+// detail, and logs a per-(node_id, class) rate-limited WARN naming only the
+// class (T-3-25, T-3-27, T-4-04). The rate limit is driven by the
+// event-loop's now — the lastWarn bookkeeping is a plain per-slot timestamp,
+// never a wall clock read and never a global throttle. Counters stay the
+// reliable signal; the WARN is the operator's coarse hint, and per-datagram
+// discard logging stays the adapter's Debug-level OnDiscard bridge.
+func (c *Core) discardValidated(now time.Time, nodeID uint16, class, detail string) {
 	switch class {
 	case DiscardEmptyKey:
 		c.discards.EmptyKey++
@@ -993,16 +1022,27 @@ func (c *Core) discardValidated(now time.Time, class, detail string) {
 		c.discards.BadChecksum++
 	case DiscardBadVersion:
 		c.discards.BadVersion++
+	case DiscardBadSyncHeader:
+		c.discards.BadSyncHeader++
 	}
 	c.cfg.OnDiscard(class, detail)
-	last, warned := c.discardWarnAt[class]
+	c.warnDiscard(now, nodeID, class)
+}
+
+// warnDiscard logs one discard-class WARN unless the same (node_id, class)
+// slot warned inside the last discardWarnInterval of event time — the shared
+// limiter every counted classification class uses, so one peer's flood can
+// never suppress another peer's first warning (D-06/D-07, T-4-04).
+func (c *Core) warnDiscard(now time.Time, nodeID uint16, class string) {
+	key := scanDiscardKey{nodeID: nodeID, class: class}
+	last, warned := c.discardWarnAt[key]
 	if warned && now.Sub(last) < discardWarnInterval {
 		return
 	}
-	c.discardWarnAt[class] = now
+	c.discardWarnAt[key] = now
 	c.cfg.Log(fmt.Sprintf(
-		"sup-kv: discarded inbound datagram: class %s (one warning per class per %s)",
-		class, discardWarnInterval,
+		"sup-kv: discarded inbound datagram: class %s from node %d (one warning per node and class per %s)",
+		class, nodeID, discardWarnInterval,
 	))
 }
 

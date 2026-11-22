@@ -267,6 +267,7 @@ type Adapter struct {
 	tombstoneData   atomic.Uint64
 	badChecksum     atomic.Uint64
 	badVersion      atomic.Uint64
+	badSyncHeader   atomic.Uint64
 	peerCount       atomic.Uint64
 
 	// readErrors counts every receive-path error the read loop survived
@@ -771,10 +772,11 @@ func (a *Adapter) SocketBuffers() (recv, send int) {
 }
 
 // Discards returns the discard-class counters (D-02) mirrored after the
-// latest event-loop iteration — safe from any goroutine. The five
-// wire-validation classes (empty_key, key_too_long, tombstone_with_data,
-// bad_checksum, bad_version) are counted by the core's validation pipeline
-// and mirrored here exactly like the original classification classes.
+// latest event-loop iteration — safe from any goroutine. The wire-validation
+// classes (empty_key, key_too_long, tombstone_with_data, bad_checksum,
+// bad_version and bad_sync_header) are counted by the core's validation
+// pipeline and mirrored here exactly like the original classification
+// classes.
 func (a *Adapter) Discards() repl.DiscardStats {
 	return repl.DiscardStats{
 		BadCRC:            a.badCRC.Load(),
@@ -787,6 +789,7 @@ func (a *Adapter) Discards() repl.DiscardStats {
 		TombstoneWithData: a.tombstoneData.Load(),
 		BadChecksum:       a.badChecksum.Load(),
 		BadVersion:        a.badVersion.Load(),
+		BadSyncHeader:     a.badSyncHeader.Load(),
 	}
 }
 
@@ -1050,6 +1053,7 @@ func (a *Adapter) mirrorStats() {
 	a.tombstoneData.Store(d.TombstoneWithData)
 	a.badChecksum.Store(d.BadChecksum)
 	a.badVersion.Store(d.BadVersion)
+	a.badSyncHeader.Store(d.BadSyncHeader)
 	// PeerCount returns the peer-table length, never a negative value.
 	//nolint:gosec // G115: PeerCount is len(c.peers), a non-negative map length.
 	a.peerCount.Store(uint64(a.core.PeerCount()))

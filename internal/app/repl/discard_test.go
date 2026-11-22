@@ -61,6 +61,7 @@ func TestDiscard_classes(t *testing.T) {
 		want        repl.DiscardStats
 		wantLogged  bool
 		logMustName []string
+		wantWarn    string
 		wantPeerID  uint16
 		wantPeer    *repl.PeerInfo
 		wantEmits   int
@@ -105,9 +106,10 @@ func TestDiscard_classes(t *testing.T) {
 			want: repl.DiscardStats{BadProtoVersion: 1},
 		},
 		{
-			name: "data sync with chunk_count 0 classifies BadSyncHeader",
-			in:   datagramFrom(peerID1, port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 0}),
-			want: repl.DiscardStats{BadSyncHeader: 1},
+			name:     "data sync with chunk_count 0 classifies BadSyncHeader",
+			in:       datagramFrom(peerID1, port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 0}),
+			want:     repl.DiscardStats{BadSyncHeader: 1},
+			wantWarn: repl.DiscardBadSyncHeader,
 		},
 		{
 			name: "own node_id with own run_id classifies OwnEcho",
@@ -223,9 +225,14 @@ func TestDiscard_classes(t *testing.T) {
 			} else if len(snap) != 0 {
 				t.Errorf("discarded datagram reached protocol processing: PeerSnapshot holds %d peers", len(snap))
 			}
-			if row.wantLogged {
+			switch {
+			case row.wantLogged:
 				assertConfigErrorLog(t, logs, row.logMustName)
-			} else if len(logs) != 0 {
+			case row.wantWarn != "":
+				if len(logs) != 1 || !strings.Contains(logs[0], row.wantWarn) {
+					t.Errorf("Config.Log = %v, want exactly one WARN naming %q", logs, row.wantWarn)
+				}
+			case len(logs) != 0:
 				t.Errorf("healthy datagram logged %d line(s), want none (no spurious configuration errors): %v",
 					len(logs), logs)
 			}

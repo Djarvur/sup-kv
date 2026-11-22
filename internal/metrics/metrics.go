@@ -334,6 +334,7 @@ func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family
 				{Labels: []Label{{Name: labelClass, Value: "tombstone_with_data"}}, Value: float64(disc.TombstoneWithData)},
 				{Labels: []Label{{Name: labelClass, Value: "bad_checksum"}}, Value: float64(disc.BadChecksum)},
 				{Labels: []Label{{Name: labelClass, Value: "bad_version"}}, Value: float64(disc.BadVersion)},
+				{Labels: []Label{{Name: labelClass, Value: "bad_sync_header"}}, Value: float64(disc.BadSyncHeader)},
 			},
 		},
 	}
