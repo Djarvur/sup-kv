@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 05-06-PLAN.md
-last_updated: "2026-11-22T15:04:29.170Z"
+stopped_at: Completed 05-07-PLAN.md
+last_updated: "2026-11-22T15:38:37.580Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 executing; 05-06 complete, 05-07 next
-state_head: e3eb2bd469a93b75921775756a67025d2d304a2b
+state_head: 10e1eac718c8a9dc66426708e8da340fecda4404
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 53
+  completed_plans: 54
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 5 (Persistence) — executing
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 12
 Status: Executing (05-06 complete, 05-07 next)
 Last activity: 2026-11-22 — 05-06 complete; 05-07 next
@@ -111,6 +111,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P04 | 13min | 3 tasks | 13 files |
 | Phase 05 P05 | 829s | 3 tasks | 10 files |
 | Phase 05 P06 | 881 | 3 tasks | 9 files |
+| Phase 05 P07 | 1114 | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -325,6 +326,12 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-06: markDirty owns the non-blocking changed nudge; ApplyRemote's duplicate is gone and the restore replay's mid-error path is woken (Phase-4 New-1)
 - [Phase 05]: 05-06: Load log attributes are candidate-keyed — Backup scans Failures for GenMain (absent main names fs.ErrNotExist) and Unusable iterates Failures, so zero/one/two entries never panic or produce a phantom entry
 - [Phase 05]: 05-06: A value-limit skip is counted, logged once with count and value_max_bytes, published as supkv_dump_records_discarded_total{class=value_limit}, and left on disk until normal rotation displaces it
+- [Phase 05]: Config.Now/After default to the wall clock only inside normalized(); every other engine read and timer uses the injected pair, so the simulator owns the dump loop's time (PERSIST-12)
+- [Phase 05]: A failed dump doubles 100 ms to the 5 s cap with the retry instant fixed at the failure; a pending retry suppresses the debounce/deadline channels so the 1 s MaxWait cannot defeat the cap, and a success resets the ladder
+- [Phase 05]: DumpStats.Errors stays the failed-attempt total while DiskFull/Permission are class subsets; the exporter renders other as the clamped residual, so every scrape carries all three labels
+- [Phase 05]: Health stays SERVING under a persistent dump failure: the failure surfaces as Unavailable writes, one static ERROR per attempt with the class, and the class counter; the SERVING transition remains gate-only
+- [Phase 05]: The simulator Scheduler takes a lock (Schedule/ScheduleAfter/Now) because the engine arms timers from its own goroutine; RunUntil remains the single driver and releases the lock around callbacks
+- [Phase 05]: Cluster.NotifyInstalled runs the production author notification without re-Setting, so the engine's stamp and the confirmed record survive; exact ladder instants stay in synctest while the simulator pins the interaction
 
 ### Pending Todos
 
@@ -347,7 +354,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T15:04:28.765Z
-Stopped at: Completed 05-06-PLAN.md
+Last session: 2026-11-22T15:38:37.173Z
+Stopped at: Completed 05-07-PLAN.md
 Resume file: None
 Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-02-PLAN.md is next)
