@@ -11,6 +11,7 @@
 package persistfile
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -59,18 +60,30 @@ func New(dumpPath string) *FileStore {
 }
 
 // Save durably writes dump as the new main generation, rotating the old
-// main generation to .prev (PERS-02): temp file in the target directory —
-// a system-temp rename onto the dump path can cross filesystems and fail
-// EXDEV — write, fsync the data before any rename can be durable, rotate,
-// rename, then fsync the parent directory so the rename itself becomes
-// durable. The rotate-first order leaves a crash window where main is
-// absent — exactly the residue the fallback chain absorbs — and the store
-// mutex closes that window against a concurrent CreateSnapshot: the copy
-// must never see the absent main as ErrNoDump.
+// main generation to .prev (PERS-02): the byte-slice convenience over
+// SaveStream for fixtures and tests. The engine streams its dumps through
+// SaveStream, so a real dump cycle never holds a second encoded copy.
 func (f *FileStore) Save(dump []byte) error {
+	return f.SaveStream(func(w io.Writer) error {
+		_, err := w.Write(dump)
+		return err
+	})
+}
+
+// SaveStream durably writes the generation produced by fill as the new main
+// generation, rotating the old main generation to .prev (PERS-02, D-06):
+// temp file in the target directory — a system-temp rename onto the dump path
+// can cross filesystems and fail EXDEV — fill it through the adapter's
+// buffered writer, fsync the data before any rename can be durable, rotate,
+// rename, then fsync the parent directory so the rename itself becomes
+// durable. The rotate-first order leaves a crash window where main is absent
+// — exactly the residue the fallback chain absorbs — and the store mutex
+// closes that window against a concurrent CreateSnapshot: the copy must never
+// see the absent main as ErrNoDump.
+func (f *FileStore) SaveStream(fill func(io.Writer) error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return saveAtomically(f.ops, f.path, f.path+prevSuffix, dump)
+	return saveAtomically(f.ops, f.path, f.path+prevSuffix, fill)
 }
 
 // Load resolves the fallback chain main then .prev and returns the first
@@ -98,17 +111,19 @@ func (f *FileStore) Load(parse func([]byte) error) (dump []byte, ok bool) {
 // parent so a fresh deployment's first dump creates its directory — setup,
 // not one of the five seam steps — then the five ordered operations, one
 // fsops method per step, in the exact order the TEST-03 order test asserts:
-// write → fsync → rotate → rename → dir-fsync. An empty prevPath skips the
+// write → fsync → rotate → rename → dir-fsync. fill runs inside step 1 on
+// the adapter's buffered temp writer, so the encoded generation streams
+// instead of arriving as one slice (D-06). An empty prevPath skips the
 // rotation — the snapshot policy, which overwrites in place with no .prev
 // of its own (research Open Question 2). The temp file is removed on every
 // failure path — the seam steps' own hygiene, close + remove (Pitfall 5).
-func saveAtomically(ops fsops, path, prevPath string, data []byte) error {
+func saveAtomically(ops fsops, path, prevPath string, fill func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	err := os.MkdirAll(dir, dirMode)
 	if err != nil {
 		return err
 	}
-	err = ops.write(dir, data) // TEST-03 step 1: create temp + write payload
+	err = ops.write(dir, fill) // TEST-03 step 1: create temp + stream payload
 	if err != nil {
 		return err
 	}

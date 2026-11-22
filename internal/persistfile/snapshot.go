@@ -2,6 +2,7 @@ package persistfile
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -51,7 +52,14 @@ func (f *FileStore) CreateSnapshot(name string) error {
 	if err != nil {
 		return err
 	}
-	return saveAtomically(f.ops, filepath.Join(snapshotDir, name), "", data)
+	// The snapshot copy is already one whole generation in memory — the
+	// read above — so the fill is a single Write of those bytes; behavior is
+	// the byte-identical copy the snapshot contract promises (D-10), now
+	// routed through the same streamed save path as a live dump.
+	return saveAtomically(f.ops, filepath.Join(snapshotDir, name), "", func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
 }
 
 // ReadSnapshot returns the named snapshot's bytes for codec decoding; a

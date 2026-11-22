@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"sync"
@@ -292,20 +293,23 @@ func (e *Engine) sweepClosed() {
 // runDump is the serialized dump cycle: under the mutex it captures the
 // current waiter list and clears the dirty epoch, then releases the mutex
 // before any encode or I/O — write-path dirty-marking must never block on
-// adapter I/O. The Encode+Save span is measured and recorded into the
-// DumpStats atomics on success and failure alike (OBS-01). On success every
-// captured waiter resolves nil, and that is sound without a version
-// watermark (PERS-04, RESEARCH Pitfall 15): await appends a waiter only
-// after its store write installed the record, under the same mutex the
-// capture holds, and the capture happens BEFORE Encode takes the Records
-// snapshot — so every captured waiter's record is in the snapshot this dump
-// saves. A write racing the capture either appends before it (covered by
-// this snapshot) or re-marks the engine dirty after it (covered by the
-// next), so no waiter is ever confirmed against a dump that misses its
-// record. On failure every current waiter resolves ErrDumpFailed while the
-// state stays readable in memory, dirty re-arms from a fresh epoch and the
-// re-armed debounce timer starts the next attempt one interval later —
-// never a tight retry loop (D-05, research A8).
+// adapter I/O. The cycle takes exactly one Records() copy and streams it
+// through SaveStream, whose fill runs EncodeTo against the adapter's
+// buffered temp writer: the encoded dump is never materialized as a second
+// buffer (D-06, PERSIST-06). The Encode+Save span is measured and recorded
+// into the DumpStats atomics on success and failure alike (OBS-01). On
+// success every captured waiter resolves nil, and that is sound without a
+// version watermark (PERS-04, RESEARCH Pitfall 15): await appends a waiter
+// only after its store write installed the record, under the same mutex the
+// capture holds, and the capture happens BEFORE Records takes the snapshot
+// — so every captured waiter's record is in the snapshot this dump saves. A
+// write racing the capture either appends before it (covered by this
+// snapshot) or re-marks the engine dirty after it (covered by the next), so
+// no waiter is ever confirmed against a dump that misses its record. On
+// failure every current waiter resolves ErrDumpFailed while the state stays
+// readable in memory, dirty re-arms from a fresh epoch and the re-armed
+// debounce timer starts the next attempt one interval later — never a tight
+// retry loop (D-05, research A8).
 func (e *Engine) runDump() error {
 	e.mu.Lock()
 	captured := e.waiters
@@ -314,10 +318,10 @@ func (e *Engine) runDump() error {
 	e.mu.Unlock()
 
 	start := time.Now()
-	block, err := Encode(e.store.Records(), e.valueMaxBytes)
-	if err == nil {
-		err = e.dumps.Save(block)
-	}
+	records := e.store.Records()
+	err := e.dumps.SaveStream(func(w io.Writer) error {
+		return EncodeTo(w, records, e.valueMaxBytes)
+	})
 	e.recordDump(time.Since(start), err)
 	if err != nil {
 		e.failWaiters(captured)

@@ -1,6 +1,8 @@
 package persist_test
 
 import (
+	"bytes"
+	"io"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -47,18 +49,33 @@ func newBlockingDumpPort() *blockingDumpPort {
 	return &blockingDumpPort{parked: make(chan struct{}), release: make(chan struct{})}
 }
 
-// Save parks before recording a completed save: the dump stands while the
-// test holds release closed.
-func (b *blockingDumpPort) Save(_ []byte) error {
+// SaveStream parks before running fill: the dump stands — the fill has not
+// run yet — while the test holds release closed, so every Set waiter must
+// stay blocked.
+func (b *blockingDumpPort) SaveStream(fill func(io.Writer) error) error {
 	b.mu.Lock()
 	b.attempts++
 	b.mu.Unlock()
 	b.parkOnce.Do(func() { close(b.parked) })
 	<-b.release
+	var buf bytes.Buffer
+	err := fill(&buf)
+	if err != nil {
+		return err
+	}
 	b.mu.Lock()
 	b.saves++
 	b.mu.Unlock()
 	return nil
+}
+
+// Save is the byte-slice convenience over SaveStream; the blocking proof
+// drives the engine's streamed path.
+func (b *blockingDumpPort) Save(dump []byte) error {
+	return b.SaveStream(func(w io.Writer) error {
+		_, err := w.Write(dump)
+		return err
+	})
 }
 
 // Load is the empty start; the blocking proof never restarts.

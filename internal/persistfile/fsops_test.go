@@ -3,6 +3,7 @@ package persistfile //nolint:testpackage // the plan mandates the internal test 
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -61,9 +62,9 @@ type recordingFSOps struct {
 	calls []fsopCall
 }
 
-func (r *recordingFSOps) write(dir string, data []byte) error {
+func (r *recordingFSOps) write(dir string, fill func(io.Writer) error) error {
 	r.calls = append(r.calls, fsopCall{fsopWrite, []string{dir}})
-	return r.fileFSOps.write(dir, data)
+	return r.fileFSOps.write(dir, fill)
 }
 
 func (r *recordingFSOps) fsync() error {
@@ -109,11 +110,11 @@ type failingFSOps struct {
 	err    error
 }
 
-func (f *failingFSOps) write(dir string, data []byte) error {
+func (f *failingFSOps) write(dir string, fill func(io.Writer) error) error {
 	if f.failAt == fsopWrite {
 		return f.err // nothing is held yet: no temp exists to clean
 	}
-	return f.fileFSOps.write(dir, data)
+	return f.fileFSOps.write(dir, fill)
 }
 
 func (f *failingFSOps) fsync() error {

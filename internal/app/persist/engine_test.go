@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -275,14 +276,28 @@ type fakeDumpPort struct {
 
 // Save records the dump at the current virtual time, failing the leading
 // configured saves; a configured gate parks the save before it records —
-// the dump is in flight, not attempted, while parked.
+// the dump is in flight, not attempted, while parked. It is the byte-slice
+// convenience over SaveStream for fixtures that already hold a generation.
 func (f *fakeDumpPort) Save(dump []byte) error {
+	return f.SaveStream(func(w io.Writer) error {
+		_, err := w.Write(dump)
+		return err
+	})
+}
+
+// SaveStream runs fill into memory and records the resulting generation at
+// the current virtual time, failing the leading configured saves; a
+// configured gate parks the save before it records — the dump is in flight,
+// not attempted, while parked.
+func (f *fakeDumpPort) SaveStream(fill func(io.Writer) error) error {
 	f.mu.Lock()
 	gate := f.gate
 	f.mu.Unlock()
 	if gate != nil {
 		<-gate
 	}
+	var buf bytes.Buffer
+	err := fill(&buf)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts++
@@ -290,7 +305,10 @@ func (f *fakeDumpPort) Save(dump []byte) error {
 		f.failSaves--
 		return errFakeSave
 	}
-	f.saves = append(f.saves, fakeSave{at: time.Now(), dump: bytes.Clone(dump)})
+	if err != nil {
+		return err
+	}
+	f.saves = append(f.saves, fakeSave{at: time.Now(), dump: bytes.Clone(buf.Bytes())})
 	return nil
 }
 

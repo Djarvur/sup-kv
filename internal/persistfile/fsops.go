@@ -1,6 +1,17 @@
 package persistfile
 
-import "os"
+import (
+	"bufio"
+	"io"
+	"os"
+)
+
+// maxDumpBufioBytes is the adapter's writer buffer for one streamed dump
+// generation: the fill writes through this buffer, so the engine never has
+// to materialize the encoded dump (D-06). 64 KiB is large enough that the
+// syscall count stays near one per line batch and small enough that the
+// buffer is a rounding error against a 6 MB state (PERSIST-06).
+const maxDumpBufioBytes = 64 << 10
 
 // fsops is the filesystem durability seam TEST-03 pins (D-07): the five
 // ordered operations one atomic dump generation performs — write → fsync →
@@ -25,13 +36,15 @@ import "os"
 // directly and carries no platform file of its own (REVIEW ENG-18, P-09;
 // Phase 5's P-09 absorbs the remaining orphan-temp/parent-dir work).
 type fsops interface {
-	// write creates the temp file in dir and writes data into it — TEST-03
-	// order step 1, the open-temp-and-write half (the same os.CreateTemp
-	// naming and bytes as before the extraction). The open temp handle
-	// stays with the implementation; fsync closes it. A failure after the
-	// temp exists closes and removes it — the temp-holding steps never
-	// litter (Pitfall 5).
-	write(dir string, data []byte) error
+	// write creates the temp file in dir and lets fill write the payload
+	// into it — TEST-03 order step 1, the open-temp-and-fill half. The
+	// fill runs through a maxDumpBufioBytes buffer, so the caller streams
+	// format lines instead of handing over a whole encoded generation
+	// (D-06, PERSIST-06). The open temp handle stays with the
+	// implementation; fsync closes it. A failure after the temp exists
+	// closes and removes it — the temp-holding steps never litter
+	// (Pitfall 5).
+	write(dir string, fill func(io.Writer) error) error
 
 	// fsync durably syncs the held temp handle and closes it — TEST-03
 	// order step 2, the data-is-durable-before-any-rename half, through
@@ -79,21 +92,22 @@ type fileFSOps struct {
 var _ fsops = (*fileFSOps)(nil)
 
 // write implements TEST-03 order step 1 (see fsops): CreateTemp in dir —
-// the caller's MkdirAll already made dir exist — then Write. The open
-// handle and path are held for fsync; a Write failure closes and removes
-// the temp before returning.
-func (o *fileFSOps) write(dir string, data []byte) error {
+// the caller's MkdirAll already made dir exist — then run fill through a
+// maxDumpBufioBytes buffer and flush it. The open handle and path are held
+// for fsync. A fill or flush failure returns the error with the temp still
+// held; the failure-hygiene completion consumes that state next.
+func (o *fileFSOps) write(dir string, fill func(io.Writer) error) error {
 	tmp, err := os.CreateTemp(dir, tempPattern)
 	if err != nil {
 		return err
 	}
 	o.tmp, o.tmpName = tmp, tmp.Name()
-	_, err = tmp.Write(data)
+	bufw := bufio.NewWriterSize(tmp, maxDumpBufioBytes)
+	err = fill(bufw)
 	if err != nil {
-		o.closeRemoveTemp()
 		return err
 	}
-	return nil
+	return bufw.Flush()
 }
 
 // fsync implements TEST-03 order step 2 (see fsops): [os.File.Sync] on the

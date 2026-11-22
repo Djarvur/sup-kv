@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"slices"
 	"strings"
@@ -70,15 +71,29 @@ type fakeDumpStore struct {
 	snapshot []byte
 }
 
-// Save durably records the generation in memory, or fails while failSave
-// is set — the injection point for persist.ErrDumpFailed.
+// Save is the byte-slice convenience over SaveStream for fixtures that
+// already hold a generation.
 func (f *fakeDumpStore) Save(dump []byte) error {
+	return f.SaveStream(func(w io.Writer) error {
+		_, err := w.Write(dump)
+		return err
+	})
+}
+
+// SaveStream runs fill into memory and records the generation, or fails
+// while failSave is set — the injection point for persist.ErrDumpFailed.
+func (f *fakeDumpStore) SaveStream(fill func(io.Writer) error) error {
+	var buf bytes.Buffer
+	err := fill(&buf)
+	if err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failSave {
 		return errSaveFailed
 	}
-	f.saved = append(f.saved, bytes.Clone(dump))
+	f.saved = append(f.saved, bytes.Clone(buf.Bytes()))
 	return nil
 }
 

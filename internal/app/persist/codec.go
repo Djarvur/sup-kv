@@ -124,26 +124,17 @@ type recordLine struct {
 // store's own write check, so a confirmed write can never fail to encode for
 // size.
 func EncodeTo(w io.Writer, records map[string]storage.Record, valueMaxBytes int) error {
-	return nil
-}
-
-// Encode writes records as one JSONL dump buffer — EncodeTo's bytes wrapper
-// for callers that need the whole generation in memory (the snapshot
-// fixtures and tests). Production dump cycles stream through EncodeTo
-// instead (D-06).
-func Encode(records map[string]storage.Record, valueMaxBytes int) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
+	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	count := len(records)
 	err := enc.Encode(header{FormatVersion: dumpFormatVersion, RecordCount: &count})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, key := range slices.Sorted(maps.Keys(records)) {
 		rec := records[key]
 		if len(rec.Data) > valueMaxBytes {
-			return nil, fmt.Errorf("persist: record %q is %d bytes, over the configured value limit %d: %w",
+			return fmt.Errorf("persist: record %q is %d bytes, over the configured value limit %d: %w",
 				key, len(rec.Data), valueMaxBytes, storage.ErrValueTooLarge)
 		}
 		line := recordLine{
@@ -155,8 +146,21 @@ func Encode(records map[string]storage.Record, valueMaxBytes int) ([]byte, error
 		}
 		err = enc.Encode(line)
 		if err != nil {
-			return nil, err
+			return err
 		}
+	}
+	return nil
+}
+
+// Encode writes records as one JSONL dump buffer — EncodeTo's bytes wrapper
+// for callers that need the whole generation in memory (the snapshot
+// fixtures and tests). Production dump cycles stream through EncodeTo
+// instead (D-06).
+func Encode(records map[string]storage.Record, valueMaxBytes int) ([]byte, error) {
+	var buf bytes.Buffer
+	err := EncodeTo(&buf, records, valueMaxBytes)
+	if err != nil {
+		return nil, err
 	}
 	return buf.Bytes(), nil
 }
