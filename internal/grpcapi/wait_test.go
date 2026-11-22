@@ -2,6 +2,7 @@ package grpcapi_test
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -60,25 +61,31 @@ func (w *fakeWait) resolve(acked bool, count uint32) {
 // immediately, and otherwise waits on the scripted wait for the key, its own
 // timeout or ctx cancellation. The real tracker's resolution rules are
 // exercised by the udprepl tests; this fake pins the gRPC projection of the
-// seam.
+// seam. peers is the write-time peer-id snapshot the fake publishes as the
+// ServerOptions.WritePeers seam — n consecutive ids from 1, so a test's peer
+// count and the per-id slice stay one value.
 type fakeTracker struct {
 	mu    sync.Mutex
-	peers uint64
+	peers []uint16
 	calls []waitCall
 	waits map[string]*fakeWait
 }
 
-// newFakeTracker returns a tracker fake with the given write-time peer
-// count and no scripted waits.
-func newFakeTracker(peers uint64) *fakeTracker {
+// newFakeTracker returns a tracker fake whose write-time peer snapshot holds
+// n consecutive ids (1..n) and no scripted waits.
+func newFakeTracker(n int) *fakeTracker {
+	peers := make([]uint16, n)
+	for i := range peers {
+		peers[i] = uint16(i + 1)
+	}
 	return &fakeTracker{peers: peers, waits: make(map[string]*fakeWait)}
 }
 
-// KnownPeers is the write-time peer snapshot seam.
-func (f *fakeTracker) KnownPeers() uint64 {
+// WritePeers is the write-time peer snapshot seam (A-01).
+func (f *fakeTracker) WritePeers() []uint16 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.peers
+	return slices.Clone(f.peers)
 }
 
 // setWait scripts the wait outcome for key.
@@ -129,7 +136,7 @@ func (f *fakeTracker) WaitReplicated(ctx context.Context, key string, ver versio
 func newWaitServer(t *testing.T, tracker *fakeTracker, waitTimeout time.Duration) *testHarness {
 	t.Helper()
 	cfg := testServerConfig{gate: openGateOptions(), waitTimeout: waitTimeout}
-	cfg.knownPeers = tracker.KnownPeers
+	cfg.writePeers = tracker.WritePeers
 	cfg.waitReplicated = tracker.WaitReplicated
 	h := buildTestServer(t, cfg)
 	awaitGateOpen(t, h)
@@ -148,10 +155,11 @@ func scriptWait(t *testing.T, tracker *fakeTracker, key string, acked bool, coun
 	}()
 }
 
-// TestWait_zeroPeers pins D-11 on the zero-peer wiring: the single-node
-// configuration reports acked=true immediately with total_peers 0, and the
-// tracker seam receives the total==0 release call — the only release point
-// for the tracker the adapter created at notify time.
+// TestWait_zeroPeers pins A-01 (was D-11's overstatement): a write with zero
+// captured peers is NOT acknowledged by anyone, so the report is the honest
+// (false, 0, 0) immediately — and the tracker seam still receives the total==0
+// release call, the only release point for the tracker the adapter created at
+// notify time.
 func TestWait_zeroPeers(t *testing.T) {
 	t.Parallel()
 
@@ -170,8 +178,8 @@ func TestWait_zeroPeers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Set %s: want OK, got error: %v", key, err)
 	}
-	if !resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 0 {
-		t.Fatalf("zero-peer report: want acked=true 0/0, got acked=%v %d/%d",
+	if resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 0 {
+		t.Fatalf("zero-peer report: want acked=false 0/0, got acked=%v %d/%d",
 			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
 	}
 	if elapsed >= waitAssertBound {
@@ -237,8 +245,9 @@ func TestWait_timeout(t *testing.T) {
 }
 
 // TestWait_deleteSymmetry: a delete is a write (API-05) — Delete with
-// wait_for_replication under zero known peers reports acked=true 0/0
-// exactly like Set and sends the tracker the total==0 release call.
+// wait_for_replication under zero captured peers reports the honest
+// acked=false 0/0 exactly like Set and sends the tracker the total==0 release
+// call.
 func TestWait_deleteSymmetry(t *testing.T) {
 	t.Parallel()
 
@@ -259,8 +268,8 @@ func TestWait_deleteSymmetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delete %s: want OK, got error: %v", key, err)
 	}
-	if !resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 0 {
-		t.Fatalf("delete zero-peer report: want acked=true 0/0, got acked=%v %d/%d",
+	if resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 0 {
+		t.Fatalf("delete zero-peer report: want acked=false 0/0, got acked=%v %d/%d",
 			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
 	}
 	calls := tracker.waitCalls()
@@ -515,15 +524,15 @@ func TestWait_noTrackerReportsFalse(t *testing.T) {
 	}
 }
 
-// TestWait_trackerNilIsSingleNode pins the nil-seam contract: a nil
-// WaitReplicated is the single-node wiring even when a peer-count seam
-// reports peers — no tracker can exist through this seam, so the report is
-// (true, 0, 0) immediately.
+// TestWait_trackerNilIsSingleNode pins the nil-seam contract (A-01): a nil
+// WaitReplicated is the single-node wiring even when the peer seam reports
+// peers — no tracker can exist through this seam, so nothing was awaited and
+// nothing was acknowledged: the report is (false, 0, 0) immediately.
 func TestWait_trackerNilIsSingleNode(t *testing.T) {
 	t.Parallel()
 
 	cfg := testServerConfig{gate: openGateOptions()}
-	cfg.knownPeers = func() uint64 { return 5 }
+	cfg.writePeers = func() []uint16 { return []uint16{1, 2, 3, 4, 5} }
 	h := buildTestServer(t, cfg)
 	awaitGateOpen(t, h)
 
@@ -537,11 +546,121 @@ func TestWait_trackerNilIsSingleNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Set wait/nil-seam: want OK, got error: %v", err)
 	}
-	if !resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 0 {
-		t.Fatalf("nil-seam report: want acked=true 0/0, got acked=%v %d/%d",
+	if resp.GetAcked() || resp.GetAckedCount() != 0 || resp.GetTotalPeers() != 0 {
+		t.Fatalf("nil-seam report: want acked=false 0/0, got acked=%v %d/%d",
 			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
 	}
 	if elapsed >= waitAssertBound {
 		t.Fatalf("nil-seam Set took %v: want the immediate single-node answer", elapsed)
+	}
+}
+
+// mutablePeers is a WritePeers seam whose result the test can replace after
+// the handler captured it — the moving-target probe for A-01.
+type mutablePeers struct {
+	mu    sync.Mutex
+	peers []uint16
+	calls int
+}
+
+// WritePeers returns the current ids and counts the call.
+func (m *mutablePeers) WritePeers() []uint16 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	return m.peers
+}
+
+// set replaces the seam's result — a peer discovered (or lost) after the
+// write was accepted.
+func (m *mutablePeers) set(ids ...uint16) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peers = ids
+}
+
+// callCount returns how many times the handler consulted the seam.
+func (m *mutablePeers) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+// TestWait_writeTimeSetPinned pins A-01's capture point end to end: the peer
+// set is read exactly once, immediately before the engine write, and that one
+// slice feeds the replication notification and the wait report. Replacing the
+// seam's answer while the handler is blocked in the wait cannot move the
+// reported total, and a peer discovered after acceptance never joins it.
+func TestWait_writeTimeSetPinned(t *testing.T) {
+	t.Parallel()
+
+	const key = "wait/pinned"
+	peers := &mutablePeers{peers: []uint16{1, 2}}
+	tracker := newFakeTracker(0)
+	capture := &notifyCapture{}
+	cfg := testServerConfig{
+		gate:           openGateOptions(),
+		notify:         capture.notify,
+		writePeers:     peers.WritePeers,
+		waitReplicated: tracker.WaitReplicated,
+	}
+	h := buildTestServer(t, cfg)
+	awaitGateOpen(t, h)
+
+	wait := newFakeWait()
+	tracker.setWait(key, wait)
+
+	type result struct {
+		resp *apiproto.SetResponse
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := h.client.Set(t.Context(), &apiproto.SetRequest{
+			Key:                key,
+			Value:              []byte("v"),
+			WaitForReplication: true,
+		})
+		done <- result{resp: resp, err: err}
+	}()
+
+	// Wait until the handler captured the set and enqueued the notification
+	// (the handler is now blocked in the scripted wait).
+	deadline := time.Now().Add(2 * time.Second)
+	for len(capture.snapshot()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the Set handler never notified the replication seam")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The seam now reports a DIFFERENT set: the captured one must stand.
+	peers.set(3, 4, 5)
+	wait.resolve(true, 2)
+
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", key, res.err)
+	}
+	if !res.resp.GetAcked() || res.resp.GetAckedCount() != 2 || res.resp.GetTotalPeers() != 2 {
+		t.Fatalf("write-time report: want acked=true 2/2, got acked=%v %d/%d",
+			res.resp.GetAcked(), res.resp.GetAckedCount(), res.resp.GetTotalPeers())
+	}
+	if got := peers.callCount(); got != 1 {
+		t.Fatalf("WritePeers consulted %d times for one write, want exactly 1 — the set is captured once", got)
+	}
+	calls := capture.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("notify calls = %d, want exactly 1", len(calls))
+	}
+	if !slices.Equal(calls[0].peers, []uint16{1, 2}) {
+		t.Fatalf("notified peers = %v, want the write-time set [1 2]", calls[0].peers)
+	}
+	if !calls[0].track {
+		t.Fatal("notify call carried track=false, want the request's wait_for_replication flag")
+	}
+	waits := tracker.waitCalls()
+	if len(waits) != 1 || waits[0].total != 2 {
+		t.Fatalf("wait calls = %+v, want exactly one with the write-time total 2", waits)
 	}
 }

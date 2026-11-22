@@ -762,8 +762,11 @@ func (c *Cluster) route(i int, outbound []port.Outbound) {
 
 // Write performs the production author sequence on node i at the scheduler's
 // current virtual time (D-05): the store Set, then the core NotifyLocalWrite
-// carrying the written record, capturing the (key, record) pair into the
-// write log. Call RunUntil first to place the write in virtual time.
+// carrying the written record and the node's current peer ids — the
+// write-time snapshot the production handler captures before its engine write
+// (A-01), read sorted from Core.PeerIDs so a same-seed replay stays
+// deterministic — capturing the (key, record) pair into the write log. Call
+// RunUntil first to place the write in virtual time.
 //
 // A rejected Set — an oversize value, the ErrValueTooLarge class — is a
 // driving test's mistake, not a protocol condition: it panics naming the
@@ -783,7 +786,7 @@ func (c *Cluster) Write(i int, key string, data []byte) storage.Record {
 		panic(fmt.Sprintf("simnet: Cluster.Write: Lookup %q on node %d after a successful Set: record missing", key, i))
 	}
 	var out port.Outbox
-	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
+	c.nodes[i].core.NotifyLocalWrite(now, key, rec, c.nodes[i].core.PeerIDs(), &out)
 	c.route(i, out.Drain())
 	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
 	c.drive(i, now)
@@ -794,7 +797,8 @@ func (c *Cluster) Write(i int, key string, data []byte) storage.Record {
 // Delete performs the production author sequence for a deletion on node i at
 // the scheduler's current virtual time (D-05): the store Delete writes a
 // fresh-version tombstone that merges like any write, the core
-// NotifyLocalWrite carries the tombstone record through the same
+// NotifyLocalWrite carries the tombstone record and the node's current peer
+// ids (the same write-time capture shape as Write, A-01) through the same
 // pending/wait-set path a write takes (Deleted=true crosses the wire per
 // message), and the (key, tombstone) pair joins the write log — Rec.Deleted
 // true, the pointwise-supremum model needs no separate flag. A missing or
@@ -821,7 +825,7 @@ func (c *Cluster) Delete(i int, key string) (storage.Record, error) {
 		panic(fmt.Sprintf("simnet: Cluster.Delete: Lookup %q on node %d after a successful delete: record missing", key, i))
 	}
 	var out port.Outbox
-	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
+	c.nodes[i].core.NotifyLocalWrite(now, key, rec, c.nodes[i].core.PeerIDs(), &out)
 	c.route(i, out.Drain())
 	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
 	c.drive(i, now)
@@ -851,7 +855,7 @@ func (c *Cluster) NotifyInstalled(i int, key string) storage.Record {
 		panic(fmt.Sprintf("simnet: Cluster.NotifyInstalled: Lookup %q on node %d: record missing", key, i))
 	}
 	var out port.Outbox
-	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
+	c.nodes[i].core.NotifyLocalWrite(now, key, rec, c.nodes[i].core.PeerIDs(), &out)
 	c.route(i, out.Drain())
 	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
 	c.drive(i, now)

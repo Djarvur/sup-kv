@@ -32,14 +32,14 @@ const (
 
 // ServerOptions carries the startup-gate wiring (API-04, API-06): the
 // sync-arrived signal source and the backstop deadline — plus the
-// wait_for_replication seams (API-05, wait.go): the peer-count source, the
-// tracker wait seam and the operator-tunable wait default. The zero value
-// is legal — a nil SyncArrived means the sync path can never fire (the
-// resolver only polls it when non-nil), a zero StartupGate and a zero
-// WaitTimeout normalize to their 1s design defaults, and nil wait seams
-// mean the single-node configuration — so a bare ServerOptions{} is a
-// single-node server whose gate opens after one second and whose writes
-// report acked immediately (D-11).
+// wait_for_replication seams (API-05, wait.go): the write-time peer-id
+// source, the tracker wait seam and the operator-tunable wait default. The
+// zero value is legal — a nil SyncArrived means the sync path can never fire
+// (the resolver only polls it when non-nil), a zero StartupGate and a zero
+// WaitTimeout normalize to their 1s design defaults, and nil wait seams mean
+// the single-node configuration — so a bare ServerOptions{} is a single-node
+// server whose gate opens after one second and whose writes report the
+// honest zero-peer (acked=false, 0, 0) (A-01).
 //
 // Exported fields on an exported struct on purpose: main (plan 05-06)
 // injects the udprepl adapter's SyncArrived mirror, tests inject fakes,
@@ -69,13 +69,18 @@ type ServerOptions struct {
 	// node answers Unavailable for every read whatever the listing says.
 	ListedKey func(key string) bool
 
-	// KnownPeers reports the known-peer count for the wait_for_replication
-	// aggregate (D-08/D-10): the wait captures it exactly once before any
-	// waiting, so peers discovered mid-wait never extend the awaited set.
-	// Production injects the udprepl adapter's KnownPeers atomic mirror;
-	// a nil seam — like a zero count — means zero peers, the single-node
-	// configuration reporting acked immediately (D-11).
-	KnownPeers func() uint64
+	// WritePeers reports the sorted peer ids known when the write was
+	// accepted — the write-time peer snapshot the wait_for_replication
+	// report is pinned to (D-01, A-01). The handler calls it exactly once,
+	// immediately before the engine write, and the SAME slice feeds the
+	// replication notification and the wait report, so a peer discovered
+	// after acceptance can neither extend the awaited set nor move the
+	// reported total. Production injects the udprepl adapter's
+	// KnownPeerIDs atomic mirror; nil — like an empty slice — means zero
+	// peers, the single-node configuration, which answers the honest
+	// (acked=false, 0, 0) rather than overstating a write no peer
+	// acknowledged (A-01).
+	WritePeers func() []uint16
 
 	// WaitReplicated is the wait_for_replication tracker seam (XPORT-12,
 	// D-04): it waits for the (key, version) write's tracker, bounded by

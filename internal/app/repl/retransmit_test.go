@@ -172,7 +172,7 @@ func localWrite(t *testing.T, core *repl.Core, st *stateStore, now time.Time, ke
 		t.Fatalf("store Get(%q): %v", key, err)
 	}
 	var out port.Outbox
-	core.NotifyLocalWrite(now, key, rec, &out)
+	core.NotifyLocalWrite(now, key, rec, core.PeerIDs(), &out)
 	out.Drain()
 	return ver
 }
@@ -1057,7 +1057,7 @@ func TestOutboxResults_resolutionEvents(t *testing.T) {
 		ver := localWrite(t, core, st, at(0), keyAlpha, "alpha")
 
 		newer := storage.Record{Version: version.PackVersion(testNowMs+1000, 0, localID), Data: []byte("newer")}
-		core.NotifyLocalWrite(at(10*time.Millisecond), keyAlpha, newer, &out)
+		core.NotifyLocalWrite(at(10*time.Millisecond), keyAlpha, newer, core.PeerIDs(), &out)
 		out.Drain()
 		results := out.DrainResults()
 		if len(results) != 1 || results[0].Kind != port.ResultSuperseded || results[0].Version != ver {
@@ -1307,7 +1307,7 @@ func TestReplication_staleAnsweredNotAcked(t *testing.T) {
 
 	v5 := version.PackVersion(testNowMs, 5, peerID1)
 	held := seedVersion(t, st, keyAlpha, storage.Record{Version: v5, Data: []byte("five")})
-	core.NotifyLocalWrite(now, keyAlpha, held, &out)
+	core.NotifyLocalWrite(now, keyAlpha, held, core.PeerIDs(), &out)
 	out.Drain()
 	assertPending(t, core.PendingSnapshot(), keyAlpha, v5, []uint16{peerID1})
 
@@ -1645,7 +1645,7 @@ func TestNotify_firstNotificationProceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store Get(%q): %v", keyAlpha, err)
 	}
-	core.NotifyLocalWrite(now, keyAlpha, rec, &out)
+	core.NotifyLocalWrite(now, keyAlpha, rec, core.PeerIDs(), &out)
 	drained := out.Drain()
 	if len(drained) != 1 || !drained[0].Broadcast {
 		t.Fatalf("the first notification drained %d messages, want exactly 1 broadcast: %+v", len(drained), drained)
@@ -1677,7 +1677,7 @@ func TestNotify_equalTrackedIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store Get(%q): %v", keyAlpha, err)
 	}
-	core.NotifyLocalWrite(now, keyAlpha, rec, &out)
+	core.NotifyLocalWrite(now, keyAlpha, rec, core.PeerIDs(), &out)
 	if got := len(out.Drain()); got != 0 {
 		t.Fatalf("an equal duplicate notification emitted %d messages, want 0 — it must never reach the wire", got)
 	}
@@ -1715,7 +1715,7 @@ func TestNotify_regressedIgnored(t *testing.T) {
 	if older.Version.Compare(ver) >= 0 {
 		t.Fatalf("test fixture version %x is not strictly older than the tracked %x", older.Version[:], ver[:])
 	}
-	core.NotifyLocalWrite(now, keyAlpha, older, &out)
+	core.NotifyLocalWrite(now, keyAlpha, older, core.PeerIDs(), &out)
 	if got := len(out.Drain()); got != 0 {
 		t.Fatalf("a regressive notification emitted %d messages, want 0 — it must never reach the wire", got)
 	}
@@ -1794,7 +1794,7 @@ func TestNotify_newerBroadcasts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store Get(%q): %v", keyAlpha, err)
 	}
-	core.NotifyLocalWrite(now, keyAlpha, rec, &out)
+	core.NotifyLocalWrite(now, keyAlpha, rec, core.PeerIDs(), &out)
 
 	drained := out.Drain()
 	if len(drained) != 1 || !drained[0].Broadcast {
@@ -1826,7 +1826,7 @@ func TestNotify_absentKeyBroadcasts(t *testing.T) {
 	out.Drain()
 
 	ver := version.PackVersion(testNowMs, 0, peerID2)
-	core.NotifyLocalWrite(now, keyGamma, storage.Record{Version: ver, Data: []byte("first")}, &out)
+	core.NotifyLocalWrite(now, keyGamma, storage.Record{Version: ver, Data: []byte("first")}, core.PeerIDs(), &out)
 	drained := out.Drain()
 	if len(drained) != 1 || !drained[0].Broadcast {
 		t.Fatalf("an untracked-key notification drained %d messages, want exactly 1 broadcast: %+v", len(drained), drained)

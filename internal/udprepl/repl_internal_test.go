@@ -190,7 +190,7 @@ func TestNotify_createsTrackerBeforeCore(t *testing.T) {
 	adapter := newTrackerTestAdapter(t)
 	key := "tracker/before-core"
 	ver := version.PackVersion(1730000000000, 0, trackerNodeA)
-	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true)
+	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, adapter.KnownPeerIDs())
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
 	}
@@ -204,7 +204,7 @@ func TestNotify_createsTrackerBeforeCore(t *testing.T) {
 	// track=false creates no tracker.
 	untrackedKey := "tracker/untracked"
 	untrackedVer := version.PackVersion(1730000000000, 1, trackerNodeA)
-	notifyErr = adapter.NotifyLocalWrite(untrackedKey, storage.Record{Version: untrackedVer, Data: []byte("v")}, false)
+	notifyErr = adapter.NotifyLocalWrite(untrackedKey, storage.Record{Version: untrackedVer, Data: []byte("v")}, false, nil)
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(track=false): %v", notifyErr)
 	}
@@ -257,7 +257,7 @@ func TestNotify_createsTrackerBeforeCore(t *testing.T) {
 	cancel()
 	<-runDone
 	postVer := version.PackVersion(1730000000000, 2, trackerNodeA)
-	err := adapter.NotifyLocalWrite("tracker/after-run", storage.Record{Version: postVer, Data: []byte("v")}, true)
+	err := adapter.NotifyLocalWrite("tracker/after-run", storage.Record{Version: postVer, Data: []byte("v")}, true, adapter.KnownPeerIDs())
 	if !errors.Is(err, ErrRunLoopExited) {
 		t.Fatalf("post-Run tracked notify = %v, want ErrRunLoopExited", err)
 	}
@@ -281,7 +281,7 @@ func TestWaitReplicated_zeroPeersReleases(t *testing.T) {
 	adapter := newTrackerTestAdapter(t)
 	key := "tracker/zero-peers"
 	ver := version.PackVersion(1730000000000, 0, trackerNodeA)
-	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true)
+	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, adapter.KnownPeerIDs())
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
 	}
@@ -302,7 +302,7 @@ func TestWaitReplicated_timeoutReleases(t *testing.T) {
 	adapter := newTrackerTestAdapter(t)
 	key := "tracker/timeout"
 	ver := version.PackVersion(1730000000000, 0, trackerNodeA)
-	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true)
+	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, adapter.KnownPeerIDs())
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
 	}
@@ -323,7 +323,7 @@ func TestWaitReplicated_ctxCancelReleases(t *testing.T) {
 	adapter := newTrackerTestAdapter(t)
 	key := "tracker/cancel"
 	ver := version.PackVersion(1730000000000, 0, trackerNodeA)
-	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true)
+	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, adapter.KnownPeerIDs())
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
 	}

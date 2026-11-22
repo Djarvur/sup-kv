@@ -132,12 +132,16 @@ type inboundEvent struct {
 // may reuse its buffer once the call returns. The queue carries no track
 // flag: the tracker is created synchronously in NotifyLocalWrite before the
 // enqueue, so no later code can mistake a notification for a tracker
-// creation site. The replay flag marks a notification for already-installed
+// creation site. peers is the write-time peer-id snapshot the author captured
+// before its engine write, cloned at enqueue for the same reuse reason; the
+// event loop hands it to the core so the promise set is the acceptance-time
+// set (A-01). The replay flag marks a notification for already-installed
 // state (a snapshot load) rather than a live write; a replay takes the core's
 // paced record-send path instead of the immediate broadcast (WR-04).
 type localWrite struct {
 	key    string
 	rec    storage.Record
+	peers  []uint16
 	replay bool
 }
 
@@ -323,6 +327,18 @@ type Adapter struct {
 	// any-goroutine reads).
 	listing    atomic.Pointer[listingMirror]
 	listingGen uint64
+
+	// peerIDs is the peer-id mirror for the write_time capture (D-01, A-01):
+	// the core's known peer ids, sorted ascending, published as ONE immutable
+	// slice pointer so a handler reading it can never observe a half-built
+	// set. The event loop stores a fresh pointer only when the core's peer
+	// generation moved — an unchanged peer table republishes nothing and
+	// clones no slice (the listing mirror's generation-gated precedent). The
+	// gRPC handler captures this slice immediately before its engine write,
+	// and the SAME copy feeds the replication notification and the wait
+	// report, so the reported total is the acceptance-time set.
+	peerIDs atomic.Pointer[[]uint16]
+	peerGen uint64
 
 	// trackers maps each wait-requesting local write's identity to its
 	// waiter tracker (XPORT-12). NotifyLocalWrite is the ONLY production
@@ -579,7 +595,7 @@ func (a *Adapter) Run(ctx context.Context) error {
 			if lw.replay {
 				a.core.NotifyReplayedWrite(time.Now(), lw.key, lw.rec, &out)
 			} else {
-				a.core.NotifyLocalWrite(time.Now(), lw.key, lw.rec, &out)
+				a.core.NotifyLocalWrite(time.Now(), lw.key, lw.rec, lw.peers, &out)
 			}
 		case <-timerChan(timer):
 			// A due deadline — the Advance below fires the due timers.
@@ -605,6 +621,11 @@ func (a *Adapter) Run(ctx context.Context) error {
 // queue struct carries no track flag, so no later code can create a
 // tracker from a notification either.
 //
+// peers is the write-time peer-id snapshot the author captured immediately
+// before its engine write (A-01): it is cloned into the queue and handed to
+// the core, which seeds the tracked entry's promise set from exactly those
+// ids. A nil slice is the replay or untracked shape — no promise set.
+//
 // The enqueue and the closed-loop decision are one select over the notify
 // channel and the loop's done channel, with a re-check after a won send
 // (D-15 P4-IN-01 — the former pre-check-then-enqueue pair raced Run's exit
@@ -620,12 +641,12 @@ func (a *Adapter) Run(ctx context.Context) error {
 // surfaced to the author, never silent.
 //
 //nolint:revive // flag-parameter: track is the wait_for_replication request crossing the D-05 notification seam (XPORT-12); a second method would split the producer contract.
-func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record, track bool) error {
+func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record, track bool, peers []uint16) error {
 	keyID := trackerKey{key: key, version: rec.Version}
 	if track {
 		a.ensureTracker(keyID)
 	}
-	err := a.enqueueLocalWrite(localWrite{key: key, rec: cloneLocalRecord(rec)})
+	err := a.enqueueLocalWrite(localWrite{key: key, rec: cloneLocalRecord(rec), peers: slices.Clone(peers)})
 	if err != nil {
 		// A failed notify deletes the just-created tracker before returning, so
 		// the zero-value path (Run already gone, no waiter will ever resolve it)
@@ -838,8 +859,26 @@ func (a *Adapter) Discards() repl.DiscardStats {
 
 // KnownPeers returns the known-peer count mirrored from the core's peer
 // table after the latest event-loop iteration — safe from any goroutine.
+// It is the observability gauge (the metrics surface); the write path uses
+// [Adapter.KnownPeerIDs] instead, because the wait report needs the ids, not
+// the count.
 func (a *Adapter) KnownPeers() uint64 {
 	return a.peerCount.Load()
+}
+
+// KnownPeerIDs returns the known peer ids mirrored from the core's peer table
+// after the latest event-loop iteration, sorted ascending — the write-time
+// peer capture seam (D-01, A-01). The gRPC handler calls it exactly once
+// immediately before an engine write and pins the wait report to that set, so
+// a peer discovered after acceptance can neither extend the awaited set nor
+// move the reported total. A nil/empty result means zero known peers. The
+// returned slice is a clone the caller owns; safe from any goroutine.
+func (a *Adapter) KnownPeerIDs() []uint16 {
+	ids := a.peerIDs.Load()
+	if ids == nil {
+		return nil
+	}
+	return slices.Clone(*ids)
 }
 
 // UnackedStats returns the pending-set gauge mirrored from the core's
@@ -1076,14 +1115,15 @@ func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) {
 	}
 }
 
-// mirrorStats copies the core's discard counters, known-peer count, the
-// listing mirror, the OBS-01 gauge set — the pending-set gauge, the
-// remote-merge counters and the retransmissions counter — and the XPORT-07
-// emission set (total queue depth, egress drops, paced sends) into the
-// atomics after each loop iteration (D-04): cross-goroutine readers — the
-// smoke test, later observability — never touch core state. The listing
-// mirror is published only when its generation moved, so its clone cost is
-// paid at listing cadence, never per event.
+// mirrorStats copies the core's discard counters, known-peer count and
+// peer-id slice, the listing mirror, the OBS-01 gauge set — the pending-set
+// gauge, the remote-merge counters and the retransmissions counter — and the
+// XPORT-07 emission set (total queue depth, egress drops, paced sends) into
+// the atomics after each loop iteration (D-04): cross-goroutine readers — the
+// smoke test, the write-time capture, later observability — never touch core
+// state. The listing and peer-id mirrors are published only when their
+// generation moved, so their clone cost is paid at change cadence, never per
+// event.
 func (a *Adapter) mirrorStats() {
 	d := a.core.Discards()
 	a.badCRC.Store(d.BadCRC)
@@ -1100,6 +1140,16 @@ func (a *Adapter) mirrorStats() {
 	// PeerCount returns the peer-table length, never a negative value.
 	//nolint:gosec // G115: PeerCount is len(c.peers), a non-negative map length.
 	a.peerCount.Store(uint64(a.core.PeerCount()))
+	// The peer-id mirror is generation-gated like the listing mirror: the
+	// core bumps its peer generation only when an id enters or leaves the
+	// table, so an unchanged table pays no clone. The slice is captured whole
+	// and published by ONE pointer store, so a handler reading it observes a
+	// complete, sorted write-time set (D-01, A-01).
+	if gen := a.core.PeerGeneration(); gen != a.peerGen {
+		a.peerGen = gen
+		ids := a.core.PeerIDs()
+		a.peerIDs.Store(&ids)
+	}
 	u := a.core.UnackedStats(time.Now())
 	a.unackedCount.Store(int64(u.Count))
 	a.unackedOldestNs.Store(int64(u.OldestAge))

@@ -127,7 +127,7 @@ func TestSmoke_threeNodeBroadcastConvergence(t *testing.T) {
 		if rec.Version != ver {
 			t.Fatalf("node %d store Get(%q) version %x, want the just-stamped %x", ids[i], key, rec.Version, ver)
 		}
-		err = adapters[i].NotifyLocalWrite(key, rec, false)
+		err = adapters[i].NotifyLocalWrite(key, rec, false, nil)
 		if err != nil {
 			t.Fatalf("node %d NotifyLocalWrite(%q): %v", ids[i], key, err)
 		}

@@ -231,7 +231,7 @@ func benchUnackedFixture(tb testing.TB, unacked int) *repl.Core {
 	for i := range unacked {
 		key := fmt.Sprintf("bench/unacked-%06d", i)
 		rec := storage.Record{Version: version.PackVersion(testNowMs+int64(i), 0, localID)}
-		core.NotifyLocalWrite(at(0), key, rec, &out)
+		core.NotifyLocalWrite(at(0), key, rec, core.PeerIDs(), &out)
 		out.Drain()
 	}
 	return core

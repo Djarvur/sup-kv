@@ -243,7 +243,7 @@ func TestWaitIntegration_ackedThroughRealAdapterTracker(t *testing.T) {
 	})
 
 	opts := openGateOptions()
-	opts.KnownPeers = adapterA.KnownPeers
+	opts.WritePeers = adapterA.KnownPeerIDs
 	opts.WaitReplicated = adapterA.WaitReplicated
 	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
 	gateCtx, cancelGate := context.WithCancel(t.Context())
@@ -385,7 +385,7 @@ func TestWaitIntegration_staleRecordNotAcked(t *testing.T) {
 	}
 
 	opts := openGateOptions()
-	opts.KnownPeers = adapterA.KnownPeers
+	opts.WritePeers = adapterA.KnownPeerIDs
 	opts.WaitReplicated = adapterA.WaitReplicated
 	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
 	gateCtx, cancelGate := context.WithCancel(t.Context())

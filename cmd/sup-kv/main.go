@@ -716,7 +716,7 @@ func wire(cfg config) (*wired, net.Listener, error) {
 	srv := grpcapi.NewServer(engine, adapter.NotifyLocalWrite, hub, grpcapi.ServerOptions{
 		SyncArrived:    adapter.SyncArrived,
 		ListedKey:      adapter.ListedKey,
-		KnownPeers:     adapter.KnownPeers,
+		WritePeers:     adapter.KnownPeerIDs,
 		WaitReplicated: adapter.WaitReplicated,
 		ReplayNotify:   adapter.NotifyReplayedWrite,
 		StartupGate:    gateBackstopFor(cfg, engine),

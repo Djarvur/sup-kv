@@ -746,6 +746,13 @@ type Core struct {
 	cfg    Config
 	peers  map[uint16]peer
 
+	// peerGen is the peer id set's generation: it moves exactly when an id
+	// enters or leaves the table (a run_id change under a known id is not a
+	// set change), so the adapter's peer-id mirror can publish only on a real
+	// change — the A-01 write-time capture reads that mirror and the clone
+	// cost must not be paid per event (the listing-generation precedent).
+	peerGen uint64
+
 	// pending holds one entry per tracked (key, version) pair — no record
 	// Data (see pendingEntry). peerUnacked is the per-peer ledger: for every
 	// known peer, the set of pending keys it is still waiting on, so peer
@@ -1390,6 +1397,11 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 	known.runID = in.RunID
 	known.lastHello = now
 	c.peers[in.NodeID] = known
+	if !remembered {
+		// A first-seen id is the one Hello shape that changes the peer id
+		// set; the peer-id mirror publishes on this generation (A-01).
+		c.peerGen++
+	}
 	c.greetAndList(now, in, known, remembered, out)
 	if remembered || !discovery {
 		return
@@ -2166,8 +2178,15 @@ func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
 // precondition of the write path: this enqueues-and-returns (D-05). A replay
 // of already-installed records uses [Core.NotifyReplayedWrite] instead: same
 // tracking, paced emission.
-func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
-	if _, accepted := c.trackLocalWrite(now, key, rec, out); !accepted {
+//
+// peers is the write-time peer snapshot the author captured immediately
+// before its engine write (A-01, D-01): the tracked entry's promise set is
+// seeded from exactly those ids, so a peer discovered after acceptance is
+// broadcast to (the discovery flush and the retransmission ladder still reach
+// it) but never awaited, and an Ack from a node outside the snapshot never
+// completes the promise.
+func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, peers []uint16, out *port.Outbox) {
+	if _, accepted := c.trackLocalWrite(now, key, rec, peers, out); !accepted {
 		return
 	}
 	own := storage.Record{
@@ -2192,7 +2211,11 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 // broadcast (a client waits on them); only the replay seam — which no client
 // waits on — trades latency for pacing.
 func (c *Core) NotifyReplayedWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
-	pk, accepted := c.trackLocalWrite(now, key, rec, out)
+	// The replay keeps the pre-capture tracking shape: a load has no waiter,
+	// so there is no write-time promise to pin, and the entry seeds its
+	// wait-set from the current peer table exactly as it always has. This is
+	// deliberately NOT part of the A-01 promise (D-01 covers live writes).
+	pk, accepted := c.trackLocalWrite(now, key, rec, c.PeerIDs(), out)
 	if !accepted {
 		return
 	}
@@ -2204,8 +2227,10 @@ func (c *Core) NotifyReplayedWrite(now time.Time, key string, rec storage.Record
 // caller must emit and whether the notification was accepted at all. The guard
 // branches are documented on [Core.NotifyLocalWrite]; both emission shapes
 // (immediate broadcast, paced record send) share this one bookkeeping path, so
-// no second implementation can drift.
-func (c *Core) trackLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) (pendingKey, bool) {
+// no second implementation can drift. peers is the write-time peer snapshot
+// the entry's wait-set is seeded from exactly (A-01); nil is the no-promise
+// shape.
+func (c *Core) trackLocalWrite(now time.Time, key string, rec storage.Record, peers []uint16, out *port.Outbox) (pendingKey, bool) {
 	if tracked, ok := c.trackedVersion(key); ok {
 		switch cmp := rec.Version.Compare(tracked); {
 		case cmp < 0:
@@ -2226,8 +2251,8 @@ func (c *Core) trackLocalWrite(now time.Time, key string, rec storage.Record, ou
 	pk := pendingKey{key: key, version: rec.Version}
 	_, tracked := c.pending[pk]
 	if !tracked {
-		waitSet := make(map[uint16]struct{}, len(c.peers))
-		for id := range c.peers {
+		waitSet := make(map[uint16]struct{}, len(peers))
+		for _, id := range peers {
 			waitSet[id] = struct{}{}
 		}
 		entry := pendingEntry{
@@ -2707,6 +2732,9 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 		c.dropListing(listingDst{nodeID: id, runID: c.peers[id].runID})
 		c.dropOwedPeer(id)
 		delete(c.peers, id)
+		// An evicted id leaves the set: the peer-id mirror republishes so the
+		// write-time capture stops counting a peer that can never Ack (A-01).
+		c.peerGen++
 		// The evicted peer's retained listing and partial rounds go with it:
 		// the mirror must never serve a dead peer's keys, and the union must
 		// not retain them (PROTO-01, T-4-41). A union change moves the
@@ -3133,6 +3161,22 @@ func (c *Core) PacedSends() uint64 {
 // and observability, never the hot mirror).
 func (c *Core) PeerCount() int {
 	return len(c.peers)
+}
+
+// PeerIDs returns the known peer ids sorted ascending — the write-time peer
+// snapshot the API handler captures immediately before a write (A-01, D-01)
+// and the deterministic slice the simulator hands its own notifications. The
+// order is sorted, never map iteration, so a same-seed replay stays
+// byte-identical; the returned slice is fresh and owned by the caller.
+func (c *Core) PeerIDs() []uint16 {
+	return slices.Sorted(maps.Keys(c.peers))
+}
+
+// PeerGeneration returns the peer id set's generation — bumped exactly when an
+// id enters or leaves the table, so the adapter's peer-id mirror publishes
+// only on a real set change (the listing-generation precedent).
+func (c *Core) PeerGeneration() uint64 {
+	return c.peerGen
 }
 
 // UnackedStats returns the pending-set gauge observed at now: the unacked

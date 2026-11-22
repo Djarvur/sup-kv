@@ -245,7 +245,7 @@ func scenarioWrite(tb testing.TB, n *scenarioNode, key string, val []byte) versi
 	if err != nil {
 		tb.Fatalf("node store Get(%q): %v", key, err)
 	}
-	err = n.adapter.NotifyLocalWrite(key, rec, false)
+	err = n.adapter.NotifyLocalWrite(key, rec, false, nil)
 	if err != nil {
 		tb.Fatalf("NotifyLocalWrite(%q): %v", key, err)
 	}

@@ -133,7 +133,7 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 	})
 
 	opts := openGateOptions()
-	opts.KnownPeers = adapterA.KnownPeers
+	opts.WritePeers = adapterA.KnownPeerIDs
 	opts.WaitReplicated = adapterA.WaitReplicated
 	opts.WaitTimeout = benchWaitTimeout
 	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
@@ -193,7 +193,7 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 				burstErr = fmt.Errorf("burst Get(%q): %w", key, err)
 				return
 			}
-			err = adapterA.NotifyLocalWrite(key, rec, false)
+			err = adapterA.NotifyLocalWrite(key, rec, false, nil)
 			if err != nil {
 				burstErr = fmt.Errorf("burst NotifyLocalWrite(%q): %w", key, err)
 				return

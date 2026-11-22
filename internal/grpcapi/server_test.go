@@ -146,12 +146,14 @@ func (f *fakeDumpStore) ReadSnapshot(_ string) ([]byte, error) {
 }
 
 // notifyCall is one LocalNotify invocation the tests observe: the key, the
-// record the handler built (version, data, tombstone flag, checksum) and the
-// wait_for_replication flag it carried.
+// record the handler built (version, data, tombstone flag, checksum), the
+// wait_for_replication flag it carried and the write-time peer ids it carried
+// (cloned, so a test may keep the call after the handler returns).
 type notifyCall struct {
 	key   string
 	rec   storage.Record
 	track bool
+	peers []uint16
 }
 
 // notifyCapture records LocalNotify calls under a mutex: the handlers run on
@@ -163,10 +165,10 @@ type notifyCapture struct {
 
 // notify is the LocalNotify seam the harness installs; it records and
 // accepts every call.
-func (c *notifyCapture) notify(key string, rec storage.Record, track bool) error {
+func (c *notifyCapture) notify(key string, rec storage.Record, track bool, peers []uint16) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.calls = append(c.calls, notifyCall{key: key, rec: rec, track: track})
+	c.calls = append(c.calls, notifyCall{key: key, rec: rec, track: track, peers: slices.Clone(peers)})
 	return nil
 }
 
@@ -216,19 +218,20 @@ type testServerConfig struct {
 	// notify is the LocalNotify seam the server is constructed with; nil is
 	// the single-node configuration (D-11). The totality tests install a
 	// capturing seam to observe which writes and replays reach replication.
-	notify func(key string, rec storage.Record, track bool) error
+	notify func(key string, rec storage.Record, track bool, peers []uint16) error
 
 	// replayNotify is the paced replay seam (WR-04); nil leaves replay
 	// notifications on the live notify seam.
 	replayNotify func(key string, rec storage.Record) error
 
-	// waitTimeout, knownPeers and waitReplicated are the
-	// wait_for_replication seams (API-05, plan 05-05), merged into the same
-	// ServerOptions the gate wiring rides on. waitTimeout zero means
-	// NewServer's 1s default (D-09, A2); nil knownPeers/waitReplicated mean
-	// the single-node configuration reporting acked immediately (D-11).
+	// waitTimeout, writePeers and waitReplicated are the
+	// wait_for_replication seams (API-05, plan 05-05; A-01 in 06-02), merged
+	// into the same ServerOptions the gate wiring rides on. waitTimeout zero
+	// means NewServer's 1s default (D-09, A2); nil writePeers/waitReplicated
+	// mean the single-node configuration, which now reports the honest
+	// (acked=false, 0, 0) (A-01).
 	waitTimeout    time.Duration
-	knownPeers     func() uint64
+	writePeers     func() []uint16
 	waitReplicated func(ctx context.Context, key string, ver version.RecordVersion, total uint32, timeout time.Duration) (acked bool, ackedCount uint32)
 }
 
@@ -338,7 +341,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 		opts.ListedKey = cfg.listedKey
 	}
 	opts.WaitTimeout = cfg.waitTimeout
-	opts.KnownPeers = cfg.knownPeers
+	opts.WritePeers = cfg.writePeers
 	opts.WaitReplicated = cfg.waitReplicated
 	opts.ReplayNotify = cfg.replayNotify
 

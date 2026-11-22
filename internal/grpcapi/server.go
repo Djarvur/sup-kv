@@ -38,13 +38,16 @@ const listedKeyNotArrivedMessage = "startup gate: key is listed by a peer but it
 
 // LocalNotify is the post-write replication notification seam: the gRPC
 // write handler is "the author" of the phase-4 D-05 explicit-call contract.
-// It receives the record the write just installed and whether the write
-// requested a wait_for_replication report (track), so the adapter can
-// create the waiter tracker synchronously before enqueueing the
-// notification (XPORT-12). It reports nil when the notification was
-// accepted for the replication loop, or a non-nil error when it was dropped
-// (udprepl.ErrRunLoopExited once that loop has exited).
-type LocalNotify func(key string, rec storage.Record, track bool) error
+// It receives the record the write just installed, whether the write
+// requested a wait_for_replication report (track), and the peer ids the
+// handler captured immediately before the engine write (peers) — the
+// write-time snapshot the core seeds its wait set from, so the adapter can
+// create the waiter tracker synchronously before enqueueing the notification
+// (XPORT-12) and the core can pin the promise to exactly those ids (A-01).
+// It reports nil when the notification was accepted for the replication loop,
+// or a non-nil error when it was dropped (udprepl.ErrRunLoopExited once that
+// loop has exited).
+type LocalNotify func(key string, rec storage.Record, track bool, peers []uint16) error
 
 // LocalReplayNotify is the PACED replication notification seam for records a
 // snapshot load replayed (PROTO-08, T-4-20, WR-04). The record is already
@@ -199,6 +202,13 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 	if req.GetCreateIfAbsent() && s.opts.ListedKey != nil && s.opts.ListedKey(req.GetKey()) {
 		return nil, status.Error(codes.AlreadyExists, storage.ErrAlreadyExists.Error())
 	}
+	// The write-time peer snapshot (D-01, A-01): captured exactly once,
+	// immediately before the engine write — the acceptance point — and the
+	// same slice feeds the replication notification and the wait report, so
+	// no peer discovered after this line can extend the awaited set or move
+	// the reported total. The helper returns a clone: the seam's slice is
+	// never retained.
+	peers := s.writePeers()
 	var (
 		ver version.RecordVersion
 		err error
@@ -216,11 +226,11 @@ func (s *Server) Set(ctx context.Context, req *apiproto.SetRequest) (*apiproto.S
 		// false: the RPC errors, so no wait_for_replication report exists.
 		// ErrClosed is shutdown work the process is abandoning — never notified.
 		if errors.Is(err, persist.ErrDumpFailed) || errors.Is(err, persist.ErrUnconfirmed) {
-			s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false, false)
+			s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false, false, peers)
 		}
 		return nil, mapError(err)
 	}
-	s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false, req.GetWaitForReplication())
+	s.notifyLocalWrite(req.GetKey(), ver, req.GetValue(), false, req.GetWaitForReplication(), peers)
 	resp := &apiproto.SetResponse{Version: ver[:]}
 	if req.GetWaitForReplication() {
 		timeout := s.waitTimeout(req.GetWaitTimeoutMs())
@@ -256,6 +266,10 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 	if len(req.GetKey()) > storage.MaxKeyBytes {
 		return nil, keyTooLongError(len(req.GetKey()))
 	}
+	// Same write-time peer capture as Set (D-01: a delete is a write): one
+	// read immediately before the engine call, feeding both the notification
+	// and the wait report.
+	peers := s.writePeers()
 	ver, _, err := s.engine.Delete(req.GetKey())
 	if err != nil {
 		// PROTO-08 totality (D-08, T-4-18, T-5-25): the unconfirmed tombstone
@@ -264,11 +278,11 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 		// dump or an expired confirmation timeout (PERSIST-08); track is false
 		// and ErrClosed never notifies.
 		if errors.Is(err, persist.ErrDumpFailed) || errors.Is(err, persist.ErrUnconfirmed) {
-			s.notifyLocalWrite(req.GetKey(), ver, nil, true, false)
+			s.notifyLocalWrite(req.GetKey(), ver, nil, true, false, peers)
 		}
 		return nil, mapError(err)
 	}
-	s.notifyLocalWrite(req.GetKey(), ver, nil, true, req.GetWaitForReplication())
+	s.notifyLocalWrite(req.GetKey(), ver, nil, true, req.GetWaitForReplication(), peers)
 	resp := &apiproto.DeleteResponse{Version: ver[:]}
 	if req.GetWaitForReplication() {
 		timeout := s.waitTimeout(req.GetWaitTimeoutMs())
@@ -367,10 +381,12 @@ func (s *Server) SnapshotLoad(_ context.Context, req *apiproto.SnapshotLoadReque
 // copy keeps the record's bytes owned by the notification. track carries
 // the request's wait_for_replication flag through to the adapter, which
 // creates the waiter tracker synchronously before enqueueing when set
-// (XPORT-12). The notify error is deliberately ignored: a failed notify
-// (ErrRunLoopExited during shutdown) never lies about the durable write,
-// which the engine already confirmed.
-func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []byte, deleted, track bool) {
+// (XPORT-12), and peers carries the write-time peer snapshot the handler
+// captured immediately before the engine call (D-01) — the same slice the
+// wait report is pinned to. The notify error is deliberately ignored: a
+// failed notify (ErrRunLoopExited during shutdown) never lies about the
+// durable write, which the engine already confirmed.
+func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []byte, deleted, track bool, peers []uint16) {
 	if s.notify == nil {
 		return
 	}
@@ -380,19 +396,21 @@ func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []
 		Deleted:  deleted,
 		Checksum: storage.RecordChecksum(key, ver, data, deleted),
 	}
-	_ = s.notify(key, rec, track)
+	_ = s.notify(key, rec, track, peers)
 }
 
 // notifyReplayedWrite hands one snapshot-replayed record to the paced replay
 // seam when the wiring provides one (WR-04, T-4-20), else through the live
 // notification seam with track=false — a load has no waiter report. The
-// rebuilt record is notifyLocalWrite's: the replay's stored version, its data
-// and the store's checksum. A notify error is ignored for the same reason as
-// on the live path: the record is already installed and the RPC's own error
-// (if any) reports the dump honestly.
+// peers slice is nil: a replay has no waiter, so no write-time peer set
+// exists to carry (D-01's promise covers live writes only). The rebuilt
+// record is notifyLocalWrite's: the replay's stored version, its data and the
+// store's checksum. A notify error is ignored for the same reason as on the
+// live path: the record is already installed and the RPC's own error (if any)
+// reports the dump honestly.
 func (s *Server) notifyReplayedWrite(rec persist.RestoredRecord) {
 	if s.opts.ReplayNotify == nil {
-		s.notifyLocalWrite(rec.Key, rec.Version, rec.Data, rec.Deleted, false)
+		s.notifyLocalWrite(rec.Key, rec.Version, rec.Data, rec.Deleted, false, nil)
 		return
 	}
 	_ = s.opts.ReplayNotify(rec.Key, storage.Record{

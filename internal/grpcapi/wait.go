@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/version"
@@ -67,10 +68,7 @@ func (s *Server) waitForReplication(ctx context.Context, key string, ver version
 	if s.opts.WaitReplicated == nil {
 		return true, 0, 0
 	}
-	var peerCount uint32
-	if s.opts.KnownPeers != nil {
-		peerCount = uint32(s.opts.KnownPeers()) //nolint:gosec // G115: the peer table is keyed by 16-bit node ids, so the count never exceeds 65535 — the conversion cannot truncate.
-	}
+	peerCount := uint32(len(s.writePeers())) //nolint:gosec // G115: the peer table is keyed by 16-bit node ids, so the count never exceeds 65536 — the conversion cannot truncate.
 	if peerCount == 0 {
 		// Zero known peers at write time (D-11): immediate acked with
 		// nothing awaited. The total==0 call releases the notify-time
@@ -81,6 +79,16 @@ func (s *Server) waitForReplication(ctx context.Context, key string, ver version
 	}
 	acked, count := s.opts.WaitReplicated(ctx, key, ver, peerCount, timeout)
 	return acked, min(count, peerCount), peerCount
+}
+
+// writePeers returns the write-time peer-id snapshot the handler captured
+// from ServerOptions.WritePeers, defensively cloned so the seam's slice is
+// never retained: a nil seam is zero peers (the single-node configuration).
+func (s *Server) writePeers() []uint16 {
+	if s.opts.WritePeers == nil {
+		return nil
+	}
+	return slices.Clone(s.opts.WritePeers())
 }
 
 // waitTimeout resolves the D-09 wait deadline for one write: a positive

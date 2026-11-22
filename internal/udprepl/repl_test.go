@@ -113,7 +113,7 @@ func TestWire_twoNodeHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store A Get(%q): %v", key, err)
 	}
-	coreA.NotifyLocalWrite(now, key, written, &outA)
+	coreA.NotifyLocalWrite(now, key, written, coreA.PeerIDs(), &outA)
 
 	// The wire: encode each outbound datagram with the adapter's encode
 	// path, decode it on B's side with A's handle as the source, feed B's
@@ -305,7 +305,7 @@ func TestNotifyLocalWrite_afterRunReturns(t *testing.T) {
 	rec := storage.Record{Data: []byte("post-run write")}
 	for call := range postRunNotifyCalls {
 		got := make(chan error, 1)
-		go func() { got <- adapter.NotifyLocalWrite("post-run/key", rec, false) }()
+		go func() { got <- adapter.NotifyLocalWrite("post-run/key", rec, false, nil) }()
 		select {
 		case err := <-got:
 			if !errors.Is(err, udprepl.ErrRunLoopExited) {
@@ -355,7 +355,7 @@ func TestNotifyLocalWrite_afterDone(t *testing.T) {
 	// and a panic in the enqueue path crashes the test binary outright.
 	got := make(chan error, 1)
 	go func() {
-		got <- adapter.NotifyLocalWrite("after-done/key", storage.Record{Data: []byte("post-done write")}, false)
+		got <- adapter.NotifyLocalWrite("after-done/key", storage.Record{Data: []byte("post-done write")}, false, nil)
 	}()
 	select {
 	case err := <-got:
@@ -498,7 +498,7 @@ func TestWaitReplicated_ackCoverage(t *testing.T) {
 
 	rec := writeStoredRecord(t, st, []byte("wait me"))
 	ver := rec.Version
-	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true)
+	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true, adapter.KnownPeerIDs())
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(%q, track=true): %v", mirrorKey, notifyErr)
 	}
@@ -554,7 +554,7 @@ func TestWaitReplicated_strangerAckCounts(t *testing.T) {
 
 	rec := writeStoredRecord(t, st, []byte("stranger me"))
 	ver := rec.Version
-	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true)
+	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true, adapter.KnownPeerIDs())
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(%q, track=true): %v", mirrorKey, notifyErr)
 	}
@@ -605,7 +605,7 @@ func TestWaitReplicated_evictionNotAck(t *testing.T) {
 
 	rec := writeStoredRecord(t, st, []byte("evict me"))
 	ver := rec.Version
-	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true)
+	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true, adapter.KnownPeerIDs())
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(%q, track=true): %v", mirrorKey, notifyErr)
 	}
@@ -632,7 +632,7 @@ func TestWaitReplicated_superseded(t *testing.T) {
 
 	rec := writeStoredRecord(t, st, []byte("supersede me"))
 	ver := rec.Version
-	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true)
+	notifyErr := adapter.NotifyLocalWrite(mirrorKey, rec, true, adapter.KnownPeerIDs())
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(%q, track=true): %v", mirrorKey, notifyErr)
 	}
@@ -724,7 +724,7 @@ func TestMirror_syncArrivedFlip(t *testing.T) {
 
 	// Further unrelated events never reset it: a notified write traverses
 	// the loop (the unacked gauge observes its entry) first.
-	err = adapter.NotifyLocalWrite(mirrorKey, storage.Record{Version: version.PackVersion(testNowMs, 0, nodeIDA), Data: []byte("v")}, false)
+	err = adapter.NotifyLocalWrite(mirrorKey, storage.Record{Version: version.PackVersion(testNowMs, 0, nodeIDA), Data: []byte("v")}, false, nil)
 	if err != nil {
 		t.Fatalf("NotifyLocalWrite(%q): %v", mirrorKey, err)
 	}
@@ -1001,7 +1001,7 @@ func TestMirror_unackedSent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store A Get(%q): %v", mirrorKey, err)
 	}
-	err = adapterA.NotifyLocalWrite(mirrorKey, rec, false)
+	err = adapterA.NotifyLocalWrite(mirrorKey, rec, false, nil)
 	if err != nil {
 		t.Fatalf("NotifyLocalWrite(%q): %v", mirrorKey, err)
 	}
