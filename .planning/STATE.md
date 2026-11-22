@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-11-22T03:40:58.479Z"
+stopped_at: Completed 04-03-PLAN.md
+last_updated: "2026-11-22T03:57:03.300Z"
 last_activity: 2026-11-22
 last_activity_desc: Completed 04-02-PLAN.md (gated reads and listed-key RPC answers)
-state_head: a3a212419aabda81444614de51b01b7274369cff
+state_head: 4e7061c5bab944643f789085280409c64f03fe11
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 36
+  completed_plans: 37
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Completed 04-02-PLAN.md
@@ -93,6 +93,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P13 | 1048s | 2 tasks | 10 files |
 | Phase 04 P01 | 23min | 3 tasks | 17 files |
 | Phase 04 P02 | 5min | 2 tasks | 8 files |
+| Phase 04 P03 | 587s | 2 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -239,6 +240,9 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-02: The gate is every data handler's first statement, before validation, listed-key knowledge and the nil-hub check; a closed node answers Unavailable for reads and writes alike.
 - [Phase 04]: 04-02: create_if_absent on any listed key is AlreadyExists before the engine call; the post-open race test models completeness+membership as one atomic.Pointer publication.
 - [Phase 04]: 04-02: Delete keeps local NotFound for a listed-but-unarrived key (rule 14.5(6) names reads; A7); the Watch send-error fixture now opens its gate through the resolver (Rule 3).
+- [Phase 04]: 04-03: Observe takes no store lock (it touches no record; the clock's mutex is the only synchronization) and Generation bumps exactly once inside install, the single convergence point of local writes, merge winners and restore replay.
+- [Phase 04]: 04-03: handleDataSync absorbs each non-empty validated part's exact maximum entry version once, after header validation and independent of stream completion; empty and discarded parts absorb nothing (T-4-10).
+- [Phase 04]: 04-03: StateStore gained Observe and Generation; every implementer delegates (engine, simnet nodeStore, seven pre-existing fakes, 04-01's white-box fake), while the map-holding egressStore returns a clock-less no-op Observe and a fixed 0 generation.
 
 ### Pending Todos
 
@@ -261,7 +265,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T03:40:50.218Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-11-22T03:56:56.120Z
+Stopped at: Completed 04-03-PLAN.md
 Resume file: None
 Next action: `/gsd:verify-work 3` (or `/gsd:execute-phase 4` after the phase gate is verified) — Phase 4 (Protocol) is unblocked

@@ -160,13 +160,13 @@ Plans:
   3. Staleness never lies: a node holding `k@v5` that receives `k@v3` sends back exactly one unicast `DataReplication k@v5` and no `Ack` (the sender's `wait_for_replication` for `v3` reports `acked: false`); a local-write notification with a version not greater than the tracked one is ignored
   4. Misconfiguration and version mismatch are named errors: a third process under a known `node_id` with alternating `run_id`s is counted and logged as a configuration error and receives no full listing; an incompatible `proto_version` is checked before body decode, classified `bad_proto_version`, and WARN-logged rate-limited per peer per interval
   5. Replication is total and N-node behavior is specified: a write whose dump failed still broadcasts (counted as unconfirmed) and a snapshot load broadcasts its result; 3+-node behavior and timing is documented with real-socket three-node tests, and `wait_for_replication` semantics at N > 2 are in the API docs
-**Plans**: 2/13 plans executed
+**Plans**: 3/13 plans executed
 **Wave 1**
 - [x] 04-01-PLAN.md — Complete-listing wire header, per-stream accumulation, one atomic mirror, pre-body proto-version verdict (PROTO-01, PROTO-07)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 04-02-PLAN.md — Gated reads and listed-key RPC semantics: Unavailable/NotFound/AlreadyExists (PROTO-01)
-- [ ] 04-03-PLAN.md — Store/engine Observe and KeyCount: per-part HLC absorption and O(1) empty selection (PROTO-01, PROTO-02)
+- [x] 04-03-PLAN.md — Store/engine Observe and KeyCount: per-part HLC absorption and O(1) empty selection (PROTO-01, PROTO-02)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 04-04-PLAN.md — `startup_gate_empty` end to end, including the stand-harness derivation (PROTO-02)
@@ -259,7 +259,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
 | 2. Engine — HLC Versioning and LWW Store | v1.0 | 17/17 | Complete    | 2026-11-21 |
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 13/13 | Complete | 2026-11-03 |
-| 4. Replication and Deterministic Simulator | v1.0 | 2/13 | In Progress |  |
+| 4. Replication and Deterministic Simulator | v1.0 | 3/13 | In Progress |  |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete | 2026-11-16 |
 | 7. v1.0 — Docs, Examples and Release | v1.0 | 5/5 | Complete | 2026-11-18 |
