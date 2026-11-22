@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 04-03-PLAN.md
-last_updated: "2026-11-22T03:57:03.300Z"
+stopped_at: Completed 04-04-PLAN.md
+last_updated: "2026-11-22T04:16:09.371Z"
 last_activity: 2026-11-22
 last_activity_desc: Completed 04-02-PLAN.md (gated reads and listed-key RPC answers)
-state_head: 4e7061c5bab944643f789085280409c64f03fe11
+state_head: 416eeb9c372dfd0195429064dc6dd2c1b80c1e3c
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 37
+  completed_plans: 38
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Completed 04-02-PLAN.md
@@ -94,6 +94,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P01 | 23min | 3 tasks | 17 files |
 | Phase 04 P02 | 5min | 2 tasks | 8 files |
 | Phase 04 P03 | 587s | 2 tasks | 16 files |
+| Phase 04 P04 | 10min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -243,6 +244,10 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-03: Observe takes no store lock (it touches no record; the clock's mutex is the only synchronization) and Generation bumps exactly once inside install, the single convergence point of local writes, merge winners and restore replay.
 - [Phase 04]: 04-03: handleDataSync absorbs each non-empty validated part's exact maximum entry version once, after header validation and independent of stream completion; empty and discarded parts absorb nothing (T-4-10).
 - [Phase 04]: 04-03: StateStore gained Observe and Generation; every implementer delegates (engine, simnet nodeStore, seven pre-existing fakes, 04-01's white-box fake), while the map-holding egressStore returns a clock-less no-op Observe and a fixed 0 generation.
+- [Phase 04]: 04-04: The empty-vs-data gate is selected once in wire from Engine.KeyCount() after the synchronous load; a node with any record (tombstone included) never consults startup_gate_empty, and production never derives one gate from the other (ADR 0006, T-4-14).
+- [Phase 04]: 04-04: The stand harness derives --startup-gate-empty from an explicit --startup-gate in the extras, yields to an explicit empty gate, and appends the derived flag last so later-flag-wins parsing gives it precedence; the frozen R-03 30 s governs both timers without editing stand_red_test.go (T-4-13).
+- [Phase 04]: 04-04: checkStartupGates validates positivity only and names the offending flag — a zero/negative gate exits 2 through the usage path; cross-parameter relations stay Phase 7's one-point validation (T-4-12).
+- [Phase 04]: 04-04: The executed docs demo pair pins --startup-gate-empty=2s so a lost first empty listing cannot hold an empty demo node closed for the 60 s default and flake the verbatim README/EXAMPLES runs (Rule 3).
 
 ### Pending Todos
 
@@ -265,7 +270,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T03:56:56.120Z
-Stopped at: Completed 04-03-PLAN.md
+Last session: 2026-11-22T04:15:59.390Z
+Stopped at: Completed 04-04-PLAN.md
 Resume file: None
 Next action: `/gsd:verify-work 3` (or `/gsd:execute-phase 4` after the phase gate is verified) — Phase 4 (Protocol) is unblocked
