@@ -306,6 +306,14 @@ func TestWaitReplicated_zeroPeersReleases(t *testing.T) {
 	if notifyErr != nil {
 		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
 	}
+	// The notify-time creation is the release's precondition: the zero-peer
+	// path must delete exactly this tracker.
+	if !trackerPresent(adapter, trackerKey{key: key, version: ver}) {
+		t.Fatal("the tracked notify created no tracker, want one before the release call")
+	}
+	if got := trackerCount(adapter); got != 1 {
+		t.Fatalf("tracker map holds %d entries after the tracked notify, want 1", got)
+	}
 	acked, count := adapter.WaitReplicated(t.Context(), key, ver, 0, 0)
 	if acked || count != 0 {
 		t.Fatalf("zero-peer wait report = (%v, %d), want the honest false (false, 0)", acked, count)

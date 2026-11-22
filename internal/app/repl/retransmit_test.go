@@ -1818,6 +1818,50 @@ func TestNotify_newerBroadcasts(t *testing.T) {
 	}
 }
 
+// TestNotify_supersededResult is the structural proof of D-01's 20 ms
+// displacement target (A-01, RESEARCH Pitfall 2): a newer local notification
+// under the same key emits ResultSuperseded for the older tracked version in
+// the SAME handler call's Outbox. There is no timer, no poll and no wait-time
+// measurement in this resolution path — the displacing call carries the
+// result — so the 20 ms design target is proven by control flow, not by a
+// flaky wall-clock assertion. The real-socket regression
+// (internal/udprepl.TestWaitReplicated_supersededFast) keeps a generous
+// CI-safe bound.
+func TestNotify_supersededResult(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	out.Drain()
+
+	older := localWrite(t, core, st, now, keyAlpha, "v1")
+	ver, _, err := st.store.Set(keyAlpha, []byte("v2"))
+	if err != nil {
+		t.Fatalf("store Set(%q): %v", keyAlpha, err)
+	}
+	if ver.Compare(older) <= 0 {
+		t.Fatalf("the displacing store write %x is not strictly newer than the tracked %x", ver[:], older[:])
+	}
+	rec, err := st.store.Get(keyAlpha)
+	if err != nil {
+		t.Fatalf("store Get(%q): %v", keyAlpha, err)
+	}
+
+	// The displacing notification: drain its message stream, then assert the
+	// older version's resolution was emitted by this one handler call.
+	core.NotifyLocalWrite(now.Add(time.Millisecond), keyAlpha, rec, core.PeerIDs(), &out)
+	out.Drain()
+	results := out.DrainResults()
+	if len(results) != 1 {
+		t.Fatalf("the displacing notification emitted %d results, want exactly 1 Superseded for the displaced version: %+v", len(results), results)
+	}
+	if res := results[0]; res.Kind != port.ResultSuperseded || res.Key != keyAlpha || res.Version != older {
+		t.Fatalf("the displacing notification's result = %+v, want Superseded for (%s, %x)", res, keyAlpha, older[:])
+	}
+	assertPending(t, core.PendingSnapshot(), keyAlpha, ver, []uint16{peerID1})
+}
+
 // TestNotify_absentKeyBroadcasts proves the empty case of the guard: a key
 // with no tracked entry proceeds and creates tracking — absent means accept,
 // never a regression.

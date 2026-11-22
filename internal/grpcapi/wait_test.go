@@ -2,13 +2,29 @@ package grpcapi_test
 
 import (
 	"context"
+	"fmt"
+	"hash/crc32"
+	"net"
 	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
+
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/app/clock"
+	"github.com/Djarvur/sup-kv/internal/app/persist"
+	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
+	"github.com/Djarvur/sup-kv/internal/grpcapi"
+	"github.com/Djarvur/sup-kv/internal/udprepl"
+	replproto "github.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1"
 )
 
 // waitAssertBound is the generous elapsed bound the wait tests assert:
@@ -662,5 +678,212 @@ func TestWait_writeTimeSetPinned(t *testing.T) {
 	waits := tracker.waitCalls()
 	if len(waits) != 1 || waits[0].total != 2 {
 		t.Fatalf("wait calls = %+v, want exactly one with the write-time total 2", waits)
+	}
+}
+
+// blockingPeerStore parks ApplyRemote for one key until the test releases it:
+// the deterministic ordering seam that lets a post-write discovery be
+// processed before the captured peer's Ack. Every other key delegates
+// straight through, so discovery and liveness traffic are unaffected.
+type blockingPeerStore struct {
+	peerStore
+
+	key     string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+// ApplyRemote parks the first apply for s.key until release, announcing the
+// arrival on entered; it then delegates to the wrapped peer store.
+func (s *blockingPeerStore) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
+	if key == s.key {
+		s.once.Do(func() { close(s.entered) })
+		<-s.release
+	}
+	return s.peerStore.ApplyRemote(key, rec)
+}
+
+// encodeHelloDatagram builds one wire Hello datagram exactly as the
+// production encoder frames it (proto_version 2, the node id and run id, a
+// CRC32 over the marshaled Body). The udprepl package's test-only encoder
+// lives in that package's test binary and is not visible from here, so the
+// discovery fixture is built from the same generated schema instead.
+func encodeHelloDatagram(t *testing.T, nodeID uint16, runID [16]byte) ([]byte, error) {
+	t.Helper()
+	body, err := proto.Marshal(&replproto.Body{Msg: &replproto.Body_Hello{Hello: &replproto.Hello{}}})
+	if err != nil {
+		return nil, fmt.Errorf("marshal Hello body: %w", err)
+	}
+	env := &replproto.Envelope{
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeId:       uint32(nodeID),
+		RunId:        runID[:],
+		Crc32:        crc32.ChecksumIEEE(body),
+		Body:         body,
+	}
+	datagram, err := proto.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Hello envelope: %w", err)
+	}
+	return datagram, nil
+}
+
+// TestWait_integrationCapturedPeerOnly pins A-01 end to end on real adapters
+// (the wait_integration_test.go harness, reused here without editing it): a
+// two-node write captures B alone, a THIRD node's Hello is discovered after
+// the write was accepted, and B's Ack — released only once the discovery has
+// been processed — completes the wait 1/1. The discovered peer is not part of
+// the promise: the report's total stays the captured 1, never the live peer
+// count, and the wait does not require the newcomer.
+func TestWait_integrationCapturedPeerOnly(t *testing.T) {
+	t.Parallel()
+
+	portA := integrationUDPPort(t)
+	portB := integrationUDPPort(t)
+	probeLoopbackBroadcast(t, portB)
+
+	hub := grpcapi.NewWatchHub()
+	eng, _ := persist.Open(
+		42,
+		time.Now,
+		time.Minute,
+		&fakeDumpStore{},
+		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
+		persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond},
+	)
+	engCtx, cancelEng := context.WithCancel(t.Context())
+	go func() { _ = eng.Run(engCtx) }()
+	t.Cleanup(cancelEng)
+	hubCtx, cancelHub := context.WithCancel(t.Context())
+	go func() { _ = hub.Run(hubCtx) }()
+	t.Cleanup(cancelHub)
+
+	adapterA, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", portA),
+		fmt.Sprintf("127.255.255.255:%d", portB),
+		replNodeA, eng, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("node A adapter: %v", err)
+	}
+
+	const key = "wait/captured-only"
+	storeB := storage.NewStore(replNodeB, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
+	blocking := &blockingPeerStore{
+		key:     key,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	blocking.store = storeB
+	adapterB, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", portB),
+		fmt.Sprintf("127.255.255.255:%d", portA),
+		replNodeB, blocking, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("node B adapter: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() { _ = adapterA.Run(ctx) }()
+	go func() { _ = adapterB.Run(ctx) }()
+
+	waitFor(t, integrationDeadline, "adapter A to discover adapter B", func() bool {
+		return adapterA.KnownPeers() == 1
+	})
+
+	opts := openGateOptions()
+	opts.WritePeers = adapterA.KnownPeerIDs
+	opts.WaitReplicated = adapterA.WaitReplicated
+	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
+	gateCtx, cancelGate := context.WithCancel(t.Context())
+	t.Cleanup(cancelGate)
+	go api.RunGate(gateCtx)
+
+	srv := grpc.NewServer()
+	apiproto.RegisterSupKVServiceServer(srv, api)
+	healthpb.RegisterHealthServer(srv, api.Health())
+
+	lis := bufconn.Listen(1 << 20)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient(
+		"passthrough:bufnet",
+		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStaticStreamWindowSize(testFlowWindowSize),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: want nil, got error: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := apiproto.NewSupKVServiceClient(conn)
+	health := healthpb.NewHealthClient(conn)
+	waitFor(t, gateWait, "the health endpoint to flip SERVING (gate open)", func() bool {
+		resp, err := health.Check(t.Context(), &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
+
+	type setResult struct {
+		resp *apiproto.SetResponse
+		err  error
+	}
+	done := make(chan setResult, 1)
+	go func() {
+		resp, err := client.Set(t.Context(), &apiproto.SetRequest{
+			Key:                key,
+			Value:              []byte("captured only"),
+			WaitForReplication: true,
+			WaitTimeoutMs:      2000,
+		})
+		done <- setResult{resp: resp, err: err}
+	}()
+
+	// The captured peer holds the replicated record until the test has
+	// processed the post-write discovery.
+	waitFor(t, integrationDeadline, "the captured peer to receive the write", func() bool {
+		select {
+		case <-blocking.entered:
+			return true
+		default:
+			return false
+		}
+	})
+
+	// The post-write discovery: a third node's Hello reaches A only after the
+	// write's peer capture and notification have happened.
+	const nodeC = uint16(11)
+	runC := [16]byte{0xC3, 0xC3, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11}
+	cConn, err := integrationSocket("0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("third-node socket: %v", err)
+	}
+	t.Cleanup(func() { _ = cConn.Close() })
+	helloDatagram, err := encodeHelloDatagram(t, nodeC, runC)
+	if err != nil {
+		t.Fatalf("encode third-node Hello: %v", err)
+	}
+	_, err = cConn.WriteToUDP(helloDatagram, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: portA})
+	if err != nil {
+		t.Fatalf("send third-node Hello: %v", err)
+	}
+	waitFor(t, integrationDeadline, "A to discover the third node after the write", func() bool {
+		return adapterA.KnownPeers() == 2
+	})
+
+	// Release the captured peer's Ack only now, so the discovered peer was
+	// certainly known while the promise was outstanding.
+	close(blocking.release)
+
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", key, res.err)
+	}
+	if !res.resp.GetAcked() || res.resp.GetAckedCount() != 1 || res.resp.GetTotalPeers() != 1 {
+		t.Fatalf("captured-peer-only report: want acked=true 1/1, got acked=%v %d/%d — the post-write discovery must not extend the promise",
+			res.resp.GetAcked(), res.resp.GetAckedCount(), res.resp.GetTotalPeers())
 	}
 }
