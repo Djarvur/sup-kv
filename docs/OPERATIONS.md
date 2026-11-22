@@ -150,9 +150,11 @@ The endpoint serves:
   `supkv_replication_unacked_oldest_age_seconds` (retransmission backlog),
   `supkv_replication_peers`, `supkv_replication_datagrams_sent_total` (by
   message type), `supkv_replication_datagrams_retransmitted_total`,
-  `supkv_datagrams_discarded_total` (by classification: `bad_crc`,
-  `undecodable`, `bad_proto_version`, `own_broadcast`,
-  `duplicate_node_id`, `bad_sync_header`), `supkv_merges_conflicts_total`,
+  `supkv_datagrams_discarded_total` (by classification; the label set is the
+  complete catalog and every class is published even at zero: `bad_crc`,
+  `undecodable`, `bad_proto_version`, `own_broadcast`, `duplicate_node_id`,
+  `empty_key`, `key_too_long`, `tombstone_with_data`, `bad_checksum`,
+  `bad_version`, `bad_sync_header`), `supkv_merges_conflicts_total`,
   `supkv_clock_drift_warnings_total`, `supkv_dumps_duration_seconds`,
   `supkv_dumps_total`, `supkv_dumps_errors_total` — plus the standard
   `go_*`/`process_*` runtime families;
