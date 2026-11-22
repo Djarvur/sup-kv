@@ -63,6 +63,12 @@ func (s stateStore) Lookup(key string) (storage.Record, bool) { return s.store.L
 // Versions returns the shallow key→version view, tombstones included.
 func (s stateStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
+// Observe absorbs one received version into the store's clock.
+func (s stateStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s stateStore) Generation() uint64 { return s.store.Generation() }
+
 // newTestStore returns a store for nodeID parked at the fixed test
 // wall-clock millisecond (built with time.UnixMilli so no monotonic
 // reading is involved — the D-02 seam).

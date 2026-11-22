@@ -309,6 +309,19 @@ type StateStore interface {
 	// Versions returns a fresh map from every key — tombstones included — to
 	// its stored version, copying no Data: the DataSync listing source.
 	Versions() map[string]version.RecordVersion
+
+	// Observe absorbs one received version into the store's clock without
+	// touching any record: the per-DataSync-part HLC update (PROTO-01), so
+	// the next local write strictly beats the peer's listed state. The
+	// returned drift is the clock's own signal; MergeStats does not count it
+	// this phase.
+	Observe(ver version.RecordVersion) (drift time.Duration)
+
+	// Generation returns the store's monotone content generation: it moves
+	// only when a stored record actually changed and never for a rejected or
+	// read path. A listing build records it and is reused only while it is
+	// unchanged (04-08, T-4-43).
+	Generation() uint64
 }
 
 // NewRunID returns a fresh per-process-start run identifier: 16 random

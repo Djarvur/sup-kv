@@ -66,6 +66,12 @@ func (s wireStateStore) Lookup(key string) (storage.Record, bool) { return s.sto
 // Versions returns the shallow key→version view, tombstones included.
 func (s wireStateStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
+// Observe absorbs one received version into the store's clock.
+func (s wireStateStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s wireStateStore) Generation() uint64 { return s.store.Generation() }
+
 // wireGraduatedKey returns the i-th sorted graduated key of keyLen bytes
 // (the repl-side chunking test's construction).
 func wireGraduatedKey(i, keyLen int) string {

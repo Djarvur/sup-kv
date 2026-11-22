@@ -99,6 +99,12 @@ func (s trackerStore) Lookup(key string) (storage.Record, bool) { return s.store
 // Versions returns the shallow key→version view, tombstones included.
 func (s trackerStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
+// Observe absorbs one received version into the store's clock.
+func (s trackerStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s trackerStore) Generation() uint64 { return s.store.Generation() }
+
 // newTrackerTestAdapter returns an adapter bound to a loopback ephemeral
 // port, with its socket closed by the test's cleanup. Run is started only by
 // the tests that need it.

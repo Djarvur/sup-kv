@@ -166,6 +166,12 @@ func (s peerStore) Lookup(key string) (storage.Record, bool) { return s.store.Lo
 // Versions returns the shallow key→version view, tombstones included.
 func (s peerStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
+// Observe absorbs one received version into the store's clock.
+func (s peerStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s peerStore) Generation() uint64 { return s.store.Generation() }
+
 // TestWaitIntegration_ackedThroughRealAdapterTracker drives 05-REVIEW CR-01's
 // exact production scenario end to end: one known peer, a Set with
 // wait_for_replication, the notify→broadcast→apply→ack cycle over real UDP

@@ -197,6 +197,12 @@ func (s smokeStore) Lookup(key string) (storage.Record, bool) { return s.store.L
 // Versions returns the shallow key→version view, tombstones included.
 func (s smokeStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
+// Observe absorbs one received version into the store's clock.
+func (s smokeStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s smokeStore) Generation() uint64 { return s.store.Generation() }
+
 // waitFor polls cond every pollInterval until it holds or the deadline —
 // the earlier of timeout and the test's own hard deadline minus a margin —
 // and fails with what on expiry. Takes testing.TB so the benchmarks reuse

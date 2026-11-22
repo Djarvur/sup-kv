@@ -62,6 +62,13 @@ func (s *egressStore) Versions() map[string]version.RecordVersion {
 	return out
 }
 
+// Observe is a clock-less no-op: this fake holds no clock.
+func (s *egressStore) Observe(_ version.RecordVersion) time.Duration { return 0 }
+
+// Generation returns a fixed 0: this fake holds its own map and nothing
+// caches a listing build over it.
+func (s *egressStore) Generation() uint64 { return 0 }
+
 // newEgressCore returns a core over the mutable fake store.
 func newEgressCore() *Core {
 	return New(egressTestLocal, [16]byte{1, 2, 3}, &egressStore{

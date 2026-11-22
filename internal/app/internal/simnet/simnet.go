@@ -427,11 +427,12 @@ type LoggedWrite struct {
 	Rec storage.Record
 }
 
-// nodeStore adapts *storage.Store to repl.StateStore by delegating its four
+// nodeStore adapts *storage.Store to repl.StateStore by delegating its
 // methods — the plan 04-01 test precedent (the persist engine's ApplyRemote
 // seam lands with plan 04-06). The three read methods are the store's
 // tombstone-visible view: the core's sync paths consume it instead of a
-// whole-store snapshot (XPORT-06).
+// whole-store snapshot (XPORT-06). Observe makes every simulated node absorb
+// listing versions into its clock, so simulator drift matches production.
 type nodeStore struct{ store *storage.Store }
 
 // ApplyRemote joins one replicated record through the store's LWW merge.
@@ -447,6 +448,12 @@ func (s nodeStore) Lookup(key string) (storage.Record, bool) { return s.store.Lo
 
 // Versions returns the shallow key→version view, tombstones included.
 func (s nodeStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
+
+// Observe absorbs one received version into the store's clock.
+func (s nodeStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s nodeStore) Generation() uint64 { return s.store.Generation() }
 
 // simRunID returns nodeID's run identifier: fresh per node (no two cluster
 // members share one) and derived deterministically — the simulator admits no

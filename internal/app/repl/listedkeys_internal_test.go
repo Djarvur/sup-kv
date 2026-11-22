@@ -56,6 +56,14 @@ func (s listedStateStore) Lookup(key string) (storage.Record, bool) { return s.s
 // Versions returns the shallow key→version view, tombstones included.
 func (s listedStateStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
 
+// Observe absorbs one received version into the store's clock.
+func (s listedStateStore) Observe(ver version.RecordVersion) time.Duration {
+	return s.store.Observe(ver)
+}
+
+// Generation returns the store's content generation.
+func (s listedStateStore) Generation() uint64 { return s.store.Generation() }
+
 // newListedCore returns a core over a real empty store at the fixed test
 // instant — the generation test's shape; the bounded flood seeds its fixture
 // versions without storing anything.
@@ -216,5 +224,179 @@ func TestSync_listingGenerationSharedKeys(t *testing.T) {
 	}
 	if got := len(core.ListedKeysSnapshot()); got != 0 {
 		t.Fatalf("listed union holds %d keys after the last lister released them, want 0", got)
+	}
+}
+
+// observingStore wraps a real store and counts Observe calls: the real store
+// proves the clock advance end to end, the counter proves once-per-part and
+// zero-for-empty/discarded. Generation delegates untouched — nothing in these
+// tests caches a build, so the pass-through is the contract.
+type observingStore struct {
+	store       *storage.Store
+	observes    int
+	maxObserved version.RecordVersion
+}
+
+// ApplyRemote joins one replicated record through the store's LWW merge.
+func (s *observingStore) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
+	return s.store.Merge(key, rec)
+}
+
+// Version returns the stored version for key, tombstones included.
+func (s *observingStore) Version(key string) (version.RecordVersion, bool) {
+	return s.store.Version(key)
+}
+
+// Lookup returns the stored record for key, tombstones included.
+func (s *observingStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s *observingStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
+
+// Observe counts the call, records the greatest absorbed version and feeds
+// the real store's clock.
+func (s *observingStore) Observe(ver version.RecordVersion) time.Duration {
+	s.observes++
+	if s.observes == 1 || ver.Compare(s.maxObserved) > 0 {
+		s.maxObserved = ver
+	}
+	return s.store.Observe(ver)
+}
+
+// Generation returns the store's content generation.
+func (s *observingStore) Generation() uint64 { return s.store.Generation() }
+
+// newObservingCore returns a core over a real store wrapped by the counting
+// fake at the fixed test instant, with the production default MaxClockLead.
+func newObservingCore() (*Core, *observingStore) {
+	fixedNow := func() time.Time { return time.UnixMilli(listedTestNowMs) }
+	st := &observingStore{store: storage.NewStore(listedTestLocal, clock.NewClock(fixedNow, 0, 0, 0), storage.Config{})}
+	return New(listedTestLocal, [16]byte{1}, st, Config{}), st
+}
+
+// observeNow returns the virtual instant the observe rows drive from.
+func observeNow() time.Time { return time.UnixMilli(listedTestNowMs) }
+
+// TestSync_observePerPart pins PROTO-01's absorption point: one non-empty
+// listing part feeds its entry version into the store clock, so the next
+// local write strictly beats the peer's listed state.
+func TestSync_observePerPart(t *testing.T) {
+	t.Parallel()
+	core, st := newObservingCore()
+	absorbed := version.PackVersion(listedTestNowMs+10_000, 3, listedTestPeer)
+	var out port.Outbox
+	core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 1, []port.SyncEntry{
+		{Key: "peer/absorbed", Version: absorbed},
+	}), &out)
+	if got := st.observes; got != 1 {
+		t.Fatalf("Observe calls after a one-entry part = %d, want 1", got)
+	}
+	ver, _, err := st.store.Set("local/after-listing", []byte("v"))
+	if err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if got := ver.Compare(absorbed); got <= 0 {
+		t.Fatalf("next local write %x does not strictly beat the listed %x", ver[:], absorbed[:])
+	}
+}
+
+// TestSync_observePerPartEmptyAndDiscarded pins the pipeline position: an
+// empty part and a datagram the validation pipeline discards perform no clock
+// call at all, so a hostile datagram cannot advance the HLC before it passed
+// validation (T-4-10).
+func TestSync_observePerPartEmptyAndDiscarded(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an empty part absorbs nothing", func(t *testing.T) {
+		t.Parallel()
+		core, st := newObservingCore()
+		var out port.Outbox
+		core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 2, nil), &out)
+		if got := st.observes; got != 0 {
+			t.Fatalf("Observe calls after an empty part = %d, want 0", got)
+		}
+	})
+
+	t.Run("a part discarded for an out-of-bound version absorbs nothing", func(t *testing.T) {
+		t.Parallel()
+		core, st := newObservingCore()
+		var out port.Outbox
+		ahead := version.PackVersion(
+			listedTestNowMs+int64(defaultMaxClockLead/time.Millisecond)+1000, 0, listedTestPeer)
+		core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 3, []port.SyncEntry{
+			{Key: "peer/future", Version: ahead},
+		}), &out)
+		if got := st.observes; got != 0 {
+			t.Fatalf("Observe calls after a discarded part = %d, want 0 (T-4-10)", got)
+		}
+		if got := core.Discards().BadVersion; got != 1 {
+			t.Fatalf("BadVersion discards = %d, want 1 — the part must be rejected before the clock", got)
+		}
+	})
+}
+
+// TestSync_observeOncePerPart pins the exactly-once contract: a part with
+// several entries absorbs one version — the greatest by the full 16-byte
+// comparison — and the next local write beats it.
+func TestSync_observeOncePerPart(t *testing.T) {
+	t.Parallel()
+	core, st := newObservingCore()
+	low := version.PackVersion(listedTestNowMs+1000, 0, listedTestPeer)
+	high := version.PackVersion(listedTestNowMs+3000, 0, listedTestPeer)
+	mid := version.PackVersion(listedTestNowMs+2000, 0, listedTestPeer)
+	var out port.Outbox
+	core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 4, []port.SyncEntry{
+		{Key: "peer/a", Version: low},
+		{Key: "peer/b", Version: high},
+		{Key: "peer/c", Version: mid},
+	}), &out)
+	if got := st.observes; got != 1 {
+		t.Fatalf("Observe calls after a three-entry part = %d, want exactly 1", got)
+	}
+	if st.maxObserved != high {
+		t.Fatalf("absorbed %x, want the part's maximum %x", st.maxObserved[:], high[:])
+	}
+	ver, _, err := st.store.Set("local/after-max", []byte("v"))
+	if err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if got := ver.Compare(high); got <= 0 {
+		t.Fatalf("next local write %x does not strictly beat the maximum %x", ver[:], high[:])
+	}
+}
+
+// TestSync_generationPassThrough pins the generation seam a cached listing
+// build trusts (T-4-43): the core's read paths leave the store's content
+// generation unchanged, and a real store mutation moves it by exactly one.
+func TestSync_generationPassThrough(t *testing.T) {
+	t.Parallel()
+	core, st := newObservingCore()
+	if got := st.Generation(); got != 0 {
+		t.Fatalf("Generation() on a fresh store = %d, want 0", got)
+	}
+	if _, _, err := st.store.Set("local/older", []byte("local")); err != nil {
+		t.Fatalf("seed Set() error = %v, want nil", err)
+	}
+	if got := st.Generation(); got != 1 {
+		t.Fatalf("Generation() after the seed Set = %d, want 1", got)
+	}
+
+	// A listing whose entry is older than the stored record drives the
+	// Version + Lookup newer-response read path.
+	var out port.Outbox
+	core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 5, []port.SyncEntry{
+		{Key: "local/older", Version: version.PackVersion(listedTestNowMs-1000, 0, listedTestPeer)},
+	}), &out)
+	out.Drain()
+	if got := st.Generation(); got != 1 {
+		t.Fatalf("Generation() after the core's read paths = %d, want the unchanged 1", got)
+	}
+
+	// A real store mutation moves it exactly once more.
+	if _, _, err := st.store.Set("local/newer", []byte("v")); err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if got := st.Generation(); got != 2 {
+		t.Fatalf("Generation() after a second Set = %d, want 2", got)
 	}
 }
