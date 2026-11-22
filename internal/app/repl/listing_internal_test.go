@@ -255,8 +255,11 @@ func TestListing_hostileBounded(t *testing.T) {
 			core.HandleDatagram(now, listingHello(identity, listingRunID(i, 1), fmt.Sprintf("spoofed-%03d", i)), &out)
 		}
 		if got := len(core.listingByDst); got != 1 {
-			t.Fatalf("one node identity announcing %d run ids from as many source handles left %d destinations, want exactly 1 — a source handle must never key a listing FIFO (CR-01, T-4-25)",
-				hostileTriggers, got)
+			t.Fatalf(
+				"one node identity announcing %d run ids from as many source handles left %d destinations, want exactly 1 — a source handle must never key a listing FIFO (CR-01, T-4-25)",
+				hostileTriggers,
+				got,
+			)
 		}
 		if got := core.ListingDropped(); got != 0 {
 			t.Fatalf("ListingDropped() = %d under the destination cap, want 0", got)

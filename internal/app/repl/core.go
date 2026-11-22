@@ -111,12 +111,22 @@ const (
 	maxEgressEntries = 32768
 
 	// maxListingDestinations bounds the in-flight listing destinations — the
-	// concurrent targeted and periodic FIFOs (CR-01, T-4-23) — and
-	// maxListingChunks the total queued listing chunk work across them: a
-	// worst-case 20 000-key round at one entry per chunk fits whole. Both
-	// bounds are pinned by the 04-08 listing queue.
+	// concurrent targeted and periodic FIFOs (CR-01, T-4-23). One FIFO per
+	// known peer plus the broadcast round is the healthy shape; a hostile
+	// segment can claim at most this many distinct (node_id, run_id)
+	// identities, and every further trigger is refused and counted instead of
+	// minting a queue entry (the destination is never the datagram's source
+	// handle, so a spoofed port buys nothing, T-4-25). The value leaves room
+	// for a 32-node segment.
 	maxListingDestinations = 32
-	maxListingChunks       = 65536
+
+	// maxListingChunks bounds the total queued listing chunk work across every
+	// destination (CR-01, T-4-23): a worst-case 20 000-key round at one entry
+	// per chunk (20 000 chunks) fits whole, with headroom. A trigger that
+	// would cross the bound is refused whole — never partially enqueued — and
+	// counted, so a hostile restart flood cannot accumulate listings faster
+	// than the shared pacer drains them.
+	maxListingChunks = 65536
 
 	// maxSyncStreams bounds the partial-listing accumulator: a peer may send
 	// many distinct sync_ids with missing chunks, so the number of retained
@@ -149,10 +159,6 @@ const (
 	// refcounts and the retained total shrink together; each released key is
 	// counted in ListedKeysEvicted.
 	maxListedKeysTotal = 131072
-
-	// broadcastDst is the listing queue's destination key for the periodic
-	// broadcast round; every other key is a peer's opaque address handle.
-	broadcastDst = ""
 
 	// jitterDivisor is the jitter envelope's denominator: timer jitter spans
 	// a tenth of the interval (positive-only), pacer jitter a tenth of the
@@ -449,28 +455,51 @@ type queuedUnicast struct {
 	id egressKey
 }
 
-// listingFIFO is one destination's in-flight DataSync listing: the round's
-// sync_id and chunk count (stamped on every emitted chunk) and the chunks not
-// yet emitted, in rotated order with their ORIGINAL 1-based indices. Exactly
-// one FIFO exists per destination (broadcastDst for the periodic round, a
-// peer handle for a restart listing), so a trigger that arrives while a
-// listing is in flight finds the map entry and is dropped after nextSync
-// advances — the queue holds at most one round of chunks (T-3-23). Rotation
-// changes only the emission order: chunk_index always names the chunk's
-// position in the unrotated listing, or completeness could never be
-// recognized.
-type listingFIFO struct {
-	dst    string
-	syncID uint64
-	count  uint32
-	chunks []queuedListingChunk
+// listingDst identifies one listing destination: a peer's announced
+// (node_id, run_id) — never the datagram's source handle, which any host
+// chooses freely and which therefore cannot key a bounded queue (CR-01,
+// T-4-25) — or, as the zero identity, the periodic broadcast round.
+type listingDst struct {
+	nodeID uint16
+	runID  [16]byte
 }
 
-// queuedListingChunk is one not-yet-emitted chunk of a listing round: its
-// 1-based original index and its entries.
-type queuedListingChunk struct {
-	index   uint32
-	entries []port.SyncEntry
+// broadcastDst returns the listing queue's destination identity for the
+// periodic broadcast round: the zero identity, which no peer can hold (node
+// ids start at 1 and every run_id is 16 random bytes). A function rather than
+// a package global keeps the core's state model free of mutable package state.
+func broadcastDst() listingDst { return listingDst{} }
+
+// listingBuild is one immutable DataSync listing built from a
+// StateStore.Versions view: the sorted chunk sequence, the build instant, the
+// store content generation it was copied at, and the round's sync_id. Every
+// FIFO created while the build is younger than cfg.SyncInterval AND the store
+// generation is unchanged holds a pointer to it, so a burst of triggers costs
+// one O(store) copy, never one per trigger (CR-01, T-4-24). The generation is
+// what keeps the cache honest: a build is a snapshot, so any store mutation
+// since makes it stale and the next trigger rebuilds exactly once — a cached
+// pre-mutation listing can never be served.
+type listingBuild struct {
+	chunks     [][]port.SyncEntry
+	at         time.Time
+	syncID     uint64
+	generation uint64
+}
+
+// listingFIFO is one destination's in-flight DataSync listing: a reference to
+// the shared build, the chunk the round starts at (rotation) and how many
+// chunks were already emitted. The shared build makes a queued destination
+// O(1) — no per-destination chunk copy (CR-01) — while the round's sync_id
+// and chunk count travel on every emitted chunk. Exactly one FIFO exists per
+// destination, so a trigger that arrives while a listing is in flight is a
+// no-op (T-3-23); rotation changes only the emission order, because each
+// chunk keeps its ORIGINAL 1-based index and completeness would otherwise be
+// unrecognizable.
+type listingFIFO struct {
+	build      *listingBuild
+	dst        listingDst
+	startIndex int
+	emitted    int
 }
 
 // scanDiscardKey identifies one WARN rate-limit slot: a datagram's node_id
@@ -648,20 +677,20 @@ type Core struct {
 	nextSync time.Time
 
 	// listingByDst holds the in-flight listing FIFOs keyed by destination
-	// (broadcastDst for the periodic round, a peer handle for a restart
-	// listing); listingOrder is their enqueue order — the deterministic drain
-	// order — and listingCount the total queued chunk count. nextListingAt is
-	// the shared listing pacer slot, and syncRotation the broadcast round
-	// counter that rotates each round's start chunk (D-01, RESEARCH Pattern
-	// 1).
-	listingByDst  map[string]*listingFIFO
-	listingOrder  []string
-	listingCount  int
-	nextListingAt time.Time
-	syncRotation  uint64
-
-	// listingDropped counts every listing trigger the queue bounds refused
-	// (CR-01, T-4-23) — the 04-08 observability counter.
+	// identity (a peer's (node_id, run_id) or the zero broadcast identity);
+	// listingOrder is their enqueue order — the deterministic drain order — and
+	// listingCount the total queued chunk count across every FIFO. build is the
+	// shared, generation-checked listing build the FIFOs reference; nextListingAt
+	// is the shared listing pacer slot and syncRotation the broadcast round
+	// counter that rotates each round's start chunk (D-01, RESEARCH Pattern 5).
+	// listingDropped counts every trigger the destination or chunk cap refused
+	// (CR-01, T-4-23).
+	listingByDst   map[listingDst]*listingFIFO
+	listingOrder   []listingDst
+	listingCount   int
+	nextListingAt  time.Time
+	syncRotation   uint64
+	build          *listingBuild
 	listingDropped uint64
 
 	// recordQueue is the paced record-send FIFO fed by the discovery flush and
@@ -760,9 +789,10 @@ type Core struct {
 	// when the union membership or the complete flag actually changes, so an
 	// identical repeated complete listing republishes nothing downstream.
 	// listingComplete flips true on the first complete listing and never
-	// resets; nextSyncID allocates one fresh sync_id per emission round
-	// (build-time counter, never crypto/rand — same-seed replay stays
-	// byte-identical).
+	// resets; nextSyncID allocates one fresh sync_id per listing BUILD (never
+	// per trigger — the shared build carries it, so two destinations reusing
+	// one build share the round identity, T-4-24; build-time counter, never
+	// crypto/rand — same-seed replay stays byte-identical).
 	listingGen      uint64
 	listingComplete bool
 	nextSyncID      uint64
@@ -793,7 +823,7 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 		peerUnacked:          make(map[uint16]map[pendingKey]struct{}),
 		pendingOrder:         list.New(),
 		retry:                retryHeap{index: make(map[pendingKey]int)},
-		listingByDst:         make(map[string]*listingFIFO),
+		listingByDst:         make(map[listingDst]*listingFIFO),
 		recordQueued:         make(map[pendingKey]struct{}),
 		egressIDs:            make(map[egressKey]struct{}),
 		discardWarnAt:        make(map[scanDiscardKey]time.Time),
@@ -1102,52 +1132,52 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // handleHello upserts the peer-table row from one Hello datagram (REPL-01)
 // and owns the restart discrimination (REPL-07, probe #19). Three cases,
 // pinned: an unknown node_id is learned — entry created, no targeted listing
-// (the peer's own startup DataSync and the periodic rounds reconcile it); a
-// known node_id repeating its remembered run_id refreshes lastHello only,
+// (the peer's own startup DataSync and the periodic rounds reconcile it);
+// a known node_id repeating its remembered run_id refreshes lastHello only,
 // never a second listing (a per-Hello full listing at hello_interval cadence
 // would be a self-inflicted listing flood; the flap case is bounded by this
-// idempotence, not by rate limiting); a known node_id whose run_id differs
-// from the remembered one is a detected restart — the duplicate-node_id
-// classifier never pre-empts this branch (HandleDatagram's second variant
-// requires run_id equality with the remembered row) — the entry updates in place
-// (handle, runID, lastHello; the table stays keyed by node_id, one row per
-// node — a change never forks a second row, which would fork ack tracking
-// and liveness; the row's listing rotation survives) and the full current
-// DataSync listing is enqueued UNICAST toward the peer's handle, rotated by
-// that peer's rotation counter, and drained through the shared listing pacer
-// at one datagram per interval. Inequality with the
-// remembered run_id is the only trigger: run_ids are 16 random bytes per
-// process start, so they carry no temporal order — a stale run_id returning
-// after a newer one was seen is indistinguishable from a fresh restart and
-// is handled as just another change (entry update plus one idempotent
-// re-sync; reconciliation no-ops on equal state). In-flight protocol
-// datagrams from the old run — Ack, DataReplication, DataSync — process
-// normally on their (key, version) merits, run_id-agnostic outside this
-// handler. The restart listing is proactive traffic on the shared listing
-// pacer, never the sync_response_rate egress queue (the plan-04-03
-// egress-scope pin): it is bounded by one in-flight listing per destination
+// idempotence, not by rate limiting);
+// a known node_id whose run_id differs from the remembered one is a detected
+// restart — the duplicate-node_id classifier never pre-empts this branch
+// (HandleDatagram's second variant requires run_id equality with the
+// remembered row) — the old run's queued listing, retained keys and partial
+// rounds are dropped so no dead state outlives the row, the entry updates in
+// place (handle, runID, lastHello; the table stays keyed by
+// node_id, one row per node — a change never forks a second row, which would
+// fork ack tracking and liveness; the row's listing rotation survives) and one
+// bounded targeted listing is enqueued through the single
+// [Core.enqueueListing], rotated by that peer's rotation counter and drained
+// through the shared listing pacer at one datagram per interval. Inequality
+// with the remembered run_id is the only trigger: run_ids are 16 random bytes
+// per process start, so they carry no temporal order — a stale run_id
+// returning after a newer one was seen is indistinguishable from a fresh
+// restart and is handled as just another change (entry update plus one
+// idempotent re-sync; reconciliation no-ops on equal state). In-flight
+// protocol datagrams from the old run — Ack, DataReplication, DataSync —
+// process normally on their (key, version) merits, run_id-agnostic outside
+// this handler. The listing is proactive traffic on the shared listing pacer,
+// never the sync_response_rate egress queue (the plan-04-03 egress-scope pin):
+// it is bounded by one in-flight listing per destination plus the queue caps,
 // and fires once per detected change, while the heavy replay traffic it
-// solicits IS limiter-gated — that flows
-// as DataRequest replies on the restarted node's side and newer-responses
-// on ours. A detected restart never re-adds the peer to any pending
-// wait-set and never touches the backoff ladder (the REPL-02 interplay):
-// the restarted node heals through reconciliation via the targeted listing,
-// not through retransmission, and an entry that already drained stays
-// drained — the dump/restart path, not retransmission, is the durability
-// story. Only a Hello refreshes lastHello — the field's name is the
-// liveness contract, and no other datagram type ever touches it. A Hello
-// that ends an empty table is discovery: in this same event the core
-// enqueues the pending set on the paced record-send queue — one broadcast
-// DataReplication per entry in sorted key order, the new peer added to every
-// wait-set, every ladder restarted at cfg.AckTimeout — so a brand-new peer
-// receives the pending set promptly, not at the next backoff expiry
-// (research A6), while the pacer prevents the whole-set burst R-01/R-02
-// measured. A Hello that
-// does not end an empty table modifies no wait-set: only discovery adds
-// waiters. Discovery and restart are mutually exclusive by construction —
-// a restart requires a remembered row, and an empty table remembers
-// nothing (an evicted peer's return Hello, whatever its run_id, is the
-// unknown-node case).
+// solicits IS limiter-gated — that flows as DataRequest replies on the
+// receiving node's side and newer-responses on ours. A detected restart never
+// re-adds the peer to any pending wait-set and never touches the backoff
+// ladder (the REPL-02 interplay): the restarted node heals through
+// reconciliation via the targeted listing, not through retransmission, and an
+// entry that already drained stays drained — the dump/restart path, not
+// retransmission, is the durability story. Only a Hello refreshes lastHello —
+// the field's name is the liveness contract, and no other datagram type ever
+// touches it. A Hello that ends an empty table is discovery: in this same
+// event the core enqueues the pending set on the paced record-send queue —
+// one broadcast DataReplication per entry in sorted key order, the new peer
+// added to every wait-set, every ladder restarted at cfg.AckTimeout — so a
+// brand-new peer receives the pending set promptly, not at the next backoff
+// expiry (research A6), while the pacer prevents the whole-set burst R-01/R-02
+// measured. A Hello that does not end an empty table modifies no wait-set:
+// only discovery adds waiters. Discovery and restart are mutually exclusive by
+// construction — a restart requires a remembered row, and an empty table
+// remembers nothing (an evicted peer's return Hello, whatever its run_id, is
+// the unknown-node case).
 func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	// Any received Hello — a discovery, a refresh or a restart — proves the
 	// receive path hears peers, so the no-Hello WARN stands down for the
@@ -1155,21 +1185,39 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	c.helloSeen = true
 	discovery := len(c.peers) == 0
 	known, remembered := c.peers[in.NodeID]
-	restarted := remembered && known.runID != in.RunID
-	known.handle = in.Source
-	known.runID = in.RunID
-	known.lastHello = now
-	c.peers[in.NodeID] = known
-	if restarted {
+	if remembered && known.runID == in.RunID {
+		// A repeat Hello is idempotence: refresh the liveness stamp, emit
+		// nothing, never a second listing.
+		known.handle = in.Source
+		known.lastHello = now
+		c.peers[in.NodeID] = known
+		return
+	}
+	if remembered {
 		// A new run under this node_id no longer stands behind the old run's
 		// listing: its keys leave the retained union (a content change the
-		// mirror must publish) and its partial rounds are discarded, so the
-		// bounded accumulator cannot inherit dead state.
+		// mirror must publish), its partial rounds are discarded and its
+		// queued FIFO is dropped, so neither the bounded listing queue nor the
+		// accumulator inherits dead state (CR-01).
 		if c.dropListedPeer(in.NodeID) > 0 {
 			c.listingGen++
 		}
 		c.dropPeerSyncStreams(in.NodeID)
-		c.enqueueRestartListing(now, in.NodeID, in.Source)
+		c.dropListing(listingDst{nodeID: in.NodeID, runID: known.runID})
+	}
+	known.handle = in.Source
+	known.runID = in.RunID
+	known.lastHello = now
+	c.peers[in.NodeID] = known
+	if remembered {
+		// One targeted listing per restart: the row's rotation counter picks the
+		// start chunk and advances on a successful enqueue, so repeated restart
+		// rounds cover the whole key space under buffer loss (D-01's targeted
+		// half).
+		if c.enqueueListing(now, listingDst{nodeID: in.NodeID, runID: in.RunID}, known.rotation) {
+			known.rotation++
+			c.peers[in.NodeID] = known
+		}
 		return
 	}
 	if !discovery {
@@ -1870,21 +1918,20 @@ func (c *Core) warnIfNoPeer(now time.Time) {
 // Hello, Hello first, both broadcast, the IDEA §Node lifecycle order
 // pinned by TestSync_triggers — and the timer trigger on every subsequent
 // Advance at or after lastSync+cfg.SyncInterval plus a positive-only jitter
-// of at most a tenth of the interval. The listing is built from
-// the store's shallow Versions view into entries for every record,
-// tombstones included (deletes reconcile through the same listing), sorted
-// by key in byte order and chunked by the conservative estimate. Every round
-// gets a fresh sync_id and stamps chunk_count on each chunk; the chunks are
-// ENQUEUED in rotated order — round r starts at chunk r % len(chunks) — while
-// each chunk keeps its ORIGINAL 1-based index, and the shared listing pacer
-// drains one datagram per floor(1s/SyncResponseRate) interval (D-01), so a
-// burst can never overflow the receiver's buffer. A store with zero
-// records still emits one DataSync with an empty entry list and count 1 — an
-// empty listing is a valid, complete sync round that invites newer-flooding
-// from receivers (probe #7). The neighbor-restart trigger — a Hello carrying
-// a new run_id from a known node — enqueues the same chunk sequence UNICAST
-// toward the restarted peer in handleHello (REPL-07, plan 04-04), through the
-// shared listingChunks build. The timer advances even when the enqueue is
+// of at most a tenth of the interval. The listing comes from the shared
+// build ([Core.listingBuild]): one O(store) Versions copy per
+// (sync_interval age, store generation) is reused by every trigger while both
+// still hold, so a hostile trigger burst can never drive one copy per datagram
+// (CR-01, T-4-24). Every round stamps the build's sync_id and chunk_count on
+// each chunk; the chunks are ENQUEUED in rotated order — round r starts at
+// chunk r % len(chunks) — while each chunk keeps its ORIGINAL 1-based index,
+// and the shared listing pacer drains one datagram per
+// floor(1s/SyncResponseRate) interval (D-01), so a burst can never overflow
+// the receiver's buffer. A store with zero records still emits one DataSync
+// with an empty entry list and count 1 — an empty listing is a valid, complete
+// sync round that invites newer-flooding from receivers (probe #7). The first-
+// seen and restart triggers share the same [Core.enqueueListing] from
+// handleHello (REPL-07, PROTO-04). The timer advances even when the enqueue is
 // skipped: a trigger arriving while a broadcast listing is in flight must
 // never leave nextSync in the past, or every Advance would retrigger and the
 // driver would never sleep (RESEARCH Pitfall 3).
@@ -1893,47 +1940,84 @@ func (c *Core) syncListing(now time.Time) {
 		return
 	}
 	c.nextSync = now.Add(c.cfg.SyncInterval + c.syncJitter())
-	if _, busy := c.listingByDst[broadcastDst]; busy {
-		return
+	if c.enqueueListing(now, broadcastDst(), c.syncRotation) {
+		c.syncRotation++
 	}
-	chunks := c.listingChunks()
-	//nolint:gosec // G115: the modulus is len(chunks), an int, so the result fits.
-	start := int(c.syncRotation % uint64(len(chunks)))
-	c.enqueueListingRound(now, broadcastDst, chunks, start)
-	c.syncRotation++
 }
 
-// enqueueRestartListing enqueues the rotated full listing toward one
-// restarted peer (REPL-07): the peer row's rotation counter picks the start
-// chunk and advances, so repeated restart rounds cover the whole key space
-// under buffer loss (D-01's targeted half). A handle that already has a
-// listing in flight is left alone — one in-flight listing per destination
-// (T-3-23).
-func (c *Core) enqueueRestartListing(now time.Time, peerID uint16, handle string) {
-	if _, busy := c.listingByDst[handle]; busy {
-		return
+// enqueueListing enqueues one full listing toward dst, rotated by the caller's
+// round counter — the single enqueue function the first-seen Hello, the
+// restart branch and the periodic broadcast all share (no second
+// implementation). It is a no-op when dst already has a FIFO in flight (one
+// in-flight listing per destination, T-3-23), refuses when the queue is at its
+// destination or queued-chunk bound (counting the drop, T-4-23), and
+// otherwise appends the FIFO with startIndex = rotation % len(chunks). It
+// reports whether a FIFO was enqueued; a refused or duplicate trigger advances
+// nothing.
+func (c *Core) enqueueListing(now time.Time, dst listingDst, rotation uint64) bool {
+	if _, busy := c.listingByDst[dst]; busy {
+		return false
 	}
-	chunks := c.listingChunks()
-	row := c.peers[peerID]
-	//nolint:gosec // G115: the modulus is len(chunks), an int, so the result fits.
-	start := int(row.rotation % uint64(len(chunks)))
-	row.rotation++
-	c.peers[peerID] = row
-	c.enqueueListingRound(now, handle, chunks, start)
+	if len(c.listingByDst) >= maxListingDestinations {
+		c.listingDropped++
+		return false
+	}
+	build := c.listingBuild(now)
+	if c.listingCount+len(build.chunks) > maxListingChunks {
+		c.listingDropped++
+		return false
+	}
+	//nolint:gosec // G115: the modulus is len(build.chunks), an int, so the result fits.
+	start := int(rotation % uint64(len(build.chunks)))
+	if c.listingCount == 0 {
+		c.nextListingAt = now
+	}
+	c.listingByDst[dst] = &listingFIFO{build: build, dst: dst, startIndex: start}
+	c.listingOrder = append(c.listingOrder, dst)
+	c.listingCount += len(build.chunks)
+	return true
 }
 
-// enqueueListingRound allocates one round's sync_id and enqueues every chunk
-// in the given rotated emission order, each stamping the round's chunk count
-// and its own ORIGINAL 1-based index. Rotation changes only the order: an
-// index derived from the emission position would never match the receiver's
-// 1..count accumulation.
-func (c *Core) enqueueListingRound(now time.Time, dst string, chunks [][]port.SyncEntry, start int) {
-	syncID := c.nextSyncID
+// listingBuild returns the shared listing build for now: a cached build is
+// reused only while it is younger than cfg.SyncInterval AND the store's
+// content generation is unchanged; otherwise the store is copied and chunked
+// once, stamped with a fresh monotone sync_id and the generation it was built
+// at. The generation check is what keeps the cache honest: a build is a
+// snapshot of the store, so serving it after any mutation would ship stale
+// state and defeat PROTO-04's no-sync_interval-term freshness; a mutation
+// costs exactly one rebuild before the next trigger, never one per trigger
+// (T-4-24).
+func (c *Core) listingBuild(now time.Time) *listingBuild {
+	gen := c.store.Generation()
+	if c.build != nil && now.Sub(c.build.at) < c.cfg.SyncInterval && c.build.generation == gen {
+		return c.build
+	}
+	c.build = &listingBuild{
+		chunks:     c.listingChunks(),
+		at:         now,
+		syncID:     c.nextSyncID,
+		generation: gen,
+	}
 	c.nextSyncID++
-	count := syncChunkCount(chunks)
-	for i := range chunks {
-		idx := (start + i) % len(chunks)
-		c.enqueueListingChunk(now, dst, syncID, count, chunkOrdinal(idx), chunks[idx])
+	return c.build
+}
+
+// dropListing removes dst's in-flight FIFO and releases its remaining queued
+// chunk work from listingCount — the peer-eviction and run-change cleanup, so
+// stale work cannot outlive the peer row it was built for (CR-01). A
+// destination with no FIFO is a no-op.
+func (c *Core) dropListing(dst listingDst) {
+	q, ok := c.listingByDst[dst]
+	if !ok {
+		return
+	}
+	c.listingCount -= len(q.build.chunks) - q.emitted
+	delete(c.listingByDst, dst)
+	for i, d := range c.listingOrder {
+		if d == dst {
+			c.listingOrder = append(c.listingOrder[:i], c.listingOrder[i+1:]...)
+			break
+		}
 	}
 }
 
@@ -1952,51 +2036,39 @@ func syncChunkCount(chunks [][]port.SyncEntry) uint32 {
 	return uint32(len(chunks)) //nolint:gosec // G115: a store cannot hold 2^32 entries in memory.
 }
 
-// enqueueListingChunk appends one DataSync chunk, stamped with its round's
-// sync_id, chunk_count and own index, to a destination's FIFO. The first
-// chunk after an idle listing queue clamps nextListingAt to now, so the first
-// datagram of a round emits in the same Advance — the startup one-chunk
-// expectation and the R-01 first-send immediacy.
-func (c *Core) enqueueListingChunk(now time.Time, dst string, syncID uint64, count, index uint32, chunk []port.SyncEntry) {
-	if c.listingCount == 0 {
-		c.nextListingAt = now
-	}
-	q := c.listingByDst[dst]
-	if q == nil {
-		q = &listingFIFO{dst: dst, syncID: syncID, count: count}
-		c.listingByDst[dst] = q
-		c.listingOrder = append(c.listingOrder, dst)
-	}
-	q.chunks = append(q.chunks, queuedListingChunk{index: index, entries: chunk})
-	c.listingCount++
-}
-
 // drainListings emits queued listing chunks at the shared pacer cadence
 // (D-01): while a listing slot is due, the FIFO at the head of the
-// destination order emits one datagram carrying its round's sync_id, the
-// round's chunk_count and the chunk's own original index — broadcast for
-// broadcastDst, unicast for a peer handle — and the slot advances by the
-// jittered interval. The clamp shape is drainEgress': an Advance that arrives
-// late emits one datagram, never a backlog burst, and the next slot is
-// measured from the actual emission time. A destination whose FIFO empties
-// leaves the order, so its in-flight mark clears exactly when its listing
-// completes (T-3-23).
+// destination order emits one datagram carrying its shared build's sync_id and
+// chunk_count and the chunk at its own rotated position — broadcast for the
+// zero destination, unicast at the peer row's current handle otherwise — and
+// the slot advances by the jittered interval. Chunk indices are the chunk's
+// ORIGINAL 1-based position in the unrotated build, so rotation only reorders
+// emission and a receiver can still recognize completeness. The clamp shape is
+// drainEgress': an Advance that arrives late emits one datagram, never a
+// backlog burst, and the next slot is measured from the actual emission time.
+// A destination whose FIFO has emitted every chunk, or whose peer row
+// disappeared, leaves the order, so its in-flight mark clears exactly when its
+// listing completes (T-3-23).
 func (c *Core) drainListings(now time.Time, out *port.Outbox) {
 	for c.listingCount > 0 && !now.Before(c.nextListingAt) {
 		dst := c.listingOrder[0]
 		q := c.listingByDst[dst]
-		chunk := q.chunks[0]
-		q.chunks[0] = queuedListingChunk{}
-		q.chunks = q.chunks[1:]
-		msg := port.DataSync{SyncID: q.syncID, ChunkIndex: chunk.index, ChunkCount: q.count, Entries: chunk.entries}
-		if dst == broadcastDst {
+		idx := (q.startIndex + q.emitted) % len(q.build.chunks)
+		msg := port.DataSync{
+			SyncID:     q.build.syncID,
+			ChunkIndex: chunkOrdinal(idx),
+			ChunkCount: syncChunkCount(q.build.chunks),
+			Entries:    q.build.chunks[idx],
+		}
+		if dst == broadcastDst() {
 			out.Broadcast(msg)
 		} else {
-			out.Unicast(dst, msg)
+			out.Unicast(c.peers[dst.nodeID].handle, msg)
 		}
 		c.pacedSends++
+		q.emitted++
 		c.listingCount--
-		if len(q.chunks) == 0 {
+		if q.emitted == len(q.build.chunks) {
 			delete(c.listingByDst, dst)
 			c.listingOrder = c.listingOrder[1:]
 		}
@@ -2058,16 +2130,16 @@ func (c *Core) jitteredSpacing(base time.Duration, seq uint64) time.Duration {
 	return max(base+offset, time.Nanosecond)
 }
 
-// listingChunks builds the full DataSync listing chunk sequence from one
-// shallow Versions view (REPL-05): every record, tombstones included (deletes
-// reconcile through the same listing), sorted by key in byte order and
-// packed by the conservative-estimate chunker. One build serves both
-// emission triggers — the sync timer's broadcast (syncListing) and the
-// neighbor-restart unicast (handleHello, REPL-07) — so the restart
-// reaction reuses the plan-04-03 machinery verbatim, never a second
-// listing implementation. Identical store state produces the identical
-// chunk sequence: the walk is over the sorted listing, never a map (probe
-// #11), and an empty listing yields one empty chunk (probe #7).
+// listingChunks copies the store's shallow Versions view into the full
+// DataSync listing chunk sequence (REPL-05): every record, tombstones included
+// (deletes reconcile through the same listing), sorted by key in byte order and
+// packed by the conservative-estimate chunker. It runs only when the shared
+// build is (re)built — at most once per (cfg.SyncInterval age, store
+// generation) — so every emission trigger, the periodic broadcast and the
+// first-seen/restart unicast alike, reads one immutable chunk sequence from
+// [Core.listingBuild] (CR-01, T-4-24). Identical store state produces the
+// identical chunk sequence: the walk is over the sorted listing, never a map
+// (probe #11), and an empty listing yields one empty chunk (probe #7).
 func (c *Core) listingChunks() [][]port.SyncEntry {
 	versions := c.store.Versions()
 	entries := make([]port.SyncEntry, 0, len(versions))
@@ -2138,6 +2210,7 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 		}
 	}
 	for _, id := range expired {
+		c.dropListing(listingDst{nodeID: id, runID: c.peers[id].runID})
 		delete(c.peers, id)
 		// The evicted peer's retained listing and partial rounds go with it:
 		// the mirror must never serve a dead peer's keys, and the union must
