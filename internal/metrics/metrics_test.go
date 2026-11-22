@@ -324,14 +324,18 @@ func otherSample(t *testing.T, out string) float64 {
 // increments its error total before it classifies the failure, so a scrape
 // can land between the two increments. The "other" sample must be the
 // explicitly counted class, never Errors minus the other classes — the
-// derived form renders 1 on the first scrape and 0 on the next, a counter
-// decrease that rate()/increase() interpret as a reset. These two snapshots
-// replay that window and must never decrease.
+// derived form renders 1 on the first scrape and 0 once any class increment
+// lands, a counter decrease that rate()/increase() interpret as a reset.
+// These three snapshots replay that faithful window: the class increment has
+// not happened, then disk_full lands while other is still uncounted (the
+// derived series drops 1→0, the counted one stays 0→0), then the explicitly
+// counted unclassified failure settles other at 1.
 func TestMetrics_dumpOtherMonotone(t *testing.T) {
 	t.Parallel()
 	scrapes := []persist.DumpStats{
-		{Total: 1, Errors: 1},           // between the error total and the class increment
-		{Total: 1, Errors: 1, Other: 1}, // the class counter has landed
+		{Total: 1, Errors: 1},              // between the error total and the class increment
+		{Total: 1, Errors: 1, DiskFull: 1}, // a class increment landed; other is still uncounted
+		{Other: 1},                         // the explicitly counted unclassified failure
 	}
 	previous := -1.0
 	for i, stats := range scrapes {
