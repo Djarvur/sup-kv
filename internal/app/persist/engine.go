@@ -40,6 +40,12 @@ type Config struct {
 	// package keeps).
 	Now   func() time.Time
 	After func(time.Duration) <-chan time.Time
+
+	// OnDumpFailure receives every failed dump attempt exactly once with the
+	// underlying error and the adapter's failure class (D-05, PERSIST-05):
+	// the binary wires it to one ERROR log line and must not block. Nil is
+	// valid — the counters and the retry ladder still apply.
+	OnDumpFailure func(err error, class port.FailureClass)
 }
 
 // normalized returns cfg with zero or negative fields replaced by the
@@ -128,11 +134,16 @@ type Engine struct {
 
 // DumpStats is the dump-cycle gauge OBS-01 reads: the last dump's
 // Encode+Save span in seconds — recorded on success and failure alike —
-// the total dump attempts, and the failed ones.
+// the total dump attempts, and the failed ones, split by the adapter's
+// failure class so a persistent ENOSPC and a persistent EACCES are
+// distinguishable without parsing the log (PERSIST-05). Errors stays the
+// total failed attempts; DiskFull and Permission are subsets of it.
 type DumpStats struct {
 	DurationSeconds float64
 	Total           uint64
 	Errors          uint64
+	DiskFull        uint64
+	Permission      uint64
 }
 
 // LoadStats is the startup load report Open stores on the engine (D-02,

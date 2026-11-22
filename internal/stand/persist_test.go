@@ -12,6 +12,7 @@
 package stand //nolint:testpackage // the persistence scenarios share the harness's unexported node launchers and log capture (D-03); testpackage's external-package rule cannot express that pairing.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -21,6 +22,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
+
+	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 // The persistence-load scenario constants: one key every seeded generation
@@ -48,6 +55,18 @@ const (
 
 	persistValueLimitSample = `supkv_dump_records_discarded_total{class="value_limit"}`
 	persistLoadMainSample   = `supkv_dump_load_total{outcome="main"}`
+
+	// The dump-failure scenario: the static message main logs once per
+	// failed attempt, the class-label sample, the two keys the scenario
+	// writes, the read-only window the attempt rate is measured over and the
+	// most retries the 100 ms→5 s ladder may emit inside it (the debounce
+	// cadence would emit ~20).
+	persistDumpFailureMsg    = "Dump failed"
+	persistDumpFailureKey    = "stand/persist/dump-failure"
+	persistDumpRecoveryKey   = "stand/persist/dump-recovery"
+	persistDumpFailureSample = `supkv_dumps_failures_total{class="permission"}`
+	persistFailureWindow     = time.Second
+	persistFailureCap        = 6
 )
 
 // seedPersistDump runs one node over the pair's dump path, writes key with
@@ -335,6 +354,99 @@ func TestStand_persistLoadPrompt(t *testing.T) {
 	persistAssertMessageCount(t, node, persistUnusableMsg, 0)
 	persistAssertMessageCount(t, node, persistSweepMsg, 1)
 	assertNoPanic(t, node, "the fresh-start node")
+}
+
+// persistSetErr writes key through the real gRPC endpoint and returns the
+// RPC error instead of failing the test — the dump-failure class is the
+// assertion in the read-only-directory scenario.
+func persistSetErr(t *testing.T, client apiproto.SupKVServiceClient, key, value string) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	defer cancel()
+	_, err := client.Set(ctx, &apiproto.SetRequest{Key: key, Value: []byte(value)})
+	return err
+}
+
+// TestStand_persistDumpFailure proves the PERSIST-05 process contract over a
+// read-only dump directory: a write whose dump fails with EACCES returns
+// Unavailable, the process logs exactly one ERROR per failed attempt with
+// the permission class and cause, health stays SERVING, the retry ladder
+// bounds the attempt rate in the window, the class counter is published, and
+// restoring the directory mode lets the next write confirm. Root skips —
+// directory modes do not bind.
+func TestStand_persistDumpFailure(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes - the read-only residue cannot be produced")
+	}
+	p := newStandPair(t)
+	metricsAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	metricsURL := "http://" + metricsAddr + "/metrics"
+	node := startStandLoggedNode(t, p, standNodeAID, "--metrics-addr="+metricsAddr)
+	awaitServing(t, p.grpcA, servingDeadline)
+	standMetricsReady(t, metricsURL)
+	client := standClient(t, p.grpcA)
+
+	// A confirmed dump exists before the directory turns read-only.
+	standSet(t, client, persistLoadKey)
+	dumpDir := filepath.Dir(p.dumpA)
+	err := os.Chmod(dumpDir, 0o500)
+	if err != nil {
+		t.Fatalf("chmod %s read-only: %v", dumpDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dumpDir, 0o700) // restore so the harness's TempDir cleanup can remove the tree
+	})
+
+	// The write's debounced dump cannot create its temp file: the RPC
+	// reports Unavailable and the record stays readable in memory.
+	err = persistSetErr(t, client, persistDumpFailureKey, standValue(persistDumpFailureKey))
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("Set() under the read-only dump directory error = %v, want codes.Unavailable", err)
+	}
+	line := awaitPersistMessage(t, node, persistDumpFailureMsg)
+	if !strings.Contains(line, `"class":"permission"`) {
+		t.Fatalf("the dump-failure ERROR does not carry the permission class:\n%s", line)
+	}
+	if !strings.Contains(strings.ToLower(line), "permission denied") {
+		t.Fatalf("the dump-failure ERROR does not carry the permission cause:\n%s", line)
+	}
+
+	// Health must not change: a durability failure is not a serving failure.
+	serving, healthErr := standHealthStatus(t, p.grpcA)
+	if healthErr != nil || serving != healthpb.HealthCheckResponse_SERVING {
+		t.Fatalf("health under the persistent dump failure = (%v, %v), want SERVING", serving, healthErr)
+	}
+
+	// The bounded ladder: the retries inside one second emit a handful of
+	// ERRORs, not the debounce cadence's ~20.
+	before := len(persistMessageLines(node.stderr.String(), persistDumpFailureMsg))
+	time.Sleep(persistFailureWindow)
+	after := len(persistMessageLines(node.stderr.String(), persistDumpFailureMsg))
+	switch grew := after - before; {
+	case grew > persistFailureCap:
+		t.Fatalf("the failure window added %d ERROR lines in %v, want at most %d - the retry ladder is not bounding the attempts",
+			grew, persistFailureWindow, persistFailureCap)
+	case grew == 0:
+		t.Fatalf("the failure window added no retry attempt in %v - the ladder stopped retrying", persistFailureWindow)
+	}
+
+	// The failure class is published as a metric.
+	body := standMetricsScrape(t, metricsURL)
+	if got := standMetricsSample(t, body, persistDumpFailureSample); got < 1 {
+		t.Fatalf("%s = %v after a permission failure, want at least 1:\n%s", persistDumpFailureSample, got, body)
+	}
+
+	// Recovery: the directory is writable again and the pending retry
+	// confirms the next write.
+	err = os.Chmod(dumpDir, 0o700)
+	if err != nil {
+		t.Fatalf("chmod %s writable: %v", dumpDir, err)
+	}
+	standSet(t, client, persistDumpRecoveryKey)
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the dump-failure node")
 }
 
 // TestStand_persistShrunkLimit proves the PERSIST-10 process-level half: a

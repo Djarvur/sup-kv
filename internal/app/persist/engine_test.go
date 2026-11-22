@@ -258,27 +258,30 @@ type fakeSave struct {
 
 // fakeDumpPort is the in-memory port.DumpStore of the synctest suite: it
 // records every save's virtual timestamp and bytes, counts attempts
-// separately from completed saves, and fails the leading failSaves saves.
-// It never touches the filesystem — real I/O inside a synctest bubble is
-// not durably blocking and deadlock-panics the bubble (Pitfall 6). A
-// non-nil gate parks every Save before it records anything — the hold
-// point that keeps one dump in flight while the exit-race tests cancel.
-// The snapshot methods mirror the adapter's semantics in memory:
+// separately from completed saves, records every attempt's virtual instant
+// (failed ones included) and fails the leading failSaves saves with failErr
+// (errFakeSave when nil). It never touches the filesystem — real I/O inside
+// a synctest bubble is not durably blocking and deadlock-panics the bubble
+// (Pitfall 6). A non-nil gate parks every Save before it records anything —
+// the hold point that keeps one dump in flight while the exit-race tests
+// cancel. The snapshot methods mirror the adapter's semantics in memory:
 // CreateSnapshot byte-copies the latest completed save under the name,
 // missing snapshots read as an error.
 type fakeDumpPort struct {
-	mu        sync.Mutex
-	attempts  int
-	saves     []fakeSave
-	failSaves int
-	snapshots map[string][]byte
-	gate      chan struct{}
+	mu         sync.Mutex
+	attempts   int
+	attemptAts []time.Time
+	saves      []fakeSave
+	failSaves  int
+	failErr    error
+	snapshots  map[string][]byte
+	gate       chan struct{}
 }
 
 // SaveStream runs fill into memory and records the resulting generation at
-// the current virtual time, failing the leading configured saves; a
-// configured gate parks the save before it records — the dump is in flight,
-// not attempted, while parked.
+// the current virtual time, failing the leading configured saves with the
+// configured error; a configured gate parks the save before it records — the
+// dump is in flight, not attempted, while parked.
 func (f *fakeDumpPort) SaveStream(fill func(io.Writer) error) error {
 	f.mu.Lock()
 	gate := f.gate
@@ -291,8 +294,12 @@ func (f *fakeDumpPort) SaveStream(fill func(io.Writer) error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts++
+	f.attemptAts = append(f.attemptAts, time.Now())
 	if f.failSaves > 0 {
 		f.failSaves--
+		if f.failErr != nil {
+			return f.failErr
+		}
 		return errFakeSave
 	}
 	if err != nil {
@@ -363,6 +370,21 @@ func (f *fakeDumpPort) saveAttempts() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.attempts
+}
+
+// attemptInstants returns the virtual instant of every Save attempt, failed
+// ones included, in attempt order.
+func (f *fakeDumpPort) attemptInstants() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.attemptAts)
+}
+
+// setFailErr sets the error the leading failSaves saves return.
+func (f *fakeDumpPort) setFailErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failErr = err
 }
 
 // save returns the recorded save i.
