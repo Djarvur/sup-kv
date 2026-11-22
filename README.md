@@ -51,10 +51,12 @@ serves gRPC reflection, so no proto files are needed, and
 <!-- quickstart-verify -->
 ```bash
 ./sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr 127.255.255.255:27902 \
-  --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json & NODE_A=$!
+  --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json --startup-gate-empty 2s & NODE_A=$!
 ./sup-kv --node-id 2 --bind-addr 0.0.0.0:27902 --broadcast-addr 127.255.255.255:27901 \
-  --grpc-addr 127.0.0.1:27912 --dump-path supkv-b.json & NODE_B=$!
-# Node A accepts writes once health reports SERVING (the startup gate, 1s default).
+  --grpc-addr 127.0.0.1:27912 --dump-path supkv-b.json --startup-gate-empty 2s & NODE_B=$!
+# Node A accepts writes once health reports SERVING: the demo pins the
+# empty-disk gate to 2s (an empty node otherwise waits 60s for a peer listing);
+# a node with data on disk opens on the 1s startup gate.
 for i in $(seq 1 50); do
   if grpcurl -plaintext -d '{}' 127.0.0.1:27911 grpc.health.v1.Health/Check 2>/dev/null | grep -q '"SERVING"'; then break; fi
   sleep 0.2
@@ -71,7 +73,7 @@ grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:27912 supkvapi.v1.SupKVSe
 # Hard-kill node A and restart it with the identical arguments.
 kill -9 $NODE_A; wait $NODE_A 2>/dev/null || true
 ./sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr 127.255.255.255:27902 \
-  --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json & NODE_A=$!
+  --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json --startup-gate-empty 2s & NODE_A=$!
 # The restarted node serves the state again with no operator action (bounded retry).
 for i in $(seq 1 50); do
   if grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:27911 supkvapi.v1.SupKVService/Get 2>/dev/null | grep -q c3VwLWt2; then break; fi
@@ -96,10 +98,11 @@ after itself.
 ```bash
 BCAST=$(ipconfig getoption en0 broadcast 2>/dev/null || echo 127.255.255.255)
 ./sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr $BCAST:27902 \
-  --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json & NODE_A=$!
+  --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json --startup-gate-empty 2s & NODE_A=$!
 ./sup-kv --node-id 2 --bind-addr 0.0.0.0:27902 --broadcast-addr $BCAST:27901 \
-  --grpc-addr 127.0.0.1:27912 --dump-path supkv-b.json & NODE_B=$!
-# Node A accepts writes once health reports SERVING (the startup gate, 1s default).
+  --grpc-addr 127.0.0.1:27912 --dump-path supkv-b.json --startup-gate-empty 2s & NODE_B=$!
+# Node A accepts writes once health reports SERVING: the demo pins the
+# empty-disk gate to 2s; a node with data on disk opens on the 1s startup gate.
 for i in $(seq 1 50); do
   if grpcurl -plaintext -d '{}' 127.0.0.1:27911 grpc.health.v1.Health/Check 2>/dev/null | grep -q '"SERVING"'; then break; fi
   sleep 0.2
@@ -116,7 +119,7 @@ grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:27912 supkvapi.v1.SupKVSe
 # Hard-kill node A and restart it with the identical arguments.
 kill -9 $NODE_A; wait $NODE_A 2>/dev/null || true
 ./sup-kv --node-id 1 --bind-addr 0.0.0.0:27901 --broadcast-addr $BCAST:27902 \
-  --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json & NODE_A=$!
+  --grpc-addr 127.0.0.1:27911 --dump-path supkv-a.json --startup-gate-empty 2s & NODE_A=$!
 # The restarted node serves the state again with no operator action (bounded retry).
 for i in $(seq 1 50); do
   if grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:27911 supkvapi.v1.SupKVService/Get 2>/dev/null | grep -q c3VwLWt2; then break; fi

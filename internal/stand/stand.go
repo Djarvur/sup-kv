@@ -607,11 +607,48 @@ func (p *standPair) slots(nodeID int) (bindPort, bcastPort int, grpcAddr, dumpPa
 	return p.udpB, p.udpA, p.grpcB, p.dumpB
 }
 
+// emptyGateArg derives the --startup-gate-empty flag from an explicit
+// --startup-gate in the scenario extras (RESEARCH Pitfall 1, T-4-13): the
+// frozen R-03 test names only --startup-gate=30s and must keep BOTH timers at
+// 30 s, while every other scenario stays on the harness's 1 s cadence. Later
+// flags win in main.go's parsing, so the derived value is appended after the
+// extras. A scenario that already names the empty gate (either the equals
+// form or the bare flag) wins: the function returns "" and nothing is
+// appended, so an explicit --startup-gate-empty is never overridden — ADR
+// 0006 keeps the two parameters separate and only this test harness derives
+// one from the other.
+func emptyGateArg(extra []string) string {
+	for _, arg := range extra {
+		if arg == "--startup-gate-empty" || strings.HasPrefix(arg, "--startup-gate-empty=") {
+			return ""
+		}
+	}
+	derived := standStartupGate.String()
+	for _, arg := range extra {
+		if value, ok := strings.CutPrefix(arg, "--startup-gate="); ok {
+			derived = value
+		}
+	}
+	return "--startup-gate-empty=" + derived
+}
+
+// nodeArgsWithExtras composes one node's command line: the topology defaults,
+// the scenario extras, and — when the extras did not name one — the derived
+// empty gate last, so it beats nodeArgs' own --startup-gate.
+func (p *standPair) nodeArgsWithExtras(nodeID int, extra []string) []string {
+	args := append(p.nodeArgs(nodeID), extra...)
+	if derived := emptyGateArg(extra); derived != "" {
+		args = append(args, derived)
+	}
+	return args
+}
+
 // startStandNode launches one scenario node in its topology slot (extra
-// args appended by the scenarios that need them).
+// args appended by the scenarios that need them, with the empty gate derived
+// from an explicit normal gate in those extras).
 func startStandNode(t *testing.T, p *standPair, nodeID int, extra ...string) *standNode {
 	t.Helper()
-	return launchNode(t, p.bin, &bytes.Buffer{}, nil, append(p.nodeArgs(nodeID), extra...)...)
+	return launchNode(t, p.bin, &bytes.Buffer{}, nil, p.nodeArgsWithExtras(nodeID, extra)...)
 }
 
 // startStandLoggedNode is startStandNode with the lock-guarded live
@@ -619,7 +656,7 @@ func startStandNode(t *testing.T, p *standPair, nodeID int, extra ...string) *st
 // still runs.
 func startStandLoggedNode(t *testing.T, p *standPair, nodeID int, extra ...string) *standNode {
 	t.Helper()
-	return launchNode(t, p.bin, &logBuffer{}, nil, append(p.nodeArgs(nodeID), extra...)...)
+	return launchNode(t, p.bin, &logBuffer{}, nil, p.nodeArgsWithExtras(nodeID, extra)...)
 }
 
 // startStandPair launches both nodes of a fresh topology — the scenarios

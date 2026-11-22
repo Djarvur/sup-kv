@@ -251,7 +251,10 @@ func TestConfig_parametersByEffect(t *testing.T) {
 		// The health endpoint is the gate's 1:1 mirror (API-06): a node
 		// whose backstop is 2s must answer NOT_SERVING first. The poll
 		// window is half the gate, so observing SERVING first is the
-		// regression this assertion exists to catch.
+		// regression this assertion exists to catch. The harness derives
+		// --startup-gate-empty from this explicit --startup-gate, so the
+		// empty node's backstop is the same 2 s; without the derivation the
+		// 60 s default would time out the serving wait below.
 		waitFor(t, standMetricsStartupGate/standMetricsRateHalfDivisor, "a NOT_SERVING health verdict while the gate is closed", func() bool {
 			got, err := standHealthStatus(t, p.grpcA)
 			return err == nil && got == healthpb.HealthCheckResponse_NOT_SERVING

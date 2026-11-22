@@ -50,12 +50,13 @@ broadcast address instead.
 # Node A: node-id 1, UDP 28001 broadcasting to node B's 28002, gRPC on 28011,
 # dump file in the current directory.
 sup-kv --node-id 1 --bind-addr 0.0.0.0:28001 --broadcast-addr 127.255.255.255:28002 \
-  --grpc-addr 127.0.0.1:28011 --dump-path supkv-ex-a.json & echo $! > ex-a.pid
+  --grpc-addr 127.0.0.1:28011 --dump-path supkv-ex-a.json --startup-gate-empty 2s & echo $! > ex-a.pid
 # Node B: the mirror — UDP 28002 broadcasting to 28001, gRPC on 28012.
 sup-kv --node-id 2 --bind-addr 0.0.0.0:28002 --broadcast-addr 127.255.255.255:28001 \
-  --grpc-addr 127.0.0.1:28012 --dump-path supkv-ex-b.json & echo $! > ex-b.pid
+  --grpc-addr 127.0.0.1:28012 --dump-path supkv-ex-b.json --startup-gate-empty 2s & echo $! > ex-b.pid
 # Bounded wait: a node answers health once its startup gate has opened (the
-# first sync round or the 1s default startup gate).
+# first sync round, or the demo's pinned 2s empty-disk gate — a node with data
+# on disk opens on the 1s startup gate).
 for i in $(seq 1 50); do
   if grpcurl -plaintext -d '{}' 127.0.0.1:28011 grpc.health.v1.Health/Check 2>/dev/null | grep -q SERVING \
     && grpcurl -plaintext -d '{}' 127.0.0.1:28012 grpc.health.v1.Health/Check 2>/dev/null | grep -q SERVING; then

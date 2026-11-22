@@ -647,13 +647,13 @@ func TestMain_startupGateEmptySelection(t *testing.T) {
 		// gate. The 300 ms probe is six normal gates past launch: a node
 		// that chose the normal backstop is SERVING well before it.
 		waitFor(t, servingDeadline, "the empty node's health endpoint answering", func() bool {
-			_, _, ok := healthAnswer(t, addr)
+			_, ok, _ := healthAnswer(t, addr)
 			return ok
 		})
 		if elapsed := time.Since(started); elapsed < startupGateSelectionProbe {
 			time.Sleep(startupGateSelectionProbe - elapsed)
 		}
-		status, _, ok := healthAnswer(t, addr)
+		status, ok, _ := healthAnswer(t, addr)
 		if !ok || status != healthpb.HealthCheckResponse_NOT_SERVING {
 			t.Fatalf("the empty node's health at >= %v after launch = (%v, ok=%t), want NOT_SERVING: the empty backstop (%v), not the normal gate (%v), must govern",
 				startupGateSelectionProbe, status, ok, emptyGate, normalGate)
@@ -715,20 +715,20 @@ func TestMain_startupGateEmptySelection(t *testing.T) {
 // healthAnswer performs one health Check against addr. ok is false when the
 // listener is not up yet — a transient transport error — so polls treat it as
 // not-yet rather than failing.
-func healthAnswer(t *testing.T, addr string) (healthpb.HealthCheckResponse_ServingStatus, error, bool) {
+func healthAnswer(t *testing.T, addr string) (healthpb.HealthCheckResponse_ServingStatus, bool, error) {
 	t.Helper()
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return healthpb.HealthCheckResponse_SERVICE_UNKNOWN, err, false
+		return healthpb.HealthCheckResponse_SERVICE_UNKNOWN, false, err
 	}
 	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
 	defer cancel()
 	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
 	if err != nil {
-		return healthpb.HealthCheckResponse_SERVICE_UNKNOWN, err, false
+		return healthpb.HealthCheckResponse_SERVICE_UNKNOWN, false, err
 	}
-	return resp.GetStatus(), nil, true
+	return resp.GetStatus(), true, nil
 }
 
 // bindAddrWarnMsg is the stable substring of XPORT-09's non-wildcard bind

@@ -382,9 +382,11 @@ func TestStand_emptyDiskRecovery(t *testing.T) {
 	// arithmetic (core.go's time.Second / SyncResponseRate) times the
 	// record count. The margin covers, generously rather than precisely
 	// (the documented bound is asserted, never wall-clock precision): B's
-	// startup gate window (the gate opens on the peer's sync arrival or
-	// the standStartupGate timeout, and B serves nothing before it
-	// opens), discovery plus one listing/request/reply ladder round at
+	// startup gate window (an empty disk selects the empty backstop, which
+	// the harness derives from nodeArgs' standStartupGate, so both timers
+	// share this one window; the gate opens on the peer's sync arrival or
+	// the timeout, and B serves nothing before it opens), discovery plus one
+	// listing/request/reply ladder round at
 	// each timer (B's own requests ride B's limiter too), and
 	// real-process scheduling slack on a loaded CI runner.
 	paced := time.Duration(keys) * (time.Second / time.Duration(rate))
