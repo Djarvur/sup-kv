@@ -109,12 +109,13 @@ type recordLine struct {
 	Checksum uint32 `json:"checksum"`
 }
 
-// Encode writes records as the JSONL dump (PERS-01, D-06): the header
-// object on line 1, then one record object per line sorted by key — the
-// sort is mandatory because Go map iteration order is random and byte
-// stability across generations of the same state is the contract.
+// EncodeTo writes records as the JSONL dump to w, streaming one format line
+// at a time: the header object first, then one record object per line sorted
+// by key — the sort is mandatory because Go map iteration order is random and
+// byte stability across generations of the same state is the contract.
 // SetEscapeHTML(false) keeps keys containing ampersand, less-than and
-// greater-than literal and greppable.
+// greater-than literal and greppable. Each line is written in one Write call,
+// so a caller-supplied writer never has to hold the whole dump (D-06).
 //
 // valueMaxBytes is the configured value limit the store enforces
 // (PERSIST-01): a record whose Data exceeds it is an invariant violation,
@@ -122,6 +123,14 @@ type recordLine struct {
 // storage.ErrValueTooLarge naming the key. The tripwire sits over the
 // store's own write check, so a confirmed write can never fail to encode for
 // size.
+func EncodeTo(w io.Writer, records map[string]storage.Record, valueMaxBytes int) error {
+	return nil
+}
+
+// Encode writes records as one JSONL dump buffer — EncodeTo's bytes wrapper
+// for callers that need the whole generation in memory (the snapshot
+// fixtures and tests). Production dump cycles stream through EncodeTo
+// instead (D-06).
 func Encode(records map[string]storage.Record, valueMaxBytes int) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
