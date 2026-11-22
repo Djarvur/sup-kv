@@ -13,6 +13,7 @@ package main_test
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,16 @@ const operationsDocPath = "../../docs/OPERATIONS.md"
 // reflection disclosure beside the trust model, monitoring knobs, lifecycle
 // and exit codes). Each literal is chosen from the authored doc's own
 // wording — renaming a heading or dropping a knob breaks the guard loudly.
+//
+// The Phase 5 persistence rows pin the behavior this phase shipped: the
+// load-outcomes section (## Load outcomes), the memory-model section
+// (## Memory model), the preserved evidence naming (.corrupt-), the
+// preservation-failure signal (preserve_error), the orphan-temp marker
+// (.tmp~, the sweep's only selection key), the retry ladder's cap
+// (5 s cap) and the health statement (SERVING under a persistent dump
+// failure), plus the four new metric families pinned row by row.
+// TestOperationsDocFamilies cross-checks those family names against the
+// exporter, so the doc cannot document a family that does not exist.
 var operationsAnchors = []struct {
 	literal string
 	pins    string
@@ -73,6 +84,17 @@ var operationsAnchors = []struct {
 	{"Restart=on-failure", "the systemd reaction to exit code 1"},
 	{"SUPKV_LOG_LEVEL", "the structured-logging level knob"},
 	{"SUPKV_LOG_FORMAT", "the structured-logging format knob (JSON default)"},
+	{"## Load outcomes", "the load-outcomes section heading — Prompt/Main/Backup/Unusable and the one-WARN/one-ERROR rule"},
+	{"## Memory model", "the memory-model section heading — one copy plus one record line plus the 64 KiB writer"},
+	{".corrupt-", "the preserved evidence naming — never rotated, never auto-deleted, removed only by an operator after inspection"},
+	{"preserve_error", "the preservation-failure hazard signal — non-empty means the corrupt generation may still be at main"},
+	{".tmp~", "the hidden orphan-temp marker — the startup sweep's only selection key, age-bounded at one hour"},
+	{"5 s cap", "the dump retry ladder's cap after doubling from 100 ms"},
+	{"SERVING", "health stays SERVING under a persistent dump failure"},
+	{"supkv_dump_load_total", "the startup load-outcome family — all four outcome labels render, at zero when unseen"},
+	{"supkv_dump_records_discarded_total", "the load-time discard family — checksum/version/value_limit/malformed labels"},
+	{"supkv_dumps_failures_total", "the dump failure-class family — disk_full/permission/other labels"},
+	{"supkv_dumps_unconfirmed_total", "the unconfirmed-write counter — a confirmation timeout is not a dump error"},
 }
 
 // TestOperationsDoc is the DOCS-02 drift guard: docs/OPERATIONS.md must
@@ -98,6 +120,43 @@ func TestOperationsDoc(t *testing.T) {
 	for _, a := range operationsAnchors {
 		if !strings.Contains(doc, a.literal) {
 			t.Fatalf("%s does not contain %q — %s", operationsDocPath, a.literal, a.pins)
+		}
+	}
+}
+
+// metricsSourcePath is the exporter source whose declared family names the
+// doc's family list must match — the API the runbook promises an operator,
+// not a rendered sample.
+const metricsSourcePath = "../../internal/metrics/metrics.go"
+
+// supkvFamilyPattern matches one supkv_ family name in the runbook. The
+// doc's own spelling drives the cross-check: whatever family it names must
+// be grep-present in the exporter.
+var supkvFamilyPattern = regexp.MustCompile(`supkv_[a-z][a-z0-9_]*`)
+
+// TestOperationsDocFamilies is the exporter cross-check (T-5-31's
+// documented-name half): every supkv_ family the runbook names must appear
+// in internal/metrics/metrics.go, so a documented family that does not
+// exist cannot send an operator to an empty graph. It is a presence check,
+// not a truth claim: the values, labels and semantics stay
+// TestOperationsDoc's and the phase's manual UAT's.
+func TestOperationsDocFamilies(t *testing.T) {
+	t.Parallel()
+	doc, err := os.ReadFile(operationsDocPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", operationsDocPath, err)
+	}
+	exporter, err := os.ReadFile(metricsSourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", metricsSourcePath, err)
+	}
+	names := supkvFamilyPattern.FindAllString(string(doc), -1)
+	if len(names) == 0 {
+		t.Fatalf("%s names no supkv_ family — the cross-check would pass vacuously", operationsDocPath)
+	}
+	for _, name := range names {
+		if !strings.Contains(string(exporter), name) {
+			t.Errorf("%s documents %s, which internal/metrics/metrics.go does not declare", operationsDocPath, name)
 		}
 	}
 }
