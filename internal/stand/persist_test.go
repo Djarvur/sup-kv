@@ -8,6 +8,7 @@
 // accepted generation holds. The dump files are seeded by running the real
 // binary (never hand-built bytes), so the scenarios and the loader agree on
 // the production format and checksums by construction.
+
 package stand //nolint:testpackage // the persistence scenarios share the harness's unexported node launchers and log capture (D-03); testpackage's external-package rule cannot express that pairing.
 
 import (
@@ -51,22 +52,22 @@ const (
 // its scenario value, and SIGKILLs the node after Set returned — the dump is
 // exactly what the client's write was confirmed against (PERS-04), so the
 // kill cannot be blamed for a loss.
-func seedPersistDump(t *testing.T, p *standPair, key string) {
+func seedPersistDump(t *testing.T, p *standPair) {
 	t.Helper()
 	node := startStandNode(t, p, standNodeAID)
 	awaitServing(t, p.grpcA, servingDeadline)
-	standSet(t, standClient(t, p.grpcA), key)
+	standSet(t, standClient(t, p.grpcA), persistLoadKey)
 	killAndReap(t, node)
 	mainDump := readFinalDump(t, p.dumpA)
-	if !strings.Contains(mainDump, `"key":"`+key+`"`) {
-		t.Fatalf("the seeded dump %s does not carry %q:\n%s", p.dumpA, key, mainDump)
+	if !strings.Contains(mainDump, `"key":"`+persistLoadKey+`"`) {
+		t.Fatalf("the seeded dump %s does not carry %q:\n%s", p.dumpA, persistLoadKey, mainDump)
 	}
 }
 
 // persistWriteFile overwrites path with the test fixture bytes.
-func persistWriteFile(t *testing.T, path, content string) {
+func persistWriteFile(t *testing.T, path string) {
 	t.Helper()
-	err := os.WriteFile(path, []byte(content), dumpFileMode)
+	err := os.WriteFile(path, []byte(persistGarbage), dumpFileMode)
 	if err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
@@ -156,9 +157,9 @@ func persistCorruptFiles(t *testing.T, p *standPair) []string {
 func TestStand_persistLoadBackup(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
-	seedPersistDump(t, p, persistLoadKey)
+	seedPersistDump(t, p)
 	persistRenameMainToPrev(t, p)
-	persistWriteFile(t, p.dumpA, persistGarbage)
+	persistWriteFile(t, p.dumpA)
 
 	node := startStandLoggedNode(t, p, standNodeAID)
 	awaitServing(t, p.grpcA, servingDeadline)
@@ -193,7 +194,7 @@ func TestStand_persistLoadBackup(t *testing.T) {
 func TestStand_persistLoadBackupAbsentMain(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
-	seedPersistDump(t, p, persistLoadKey)
+	seedPersistDump(t, p)
 	persistRenameMainToPrev(t, p)
 
 	node := startStandLoggedNode(t, p, standNodeAID)
@@ -229,10 +230,10 @@ func TestStand_persistLoadBackupAbsentMain(t *testing.T) {
 func TestStand_persistLoadUnusable(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
-	seedPersistDump(t, p, persistLoadKey)
+	seedPersistDump(t, p)
 	persistRenameMainToPrev(t, p)
-	persistWriteFile(t, p.dumpA, persistGarbage)
-	persistWriteFile(t, p.dumpA+".prev", persistGarbage)
+	persistWriteFile(t, p.dumpA)
+	persistWriteFile(t, p.dumpA+".prev")
 
 	node := startStandLoggedNode(t, p, standNodeAID)
 	awaitServing(t, p.grpcA, servingDeadline)
@@ -272,9 +273,9 @@ func TestStand_persistLoadUnusable(t *testing.T) {
 func TestStand_persistLoadUnusableSingle(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
-	seedPersistDump(t, p, persistLoadKey)
+	seedPersistDump(t, p)
 	persistRemovePrev(t, p)
-	persistWriteFile(t, p.dumpA, persistGarbage)
+	persistWriteFile(t, p.dumpA)
 
 	node := startStandLoggedNode(t, p, standNodeAID)
 	awaitServing(t, p.grpcA, servingDeadline)

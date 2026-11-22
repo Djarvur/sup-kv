@@ -32,6 +32,7 @@ import (
 // fakeDumpPort supplies the recording save and snapshot halves.
 type loadResultPort struct {
 	*fakeDumpPort
+
 	result port.LoadResult
 }
 
@@ -49,18 +50,21 @@ func newLoadResultPort(result port.LoadResult) *loadResultPort {
 	return &loadResultPort{fakeDumpPort: &fakeDumpPort{}, result: result}
 }
 
+// loadFixtureTime is the fixture records' HLC timestamp.
+const loadFixtureTime = int64(1730000000000)
+
 // loadFixture builds one live record whose checksum covers its line, so an
 // encoded dump decodes back without a checksum discard.
-func loadFixture(key, value string, at int64, counter uint16) storage.Record {
-	ver := version.PackVersion(at, counter, tracerNodeID)
+func loadFixture(key, value string, counter uint16) storage.Record {
+	ver := version.PackVersion(loadFixtureTime, counter, tracerNodeID)
 	data := []byte(value)
 	return storage.Record{Version: ver, Data: data, Checksum: storage.RecordChecksum(key, ver, data, false)}
 }
 
 // encodeLoadDump encodes records at limit into a valid generation.
-func encodeLoadDump(t *testing.T, records map[string]storage.Record, limit int) []byte {
+func encodeLoadDump(t *testing.T, records map[string]storage.Record) []byte {
 	t.Helper()
-	dump, err := persist.Encode(records, limit)
+	dump, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("Encode fixture: %v", err)
 	}
@@ -75,13 +79,13 @@ func encodeLoadDump(t *testing.T, records map[string]storage.Record, limit int) 
 func TestEngine_loadStatsMapsResult(t *testing.T) {
 	t.Parallel()
 	mainDump := encodeLoadDump(t, map[string]storage.Record{
-		"main": loadFixture("main", "main-value", 1730000000000, 1),
-	}, storage.ValueMaxBytes)
+		"main": loadFixture("main", "main-value", 1),
+	})
 	mixedDump := encodeLoadDump(t, map[string]storage.Record{
-		"slim": loadFixture("slim", "slim", 1730000000000, 2),
-		"fat":  loadFixture("fat", strings.Repeat("f", 64), 1730000000000, 3),
-	}, storage.ValueMaxBytes)
-	sweepErr := errors.New("sweep failed")
+		"slim": loadFixture("slim", "slim", 2),
+		"fat":  loadFixture("fat", strings.Repeat("f", 64), 3),
+	})
+	sweepErr := fs.ErrPermission
 
 	cases := []struct {
 		name          string
@@ -205,12 +209,12 @@ func TestEngine_loadStatsMapsResult(t *testing.T) {
 func TestEngine_startDirty(t *testing.T) {
 	t.Parallel()
 	loadedDump := encodeLoadDump(t, map[string]storage.Record{
-		"loaded": loadFixture("loaded", "loaded-value", 1730000000000, 1),
-	}, storage.ValueMaxBytes)
+		"loaded": loadFixture("loaded", "loaded-value", 1),
+	})
 	discardDump := encodeLoadDump(t, map[string]storage.Record{
-		"slim": loadFixture("slim", "slim", 1730000000000, 2),
-		"fat":  loadFixture("fat", strings.Repeat("f", 64), 1730000000000, 3),
-	}, storage.ValueMaxBytes)
+		"slim": loadFixture("slim", "slim", 2),
+		"fat":  loadFixture("fat", strings.Repeat("f", 64), 3),
+	})
 
 	cases := []struct {
 		name      string
@@ -265,6 +269,7 @@ func TestEngine_startDirty(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				dumps := newLoadResultPort(tc.result)
 				eng, _ := persist.Open(
@@ -351,7 +356,8 @@ func TestEngine_skipEvidenceWindow(t *testing.T) {
 	if stats.Outcome != port.LoadMain || stats.Decoded.ValueLimit != 1 {
 		t.Fatalf("shrunk LoadStats() = %+v, want a Main outcome with one ValueLimit discard", stats)
 	}
-	if _, err := shrunk.Get("fat"); !errors.Is(err, storage.ErrNotFound) {
+	_, err = shrunk.Get("fat")
+	if !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("shrunk Get(fat) error = %v, want ErrNotFound", err)
 	}
 	mainAfterOpen, err := os.ReadFile(dumpPath)

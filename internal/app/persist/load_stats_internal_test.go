@@ -79,7 +79,8 @@ func TestEngine_markDirtyNudge(t *testing.T) {
 		go func() { done <- eng.Run(ctx) }()
 		defer func() {
 			cancel()
-			if err := <-done; !errors.Is(err, context.Canceled) {
+			err := <-done
+			if !errors.Is(err, context.Canceled) {
 				t.Errorf("Run() error = %v, want context.Canceled", err)
 			}
 		}()

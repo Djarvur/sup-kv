@@ -29,6 +29,7 @@ import (
 
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/port"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -47,8 +48,9 @@ const (
 // exposition defines, and their values are fixed enums (bounded cardinality
 // by construction).
 const (
-	labelType  = "type"
-	labelClass = "class"
+	labelType    = "type"
+	labelClass   = "class"
+	labelOutcome = "outcome"
 )
 
 // errNoClientCertPEM reports a client-CA file whose bytes hold no PEM
@@ -218,14 +220,46 @@ func Snapshot(s Sources) []Family {
 // loadFamilies builds the startup load-outcome family (PERSIST-02): the four
 // outcome labels always render, with the loaded outcome at 1 and the others
 // at 0; an unloaded engine reports all four at 0.
-func loadFamilies(persist.LoadStats) []Family {
-	return nil
+func loadFamilies(stats persist.LoadStats) []Family {
+	samples := []Sample{
+		{Labels: []Label{{Name: labelOutcome, Value: "prompt"}}},
+		{Labels: []Label{{Name: labelOutcome, Value: "main"}}},
+		{Labels: []Label{{Name: labelOutcome, Value: "backup"}}},
+		{Labels: []Label{{Name: labelOutcome, Value: "unusable"}}},
+	}
+	if stats.Loaded {
+		switch stats.Outcome {
+		case port.LoadPrompt:
+			samples[0].Value = 1
+		case port.LoadMain:
+			samples[1].Value = 1
+		case port.LoadBackup:
+			samples[2].Value = 1
+		case port.LoadUnusable:
+			samples[3].Value = 1
+		}
+	}
+	return []Family{{
+		Name: "supkv_dump_load_total", Type: Counter,
+		Help:    "Startup dump loads by outcome.",
+		Samples: samples,
+	}}
 }
 
 // discardClassFamilies builds the load-time discard family (PERSIST-10): the
-// four decode classes always render from the accepted generation's census.
-func discardClassFamilies(persist.DecodeStats) []Family {
-	return nil
+// four decode classes always render from the accepted generation's census, so
+// an idle node publishes zero-valued samples rather than omitting the family.
+func discardClassFamilies(decoded persist.DecodeStats) []Family {
+	return []Family{{
+		Name: "supkv_dump_records_discarded_total", Type: Counter,
+		Help: "Dumped records discarded at load, by classification.",
+		Samples: []Sample{
+			{Labels: []Label{{Name: labelClass, Value: "checksum"}}, Value: float64(decoded.Checksum)},
+			{Labels: []Label{{Name: labelClass, Value: "version"}}, Value: float64(decoded.Version)},
+			{Labels: []Label{{Name: labelClass, Value: "value_limit"}}, Value: float64(decoded.ValueLimit)},
+			{Labels: []Label{{Name: labelClass, Value: "malformed"}}, Value: float64(decoded.Malformed)},
+		},
+	}}
 }
 
 // replicationFamilies builds the peer/unacked/retransmit/merge families (the

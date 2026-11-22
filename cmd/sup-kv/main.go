@@ -77,6 +77,10 @@ const (
 	exitUsage      = 2
 )
 
+// loadFailureAttrsPerCandidate is the number of attributes one candidate
+// load failure contributes: its path, its cause and its preservation error.
+const loadFailureAttrsPerCandidate = 3
+
 // shutdownGrace bounds GracefulStop during the D-19 shutdown: past it,
 // gs.Stop() force-closes whatever is still open (T-05-10 — a hang here
 // would leave committed data only in memory when the supervisor SIGKILLs).
@@ -636,7 +640,7 @@ func logBackupFallback(stats persist.LoadStats) {
 // handles the absent-candidate case by construction — a single corrupt
 // generation yields one group and no phantom .prev entry.
 func logUnusableGenerations(stats persist.LoadStats) {
-	attrs := make([]any, 0, 3*len(stats.Failures))
+	attrs := make([]any, 0, loadFailureAttrsPerCandidate*len(stats.Failures))
 	for _, failure := range stats.Failures {
 		prefix := "prev"
 		if failure.Candidate == port.GenMain {
