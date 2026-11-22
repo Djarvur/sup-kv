@@ -28,6 +28,9 @@ const (
 	// tornTailCut bytes off the dump's tail, landing the cut mid-JSON of the
 	// last record line — the torn-tail residue class.
 	tornTailCut = 10
+	// overlongLineBytes is a line length no supported writer can emit — far
+	// beyond the format-bound reader's buffer — proving the generation fault.
+	overlongLineBytes = 1 << 20
 	// The TEST-15 small (l, c, node) space — the same 3x3x3 box the storage
 	// merge property draws from (prop_small_space_test.go), so a counterexample
 	// in either suite reduces to the same short adjacent-version shape. Half
@@ -341,23 +344,23 @@ func TestCodec_discardClasses(t *testing.T) {
 	tests := []struct {
 		name          string
 		dump          []byte
-		wantDiscarded int
+		wantStats     persist.DecodeStats
 		wantDecodeErr bool
 	}{
 		{
-			name:          "a tampered checksum discards only its record",
-			dump:          tampered,
-			wantDiscarded: 1,
+			name:      "a tampered checksum discards only its record",
+			dump:      tampered,
+			wantStats: persist.DecodeStats{Checksum: 1},
 		},
 		{
-			name:          "a non-hex record_version discards only its record",
-			dump:          malformed,
-			wantDiscarded: 1,
+			name:      "a non-hex record_version discards only its record",
+			dump:      malformed,
+			wantStats: persist.DecodeStats{Version: 1},
 		},
 		{
-			name:          "data over the envelope discards only its record",
-			dump:          oversized,
-			wantDiscarded: 1,
+			name:      "data over the envelope discards only its record",
+			dump:      oversized,
+			wantStats: persist.DecodeStats{ValueLimit: 1},
 		},
 		{
 			name:          "an unknown format_version is a generation-level fault",
@@ -375,8 +378,8 @@ func TestCodec_discardClasses(t *testing.T) {
 			if tt.wantDecodeErr {
 				return
 			}
-			if stats.Total() != tt.wantDiscarded {
-				t.Errorf("Decode() discarded = %d, want %d", stats.Total(), tt.wantDiscarded)
+			if stats != tt.wantStats {
+				t.Errorf("Decode() stats = %+v, want %+v", stats, tt.wantStats)
 			}
 			if !recordsEqual(decoded, baseRecords()) {
 				t.Errorf("Decode() records = %v, want the surviving base records", decoded)
@@ -540,6 +543,177 @@ func TestCodec_corruptLineIsolated(t *testing.T) {
 	}
 	if !recordsEqual(decoded, want) {
 		t.Errorf("Decode(corrupt line) records = %v, want the two intact siblings", decoded)
+	}
+}
+
+// legacyDumpHeader is a v1.0 header: no record_count, so the generation
+// takes the documented legacy read path with no completeness census.
+const legacyDumpHeader = "{\"format_version\":1}\n"
+
+// TestCodec_headerCensus proves the v1.1 completeness census and the legacy
+// read path (PERSIST-03, D-03): the writer announces its record count, fewer
+// record lines than the count is a generation-level fault (a cut at a line
+// boundary), more lines than the count is tolerated, a final unterminated
+// fragment must parse, and a v1.0 dump with no count has no census — a
+// line-boundary cut of one still loads, the documented compatibility
+// limitation.
+func TestCodec_headerCensus(t *testing.T) {
+	t.Parallel()
+	full := encodeRecords(t, map[string]storage.Record{
+		"census": sealed("census", storage.Record{Version: version.PackVersion(1008, 1, 1), Data: []byte("census-value")}),
+	})
+	lines := strings.Split(strings.TrimSuffix(string(full), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("encoded dump has %d lines, want 4 (header plus three records)", len(lines))
+	}
+	records := strings.Join(lines[1:], "\n")
+	cut := strings.Join(lines[1:len(lines)-1], "\n") // one record line short
+	atLimit := encodeRecords(t, map[string]storage.Record{
+		"limit": sealed("limit", storage.Record{
+			Version: version.PackVersion(1011, 1, 1),
+			Data:    bytes.Repeat([]byte("l"), storage.ValueMaxBytes),
+		}),
+	})
+	tests := []struct {
+		name        string
+		dump        []byte
+		wantErr     bool
+		wantRecords int
+	}{
+		{
+			name:    "fewer record lines than the announced count is an incomplete generation",
+			dump:    []byte(censusHeader(4) + cut + "\n"),
+			wantErr: true,
+		},
+		{
+			name:        "more record lines than the announced count is tolerated",
+			dump:        []byte(censusHeader(1) + records + "\n"),
+			wantRecords: 3,
+		},
+		{
+			name:    "a v1.1 line-boundary cut is an incomplete generation",
+			dump:    []byte(censusHeader(3) + cut + "\n"),
+			wantErr: true,
+		},
+		{
+			name:        "a legacy line-boundary cut loads every remaining line",
+			dump:        []byte(legacyDumpHeader + cut + "\n"),
+			wantRecords: 2,
+		},
+		{
+			name:        "a legacy header with no count loads every line",
+			dump:        []byte(legacyDumpHeader + records + "\n"),
+			wantRecords: 3,
+		},
+		{
+			name:        "a final unterminated fragment that parses and matches the count is accepted",
+			dump:        []byte(strings.TrimSuffix(string(full), "\n")),
+			wantRecords: 3,
+		},
+		{
+			name: "a header-only v1.1 dump with count zero loads empty",
+			dump: []byte(censusHeader(0)),
+		},
+		{
+			name: "a header-only legacy dump loads empty",
+			dump: []byte(legacyDumpHeader),
+		},
+		{
+			name:    "a line longer than the format maximum is a generation-level fault",
+			dump:    []byte(censusHeader(0) + strings.Repeat("x", overlongLineBytes) + "\n"),
+			wantErr: true,
+		},
+		{
+			name:        "a record at the configured limit parses",
+			dump:        atLimit,
+			wantRecords: 3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			decoded, stats, err := persist.Decode(tt.dump, storage.ValueMaxBytes)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Decode() error = %v, want error=%t", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if decoded != nil || stats != (persist.DecodeStats{}) {
+					t.Errorf("Decode() generation fault returned (%d records, %+v), want nil and zero stats",
+						len(decoded), stats)
+				}
+				return
+			}
+			if len(decoded) != tt.wantRecords {
+				t.Errorf("Decode() loaded %d records, want %d", len(decoded), tt.wantRecords)
+			}
+			if stats.Total() != 0 {
+				t.Errorf("Decode() discarded %d records, want none", stats.Total())
+			}
+		})
+	}
+}
+
+// TestCodec_escapedMaxKeyRoundTrip proves the format-bound reader holds the
+// near-worst-case legal record (T-5-03): a storage.MaxKeyBytes key made of
+// quote and control bytes listed with a full 61 440-byte value. The key's
+// JSON escaping expands it to roughly six bytes per input byte, a shape the
+// old record-line bound — datagram-expansion plus one key byte each — could
+// not hold and would fault as ErrBufferFull on a legal record.
+func TestCodec_escapedMaxKeyRoundTrip(t *testing.T) {
+	t.Parallel()
+	key := "\"" + strings.Repeat("\x01", storage.MaxKeyBytes-1)
+	data := bytes.Repeat([]byte("v"), storage.ValueMaxBytes)
+	dump, err := persist.Encode(map[string]storage.Record{
+		key: sealed(key, storage.Record{Version: version.PackVersion(1010, 1, 1), Data: data}),
+	}, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Encode(escaped max key) error = %v, want nil", err)
+	}
+	decoded, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Decode(escaped max key) error = %v, want nil — a legal record must not fault the generation", err)
+	}
+	if stats.Total() != 0 {
+		t.Errorf("Decode(escaped max key) discarded = %d, want 0", stats.Total())
+	}
+	rec, ok := decoded[key]
+	if !ok {
+		t.Fatalf("Decode(escaped max key) lost the record: %d records loaded", len(decoded))
+	}
+	if !bytes.Equal(rec.Data, data) {
+		t.Errorf("Decode(escaped max key) data = %d bytes, want the full %d-byte value", len(rec.Data), len(data))
+	}
+}
+
+// TestCodec_shrunkLimitKeepsOtherRecords proves the line bound is a property
+// of the format, not of the current configuration (T-5-03): a dump written
+// at the default limit still reads with Decode(dump, 16), every record inside
+// the tiny limit loads, and the over-limit record is a counted ValueLimit
+// discard — never an ErrBufferFull generation fault.
+func TestCodec_shrunkLimitKeepsOtherRecords(t *testing.T) {
+	t.Parallel()
+	dump := encodeRecords(t, map[string]storage.Record{
+		"big": sealed("big", storage.Record{
+			Version: version.PackVersion(1009, 1, 1),
+			Data:    bytes.Repeat([]byte("b"), storage.ValueMaxBytes),
+		}),
+	})
+	decoded, stats, err := persist.Decode(dump, shrunkValueLimit)
+	if err != nil {
+		t.Fatalf("Decode(dump, %d) error = %v, want nil — the reader bound must not shrink with the limit",
+			shrunkValueLimit, err)
+	}
+	if stats.ValueLimit != 1 || stats.Total() != 1 {
+		t.Errorf("Decode(dump, %d) stats = %+v, want exactly one ValueLimit discard", shrunkValueLimit, stats)
+	}
+	if len(decoded) != 2 {
+		t.Errorf("Decode(dump, %d) loaded %d records, want the two records under the limit", shrunkValueLimit, len(decoded))
+	}
+	if _, ok := decoded["big"]; ok {
+		t.Error("Decode(dump, 16) loaded the over-limit record")
+	}
+	if got, ok := decoded["keep-a"]; !ok || string(got.Data) != "a-value" {
+		t.Errorf("Decode(dump, %d) keep-a = (%q, %t), want the intact small record", shrunkValueLimit, got.Data, ok)
 	}
 }
 
