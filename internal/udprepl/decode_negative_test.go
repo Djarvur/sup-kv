@@ -524,12 +524,12 @@ func TestWire_deleteRoundTrip(t *testing.T) {
 		if !strings.Contains(string(dump), `"deleted":true`) {
 			t.Fatalf("encoded dump does not carry the greppable \"deleted\":true marker:\n%s", dump)
 		}
-		decoded, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
+		decoded, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("decode tombstone dump: %v", err)
 		}
-		if discarded != 0 {
-			t.Fatalf("decode tombstone dump discarded %d records, want none", discarded)
+		if stats.Total() != 0 {
+			t.Fatalf("decode tombstone dump discarded %d records, want none", stats.Total())
 		}
 		rec, ok := decoded["neg/delete-roundtrip/dump"]
 		if !ok {
@@ -566,12 +566,12 @@ func TestWire_deleteRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode tombstone-with-data dump: %v", err)
 		}
-		decoded, discarded, err := persist.Decode(dump, storage.ValueMaxBytes)
+		decoded, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("decode tombstone-with-data dump: %v", err)
 		}
-		if discarded != 0 {
-			t.Fatalf("decode tombstone-with-data dump discarded %d records, want none", discarded)
+		if stats.Total() != 0 {
+			t.Fatalf("decode tombstone-with-data dump discarded %d records, want none", stats.Total())
 		}
 		rec := decoded[key]
 		if !rec.Deleted || !bytes.Equal(rec.Data, data) {

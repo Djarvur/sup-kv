@@ -265,36 +265,35 @@ func fuzzDumpPayloadChanged(before, after []byte) (changed, ok bool) {
 	return !bytes.Equal(was, now), true
 }
 
-// fuzzDumpScan mirrors the decoder's JSON stream one value at a time: it
-// counts parsed record lines and records which keys ever carried
-// Deleted=true alongside non-empty Data. Production's last-wins duplicate
-// handling and per-record discards make the union over all lines the sound
-// direction — an accepted tombstone may carry Data if any input line for
-// that key did. Lines the production decoder would reject end the scan,
-// exactly where it stops.
+// fuzzDumpScan mirrors the decoder's line walk: the first line is the
+// header, every following line is a record line — blank and unparseable
+// lines included, exactly as Decode counts them — and each line parses
+// independently, so one syntax fault does not end the scan. A final
+// fragment without a trailing newline counts as a record line too. It
+// records which keys ever carried Deleted=true alongside non-empty Data;
+// production's last-wins duplicate handling and per-record discards make the
+// union over all lines the sound direction.
 func fuzzDumpScan(dump []byte) (lines int, deletionsWithData map[string]bool) {
 	deletionsWithData = make(map[string]bool)
-	dec := json.NewDecoder(bytes.NewReader(dump))
-	var h struct {
-		FormatVersion int `json:"format_version"`
+	segments := bytes.Split(dump, []byte("\n"))
+	if len(segments) > 0 && len(segments[len(segments)-1]) == 0 {
+		segments = segments[:len(segments)-1]
 	}
-	err := dec.Decode(&h)
-	if err != nil {
-		return 0, deletionsWithData
-	}
-	for {
+	for _, segment := range segments[1:] {
+		lines++
+		segment = bytes.TrimSuffix(segment, []byte("\r"))
 		var line struct {
 			Key     string `json:"key"`
 			Data    []byte `json:"data"`
 			Deleted bool   `json:"deleted"`
 		}
-		err = dec.Decode(&line)
+		err := json.Unmarshal(segment, &line)
 		if err != nil {
-			return lines, deletionsWithData
+			continue
 		}
-		lines++
 		if line.Deleted && len(line.Data) > 0 {
 			deletionsWithData[line.Key] = true
 		}
 	}
+	return lines, deletionsWithData
 }
