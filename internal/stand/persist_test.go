@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The persistence-load scenario constants: one key every seeded generation
@@ -34,6 +35,7 @@ const (
 	persistBackupMsg   = "Dump generation fallback"
 	persistUnusableMsg = "No usable dump generation"
 	persistSkipMsg     = "Dumped records skipped by the configured value limit"
+	persistSweepMsg    = "Orphan temp sweep removed files"
 
 	// The shrunk-limit scenario: a 64-byte record stored at the default limit
 	// and reopened under a 16-byte limit, so the codec discards exactly it and
@@ -300,16 +302,38 @@ func TestStand_persistLoadUnusableSingle(t *testing.T) {
 	assertNoPanic(t, node, "the single-candidate unusable-load node")
 }
 
-// TestStand_persistLoadPrompt starts over an empty directory: neither a WARN
-// nor an ERROR is emitted.
+// TestStand_persistLoadPrompt starts over a directory with no generation:
+// neither a WARN nor an ERROR is emitted, while an hour-old .tmp~ orphan is
+// swept and reported once (PERSIST-09's visible half).
 func TestStand_persistLoadPrompt(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
+	orphan := filepath.Join(filepath.Dir(p.dumpA), filepath.Base(p.dumpA)+".tmp~orphan")
+	err := os.WriteFile(orphan, []byte("abandoned temp"), dumpFileMode)
+	if err != nil {
+		t.Fatalf("write the orphan temp %s: %v", orphan, err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	err = os.Chtimes(orphan, old, old)
+	if err != nil {
+		t.Fatalf("age the orphan temp %s: %v", orphan, err)
+	}
+
 	node := startStandLoggedNode(t, p, standNodeAID)
 	awaitServing(t, p.grpcA, servingDeadline)
+	line := awaitPersistMessage(t, node, persistSweepMsg)
+	if !strings.Contains(line, `"count":1`) {
+		t.Fatalf("the sweep INFO does not carry the removed count 1:\n%s", line)
+	}
+	_, statErr := os.Stat(orphan)
+	if !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("the hour-old orphan temp survived the startup sweep: %v", statErr)
+	}
+
 	signalAndWaitExit(t, node)
 	persistAssertMessageCount(t, node, persistBackupMsg, 0)
 	persistAssertMessageCount(t, node, persistUnusableMsg, 0)
+	persistAssertMessageCount(t, node, persistSweepMsg, 1)
 	assertNoPanic(t, node, "the fresh-start node")
 }
 
