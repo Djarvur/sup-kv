@@ -2,6 +2,7 @@ package persist
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -91,11 +92,10 @@ func newScheduler(
 // Every timer is a channel armed through cfg.After and held in a loop
 // variable: re-arming replaces the channel, so a stale channel is
 // unreachable and can never fire a dump, and no channel is ever created
-// inside the select (PERSIST-12, research Pitfall 17). flushCh requests
-// force a dump immediately — bypassing the debounce quiet window — and
-// receive the dump's error after it completed; a clean engine has nothing
-// unconfirmed on disk and replies nil without a redundant save (the D-10
-// snapshot flush seam Snapshot and Restore drive). Run exits when ctx is
+// inside the select (PERSIST-12, research Pitfall 17). flushCh requests force
+// a dump immediately, bypassing the debounce quiet window; an explicit flush
+// attempts even while a retry rung is pending, while a snapshot request defers
+// to that rung (WR-02). Run exits when ctx is
 // cancelled, sweeping every stranded waiter with ErrClosed, closing
 // runDone — the exit signal flush races its flushCh send and reply against,
 // so a request stranding between the closed-check and the send can never
@@ -126,8 +126,8 @@ func (s *scheduler) run(ctx context.Context) error {
 		case <-retry:
 			retry = nil
 			fired = true
-		case reply := <-s.conf.flushCh:
-			reply <- s.flushDump()
+		case req := <-s.conf.flushCh:
+			req.reply <- s.flushDump(req)
 		}
 		if fired {
 			_ = s.runDump() // the error belongs to the waiters; nobody is left to report to.
@@ -136,25 +136,25 @@ func (s *scheduler) run(ctx context.Context) error {
 	}
 }
 
-// flushDump services a flushCh request: a dirty engine dumps immediately —
-// the forced dump that must complete before a snapshot copies the main file
-// (D-10) — while a clean engine has nothing unconfirmed on disk and replies
-// nil without a redundant save. A pending retry rung owns the next attempt
-// (WR-02): while the ladder is armed a dirty engine answers with the last
-// classified failure instead of forcing an extra attempt, so a client-driven
-// snapshot loop under a persistent dump failure cannot bypass the bounded
-// ladder and drive one full Records copy and one ERROR line per request. The
-// armed rung still dumps and re-arms on its own schedule; a success resets
-// the ladder, after which a flush may force the next attempt again.
-func (s *scheduler) flushDump() error {
+// flushDump services a flushRequest: a dirty engine dumps immediately — the
+// forced dump that must complete before a snapshot copies the main file
+// (D-10) — while a clean engine replies nil without a redundant save. A
+// snapshot request does not bypass a pending retry rung (WR-02): while the
+// ladder is armed it answers the last classified failure, wrapped as
+// ErrDumpFailed for the RPC's Unavailable class, instead of forcing an extra
+// attempt, so a client snapshot loop cannot drive one full Records copy and
+// one ERROR line per request. An explicit Flush/FlushTimeout always attempts
+// one dump, even while a rung is pending: shutdown must never skip the final
+// dump (N-1).
+func (s *scheduler) flushDump(req flushRequest) error {
 	if !s.conf.isDirty() {
 		return nil
 	}
-	s.mu.Lock()
-	delay, lastErr := s.retryDelay, s.lastErr
-	s.mu.Unlock()
-	if delay > 0 && lastErr != nil {
-		return lastErr
+	if req.snapshot {
+		err := s.pendingFailure()
+		if err != nil {
+			return err
+		}
 	}
 	return s.runDump()
 }
@@ -314,4 +314,18 @@ func (e *Engine) DumpStats() DumpStats {
 		Other:           stats.other.Load(),
 		Unconfirmed:     stats.unconfirmed.Load(),
 	}
+}
+
+// pendingFailure returns the armed retry rung's last classified failure,
+// wrapped as ErrDumpFailed so a snapshot RPC maps it to Unavailable rather
+// than exposing the adapter's raw path error, or nil when no rung owns the
+// next attempt (WR-02). It is read under the scheduler mutex, like every
+// other ladder access.
+func (s *scheduler) pendingFailure() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retryDelay > 0 && s.lastErr != nil {
+		return fmt.Errorf("%w: %w", ErrDumpFailed, s.lastErr)
+	}
+	return nil
 }

@@ -46,7 +46,7 @@ type confirmer struct {
 	oldest  time.Time
 
 	changed chan struct{}
-	flushCh chan chan error
+	flushCh chan flushRequest
 	runDone chan struct{}
 	closed  bool
 
@@ -60,7 +60,7 @@ type confirmer struct {
 func newConfirmer(cfg Config, stats *dumpStats) *confirmer {
 	return &confirmer{
 		changed: make(chan struct{}, 1),
-		flushCh: make(chan chan error, 1),
+		flushCh: make(chan flushRequest, 1),
 		runDone: make(chan struct{}),
 		cfg:     cfg,
 		stats:   stats,
@@ -276,8 +276,8 @@ func (c *confirmer) sweepClosed() {
 	}
 	for {
 		select {
-		case reply := <-c.flushCh:
-			reply <- ErrClosed
+		case req := <-c.flushCh:
+			req.reply <- ErrClosed
 		default:
 			return
 		}

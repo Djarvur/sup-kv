@@ -34,7 +34,7 @@ import (
 // always reads one complete generation. Requires a running Run goroutine
 // like every blocking engine call.
 func (e *Engine) Snapshot(name string) error {
-	err := e.flush(e.cfg.ConfirmTimeout)
+	err := e.flush(e.cfg.ConfirmTimeout, flushRequest{snapshot: true})
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
 	if err != nil {
 		return restored, err
 	}
-	err = e.flush(e.cfg.ConfirmTimeout)
+	err = e.flush(e.cfg.ConfirmTimeout, flushRequest{snapshot: true})
 	switch {
 	case err == nil:
 		return restored, nil

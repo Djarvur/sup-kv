@@ -224,11 +224,12 @@ func TestSnapshot_forcedFlushRespectsRetryLadder(t *testing.T) {
 		firstFailure := instants[0]
 
 		// Several snapshots inside the first 100 ms rung: each is refused with
-		// the last classified failure, none reaches the port and none logs.
+		// the last classified failure, wrapped as ErrDumpFailed, and none
+		// reaches the port or logs.
 		for range refusedSnapshots {
 			err := eng.Snapshot("ladder-snap")
-			if !errors.Is(err, errFakeSave) {
-				t.Fatalf("Snapshot() during the armed rung error = %v, want the last dump failure %v",
+			if !errors.Is(err, persist.ErrDumpFailed) || !errors.Is(err, errFakeSave) {
+				t.Fatalf("Snapshot() during the armed rung error = %v, want ErrDumpFailed wrapping the last dump failure %v",
 					err, errFakeSave)
 			}
 		}
@@ -254,8 +255,9 @@ func TestSnapshot_forcedFlushRespectsRetryLadder(t *testing.T) {
 		// attempt is failure+300 ms, and the ERROR count still tracks attempts.
 		for range refusedSnapshots {
 			err := eng.Snapshot("ladder-snap")
-			if !errors.Is(err, errFakeSave) {
-				t.Fatalf("Snapshot() during the second armed rung error = %v, want %v", err, errFakeSave)
+			if !errors.Is(err, persist.ErrDumpFailed) || !errors.Is(err, errFakeSave) {
+				t.Fatalf("Snapshot() during the second armed rung error = %v, want ErrDumpFailed wrapping %v",
+					err, errFakeSave)
 			}
 		}
 		synctest.Sleep(200 * time.Millisecond)
@@ -268,6 +270,70 @@ func TestSnapshot_forcedFlushRespectsRetryLadder(t *testing.T) {
 		}
 		if errs, _ := log.snapshot(); len(errs) != 3 {
 			t.Errorf("OnDumpFailure fired %d times, want 3 — one per failed attempt, none per refused snapshot", len(errs))
+		}
+	})
+}
+
+// TestFlush_forcesAttemptPastPendingRung is the N-1 shutdown-durability
+// regression: a pending retry rung must not make the final flush skip its
+// dump. (a) The first save fails, so the ladder arms and the state stays
+// dirty; (b) the disk recovers; (c) FlushTimeout — the shutdown seam's call —
+// must force one attempt anyway; (d) the attempt happened and its completed
+// dump is the dirty state, which is exactly the on-disk generation the fake
+// port holds.
+func TestFlush_forcesAttemptPastPendingRung(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFailureEngine(&failureLog{})
+		dumps.mu.Lock()
+		dumps.failSaves = 1 // (a) the first attempt fails
+		dumps.mu.Unlock()
+		defer startDumper(t, eng)()
+
+		_, _, err := eng.Set("shutdown-key", []byte("shutdown-value"))
+		if !errors.Is(err, persist.ErrDumpFailed) {
+			t.Fatalf("Set() error = %v, want ErrDumpFailed — the first attempt fails", err)
+		}
+		if got := dumps.saveAttempts(); got != 1 {
+			t.Fatalf("attempts after the failure = %d, want 1", got)
+		}
+		if got := dumps.saveCount(); got != 0 {
+			t.Fatalf("completed saves after the failure = %d, want 0", got)
+		}
+
+		dumps.mu.Lock()
+		dumps.failSaves = 0 // (b) the disk recovered
+		dumps.mu.Unlock()
+
+		// (c) The shutdown flush must attempt despite the armed 100 ms rung.
+		err = eng.FlushTimeout(5 * time.Second)
+		if err != nil {
+			t.Fatalf("FlushTimeout(shutdown grace) error = %v, want nil after the disk recovered", err)
+		}
+
+		// (d) The attempt happened and its completed dump is the dirty state.
+		if got := dumps.saveAttempts(); got != 2 {
+			t.Errorf("attempts after the shutdown flush = %d, want 2 — a rung must not skip the final dump", got)
+		}
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("completed saves after the shutdown flush = %d, want 1", got)
+		}
+		records, _, decodeErr := persist.Decode(dumps.save(0).dump, storage.ValueMaxBytes)
+		if decodeErr != nil {
+			t.Fatalf("Decode(the shutdown dump) error = %v", decodeErr)
+		}
+		if rec, ok := records["shutdown-key"]; !ok || string(rec.Data) != "shutdown-value" {
+			t.Errorf("the shutdown dump carries shutdown-key = (%t, %q), want the dirty record", ok, rec.Data)
+		}
+
+		// The forced success reset the ladder and cleaned the engine: a second
+		// flush must not dump again.
+		err = eng.Flush()
+		if err != nil {
+			t.Fatalf("post-recovery Flush() error = %v, want nil", err)
+		}
+		if got := dumps.saveAttempts(); got != 2 {
+			t.Errorf("attempts after the clean flush = %d, want still 2", got)
 		}
 	})
 }

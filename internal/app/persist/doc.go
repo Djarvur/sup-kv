@@ -43,14 +43,18 @@
 // starve confirmation. After a failed dump the next attempt is armed at the
 // failure instant plus a bounded ladder — 100 ms doubling to a 5 s cap,
 // reset by a success (D-05, PERSIST-05) — never a tight retry loop, and it
-// also carries the failed era's surviving records. A flush request cannot
-// bypass that ladder: while a rung is pending it answers with the last
-// classified failure instead of forcing an extra attempt and an extra ERROR
-// line at the caller's rate.
+// also carries the failed era's surviving records. A snapshot's flush request
+// cannot bypass that ladder: while a rung is pending it answers with the last
+// classified failure (ErrDumpFailed) instead of forcing an extra attempt and
+// an extra ERROR line at the client's rate (WR-02). An explicit
+// Flush/FlushTimeout is the shutdown seam and forces one attempt even while a
+// rung is pending, so shutdown never skips the mandated final dump (N-1).
 //
 // Snapshots (PERS-05, D-08..D-10): Snapshot first forces the current dump
 // to complete — a clean engine skips the redundant dump, a dirty one is
-// dumped before anything is copied — then byte-copies the finished main
+// dumped before anything is copied unless the failure ladder has a rung
+// pending, in which case the flush answers that failure as ErrDumpFailed
+// and nothing is copied — then byte-copies the finished main
 // dump under the adapter-validated name, so the snapshot is byte-identical
 // to the confirmed on-disk state at creation; a failed flush aborts with
 // nothing copied. Restore decodes the snapshot with the same codec and

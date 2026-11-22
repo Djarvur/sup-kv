@@ -226,64 +226,64 @@ func (e *Engine) SetIfAbsent(key string, data []byte) (version.RecordVersion, ti
 // stranded waiters with ErrClosed without performing a final dump, so state
 // merged after the last scheduled dump would otherwise die with the
 // process. It is exactly FlushTimeout with the confirmation timeout: a dirty
-// engine completes one covering dump and returns its error, a clean engine
-// replies nil without a redundant save (the D-10 clean decision), ErrClosed
-// once Run has exited, and ErrUnconfirmed when the dump outlives the
-// deadline (PERSIST-08). Requires a running Run goroutine like every
-// blocking engine call.
+// engine attempts one covering dump even while a retry rung is pending and
+// returns that attempt's error; shutdown must never skip the final dump. A
+// clean engine replies nil without a redundant save (the D-10 clean decision),
+// ErrClosed once Run has exited, and ErrUnconfirmed when the dump outlives the
+// deadline (PERSIST-08). Requires a running Run goroutine like every blocking call.
 func (e *Engine) Flush() error {
 	return e.FlushTimeout(0)
 }
 
 // FlushTimeout is the bounded flush seam (PERSIST-08, D-07): it forces the
-// same covering dump as Flush but gives up after d — zero or negative means
-// the configured ConfirmTimeout — returning ErrUnconfirmed when the dumper
-// never answers. Both the flush-channel send and the reply wait are bound by
-// that one deadline, so a dumper stuck in a kernel fsync can never park the
-// caller. Snapshot and Restore ride this seam with the confirmation timeout,
-// and the binary's shutdown passes its grace period.
+// same covering dump attempt as Flush — even while a retry rung is pending —
+// but gives up after d (zero or negative means ConfirmTimeout), returning
+// ErrUnconfirmed when the dumper never answers. Both the flush-channel send and
+// the reply wait are bound by that one deadline, so a dumper stuck in a kernel
+// fsync can never park the caller. Snapshot and Restore ride this same seam
+// with the confirmation timeout; the binary's shutdown passes its grace period.
 func (e *Engine) FlushTimeout(d time.Duration) error {
 	if d <= 0 {
 		d = e.cfg.ConfirmTimeout
 	}
-	return e.flush(d)
+	return e.flush(d, flushRequest{})
 }
 
 // flush forces the dumper to complete one dump covering every unconfirmed
-// write and returns that dump's error: it hands a reply channel to Run
-// through flushCh, which Run services immediately — bypassing the debounce
-// quiet window, D-10's "forces the current dump to complete" — replying
-// after the forced dump completed. ErrClosed when Run has already exited.
-// The closed check under the mutex and the flushCh send cannot be one
-// atomic step — the send must happen outside mu — so a flush passing the
-// check while Run's exit sweep completes in between would strand its send
-// with no receiver forever. Both the send and the reply wait therefore
-// also race runDone, the channel Run closes after the sweep: a reply found
-// after runDone closed is exactly one the sweep answered (program order in
-// Run), an absent one is the stranded case, and flush returns ErrClosed
-// instead of hanging. Both waits are additionally bounded by one deadline
-// armed through cfg.After (PERSIST-08, T-5-24): expiry — the send never
-// accepted or the reply never delivered — is the wrapped ErrUnconfirmed,
-// because the dump's outcome is unknown rather than failed.
-func (e *Engine) flush(d time.Duration) error {
-	reply := make(chan error, 1)
+// write and returns that dump's error: it hands a request to Run through
+// flushCh, which Run services immediately — bypassing the debounce quiet
+// window, D-10's "forces the current dump to complete". An explicit flush
+// (Flush, FlushTimeout) always attempts, even while a retry rung is pending;
+// a snapshot-originated one defers to the rung and returns its last
+// classified failure wrapped as ErrDumpFailed (WR-02). ErrClosed when Run has
+// already exited: the closed check and the flushCh send cannot be atomic —
+// the send happens outside mu — so a flush passing the check while Run's
+// exit sweep completes in between would strand its send forever. Both waits
+// race runDone, the channel Run closes after the sweep: a reply found after
+// runDone closed is exactly one the sweep answered, an absent one is the
+// stranded case, and flush returns ErrClosed instead of hanging. Both waits
+// are additionally bounded by one deadline armed through cfg.After
+// (PERSIST-08, T-5-24): expiry — the send never accepted or the reply never
+// delivered — is the wrapped ErrUnconfirmed, because the dump outcome is unknown, not failed.
+func (e *Engine) flush(d time.Duration, req flushRequest) error {
+	req.reply = make(chan error, 1)
 	if e.isClosed() {
 		return ErrClosed
 	}
 	timeout := e.cfg.After(d)
 	select {
-	case e.flushCh <- reply:
+	case e.flushCh <- req:
 	case <-e.runDone:
 		return ErrClosed
 	case <-timeout:
 		return fmt.Errorf("%w: flush", ErrUnconfirmed)
 	}
 	select {
-	case err := <-reply:
+	case err := <-req.reply:
 		return err
 	case <-e.runDone:
 		select {
-		case err := <-reply: // the exit sweep answered us after all
+		case err := <-req.reply: // the exit sweep answered us after all
 			return err
 		default:
 			return ErrClosed
