@@ -290,6 +290,119 @@ func TestMerge_equalVersionContentLaw(t *testing.T) {
 	})
 }
 
+// assertStoredRecord fails unless the store's stored record for key matches
+// want in version, tombstone flag and Data bytes — the checksum is derived, so
+// it is not part of the comparison.
+func assertStoredRecord(t *testing.T, store *storage.Store, key string, want storage.Record) {
+	t.Helper()
+	got, ok := store.Lookup(key)
+	if !ok || got.Version != want.Version || got.Deleted != want.Deleted || !bytes.Equal(got.Data, want.Data) {
+		t.Fatalf("Lookup(%q) = (%x, %q, deleted=%t, ok=%t), want (%x, %q, deleted=%t)",
+			key, got.Version[:], got.Data, got.Deleted, ok, want.Version[:], want.Data, want.Deleted)
+	}
+}
+
+// TestMerge_equalVersionBranchTable pins every branch of the (version,
+// content) law in both directions (PERSIST-07, ADR 0012): live vs live with
+// greater and lesser Data, tombstone vs live and live vs tombstone, tombstone
+// vs tombstone with different Data, and identical live and tombstone content.
+// Every row asserts the conflict set, the changed result, the resulting stored
+// record, and that the three-result Merge wrapper reports exactly the same
+// conflicts and drift as MergeChanged — one law, two entry points.
+func TestMerge_equalVersionBranchTable(t *testing.T) {
+	t.Parallel()
+	ver := version.PackVersion(mergeL, 0, nodeA)
+	for _, tt := range []struct {
+		name     string
+		stored   storage.Record
+		incoming storage.Record
+	}{
+		{
+			name:     "live greater data wins",
+			stored:   storage.Record{Version: ver, Data: []byte("a")},
+			incoming: storage.Record{Version: ver, Data: []byte("x")},
+		},
+		{
+			name:     "live lesser data loses",
+			stored:   storage.Record{Version: ver, Data: []byte("x")},
+			incoming: storage.Record{Version: ver, Data: []byte("a")},
+		},
+		{
+			name:     "an incoming tombstone beats a live record",
+			stored:   storage.Record{Version: ver, Data: []byte("a")},
+			incoming: storage.Record{Version: ver, Deleted: true},
+		},
+		{
+			name:     "a stored tombstone beats an incoming live record",
+			stored:   storage.Record{Version: ver, Deleted: true},
+			incoming: storage.Record{Version: ver, Data: []byte("a")},
+		},
+		{
+			name:     "greater tombstone data wins",
+			stored:   storage.Record{Version: ver, Deleted: true, Data: []byte("a")},
+			incoming: storage.Record{Version: ver, Deleted: true, Data: []byte("b")},
+		},
+		{
+			name:     "lesser tombstone data loses",
+			stored:   storage.Record{Version: ver, Deleted: true, Data: []byte("b")},
+			incoming: storage.Record{Version: ver, Deleted: true, Data: []byte("a")},
+		},
+		{
+			name:     "identical live content is a full no-op",
+			stored:   storage.Record{Version: ver, Data: []byte("a")},
+			incoming: storage.Record{Version: ver, Data: []byte("a")},
+		},
+		{
+			name:     "identical tombstone content is a full no-op",
+			stored:   storage.Record{Version: ver, Deleted: true, Data: []byte("a")},
+			incoming: storage.Record{Version: ver, Deleted: true, Data: []byte("a")},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			wantRecord := contentWinner(tt.stored, tt.incoming)
+			wantConflicts := equalVersionConflicts("k", tt.stored, tt.incoming)
+			// changed means "the incoming record became the stored record":
+			// false both for identical content and for a losing tie-break.
+			wantChanged := !storage.RecordsEqual(tt.stored, tt.incoming) && storage.RecordsEqual(wantRecord, tt.incoming)
+
+			changedStore := newStore()
+			_, _, err := changedStore.Merge("k", tt.stored)
+			if err != nil {
+				t.Fatalf("seed Merge() error = %v, want nil", err)
+			}
+			conflicts, changed, drift, err := changedStore.MergeChanged("k", tt.incoming)
+			if err != nil {
+				t.Fatalf("MergeChanged() error = %v, want nil", err)
+			}
+			if changed != wantChanged {
+				t.Fatalf("MergeChanged() changed = %t, want %t", changed, wantChanged)
+			}
+			if !conflictsEqual(conflicts, wantConflicts) {
+				t.Fatalf("MergeChanged() conflicts = %v, want %v", conflicts, wantConflicts)
+			}
+			assertStoredRecord(t, changedStore, "k", wantRecord)
+
+			wrappedStore := newStore()
+			_, _, err = wrappedStore.Merge("k", tt.stored)
+			if err != nil {
+				t.Fatalf("seed Merge() error = %v, want nil", err)
+			}
+			wrapped, wrappedDrift, err := wrappedStore.Merge("k", tt.incoming)
+			if err != nil {
+				t.Fatalf("wrapper Merge() error = %v, want nil", err)
+			}
+			if !conflictsEqual(wrapped, conflicts) {
+				t.Fatalf("wrapper Merge() conflicts = %v, want MergeChanged's %v", wrapped, conflicts)
+			}
+			if wrappedDrift != drift {
+				t.Fatalf("wrapper Merge() drift = %v, want MergeChanged's %v", wrappedDrift, drift)
+			}
+			assertStoredRecord(t, wrappedStore, "k", wantRecord)
+		})
+	}
+}
+
 // contentWinner returns the record the (version, content) law keeps for two
 // equal-version records: identical content keeps the stored record, a
 // tombstone beats a live record, and otherwise the greater Data bytes win.

@@ -1345,9 +1345,11 @@ func TestStore_len(t *testing.T) {
 
 // TestStore_generationContentOnly pins the content-generation contract
 // (T-4-43): it moves by exactly one per record-changing install — Set, a
-// successful SetIfAbsent, a successful Delete and every winning Merge all
+// successful SetIfAbsent, a successful Delete and every winning Merge (a
+// content tie-break win included) all
 // converge on install — and stays put for a rejected SetIfAbsent, a
-// missing-key Delete, an equal-or-older Merge, the clock-only Observe and
+// missing-key Delete, an equal-version loss, an identical redelivery, a
+// strictly older Merge, the clock-only Observe and
 // every read path. A call counter would move where this must not.
 func TestStore_generationContentOnly(t *testing.T) {
 	t.Parallel()
@@ -1408,28 +1410,34 @@ func TestStore_generationContentOnly(t *testing.T) {
 	}
 	requireGeneration(t, store, 4)
 
-	// Equal and older merges are no-ops.
+	// An equal version with greater content wins and installs; an identical
+	// redelivery and an older merge are no-ops (PERSIST-07, ADR 0012).
 	_, _, err = store.Merge("merged", storage.Record{Version: stored.Version, Data: []byte("x")})
 	if err != nil {
 		t.Fatalf("equal Merge() error = %v, want nil", err)
 	}
-	requireGeneration(t, store, 4)
+	requireGeneration(t, store, 5)
+	_, _, err = store.Merge("merged", storage.Record{Version: stored.Version, Data: []byte("x")})
+	if err != nil {
+		t.Fatalf("identical redelivery Merge() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 5)
 	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL-1, 0, nodeB), Data: []byte("old")})
 	if err != nil {
 		t.Fatalf("older Merge() error = %v, want nil", err)
 	}
-	requireGeneration(t, store, 4)
+	requireGeneration(t, store, 5)
 
 	// A strictly greater merge installs.
 	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeB), Data: []byte("b")})
 	if err != nil {
 		t.Fatalf("greater Merge() error = %v, want nil", err)
 	}
-	requireGeneration(t, store, 5)
+	requireGeneration(t, store, 6)
 
 	// Observe is clock-only: no record moves the generation.
 	store.Observe(version.PackVersion(testNowMs+10_000, 0, nodeB))
-	requireGeneration(t, store, 5)
+	requireGeneration(t, store, 6)
 }
 
 // TestStorage_valueLimit pins the single-source value limit (PERSIST-01):

@@ -83,6 +83,24 @@ func randSmallSpaceStore(rng *rand.Rand) *storage.Store {
 	return store
 }
 
+// randCollisionStore returns a store of small-space-drawn versions whose
+// payload and tombstone flag are drawn independently of the version, so equal
+// versions carrying different content collide constantly — the state only the
+// (version, content) law makes a total order (PERSIST-07, ADR 0012).
+func randCollisionStore(rng *rand.Rand) *storage.Store {
+	store := newStoreFor(uint16(1 + rng.IntN(smallSpaceNodeRange)))
+	for range 1 + rng.IntN(smallSpaceRecords) {
+		key := fmt.Sprintf("collision-%d", rng.IntN(smallSpaceKeyRange))
+		rec := storage.Record{
+			Version: smallSpaceVersion(rng),
+			Data:    []byte{byte(rng.IntN(4))},
+			Deleted: rng.IntN(4) == 0,
+		}
+		_, _, _ = store.Merge(key, rec)
+	}
+	return store
+}
+
 // pointwiseSupremum returns the per-key record of greatest version across the
 // stores — the LWW join's closed-form expectation (equal versions are
 // identical records by construction, so the choice among them is immaterial).
@@ -112,6 +130,13 @@ func TestProp_mergeSmallSpace(t *testing.T) {
 		rng := testutil.NewRNG(t)
 		for step := range smallSpaceSteps {
 			assertMergeLaws(t, step, randSmallSpaceStore(rng), randSmallSpaceStore(rng), randSmallSpaceStore(rng))
+		}
+	})
+	t.Run("the three laws hold when equal versions carry different payloads", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range smallSpaceSteps {
+			assertMergeLaws(t, step, randCollisionStore(rng), randCollisionStore(rng), randCollisionStore(rng))
 		}
 	})
 	t.Run("the merged state is the pointwise supremum of the drawn versions", func(t *testing.T) {
