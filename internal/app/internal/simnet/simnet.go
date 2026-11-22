@@ -8,13 +8,17 @@
 // (the internal/app/internal/testutil precedent); unlike testutil its
 // directory name does not match the no-test-libs-in-prod glob, so the
 // non-test files here must not import Go's testing package — assertions live
-// only in _test.go files. The package starts no goroutines, takes no locks
-// and never reads a wall clock or sleeps: virtual time is the only time
-// (D-06/D-07, RESEARCH Pitfall 9), every time value is built from
-// [time.UnixMilli] arithmetic — no monotonic reading anywhere (the D-02 seam
-// discipline) — and every random draw flows through the one rng injected at
-// construction, drawn at send time, so the same seed reproduces the whole
-// run byte for byte.
+// only in _test.go files. The package starts no goroutines and never reads a
+// wall clock or sleeps: virtual time is the only time (D-06/D-07, RESEARCH
+// Pitfall 9), every time value is built from [time.UnixMilli] arithmetic — no
+// monotonic reading anywhere (the D-02 seam discipline) — and every random
+// draw flows through the one rng injected at construction, drawn at send
+// time, so the same seed reproduces the whole run byte for byte. The
+// scheduler alone takes a lock: the dump engine arms its timers from its own
+// goroutine through the slice's scheduling methods (the PERSIST-12 seam), so
+// [Scheduler.Schedule], [Scheduler.ScheduleAfter] and [Scheduler.Now] are
+// safe from any goroutine while [Scheduler.RunUntil] stays the single
+// driver.
 package simnet
 
 import (
@@ -25,6 +29,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/clock"
@@ -84,7 +89,12 @@ func (h *eventHeap) Pop() any {
 // virtual time in Schedule-call (insertion) order, the tie-break contract
 // same-seed determinism is built on. Now advances only as RunUntil executes
 // events; nothing here reads a wall clock, sleeps or launches a goroutine.
+// The lock makes the scheduling surface safe for the dump engine's own
+// goroutine (PERSIST-12): RunUntil stays the single driver, and it releases
+// the lock around each callback so a handler may schedule (the network
+// does exactly that).
 type Scheduler struct {
+	mu   sync.Mutex
 	now  time.Time
 	seq  uint64
 	pend eventHeap
@@ -100,28 +110,53 @@ func NewScheduler(start time.Time) *Scheduler {
 // virtual time is simply due: the next RunUntil covering its time executes
 // it, ordered before any later-time event.
 func (s *Scheduler) Schedule(t time.Time, fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.seq++
 	heap.Push(&s.pend, event{at: t, seq: s.seq, fn: fn})
+}
+
+// ScheduleAfter books fn at the current virtual time plus d and returns the
+// instant it is due — the one-call form the injected After seam needs, so
+// computing the instant and enqueueing it cannot be split by another
+// goroutine advancing the clock.
+func (s *Scheduler) ScheduleAfter(d time.Duration, fn func()) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at := s.now.Add(d)
+	s.seq++
+	heap.Push(&s.pend, event{at: at, seq: s.seq, fn: fn})
+	return at
 }
 
 // RunUntil executes every event with (Time, Seq) at or before t, in that
 // total order, advancing the virtual clock to each event's time before it
 // runs — so handlers observe exactly the event's scheduled time. Events
 // scheduled by executed events (network deliveries at now+delay, timer
-// pumps) join the same order and fire inside this same call whenever their
-// time is at or before t. Afterwards the clock rests at t whether or not any
-// event ran.
+// pumps, the injected engine timers) join the same order and fire inside
+// this same call whenever their time is at or before t. Afterwards the
+// clock rests at t whether or not any event ran.
 func (s *Scheduler) RunUntil(t time.Time) {
-	for s.pend.Len() > 0 && !s.pend[0].at.After(t) {
+	for {
+		s.mu.Lock()
+		if s.pend.Len() == 0 || s.pend[0].at.After(t) {
+			s.now = t
+			s.mu.Unlock()
+			return
+		}
 		ev := heap.Pop(&s.pend).(event)
 		s.now = ev.at
+		s.mu.Unlock()
 		ev.fn()
 	}
-	s.now = t
 }
 
 // Now returns the current virtual time.
-func (s *Scheduler) Now() time.Time { return s.now }
+func (s *Scheduler) Now() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.now
+}
 
 // Policy is the fault-injection profile, pure data injected by each test:
 // drop and duplicate probabilities, the one-way delay draw, the partition
@@ -792,6 +827,29 @@ func (c *Cluster) Delete(i int, key string) (storage.Record, error) {
 	c.drive(i, now)
 	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
 	return rec, nil
+}
+
+// NotifyInstalled announces the record already installed under key on node i
+// — the persist engine's write-confirmation seam (PERSIST-12, the research
+// D-11 addition): the production author notification runs exactly as in
+// Write — NotifyLocalWrite, the outbox route, the result drain, the drive
+// loop — and the (key, record) pair joins the write log, but the store is
+// never Set again. The engine stamped and installed the record itself, so a
+// second Set would burn a fresh version and replace the record the
+// confirmation covered. A key with no stored record is a driving test's
+// mistake and panics, the Write/Lookup convention.
+//
+// Determinism contract: as Write — the notification runs at the current
+// virtual time and every emission routes through the network's seeded rng;
+// the seam adds no randomness source, so the event stream stays a pure
+// function of the seed.
+func (c *Cluster) NotifyInstalled(i int, key string) storage.Record {
+	c.checkIndex(i, "NotifyInstalled")
+	rec, ok := c.nodes[i].store.Lookup(key)
+	if !ok {
+		panic(fmt.Sprintf("simnet: Cluster.NotifyInstalled: Lookup %q on node %d: record missing", key, i))
+	}
+	return rec
 }
 
 // Nodes returns the cluster size.
