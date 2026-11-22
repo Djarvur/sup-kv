@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 4
 current_phase_name: Protocol
-current_plan: 6
+current_plan: 7
 status: executing
-stopped_at: Completed 04-05-PLAN.md
-last_updated: "2026-11-22T04:32:50.915Z"
+stopped_at: Completed 04-06-PLAN.md
+last_updated: "2026-11-22T04:43:45.920Z"
 last_activity: 2026-11-22
-last_activity_desc: Completed 04-02-PLAN.md (gated reads and listed-key RPC answers)
-state_head: 80492d90ab9e7af349c16ba9724cc5bc493e260a
+last_activity_desc: Completed 04-06-PLAN.md (dump-failed and snapshot-load replication)
+state_head: cacabdbbc4317f5b3616e10529b13f3bc386becd
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 47
-  completed_plans: 39
+  completed_plans: 40
 ---
 
 # Project State
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 4 (Protocol)
-Current Plan: 6
+Current Plan: 7
 Total Plans in Phase: 13
 Status: Ready to execute
-Last activity: 2026-11-22 — Completed 04-02-PLAN.md
+Last activity: 2026-11-22 — Completed 04-06-PLAN.md
 
 Progress: [███░░░░░░░] 33%
 
@@ -96,6 +96,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P03 | 587s | 2 tasks | 16 files |
 | Phase 04 P04 | 10min | 2 tasks | 9 files |
 | Phase 04 P05 | 791s | 2 tasks | 5 files |
+| Phase 04 P06 | 294 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -253,6 +254,10 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-05: handleDataRequest probes StateStore.Version (presence only, no Data copy) and handleDataSync's local-newer branch enqueues the identity without a second Lookup; the drain owns the probe/read race and a vanished key still skips without consuming a pacer slot.
 - [Phase 04]: 04-05: applyRemote branches three ways before ApplyRemote on one point Version probe — strictly older queues exactly one unicast reply carrying the held record and sends no Ack (no merge, no conflict, ledger untouched); equal Acks with no reply (the version was absorbed at install, and the retransmission drain needs it); newer/absent applies and Acks as before (PROTO-03).
 - [Phase 04]: 04-05: The stale reply reuses the (handle, kind, key) egress identity path, so T-4-17's dedupe/amplification bound and CR-02's key-sized retention bound cover the new producer with no extra queue machinery; TestWaitIntegration_staleRecordNotAcked proves the real adapter tracker reports acked=false.
+- [Phase 04]: 04-06: Restore reports the replayed records even when the final flush failed, and converts a non-ErrClosed flush failure into ErrDumpFailed wrapping the cause so the RPC maps to Unavailable while errors.Is still reaches the port error; ErrClosed passes through unchanged (shutdown is never a dump failure).
+- [Phase 04]: 04-06: replayRecord's bool is the explicit install/skip signal, separate from the tombstone flag: ErrNotFound on a tombstone replay and ErrValueTooLarge on a live replay return the zero version, replayed=false and nil; skipped records are absent from RestoredRecord and never notified.
+- [Phase 04]: 04-06: Dump-failed Set/SetIfAbsent/Delete notify the stamped record with track=false before mapError answers Unavailable; SnapshotLoad notifies Restore's list before mapping the error and skips the loop entirely on ErrClosed, so abandoned shutdown work is never announced.
+- [Phase 04]: 04-06: The snapshot-load notify order is the replay's sorted-key order and the tests assert the exact key sequence, not a count, so a map-order regression fails; the no-op load notifies nothing and returns OK.
 
 ### Pending Todos
 
@@ -275,7 +280,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T04:32:50.626Z
-Stopped at: Completed 04-05-PLAN.md
+Last session: 2026-11-22T04:43:45.627Z
+Stopped at: Completed 04-06-PLAN.md
 Resume file: None
 Next action: `/gsd:verify-work 3` (or `/gsd:execute-phase 4` after the phase gate is verified) — Phase 4 (Protocol) is unblocked
