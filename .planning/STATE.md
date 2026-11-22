@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-11-22T13:46:49.580Z"
+stopped_at: Completed 05-04-PLAN.md
+last_updated: "2026-11-22T14:13:18.525Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 4 complete, transitioned to Phase 5
-state_head: 06691b8484f010df7dfb46048a0f23936c074e36
+state_head: 0e7e7225f8d8e00c30cf0288308fbd27266284fe
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 50
+  completed_plans: 51
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 5 (Persistence) — executing
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 12
 Status: Executing (05-01 complete, 05-02 next)
 Last activity: 2026-11-22 — 05-01 complete; 05-02 next
@@ -108,6 +108,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P01 | 761s | 3 tasks | 14 files |
 | Phase 05 P02 | 868 | 3 tasks | 6 files |
 | Phase 05 P03 | 1224 | 3 tasks | 9 files |
+| Phase 05 P04 | 13min | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -306,6 +307,12 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-03: MergeChanged returns (conflicts, changed, drift, err) and Merge delegates; Engine.ApplyRemote dirties on changed, replacing the Get probe and the Winner==rec.Version heuristic (research Pitfall 5)
 - [Phase 05]: 05-03: applyRemote Acks identical content early, applies differing content through the store, then answers from the stored record: incoming win Acks, stored win queues exactly one unicast DataReplication and no Ack
 - [Phase 05]: 05-03: ADR 0012 records the deviation from the Spec's random tail with the version layout, zero filler (S-HLC-07) and PFXD-01 as explicit non-changes; cross-node convergence stays 05-07's proof on the NotifyInstalled seam
+- [Phase 05]: EncodeTo is the single dump encoder and Encode is its bytes.Buffer wrapper, so the streaming and buffered paths cannot drift
+- [Phase 05]: SaveStream's fill runs exactly once on the caller's goroutine and must not retain the writer; the adapter owns the temp lifetime and removes it on any fill error
+- [Phase 05]: The adapter buffers the streamed dump through a named 64 KiB bufio writer, coalescing the codec's per-line writes without holding the dump
+- [Phase 05]: Save leaves port.DumpStore; FileStore.Save stays as a byte-fixture convenience over SaveStream and the engine has no byte-slice save path
+- [Phase 05]: Load classifies only in 05-04: absent candidates are non-failures, present-but-unreadable ones carry path and cause, and preservation/sweep stay for 05-05
+- [Phase 05]: peak-live-B samples runtime.MemStats HeapAlloc at the fill's end, the peak moment when the one Records() copy and the adapter's bufio are both live
 
 ### Pending Todos
 
@@ -328,7 +335,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T13:46:49.171Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-11-22T14:13:18.126Z
+Stopped at: Completed 05-04-PLAN.md
 Resume file: None
 Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-02-PLAN.md is next)
