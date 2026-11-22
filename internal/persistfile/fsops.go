@@ -24,9 +24,9 @@ const maxDumpBufioBytes = 64 << 10
 // files — never in the shipped default.
 //
 // Per-save state (the open temp handle and its path) lives in the
-// implementation value: FileStore's store mutex serializes Save against
-// CreateSnapshot and against concurrent Saves, so one implementation value
-// is never mid-save twice.
+// implementation value: FileStore's store mutex serializes SaveStream
+// against CreateSnapshot and against concurrent save calls, so one
+// implementation value is never mid-save twice.
 //
 // The platform durability detail deliberately lives in the standard
 // library, not here: [os.File.Sync] on darwin goes through internal/poll's

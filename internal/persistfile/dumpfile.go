@@ -1,17 +1,19 @@
 // Package persistfile is the sup-kv dump file adapter: the only
 // os-importing persistence code, implementing port.DumpStore with atomic
 // writes, .prev rotation and the fallback chain (D-01/D-02). The store
-// mutex serializes Save against CreateSnapshot: the rotate-first order
+// mutex serializes SaveStream against CreateSnapshot: the rotate-first order
 // that keeps the crash chain correct (D-02) briefly leaves the main path
 // absent between the two renames, and a concurrent snapshot copy must
-// never observe that window as ErrNoDump. Concurrent Save calls serialize
+// never observe that window as ErrNoDump. Concurrent save calls serialize
 // on the same mutex; the engine's single dumper goroutine remains the
 // design's serializer. Load and ReadSnapshot stay lock-free — every
 // observable generation is always complete bytes.
 package persistfile
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -42,8 +44,8 @@ type FileStore struct {
 	// field. Its per-save state is safe in one shared value because mu
 	// serializes every save below.
 	ops fsops
-	// mu serializes Save against CreateSnapshot (and concurrent Saves):
-	// between rotate's and rename's renames the main path is briefly
+	// mu serializes SaveStream against CreateSnapshot (and concurrent save
+	// calls): between rotate's and rename's renames the main path is briefly
 	// absent, and a snapshot copy racing that window would report ErrNoDump
 	// despite confirmed data on disk. Load and ReadSnapshot need no lock —
 	// each rename leaves every observable generation complete.
@@ -93,9 +95,53 @@ func (f *FileStore) SaveStream(fill func(io.Writer) error) error {
 // rejection — a truncated or unparseable file counts as unreadable — is
 // recorded against its candidate and advances the chain; an absent candidate
 // is not a failure. No candidate at all is the prompt start, and candidates
-// that all fail are unusable. Load never deletes evidence.
-func (f *FileStore) Load(_ time.Time, _ func([]byte) error) port.LoadResult {
-	return port.LoadResult{}
+// that all fail are unusable. Load never deletes evidence: preservation is
+// the adapter's duty and lands with the sweep; now is the clock that names a
+// preserved generation.
+func (f *FileStore) Load(_ time.Time, parse func([]byte) error) port.LoadResult {
+	var result port.LoadResult
+	candidates := []struct {
+		generation port.Generation
+		path       string
+	}{
+		{port.GenMain, f.path},
+		{port.GenPrev, f.path + prevSuffix},
+	}
+	for _, candidate := range candidates {
+		data, err := os.ReadFile(candidate.path) // safe: the path derives from the configured dump path, never caller input
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // absent is the prompt start's shape, never a failure.
+			}
+			result.Failures = append(result.Failures, port.GenerationFailure{
+				Candidate: candidate.generation,
+				Path:      candidate.path,
+				Cause:     err,
+			})
+			continue
+		}
+		err = parse(data)
+		if err != nil {
+			result.Failures = append(result.Failures, port.GenerationFailure{
+				Candidate: candidate.generation,
+				Path:      candidate.path,
+				Cause:     err,
+			})
+			continue
+		}
+		result.Dump = data
+		result.Generation = candidate.generation
+		if candidate.generation == port.GenPrev {
+			result.Outcome = port.LoadBackup
+		} else {
+			result.Outcome = port.LoadMain
+		}
+		return result
+	}
+	if len(result.Failures) > 0 {
+		result.Outcome = port.LoadUnusable
+	}
+	return result
 }
 
 // saveAtomically implements the canonical atomic-write sequence (PERS-02,

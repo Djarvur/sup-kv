@@ -1,17 +1,19 @@
 package persist_test
 
-// The TEST-05 dump benchmark (D-13, plan 06-08): the first benchmark in the
-// repo. BenchmarkDump10kKeys drives the REAL dump path — persist.Encode over
-// store.Records() into a persistfile.FileStore rooted at b.TempDir, exactly
-// the Encode+Save pair runDump performs per dump cycle (engine.go) — over a
-// store seeded with exactly 10,000 keys of varied small value sizes from a
-// deterministic size table. Manual before/after comparison via `make bench`
-// only: no thresholds anywhere, CI never runs it (D-13/D-14) — run-to-run
-// comparison is the human's job.
+// The TEST-05 dump benchmark (D-13, plan 06-08, extended by 05-04): the
+// first benchmark in the repo. BenchmarkDump10kKeys drives the REAL streamed
+// dump path — one store.Records() copy encoded by persist.EncodeTo inside
+// persistfile.FileStore.SaveStream (the same pair runDump performs per dump
+// cycle) — over a store seeded with exactly 10,000 keys of varied small
+// value sizes from a deterministic size table. Manual before/after
+// comparison via `make bench` only: no thresholds anywhere, CI never runs it
+// (D-13/D-14) — run-to-run comparison is the human's job.
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -58,40 +60,82 @@ func benchSeedStore(tb testing.TB) *storage.Store {
 	return store
 }
 
-// BenchmarkDump10kKeys measures one full dump cycle at 10k keys through the
-// real path: Encode over the store's full snapshot, then the persistfile
-// FileStore's durable Save (temp file, fsync, rotate, rename, dir fsync —
-// the PERS-02 atomic-write sequence) into one temp directory per benchmark
-// run, per-iteration Save following the FileStore contract. bytes/op is the
-// mean encoded size per iteration and dump-bytes the (constant) dump size —
-// both derived via ReportMetric with whitespace-free unit strings; ns/op
-// stays visible for the Encode+Save span itself, and p50-ms/p99-ms report
-// the same per-iteration spans' distribution (TEST-10: measured per-op
-// durations, no self-pacing — the loop runs as fast as the real path
-// allows). No thresholds: a shared machine's numbers are noise, D-13 keeps
-// the gate human.
+// countingWriter counts the bytes written through it: the streamed dump's
+// size, observed without materializing the encoded generation.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+// Write forwards p and accumulates its length.
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// liveHeapBytes returns the current live heap allocation (runtime.MemStats
+// HeapAlloc) — the stdlib's closest measure of live state at the sample
+// instant.
+func liveHeapBytes() uint64 {
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	return stats.HeapAlloc
+}
+
+// BenchmarkDump10kKeys measures one full streamed dump cycle at 10k keys
+// through the real path: one store.Records() copy, EncodeTo feeding the
+// persistfile FileStore's buffered temp writer, then the durable save (temp
+// file, fsync, rotate, rename, dir fsync — the PERS-02 atomic-write
+// sequence) into one temp directory per benchmark run.
+//
+// Reported figures (D-06, PERSIST-06):
+//   - B/op (-benchmem) is the allocation churn of the whole cycle.
+//   - peak-live-B samples runtime.ReadMemStats at the end of the fill, the
+//     cycle's peak moment: the one unavoidable Records() copy and the
+//     adapter's 64 KiB bufio are both live. That copy plus the writer pause
+//     is the accepted residual; a second encoded state would show up here as
+//     a roughly doubled figure.
+//   - bytes/op and dump-bytes are the streamed generation's size, counted at
+//     the writer so the dump is never held as a second buffer.
+//
+// ns/op stays visible for the cycle itself, and p50-ms/p99-ms report the
+// same per-iteration spans' distribution (TEST-10: measured per-op durations,
+// no self-pacing — the loop runs as fast as the real path allows). No
+// thresholds: a shared machine's numbers are noise, D-13 keeps the gate
+// human.
 func BenchmarkDump10kKeys(b *testing.B) {
 	store := benchSeedStore(b)
 	dumps := persistfile.New(filepath.Join(b.TempDir(), "dump.json"))
 	durations := make([]time.Duration, 0, b.N)
 	b.ResetTimer()
 	var totalBytes, lastSize int64
+	var peakLive uint64
 	for range b.N {
 		start := time.Now()
-		block, err := persist.Encode(store.Records(), storage.ValueMaxBytes)
+		records := store.Records()
+		var sampled, written int64
+		err := dumps.SaveStream(func(w io.Writer) error {
+			counter := &countingWriter{w: w}
+			err := persist.EncodeTo(counter, records, storage.ValueMaxBytes)
+			written = counter.n
+			sampled = int64(liveHeapBytes())
+			return err
+		})
 		if err != nil {
-			b.Fatalf("Encode 10k-key dump: %v", err)
+			b.Fatalf("streamed dump cycle: %v", err)
 		}
-		err = dumps.Save(block)
-		if err != nil {
-			b.Fatalf("persistfile Save: %v", err)
-		}
+		runtime.KeepAlive(records)
 		durations = append(durations, time.Since(start))
-		totalBytes += int64(len(block))
-		lastSize = int64(len(block))
+		totalBytes += written
+		lastSize = written
+		if sampled > int64(peakLive) {
+			peakLive = uint64(sampled)
+		}
 	}
 	b.StopTimer()
 	testutil.ReportLatencyPercentiles(b, durations)
 	b.ReportMetric(float64(totalBytes)/float64(b.N), "bytes/op")
 	b.ReportMetric(float64(lastSize), "dump-bytes")
+	b.ReportMetric(float64(peakLive), "peak-live-B")
 }
