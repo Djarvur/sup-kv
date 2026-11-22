@@ -181,8 +181,9 @@ const (
 	decodeMalformed
 )
 
-// add counts one line's outcome; an accepted line counts nothing.
-func (s *DecodeStats) add(class decodeClass) {
+// add returns s with one line's outcome counted; an accepted line counts
+// nothing.
+func (s DecodeStats) add(class decodeClass) DecodeStats {
 	switch class {
 	case decodeChecksum:
 		s.Checksum++
@@ -194,6 +195,7 @@ func (s *DecodeStats) add(class decodeClass) {
 		s.Malformed++
 	case decodeAccepted:
 	}
+	return s
 }
 
 // Decode reads a JSONL dump produced by Encode and keeps the failure classes
@@ -209,9 +211,9 @@ func (s *DecodeStats) add(class decodeClass) {
 // cover the line). One torn record never collapses its generation to the
 // empty start (PERS-02, PERSIST-03).
 //
-// Lines are read through a bounded bufio.Reader and parsed one at a time
-// with json.Unmarshal: a streaming json.Decoder is permanently poisoned by a
-// syntax error and loses every line after it. A duplicate key in a
+// Lines are read through a bounded [bufio.Reader] and parsed one at a time
+// with [json.Unmarshal]: a streaming [json.Decoder] is permanently poisoned
+// by a syntax error and loses every line after it. A duplicate key in a
 // hand-edited file is last-wins. A legacy v1.0 dump with no record_count
 // carries no completeness census — a truncation exactly at a line boundary
 // of such a dump is the documented compatibility limitation — and its final
@@ -251,7 +253,7 @@ func Decode(dump []byte, valueMaxBytes int) (records map[string]storage.Record, 
 		if class == decodeMalformed && !terminated {
 			return nil, DecodeStats{}, fmt.Errorf("persist: dump record unreadable: %w", errTornTail)
 		}
-		stats.add(class)
+		stats = stats.add(class)
 		if class == decodeAccepted {
 			records[key] = rec
 		}
@@ -267,7 +269,7 @@ func Decode(dump []byte, valueMaxBytes int) (records map[string]storage.Record, 
 // terminated reports whether the line ended with a newline: an unterminated
 // remainder is the dump's final fragment, which the caller accepts only when
 // it parses as a record. An overlong line is a generation-level fault
-// (bufio.ErrBufferFull — a line no supported writer can emit), and io.EOF
+// ([bufio.ErrBufferFull] — a line no supported writer can emit), and [io.EOF]
 // with an empty remainder is the clean end of the stream.
 func readDumpLine(reader *bufio.Reader) (line []byte, terminated bool, err error) {
 	segment, err := reader.ReadSlice('\n')
@@ -317,8 +319,8 @@ func checkRecordCount(count *int, lines int) error {
 // record_version that is not exactly 16 bytes of hex, decodeValueLimit for
 // Data over valueMaxBytes and decodeChecksum for a checksum mismatch.
 // decodeAccepted is the zero value. It never panics on any bit pattern:
-// json.Unmarshal is total, [hex.DecodeString] is total, Unpack is total and
-// the checksum comparison is arithmetic (T-3-01).
+// [json.Unmarshal] is total, [hex.DecodeString] is total, Unpack is total
+// and the checksum comparison is arithmetic (T-3-01).
 func decodeRecord(line []byte, valueMaxBytes int) (key string, rec storage.Record, class decodeClass) {
 	var parsed recordLine
 	err := json.Unmarshal(line, &parsed)
