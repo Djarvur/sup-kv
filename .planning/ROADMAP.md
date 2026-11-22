@@ -230,7 +230,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 |-------|-----------|----------------|--------|-----------|
 | 1. CI Bootstrap and Repo Skeleton | v1.0 | 4/4 | Complete    | 2026-11-19 |
 | 2. Engine — HLC Versioning and LWW Store | v1.0 | 17/17 | Complete    | 2026-11-21 |
-| 3. Persistence — Dump and Write Confirmation | v1.0 | 2/2 | Complete | 2026-11-03 |
+| 3. Persistence — Dump and Write Confirmation | v1.0 | 13/13 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 6/6 | Complete | 2026-11-07 |
 | 5. gRPC API and Binary | v1.0 | 6/6 | Complete | 2026-11-09 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete | 2026-11-16 |
