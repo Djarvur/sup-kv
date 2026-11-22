@@ -450,13 +450,16 @@ func TestRetransmit_suspendAndFlush(t *testing.T) {
 	}
 
 	// The first Hello ends the empty table: the same HandleDatagram call
-	// enqueues the pending record on the paced queue (it emits no datagram
-	// itself), gains the peer as its only waiter and restarts the ladder at
-	// ack_timeout; the next Advance drains the queued send.
+	// enqueues the pending record on the paced queue (it emits no
+	// DataReplication itself, only the identity echo, CR-01), gains the peer
+	// as its only waiter and restarts the ladder at ack_timeout; the next
+	// Advance drains the queued send.
 	helloAt := at(suspendWindow + time.Second)
 	core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
-	if got := len(out.Drain()); got != 0 {
-		t.Fatalf("the discovery flush emitted %d messages inside the Hello handler, want 0 — it only enqueues", got)
+	if got := out.Drain(); len(got) != 1 {
+		t.Fatalf("the discovery flush emitted %d messages inside the Hello handler, want 1 (the identity echo) — the record only enqueues", len(got))
+	} else if _, ok := got[0].Msg.(port.Hello); !ok {
+		t.Fatalf("the Hello handler's synchronous emission is a %T, want the identity echo port.Hello", got[0].Msg)
 	}
 	core.Advance(helloAt, &out)
 	repls := broadcastRepls(out.Drain())

@@ -86,6 +86,229 @@ func listedDatagram(peer uint16, syncID uint64, entries []port.SyncEntry) port.I
 	}
 }
 
+// listedHello builds the Hello the listing binding requires (CR-01): the same
+// node id and run_id listedDatagram stamps, so the sender is a known peer
+// identity before its listing arrives.
+func listedHello(peer uint16) port.InboundDatagram {
+	return port.InboundDatagram{
+		Source:       fmt.Sprintf("n%d", peer),
+		Status:       port.Decoded,
+		ProtoVersion: SupportedProtoVersion,
+		NodeID:       peer,
+		RunID:        [16]byte{byte(peer)},
+		Msg:          port.Hello{},
+	}
+}
+
+// listedFeedHello teaches core peer's identity and drains the outbox — the
+// first-seen branch enqueues a targeted listing, which these tests never
+// drain further.
+func listedFeedHello(core *Core, now time.Time, peer uint16) {
+	var out port.Outbox
+	core.HandleDatagram(now, listedHello(peer), &out)
+	out.Drain()
+}
+
+// listedSpoofDatagram builds one complete one-part listing from nodeID, an
+// arbitrary runID and an arbitrary source handle — the forged-envelope shape
+// the CR-01 proofs drive.
+func listedSpoofDatagram(nodeID uint16, runID [16]byte, source, key string) port.InboundDatagram {
+	return port.InboundDatagram{
+		Source:       source,
+		Status:       port.Decoded,
+		ProtoVersion: SupportedProtoVersion,
+		NodeID:       nodeID,
+		RunID:        runID,
+		Msg: port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: []port.SyncEntry{{
+			Key:     key,
+			Version: version.PackVersion(listedTestNowMs, 1, nodeID),
+		}}},
+	}
+}
+
+// TestSync_unboundListingDiscarded is CR-01's first proof: the retained
+// listed-key union is filled only from a peer-table identity, so a listing
+// from a sender that never sent a Hello — the review's permanent-denial
+// datagram — retains nothing, completes nothing and opens nothing, and no
+// amount of elapsed time makes the forged keys appear.
+func TestSync_unboundListingDiscarded(t *testing.T) {
+	t.Parallel()
+	now := time.UnixMilli(listedTestNowMs)
+	core := newListedCore()
+	var out port.Outbox
+
+	const victimKey = "victim/key"
+	core.HandleDatagram(now, listedSpoofDatagram(0x66, [16]byte{0xEE}, "spoof-102", victimKey), &out)
+	out.Drain()
+
+	if got := core.Discards().DuplicateNodeID; got != 1 {
+		t.Fatalf("DuplicateNodeID discards after an unbound listing = %d, want 1 — the drop is the named configuration-error class (CR-01)", got)
+	}
+	if got := len(core.ListedKeysSnapshot()); got != 0 {
+		t.Fatalf("the unbound listing retained %d keys, want 0 — the union must never take an unknown identity's keys", got)
+	}
+	if got := len(core.listedByPeer); got != 0 {
+		t.Fatalf("the unbound listing created %d listedByPeer rows, want 0", got)
+	}
+	if core.ListingComplete() || core.SyncArrived() {
+		t.Fatal("an unbound complete listing opened the gate — no completeness may follow the drop (CR-01)")
+	}
+	if got := core.ListingGeneration(); got != 0 {
+		t.Fatalf("ListingGeneration() = %d after an unbound listing, want 0 — nothing was published", got)
+	}
+
+	// The review's 24-hour proof: with no peer row the forged keys must never
+	// surface, however long the driver runs.
+	core.Advance(now.Add(24*time.Hour), &out)
+	out.Drain()
+	if got := len(core.ListedKeysSnapshot()); got != 0 {
+		t.Fatalf("after 24h the unbound listing still retained %d keys, want 0 — retention is bound to a live peer identity (CR-01)", got)
+	}
+	if core.ListingComplete() || core.SyncArrived() {
+		t.Fatal("the gate opened on the forged listing after 24h, want it never opened by an unbound sender")
+	}
+}
+
+// TestSync_forgedRunIDCannotReplaceListing is CR-01's second proof: a listing
+// from a KNOWN node_id whose envelope run_id differs from the row's is
+// discarded, so it cannot flush the peer's protective set. A real restart —
+// a Hello carrying the new run — binds the new identity, and only then does
+// that run's listing replace the previous set.
+func TestSync_forgedRunIDCannotReplaceListing(t *testing.T) {
+	t.Parallel()
+	now := time.UnixMilli(listedTestNowMs)
+	core := newListedCore()
+	var out port.Outbox
+
+	const (
+		legitKey = "legit/listed"
+		nextKey  = "next/run-listed"
+	)
+	legitRun := [16]byte{byte(listedTestPeer)}
+	forgedRun := [16]byte{0xEE, 0xEE}
+	core.HandleDatagram(now, listedHello(listedTestPeer), &out)
+	out.Drain()
+	core.HandleDatagram(now, listedDatagram(listedTestPeer, 1, []port.SyncEntry{{
+		Key:     legitKey,
+		Version: version.PackVersion(listedTestNowMs, 1, listedTestPeer),
+	}}), &out)
+	out.Drain()
+	if _, ok := core.ListedKeysSnapshot()[legitKey]; !ok {
+		t.Fatalf("the bound listing did not retain %q, want it in the union", legitKey)
+	}
+
+	// Same node_id, different run_id: discarded, and the real set survives.
+	core.HandleDatagram(now, listedSpoofDatagram(listedTestPeer, forgedRun, "spoof-2", "attacker/key"), &out)
+	out.Drain()
+	union := core.ListedKeysSnapshot()
+	if _, ok := union[legitKey]; !ok {
+		t.Fatalf("a forged-run listing dropped %q from the union, want the real run's set untouched (CR-01)", legitKey)
+	}
+	if _, ok := union["attacker/key"]; ok {
+		t.Fatal("a forged-run listing installed attacker/key, want it discarded")
+	}
+	if got := core.Discards().DuplicateNodeID; got != 1 {
+		t.Fatalf("DuplicateNodeID discards after the forged-run listing = %d, want 1", got)
+	}
+	if got := core.PeerSnapshot()[listedTestPeer].RunID; got != legitRun {
+		t.Fatalf("the peer row's run became %x, want the authoritative %x", got[:], legitRun[:])
+	}
+
+	// A genuine restart Hello re-binds the identity; only then is the new
+	// run's listing accepted and the old set replaced wholesale.
+	restarted := port.InboundDatagram{
+		Source:       fmt.Sprintf("n%d", listedTestPeer),
+		Status:       port.Decoded,
+		ProtoVersion: SupportedProtoVersion,
+		NodeID:       listedTestPeer,
+		RunID:        forgedRun,
+		Msg:          port.Hello{},
+	}
+	core.HandleDatagram(now, restarted, &out)
+	out.Drain()
+	core.HandleDatagram(now, listedSpoofDatagram(listedTestPeer, forgedRun, fmt.Sprintf("n%d", listedTestPeer), nextKey), &out)
+	out.Drain()
+	union = core.ListedKeysSnapshot()
+	if _, ok := union[nextKey]; !ok {
+		t.Fatalf("the restarted run's listing did not retain %q, want it in the union", nextKey)
+	}
+	if _, ok := union[legitKey]; ok {
+		t.Fatalf("the previous run's %q survived the replacement, want the new complete listing to replace the set", legitKey)
+	}
+}
+
+// TestSync_emptyListingCreatesNoRow pins the row-bound half of CR-01: a
+// complete empty listing adds nothing to the union, so it must not create a
+// listedByPeer row (or an LRU element) that the size cap can never reclaim —
+// the review's un-evictable-row growth.
+func TestSync_emptyListingCreatesNoRow(t *testing.T) {
+	t.Parallel()
+	now := time.UnixMilli(listedTestNowMs)
+	core := newListedCore()
+	var out port.Outbox
+
+	listedFeedHello(core, now, listedTestPeer)
+	core.HandleDatagram(now, listedDatagram(listedTestPeer, 1, nil), &out)
+	out.Drain()
+
+	if got := len(core.listedByPeer); got != 0 {
+		t.Fatalf("an empty complete listing created %d listedByPeer rows, want 0", got)
+	}
+	if got := core.listedOrder.Len(); got != 0 {
+		t.Fatalf("an empty complete listing left %d LRU elements, want 0", got)
+	}
+	if !core.ListingComplete() {
+		t.Fatal("an empty complete listing did not complete the listing, want ListingComplete true")
+	}
+}
+
+// TestSync_listedKeysExpire is CR-01's time bound: a set nobody republishes
+// within two sync intervals leaves the union, while the peer row and the
+// startup-gate completeness stay (the expiry is not an eviction and not a
+// re-close). A fresh complete listing from the still-known peer re-retains
+// the keys.
+func TestSync_listedKeysExpire(t *testing.T) {
+	t.Parallel()
+	const syncInterval = time.Second
+	fixedNow := func() time.Time { return time.UnixMilli(listedTestNowMs) }
+	st := &listedStateStore{store: storage.NewStore(listedTestLocal, clock.NewClock(fixedNow, 0, 0, 0), storage.Config{})}
+	core := New(listedTestLocal, [16]byte{1}, st, Config{SyncInterval: syncInterval})
+	now := time.UnixMilli(listedTestNowMs)
+	var out port.Outbox
+
+	expiring := port.SyncEntry{Key: "expire/me", Version: version.PackVersion(listedTestNowMs, 1, listedTestPeer)}
+	listedFeedHello(core, now, listedTestPeer)
+	core.HandleDatagram(now, listedDatagram(listedTestPeer, 1, []port.SyncEntry{expiring}), &out)
+	out.Drain()
+	if _, ok := core.ListedKeysSnapshot()[expiring.Key]; !ok {
+		t.Fatalf("the fresh listing did not retain %q, want it in the union", expiring.Key)
+	}
+
+	// Nothing republishes: past two sync intervals the set is released while
+	// the peer row (peer_timeout is longer) and the completeness flag stay.
+	core.Advance(now.Add(2*syncInterval+time.Millisecond), &out)
+	out.Drain()
+	if got := len(core.ListedKeysSnapshot()); got != 0 {
+		t.Fatalf("the retained union still holds %d keys past two sync intervals, want 0 — retention is bounded in time (CR-01)", got)
+	}
+	if got := core.PeerSnapshot(); len(got) != 1 {
+		t.Fatalf("the peer table holds %d rows after the expiry, want 1 — the expiry must not be an eviction", len(got))
+	}
+	if !core.ListingComplete() {
+		t.Fatal("ListingComplete() = false after the expiry, want the startup-gate completeness to stay — expiry is not a re-close")
+	}
+	if got := core.ListedKeysEvicted(); got != 1 {
+		t.Fatalf("ListedKeysEvicted() = %d after the expiry, want 1 — a released key is counted", got)
+	}
+
+	// A republished complete listing from the same peer restores the union.
+	core.HandleDatagram(now.Add(3*syncInterval), listedDatagram(listedTestPeer, 2, []port.SyncEntry{expiring}), &out)
+	out.Drain()
+	if _, ok := core.ListedKeysSnapshot()[expiring.Key]; !ok {
+		t.Fatalf("the republished listing did not restore %q, want it back in the union", expiring.Key)
+	}
+}
+
 // TestSync_listedKeysBounded is the T-4-41 acceptance: a hostile segment
 // floods complete one-part listings from 200 distinct node_ids, each listing
 // 1 000 distinct keys built on one shared version set. After the flood the
@@ -107,6 +330,7 @@ func TestSync_listedKeysBounded(t *testing.T) {
 		for j := range entries {
 			entries[j] = port.SyncEntry{Key: fmt.Sprintf("p%03d/k%04d", peer, j), Version: versions[j]}
 		}
+		listedFeedHello(core, now, nodeID)
 		core.HandleDatagram(now, listedDatagram(nodeID, uint64(peer+1), entries), &out)
 		out.Drain()
 		if got := core.listedKeyCount; got > maxListedKeysTotal {
@@ -141,6 +365,7 @@ func TestSync_listingGenerationContentOnly(t *testing.T) {
 	now := time.UnixMilli(listedTestNowMs)
 	core := newListedCore()
 	var out port.Outbox
+	listedFeedHello(core, now, listedTestPeer)
 	send := func(syncID uint64, entries ...port.SyncEntry) {
 		t.Helper()
 		core.HandleDatagram(now, listedDatagram(listedTestPeer, syncID, entries), &out)
@@ -200,6 +425,8 @@ func TestSync_listingGenerationSharedKeys(t *testing.T) {
 		out.Drain()
 	}
 
+	listedFeedHello(core, now, listedTestPeer)
+	listedFeedHello(core, now, listedTestPeer+1)
 	send(listedTestPeer, 1, keyA, keyB)
 	first := core.ListingGeneration()
 	if first == 0 {
@@ -285,6 +512,7 @@ func TestSync_observePerPart(t *testing.T) {
 	core, st := newObservingCore()
 	absorbed := version.PackVersion(listedTestNowMs+10_000, 3, listedTestPeer)
 	var out port.Outbox
+	listedFeedHello(core, observeNow(), listedTestPeer)
 	core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 1, []port.SyncEntry{
 		{Key: "peer/absorbed", Version: absorbed},
 	}), &out)
@@ -311,6 +539,7 @@ func TestSync_observePerPartEmptyAndDiscarded(t *testing.T) {
 		t.Parallel()
 		core, st := newObservingCore()
 		var out port.Outbox
+		listedFeedHello(core, observeNow(), listedTestPeer)
 		core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 2, nil), &out)
 		if got := st.observes; got != 0 {
 			t.Fatalf("Observe calls after an empty part = %d, want 0", got)
@@ -321,6 +550,7 @@ func TestSync_observePerPartEmptyAndDiscarded(t *testing.T) {
 		t.Parallel()
 		core, st := newObservingCore()
 		var out port.Outbox
+		listedFeedHello(core, observeNow(), listedTestPeer)
 		ahead := version.PackVersion(
 			listedTestNowMs+int64(defaultMaxClockLead/time.Millisecond)+1000, 0, listedTestPeer)
 		core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 3, []port.SyncEntry{
@@ -345,6 +575,7 @@ func TestSync_observeOncePerPart(t *testing.T) {
 	high := version.PackVersion(listedTestNowMs+3000, 0, listedTestPeer)
 	mid := version.PackVersion(listedTestNowMs+2000, 0, listedTestPeer)
 	var out port.Outbox
+	listedFeedHello(core, observeNow(), listedTestPeer)
 	core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 4, []port.SyncEntry{
 		{Key: "peer/a", Version: low},
 		{Key: "peer/b", Version: high},
@@ -385,6 +616,7 @@ func TestSync_generationPassThrough(t *testing.T) {
 	// A listing whose entry is older than the stored record drives the
 	// Version + Lookup newer-response read path.
 	var out port.Outbox
+	listedFeedHello(core, observeNow(), listedTestPeer)
 	core.HandleDatagram(observeNow(), listedDatagram(listedTestPeer, 5, []port.SyncEntry{
 		{Key: "local/older", Version: version.PackVersion(listedTestNowMs-1000, 0, listedTestPeer)},
 	}), &out)

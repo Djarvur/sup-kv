@@ -78,12 +78,17 @@ func (*egressStore) Observe(_ version.RecordVersion) time.Duration { return 0 }
 // caches a listing build over it.
 func (*egressStore) Generation() uint64 { return 0 }
 
-// newEgressCore returns a core over the mutable fake store.
+// newEgressCore returns a core over the mutable fake store. The egress tests
+// drive handleDataSync directly, past the classifier, so the peer row the
+// listing binding checks (CR-01) is installed here: the fixture's node id and
+// run_id are exactly the ones egressSync stamps.
 func newEgressCore() *Core {
-	return New(egressTestLocal, [16]byte{1, 2, 3}, &egressStore{
+	core := New(egressTestLocal, [16]byte{1, 2, 3}, &egressStore{
 		versions: make(map[string]version.RecordVersion),
 		records:  make(map[string]storage.Record),
 	}, Config{})
+	core.peers[egressTestPeer] = peer{handle: "peer", runID: [16]byte{1}}
+	return core
 }
 
 // egressNow returns the fixed virtual test instant.

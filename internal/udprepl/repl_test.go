@@ -728,6 +728,18 @@ func TestMirror_listingComplete(t *testing.T) {
 	adapter, udpPort := newMirrorAdapter(t)
 	tx := peerSocket(t)
 	const keys = 3
+
+	// The listing is bound to a learned peer identity (CR-01): the peer's
+	// Hello comes first, and KnownPeers proves the loop processed it.
+	helloDatagram, err := udprepl.EncodeDatagramForTest(port.Hello{}, nodeIDB, runIDB)
+	if err != nil {
+		t.Fatalf("encode Hello: %v", err)
+	}
+	sendDatagram(t, tx, udpPort, helloDatagram)
+	waitFor(t, mirrorWait, "the peer's Hello to surface as KnownPeers == 1", func() bool {
+		return adapter.KnownPeers() == 1
+	})
+
 	sendPart := func(index int, key string) {
 		t.Helper()
 		datagram, err := udprepl.EncodeDatagramForTest(port.DataSync{

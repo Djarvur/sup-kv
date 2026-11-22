@@ -100,9 +100,13 @@ func TestMergeStats_listingAndStaleExcluded(t *testing.T) {
 
 	// A complete one-part listing whose max version sits one drift-warn
 	// window plus a second past the wall clock — exactly the stamp that
-	// would count a DriftWarning if it travelled the merge path.
+	// would count a DriftWarning if it travelled the merge path. Its Hello
+	// comes first: a received listing is bound to a learned peer identity
+	// (CR-01).
 	past := testNowMs + 5000 + int64(testDriftWarn/time.Millisecond) + 1000
 	listed := version.PackVersion(past, 0, peerID1)
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	out.Drain()
 	core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{
 		SyncID:     1,
 		ChunkIndex: 1,

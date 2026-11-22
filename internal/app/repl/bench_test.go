@@ -49,11 +49,13 @@ const (
 // benchFixture builds the core under measurement over a store seeded with
 // keys records through Merge — explicitly versioned, sorted-key seeds, so
 // the fixture never burns 50 000 clock ticks. Construction runs once per
-// benchmark invocation, outside the measured loop; the core's startup
-// timers are armed here so no listing or Hello lands inside a measurement.
-// The returned entries are the first benchChunkEntries seeded records, the
-// fixed DataSync chunk the benchmark feeds back.
-func benchFixture(tb testing.TB, keys int) (*repl.Core, []port.SyncEntry) {
+// benchmark invocation, outside the measured loop; the fixture learns the
+// benchmark's peer identity (the CR-01 listing binding) and drains every
+// startup/listing emission, returning the instant the drain stopped at so no
+// queued datagram lands inside a measurement. The returned entries are the
+// first benchChunkEntries seeded records, the fixed DataSync chunk the
+// benchmark feeds back.
+func benchFixture(tb testing.TB, keys int) (*repl.Core, []port.SyncEntry, time.Time) {
 	tb.Helper()
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	store := storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})
@@ -73,9 +75,15 @@ func benchFixture(tb testing.TB, keys int) (*repl.Core, []port.SyncEntry) {
 	core := repl.New(localID, testRunID(localID),
 		&stateStore{store: store}, repl.Config{SyncResponseRate: benchSyncRate})
 	var out port.Outbox
-	core.Advance(at(0), &out) // startup Hello + listing, before the measured loop
+	core.HandleDatagram(at(0), benchDatagram(port.Hello{}), &out)
 	out.Drain()
-	return core, head
+	now := at(0)
+	for core.QueuedSends() > 0 {
+		now = now.Add(time.Nanosecond) // one limiter slot at the pinned 1e9/s rate
+		core.Advance(now, &out)
+		out.Drain()
+	}
+	return core, head, now
 }
 
 // benchDatagram wraps msg in a decoded datagram from peerID1 — the hand-built
@@ -108,14 +116,14 @@ func BenchmarkHandleDataRequest(b *testing.B) {
 // the flatness gate's measurement.
 func benchHandleDataRequest(b *testing.B, keys int) {
 	b.Helper()
-	core, head := benchFixture(b, keys)
+	core, head, base := benchFixture(b, keys)
 	in := benchDatagram(port.DataRequest{Key: head[0].Key})
 	var out port.Outbox
 	b.ReportAllocs()
 	b.ReportMetric(float64(keys), "store-keys")
 	b.ResetTimer()
 	for i := range b.N {
-		now := at(time.Duration(i+1) * time.Nanosecond)
+		now := base.Add(time.Duration(i+1) * time.Nanosecond)
 		core.HandleDatagram(now, in, &out)
 		core.Advance(now, &out)
 		out.Drain()
@@ -138,7 +146,7 @@ func BenchmarkHandleDataSync(b *testing.B) {
 // flatness gate's measurement.
 func benchHandleDataSync(b *testing.B, keys int) {
 	b.Helper()
-	core, head := benchFixture(b, keys)
+	core, head, base := benchFixture(b, keys)
 	// The 1-of-1 completeness header keeps the datagram on the compare path:
 	// without it the handler would reject the fixture as a malformed listing
 	// and the benchmark would measure the discard branch.
@@ -148,7 +156,7 @@ func benchHandleDataSync(b *testing.B, keys int) {
 	b.ReportMetric(float64(keys), "store-keys")
 	b.ResetTimer()
 	for i := range b.N {
-		now := at(time.Duration(i+1) * time.Nanosecond)
+		now := base.Add(time.Duration(i+1) * time.Nanosecond)
 		core.HandleDatagram(now, in, &out)
 		core.Advance(now, &out)
 		out.Drain()

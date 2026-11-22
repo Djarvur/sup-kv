@@ -351,6 +351,19 @@ func TestMirror_identicalListingFloodDoesNotRepublish(t *testing.T) {
 	adapter := newTrackerTestAdapter(t)
 	now := time.UnixMilli(1730000000000)
 	entry := port.SyncEntry{Key: mirrorFloodKey, Version: version.PackVersion(1730000000000, 1, trackerNodeB)}
+	// The listing must arrive from a learned peer identity (CR-01): the
+	// peer's Hello teaches the row the listing's run_id is bound to.
+	hello := port.InboundDatagram{
+		Source:       "n22",
+		Status:       port.Decoded,
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeID:       trackerNodeB,
+		RunID:        trackerRunIDB,
+		Msg:          port.Hello{},
+	}
+	var out port.Outbox
+	adapter.core.HandleDatagram(now, hello, &out)
+	out.Drain()
 	in := port.InboundDatagram{
 		Source:       "n22",
 		Status:       port.Decoded,
@@ -364,7 +377,6 @@ func TestMirror_identicalListingFloodDoesNotRepublish(t *testing.T) {
 			Entries:    []port.SyncEntry{entry},
 		},
 	}
-	var out port.Outbox
 	adapter.core.HandleDatagram(now, in, &out)
 	out.Drain()
 	adapter.mirrorStats()

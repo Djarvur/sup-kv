@@ -124,15 +124,24 @@ func TestRestart_runIDChangeTriggersFullSync(t *testing.T) {
 
 	r1, r2 := runIDFor(1), runIDFor(2)
 	core.HandleDatagram(now, helloFromRun(r1), &out)
-	if got := len(out.Drain()); got != 0 {
-		t.Fatalf("the learn Hello from the unknown node emitted %d messages synchronously, want 0 — its first-seen listing is queued on the pacer", got)
+	if got := out.Drain(); len(got) != 1 {
+		t.Fatalf("the learn Hello from the unknown node emitted %d messages synchronously, want 1 — the identity echo that lets the peer bind our listing (CR-01)", len(got))
+	} else if echo, ok := got[0].Msg.(port.Hello); !ok || echo != (port.Hello{}) || got[0].To != handleFor(peerID1) || got[0].Broadcast {
+		t.Fatalf("the learn Hello emitted %v, want one unicast port.Hello to the triggering handle %q", got[0], handleFor(peerID1))
 	}
 
 	core.HandleDatagram(now, helloFromRun(r2), &out)
 	drained := advanceDrain(core, &out, now)
 	got := targetedSyncs(t, drained, handleFor(peerID1))
-	if len(drained) != len(got) {
-		t.Fatalf("the restart Hello drained %d messages of which %d are targeted DataSync chunks, want exactly the chunk sequence and nothing else", len(drained), len(got))
+	// The echo travels in the handler outbox, the listing chunks on the pacer:
+	// one identity message plus exactly the chunk sequence, nothing else.
+	if len(drained) != len(got)+1 {
+		t.Fatalf("the restart Hello drained %d messages of which %d are targeted DataSync chunks, want the chunk sequence plus one identity echo", len(drained), len(got))
+	}
+	if echo := drained[0]; echo.Broadcast || echo.To != handleFor(peerID1) {
+		t.Fatalf("the restart Hello's first emission = (%t, %q), want a unicast identity echo to %q", echo.Broadcast, echo.To, handleFor(peerID1))
+	} else if _, ok := echo.Msg.(port.Hello); !ok {
+		t.Fatalf("the restart Hello's first emission is a %T, want the identity echo port.Hello", echo.Msg)
 	}
 	if !dataSyncsEqual(got, want) {
 		t.Fatalf("the targeted listing = %v, want the exact fresh plan-04-03 chunk sequence %v over the same store", got, want)
@@ -179,8 +188,8 @@ func TestRestart_firstHelloExactlyOneListing(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("the first Hello emitted %d targeted DataSync chunks, want exactly 1 — a newly seen peer gets one complete listing", len(got))
 	}
-	if len(drained) != len(got) {
-		t.Fatalf("the first Hello drained %d messages of which %d are targeted listing chunks, want exactly the listing and nothing else",
+	if len(drained) != len(got)+1 {
+		t.Fatalf("the first Hello drained %d messages of which %d are targeted listing chunks, want the listing plus one identity echo",
 			len(drained), len(got))
 	}
 	if sync := got[0]; sync.ChunkIndex != 1 || sync.ChunkCount != 1 || len(sync.Entries) != 1 || sync.Entries[0].Key != keyAlpha {
@@ -478,8 +487,10 @@ func TestRestart_staleRunIdAndInFlight(t *testing.T) {
 		r1, r2, r3 := runIDFor(1), runIDFor(2), runIDFor(3)
 
 		core.HandleDatagram(now0, helloFromRun(r1), &out)
-		if got := len(out.Drain()); got != 0 {
-			t.Fatalf("the learn Hello emitted %d messages synchronously, want 0", got)
+		if got := out.Drain(); len(got) != 1 {
+			t.Fatalf("the learn Hello emitted %d messages synchronously, want 1 (the identity echo)", len(got))
+		} else if _, ok := got[0].Msg.(port.Hello); !ok {
+			t.Fatalf("the learn Hello's synchronous emission is a %T, want the identity echo port.Hello", got[0].Msg)
 		}
 		advanceDrain(core, &out, now0) // the learn's first-seen listing
 		out.Drain()

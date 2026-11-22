@@ -165,8 +165,10 @@ func TestDiscard_classes(t *testing.T) {
 			want:       repl.DiscardStats{},
 			wantPeerID: strangerID,
 			wantPeer:   &repl.PeerInfo{Handle: handleFor(strangerID), RunID: testRunID(strangerID), LastHello: now},
-			// The stranger's first Hello enqueues its first-seen listing on
-			// the pacer (PROTO-04): one empty-store chunk is queued.
+			// The stranger's first Hello emits its identity echo and enqueues
+			// its first-seen listing on the pacer (PROTO-04, CR-01): one
+			// unicast Hello plus one empty-store chunk queued.
+			wantEmits:  1,
 			wantQueued: 1,
 		},
 		{
@@ -187,10 +189,10 @@ func TestDiscard_classes(t *testing.T) {
 			wantPeerID: peerID1,
 			wantPeer:   &repl.PeerInfo{Handle: cloneHandle, RunID: testRunID(strangerID), LastHello: now},
 			// The targeted listing is enqueued on the listing pacer, not
-			// emitted by the handler: one queued chunk proves the restart
-			// reaction ran while the empty handler outbox proves the
-			// duplicate classifier did not discard it.
-			wantEmits:  0,
+			// emitted by the handler; the handler outbox carries the one
+			// identity echo that lets the peer bind that listing (CR-01). The
+			// queued chunk proves the restart reaction ran.
+			wantEmits:  1,
 			wantQueued: 1,
 		},
 	}
@@ -336,6 +338,16 @@ func classify(in port.InboundDatagram, peers map[uint16]*modelPeer, now time.Tim
 	}
 	if class := validateClass(in.Msg, now); class != "" {
 		return class
+	}
+	if _, isSync := in.Msg.(port.DataSync); isSync {
+		// The retained-listing binding (CR-01): a listing from an identity the
+		// table does not hold, or from a run_id that differs from the row's, is
+		// the duplicate-node_id configuration error — it never reaches the
+		// retention, the completeness flag or the compare path.
+		known, ok := peers[in.NodeID]
+		if !ok || known.runID != in.RunID {
+			return "DuplicateNodeID"
+		}
 	}
 	if isHello {
 		known, ok := peers[in.NodeID]
@@ -1201,6 +1213,8 @@ func TestDiscard_badSyncHeader(t *testing.T) {
 		var out port.Outbox
 		core.Advance(now, &out)
 		out.Drain()
+		core.HandleDatagram(now, helloFrom(peerID1), &out) // a listing is bound to a learned identity (CR-01)
+		out.Drain()
 
 		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 5, ChunkIndex: 0, ChunkCount: 0, Entries: []port.SyncEntry{entry}}), &out)
 		out.Drain()
@@ -1227,6 +1241,8 @@ func TestDiscard_badSyncHeader(t *testing.T) {
 		core, _ := newTestCore()
 		var out port.Outbox
 		core.Advance(now, &out)
+		out.Drain()
+		core.HandleDatagram(now, helloFrom(peerID1), &out) // a listing is bound to a learned identity (CR-01)
 		out.Drain()
 
 		core.HandleDatagram(now, datagramFrom(peerID1, port.DataSync{SyncID: 7, ChunkIndex: 1, ChunkCount: 3, Entries: []port.SyncEntry{entry}}), &out)

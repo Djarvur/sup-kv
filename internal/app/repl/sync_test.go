@@ -767,8 +767,10 @@ func TestSync_syncArrived(t *testing.T) {
 	}
 
 	// One complete received listing — the single-part empty one — flips it:
-	// every chunk of the round is present, from any sender (the compare path
-	// never consults the peer table).
+	// every chunk of the round is present. The sender must be a known peer
+	// identity (CR-01), so its Hello comes first.
+	core.HandleDatagram(now, helloFrom(peerID2), &out)
+	out.Drain()
 	core.HandleDatagram(now, syncFrom(peerID2), &out)
 	out.Drain()
 	if !core.SyncArrived() {
@@ -836,6 +838,8 @@ func TestSync_partialListingKeepsGateClosed(t *testing.T) {
 	var out port.Outbox
 	core.Advance(at(0), &out)
 	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out) // the listing's identity must be a learned peer (CR-01)
+	out.Drain()
 	parts := chunkedListing(peerID1, 44, 3)
 	for i, part := range parts {
 		core.HandleDatagram(at(0), part, &out)
@@ -860,6 +864,8 @@ func TestSync_headerOutOfOrderAndDuplicate(t *testing.T) {
 	core, _ := newTestCore()
 	var out port.Outbox
 	core.Advance(at(0), &out)
+	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out) // the listing's identity must be a learned peer (CR-01)
 	out.Drain()
 	parts := chunkedListing(peerID1, 45, 3)
 	feed := func(i int) {
@@ -894,6 +900,8 @@ func TestSync_emptyListingCompletes(t *testing.T) {
 	var out port.Outbox
 	core.Advance(at(0), &out)
 	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out) // the listing's identity must be a learned peer (CR-01)
+	out.Drain()
 	core.HandleDatagram(at(0), datagramFrom(peerID1, port.DataSync{SyncID: 46, ChunkIndex: 1, ChunkCount: 1}), &out)
 	out.Drain()
 	if !core.SyncArrived() || !core.ListingComplete() {
@@ -912,6 +920,23 @@ func newSyncCore(cfg repl.Config) (*repl.Core, *stateStore) {
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
 	return repl.New(localID, testRunID(localID), st, cfg), st
+}
+
+// learnPeer sends one Hello from peerID1 through core and drains the targeted
+// listing its first-seen branch enqueues, returning the virtual instant the
+// drain stopped at. A received listing is bound to a peer-table row (CR-01),
+// so a fixture's Hello comes first; draining the listing keeps the queue
+// empty for tests whose later Advances pin exact per-slot emission counts.
+func learnPeer(core *repl.Core, now time.Time) time.Time {
+	var out port.Outbox
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	out.Drain()
+	for core.QueuedSends() > 0 {
+		now = now.Add(time.Millisecond)
+		core.Advance(now, &out)
+		out.Drain()
+	}
+	return now
 }
 
 // TestSync_compare proves the DataSync receive path's per-key compare
@@ -959,6 +984,7 @@ func TestSync_compare(t *testing.T) {
 		t.Fatalf("store Merge(%q): %v", keyTombstone, err)
 	}
 	snap := st.Records()
+	now = learnPeer(core, now)
 
 	listing := []port.SyncEntry{
 		{Key: keyAlpha, Version: version.PackVersion(testNowMs, 9, peerID1)},
@@ -1027,6 +1053,7 @@ func TestSync_rateLimit(t *testing.T) {
 		var out port.Outbox
 		core.Advance(now, &out)
 		out.Drain()
+		now = learnPeer(core, now)
 		const k = 5
 		entries := make([]port.SyncEntry, 0, k)
 		for i := range k {
@@ -1083,6 +1110,7 @@ func TestSync_rateLimit(t *testing.T) {
 		var out port.Outbox
 		core.Advance(now, &out)
 		out.Drain()
+		now = learnPeer(core, now)
 		entries := []port.SyncEntry{
 			{Key: "cfg/one", Version: version.PackVersion(testNowMs, 0, peerID1)},
 			{Key: "cfg/two", Version: version.PackVersion(testNowMs+1, 0, peerID1)},
@@ -1140,6 +1168,7 @@ func TestSync_responseRateClamp(t *testing.T) {
 			var out port.Outbox
 			core.Advance(now, &out)
 			out.Drain()
+			now = learnPeer(core, now)
 			entries := []port.SyncEntry{
 				{Key: "cfg/clamp-a", Version: version.PackVersion(testNowMs, 0, peerID1)},
 				{Key: "cfg/clamp-b", Version: version.PackVersion(testNowMs+1, 0, peerID1)},

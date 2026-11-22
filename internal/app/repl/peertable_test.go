@@ -218,11 +218,14 @@ func TestPeerTable_solePeer(t *testing.T) {
 		// The peer returns: the Hello ends the empty table, so the same event
 		// enqueues the flush send, re-adds the waiter and restarts the ladder;
 		// the next Advance drains the queued send, and the peer's Ack then
-		// drains the entry.
+		// drains the entry. The handler's only synchronous emission is the
+		// identity echo (CR-01) — the flush itself only enqueues.
 		backAt := at(peerTimeout + 2*time.Second)
 		core.HandleDatagram(backAt, helloFrom(peerID1), &out)
-		if got := len(out.Drain()); got != 0 {
-			t.Fatalf("the returning Hello emitted %d messages inside the handler, want 0 — it only enqueues", got)
+		if got := out.Drain(); len(got) != 1 {
+			t.Fatalf("the returning Hello emitted %d messages inside the handler, want 1 (the identity echo) — the flush only enqueues", len(got))
+		} else if _, ok := got[0].Msg.(port.Hello); !ok || got[0].To != handleFor(peerID1) {
+			t.Fatalf("the returning Hello's synchronous emission %v is not the unicast identity echo to %q", got[0], handleFor(peerID1))
 		}
 		core.Advance(backAt, &out)
 		if got := broadcastRepls(out.Drain()); len(got) != 1 || got[0].Key != keyAlpha || got[0].Record.Version != ver {

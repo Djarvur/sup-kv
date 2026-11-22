@@ -160,6 +160,12 @@ const (
 	// counted in ListedKeysEvicted.
 	maxListedKeysTotal = 131072
 
+	// listedKeysMaxAgeSyncIntervals is the retained-listing lifetime, in sync
+	// intervals (CR-01): a peer that has not republished its complete listing
+	// for this many intervals stops protecting keys. Two intervals tolerate
+	// one lost round without widening the exposure window further.
+	listedKeysMaxAgeSyncIntervals = 2
+
 	// seenRunsCap bounds the per-peer history of previously current run_ids
 	// (PROTO-06, T-4-30): a fixed ring behind the alternating-identity
 	// discrimination, so a hostile flapping identity cannot grow per-peer
@@ -825,15 +831,20 @@ type Core struct {
 
 	// The retained listed-key payload (PROTO-01, T-4-41): each peer's last
 	// complete listing as a key set, the union's per-key refcounts, the
-	// union itself and its size, and the LRU over peers (listedOrder front =
-	// least recently published) that bounds the payload. listedKeysEvicted
-	// counts every key released by an eviction.
+	// union itself and its size, the LRU over peers (listedOrder front =
+	// least recently published, which is also listedAt order) that bounds
+	// the payload, and each row's last-published instant. listedAt bounds
+	// the retention in TIME as well as in size (CR-01): a set nobody
+	// republished within two sync intervals leaves the union. Both dropping
+	// paths — eviction and expiry — count every released key in
+	// listedKeysEvicted.
 	listedByPeer      map[uint16]map[string]struct{}
 	listedRefs        map[string]int
 	listedKeys        map[string]struct{}
 	listedKeyCount    int
 	listedOrder       *list.List
 	listedPos         map[uint16]*list.Element
+	listedAt          map[uint16]time.Time
 	listedKeysEvicted uint64
 
 	// listingGen is the published listing content version: it moves exactly
@@ -884,6 +895,7 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 		listedKeys:           make(map[string]struct{}),
 		listedOrder:          list.New(),
 		listedPos:            make(map[uint16]*list.Element),
+		listedAt:             make(map[uint16]time.Time),
 		nextSyncID:           1,
 		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
@@ -934,9 +946,11 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 // per-class rate-limited WARN on the event-loop's now (T-3-25).
 //
 // Everything else reaches protocol processing:
-// Hello learns a previously unknown node and answers it with one targeted
-// full listing (the first-seen listing, PROTO-04), refreshes a known node's
-// liveness, or — when a known node's run_id changed — replaces the old run's
+// Hello learns a previously unknown node and answers it with one unicast
+// identity echo plus one targeted full listing (the first-seen listing,
+// PROTO-04 — the echo is what lets the receiver's CR-01 listing binding
+// accept that listing), refreshes a known node's liveness, or — when a known
+// node's run_id changed — replaces the old run's
 // listing with one targeted full listing toward the restarted peer (REPL-07),
 // DataReplication applies the record and Acks it, Ack drains
 // the pending-set wait-set (REPL-02), DataRequest answers through the
@@ -1180,7 +1194,7 @@ func (c *Core) warnDiscard(now time.Time, nodeID uint16, class string) {
 func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	switch msg := in.Msg.(type) {
 	case port.Hello:
-		c.handleHello(now, in)
+		c.handleHello(now, in, out)
 	case port.DataReplication:
 		c.applyRemote(now, in.Source, msg, out)
 	case port.Ack:
@@ -1230,7 +1244,13 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 //     has discovery == false, so this branch returns.
 //
 // Both listing paths call the single [Core.enqueueListing] — there is no
-// second implementation. The first-seen round starts at chunk 0; the restart
+// second implementation — and both preface it with one unicast Hello to the
+// triggering handle: the receiver's listing binding (CR-01) requires a
+// peer-table row for the sender, and a peer that just announced itself may
+// not have heard our periodic Hello yet. The echo is cheap and bounded (the
+// reply terminates as a repeat Hello on the other side), and it is what
+// keeps PROTO-04's "state without a sync_interval term" true under the
+// binding. The first-seen round starts at chunk 0; the restart
 // round uses and advances the row's rotation counter, so repeated restarts
 // cover the whole key space under buffer loss (D-01's targeted half).
 // The restart test is "run_id unseen by this row", not "run_id differs": the
@@ -1262,7 +1282,7 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 // expiry (research A6), while the pacer prevents the whole-set burst R-01/R-02
 // measured. A Hello that does not end an empty table modifies no wait-set:
 // only discovery adds waiters.
-func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
+func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	// Any received Hello — a discovery, a refresh or a restart — proves the
 	// receive path hears peers, so the no-Hello WARN stands down for the
 	// process lifetime (XPORT-09).
@@ -1314,6 +1334,20 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	// One targeted listing per (node_id, run_id) destination. Only a restart
 	// advances the rotation: the first-seen round is round 0, and the repeated
 	// rounds that must cover the key space are the restarts.
+	//
+	// The listing's receiver must already hold this node's peer row, or the
+	// listing binding (CR-01) discards every part: a first-seen or restarting
+	// peer has not necessarily heard our Hello yet, so the identity half of
+	// "one targeted listing toward a newly seen peer" travels with it — one
+	// unicast Hello to the same handle, flushed ahead of the paced listing
+	// chunks. Without this echo the targeted listing would be dropped as
+	// unbound and the joiner would wait for our next periodic Hello PLUS a
+	// periodic listing, reintroducing the sync_interval term D-04 removes.
+	// The exchange terminates: a receiver that has not yet learned us answers
+	// our echo with its own echo (and listing), and that reply reaches us as a
+	// repeat Hello — the row it names is the one the original Hello created —
+	// so each side echoes at most once per pair.
+	out.Unicast(in.Source, port.Hello{})
 	if c.enqueueListing(now, listingDst{nodeID: in.NodeID, runID: in.RunID}, known.rotation) && remembered {
 		known.rotation++
 		c.peers[in.NodeID] = known
@@ -1507,14 +1541,26 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 // directly-driven core receives no header validation (the wired path
 // classifies that before this handler), so an impossible header returns
 // without touching any state.
+//
+// A listing is TRUSTED state — it makes arbitrary key names unreadable and
+// uncreatable through the RPC layer — so it is accepted only from a real
+// peer identity (CR-01): a datagram whose node_id has no peer-table row, or
+// whose envelope run_id differs from the row's, is the named
+// duplicate-node-id configuration error. It is counted, WARNed through the
+// shared limiter and dropped BEFORE the clock call, the accumulation and the
+// completeness publication: an unbound sender can neither retain keys, nor
+// complete a round, nor open the gate.
 func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.DataSync, _ *port.Outbox) {
 	if !validSyncHeader(msg) {
+		return
+	}
+	if !c.listingBound(now, in) {
 		return
 	}
 	if len(msg.Entries) > 0 {
 		c.store.Observe(maxEntryVersion(msg.Entries))
 	}
-	c.accumulateSync(in, msg)
+	c.accumulateSync(now, in, msg)
 	for _, entry := range msg.Entries {
 		local, present := c.store.Version(entry.Key)
 		switch {
@@ -1526,6 +1572,30 @@ func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.D
 			c.enqueueResponse(now, in.Source, egressDataReplication, entry.Key)
 		}
 	}
+}
+
+// listingBound reports whether in's identity is bound to a live peer-table
+// row — the CR-01 retention gate. Every other stateful path compares the
+// envelope run_id with the remembered row's, and the listed-key union must
+// not be cheaper to fill than the peer table itself: an unauthenticated
+// sender that never sent a Hello (or that forges a different run under a
+// known node_id) would otherwise install permanent state, flush a real
+// peer's protective set and open the startup gate past both backstops. The
+// drop is the named configuration-error class (D-06's identity family),
+// counted and rate-limited exactly like the duplicate-identity paths, and
+// nothing — no clock call, no accumulation, no completeness — follows it.
+func (c *Core) listingBound(now time.Time, in port.InboundDatagram) bool {
+	if known, ok := c.peers[in.NodeID]; ok && known.runID == in.RunID {
+		return true
+	}
+	c.discards.DuplicateNodeID++
+	c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf(
+		"node_id %d listing from unbound run at handle %q", in.NodeID, in.Source))
+	c.warnRateLimited(now, in.NodeID, DiscardDuplicateNodeID, fmt.Sprintf(
+		"sup-kv: configuration error: node_id %d sent a listing from a run the peer table does not hold, datagram discarded (CR-01)",
+		in.NodeID,
+	))
+	return false
 }
 
 // maxEntryVersion returns the greatest version among entries by the full
@@ -1553,11 +1623,12 @@ func validSyncHeader(msg port.DataSync) bool {
 		msg.ChunkCount <= maxSyncChunks
 }
 
-// accumulateSync folds one valid part into its round's stream, enforcing the
-// three bounds, and completes the listing when every index 1..count is
-// present. The stream key includes the peer's run_id, so a restart's fresh
-// sync_id counter cannot merge into the previous run's partial state.
-func (c *Core) accumulateSync(in port.InboundDatagram, msg port.DataSync) {
+// accumulateSync folds one valid, identity-bound part into its round's
+// stream, enforcing the three bounds, and completes the listing when every
+// index 1..count is present. The stream key includes the peer's run_id, so a
+// restart's fresh sync_id counter cannot merge into the previous run's
+// partial state.
+func (c *Core) accumulateSync(now time.Time, in port.InboundDatagram, msg port.DataSync) {
 	key := syncStreamKey{peer: in.NodeID, run: in.RunID, id: msg.SyncID}
 	stream := c.syncs[key]
 	if stream == nil {
@@ -1588,7 +1659,7 @@ func (c *Core) accumulateSync(in port.InboundDatagram, msg port.DataSync) {
 	if !stream.complete() {
 		return
 	}
-	changed := c.retainListedKeys(in.NodeID, stream.entries)
+	changed := c.retainListedKeys(now, in.NodeID, stream.entries)
 	if !c.listingComplete {
 		c.listingComplete = true
 		changed = true
@@ -1717,18 +1788,21 @@ func (c *Core) dropPeerSyncStreams(peer uint16) {
 }
 
 // retainListedKeys installs entries as peer's whole listed-key set, releases
-// the set it replaces through the union refcounts, refreshes the peer's LRU
-// position, and then evicts whole peer sets from the LRU front while the
-// retained total exceeds maxListedKeysTotal (T-4-41). It reports whether the
-// UNION membership actually changed — a key entering or leaving the union,
-// not merely a peer's own set being rewritten — so a key shared with another
-// peer neither enters nor leaves it, and an identical repeated listing moves
-// no generation and the adapter's mirror clones nothing. A key shared by
+// the set it replaces through the union refcounts, records the publish
+// instant, refreshes the peer's LRU position, and then evicts whole peer
+// sets from the LRU front while the retained total exceeds
+// maxListedKeysTotal (T-4-41). It reports whether the UNION membership
+// actually changed — a key entering or leaving the union, not merely a
+// peer's own set being rewritten — so a key shared with another peer neither
+// enters nor leaves it, and an identical repeated listing moves no
+// generation and the adapter's mirror clones nothing. A key shared by
 // several peers stays in the union until its last lister drops it; eviction
 // therefore shrinks the union, the refcounts and the retained total together.
-func (c *Core) retainListedKeys(peer uint16, entries map[string]version.RecordVersion) bool {
+// The recorded instant is what bounds the retention in time (CR-01,
+// [Core.expireListedKeys]): a set nobody republishes stops protecting keys.
+func (c *Core) retainListedKeys(now time.Time, peer uint16, entries map[string]version.RecordVersion) bool {
 	if sameListedKeys(c.listedByPeer[peer], entries) {
-		c.touchListedPeer(peer)
+		c.touchListedPeer(now, peer)
 		return false
 	}
 	released := c.dropListedPeer(peer)
@@ -1744,6 +1818,7 @@ func (c *Core) retainListedKeys(peer uint16, entries map[string]version.RecordVe
 		}
 	}
 	c.listedByPeer[peer] = set
+	c.listedAt[peer] = now
 	c.listedPos[peer] = c.listedOrder.PushBack(peer)
 	evicted := 0
 	for c.listedKeyCount > maxListedKeysTotal {
@@ -1758,15 +1833,19 @@ func (c *Core) retainListedKeys(peer uint16, entries map[string]version.RecordVe
 	return released > 0 || added > 0 || evicted > 0
 }
 
-// touchListedPeer moves peer to the LRU back without touching its set — the
-// identical-repeat path: recency updates, content does not.
-func (c *Core) touchListedPeer(peer uint16) {
-	if elem := c.listedPos[peer]; elem != nil {
-		c.listedOrder.MoveToBack(elem)
+// touchListedPeer moves peer to the LRU back and refreshes its publish
+// instant without touching its set — the identical-repeat path: recency
+// updates, content does not. A peer with no retained set is a no-op: an
+// empty listing adds no key to the union, so creating a row for it would let
+// a listing-shaped datagram grow listedByPeer without bound while
+// listedKeyCount stayed 0 and the size cap never applied (CR-01).
+func (c *Core) touchListedPeer(now time.Time, peer uint16) {
+	elem := c.listedPos[peer]
+	if elem == nil {
 		return
 	}
-	c.listedByPeer[peer] = make(map[string]struct{})
-	c.listedPos[peer] = c.listedOrder.PushBack(peer)
+	c.listedOrder.MoveToBack(elem)
+	c.listedAt[peer] = now
 }
 
 // dropListedPeer removes peer's whole listed-key contribution: every key whose
@@ -1793,11 +1872,55 @@ func (c *Core) dropListedPeer(peer uint16) int {
 		}
 	}
 	delete(c.listedByPeer, peer)
+	delete(c.listedAt, peer)
 	if elem := c.listedPos[peer]; elem != nil {
 		c.listedOrder.Remove(elem)
 		delete(c.listedPos, peer)
 	}
 	return released
+}
+
+// expireListedKeys releases every retained peer set that has not been
+// republished within two sync intervals (CR-01). Retention is bound in TIME
+// as well as in size: a peer that stops publishing listings — a dead run, a
+// partitioned segment, a sender that never lists again — must stop
+// protecting keys, or one forged or stale listing would deny them for the
+// process lifetime. The walk follows listedOrder, which is also publish-time
+// order (every retain and every identical repeat moves the peer to the back
+// and refreshes its instant), so it stops at the first fresh row. Each
+// released key counts in ListedKeysEvicted like an eviction, and a union
+// change moves the listing generation so the mirror republishes.
+func (c *Core) expireListedKeys(now time.Time) {
+	maxAge := listedKeysMaxAgeSyncIntervals * c.cfg.SyncInterval
+	var expired []uint16
+	for elem := c.listedOrder.Front(); elem != nil; elem = elem.Next() {
+		peer := elem.Value.(uint16)
+		if now.Sub(c.listedAt[peer]) < maxAge {
+			break // listedOrder is publish-time order: the rest are fresh too
+		}
+		expired = append(expired, peer)
+	}
+	for _, peer := range expired {
+		released := c.dropListedPeer(peer)
+		//nolint:gosec // G115: released counts union keys, bounded by maxListedKeysTotal.
+		c.listedKeysEvicted += uint64(released)
+		if released > 0 {
+			c.listingGen++
+		}
+	}
+}
+
+// earliestListedExpiry returns the instant the oldest retained set expires —
+// the deadline contribution that keeps [Core.expireListedKeys] from waiting
+// for an unrelated timer. The zero time means no set is retained (never a
+// deadline). After an expire pass every remaining instant is strictly future,
+// so the returned deadline is too.
+func (c *Core) earliestListedExpiry() time.Time {
+	front := c.listedOrder.Front()
+	if front == nil {
+		return time.Time{}
+	}
+	return c.listedAt[front.Value.(uint16)].Add(listedKeysMaxAgeSyncIntervals * c.cfg.SyncInterval)
 }
 
 // sameListedKeys reports whether peer's retained set already holds exactly
@@ -1966,11 +2089,13 @@ func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, o
 }
 
 // Advance fires the due timers — the hello timer, the DataSync startup and
-// interval triggers, the paced listing drain, the peer-timeout eviction scan,
-// the retransmission scan and its paced record-send drain, and the
+// interval triggers, the paced listing drain, the retained-listing expiry,
+// the peer-timeout eviction scan, the retransmission scan and its paced
+// record-send drain, and the
 // rate-limited egress drain — and returns the
 // next deadline for the driver to sleep on: the minimum of the following
-// hello deadline, the next sync deadline, the earliest peer expiry, while
+// hello deadline, the next sync deadline, the earliest listed-key expiry,
+// the earliest peer expiry, while
 // any pending entry exists the retransmit scan deadline (the
 // scan-granularity reading of retransmit_interval, research A5), while any
 // listing chunk is queued the next listing slot, while any record send is
@@ -1990,6 +2115,7 @@ func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
 	}
 	c.syncListing(now)
 	c.drainListings(now, out)
+	c.expireListedKeys(now)
 	c.evictPeers(now, out)
 	c.scanRetransmit(now)
 	c.drainRecordSends(now, out)
@@ -2477,13 +2603,14 @@ func (c *Core) emitRecordSend(now time.Time, rs recordSend, out *port.Outbox) bo
 }
 
 // nextDeadline returns the earliest strictly-future deadline over the armed
-// timers: the hello timer, the sync timer, the earliest peer expiry, while
+// timers: the hello timer, the sync timer, the earliest listed-key expiry,
+// the earliest peer expiry, while
 // any pending entry exists the retransmit scan deadline, while any listing
 // chunk is queued the next listing slot, while any record send is queued the
 // next record slot, and while
 // any response is queued the next egress slot. After syncListing,
-// drainListings, evictPeers, scanRetransmit, drainRecordSends and
-// drainEgress have fired everything due, every
+// drainListings, expireListedKeys, evictPeers, scanRetransmit,
+// drainRecordSends and drainEgress have fired everything due, every
 // contribution is strictly future.
 func (c *Core) nextDeadline(now time.Time) time.Time {
 	deadline := c.nextHello
@@ -2502,6 +2629,9 @@ func (c *Core) nextDeadline(now time.Time) time.Time {
 		deadline = c.nextRecordAt
 	}
 	if expiry := c.earliestPeerExpiry(); !expiry.IsZero() && expiry.Before(deadline) {
+		deadline = expiry
+	}
+	if expiry := c.earliestListedExpiry(); !expiry.IsZero() && expiry.Before(deadline) {
 		deadline = expiry
 	}
 	if len(c.egress) > 0 && c.nextSendAt.Before(deadline) {
@@ -2623,8 +2753,9 @@ func (c *Core) SyncStreamDropped() uint64 {
 }
 
 // ListedKeysEvicted returns the number of retained listed keys released by
-// whole-peer-set eviction (T-4-41) — each key removed from the union by the
-// maxListedKeysTotal bound increments it once.
+// whole-peer-set eviction or by expiry (T-4-41, CR-01) — each key removed
+// from the union by the maxListedKeysTotal bound or by the two-sync-interval
+// age bound increments it once.
 func (c *Core) ListedKeysEvicted() uint64 {
 	return c.listedKeysEvicted
 }
