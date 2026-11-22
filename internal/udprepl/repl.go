@@ -165,9 +165,14 @@ type trackerKey struct {
 // the report can count only the promise the write actually made (A-01,
 // T-06-04).
 type tracker struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+
+	// wants is the captured write-time membership set, stored when the
+	// tracker is created and immutable afterwards; an Ack from a peer outside
+	// it is inert (T-06-04).
+	wants map[uint16]struct{}
+
 	total    uint32
-	wants    map[uint16]struct{}
 	acked    []uint16
 	resolved bool
 	ok       bool
