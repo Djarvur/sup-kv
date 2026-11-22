@@ -575,6 +575,20 @@ func (e *Engine) Snapshot(name string) error {
 	return e.dumps.CreateSnapshot(name)
 }
 
+// RestoredRecord is one record a Restore actually replayed: the snapshot
+// key, the fresh version the store stamped for the replay, the record's
+// data and whether the replay installed a tombstone. Records a replay
+// skips — a tombstone with nothing to beat, a value the store's shrunk
+// limit rejects — are absent, and the order is the replay's deterministic
+// sorted-key order, so the notify sequence a snapshot load drives is stable
+// across runs.
+type RestoredRecord struct {
+	Key     string
+	Version version.RecordVersion
+	Data    []byte
+	Deleted bool
+}
+
 // Restore replays the named snapshot's records as ordinary writes and
 // deletes with fresh versions (D-09, PERS-05): a snapshot-live record is a
 // fresh Set that beats any current tombstone, a snapshot tombstone a fresh
@@ -583,37 +597,42 @@ func (e *Engine) Snapshot(name string) error {
 // never re-installed (no Merge); fresh versions are what make the restore
 // replicate and win by normal LWW. A snapshot that already equals the
 // store's current state — every record, version and tombstone — replays
-// as a whole-restore no-op: the engine stays clean and the final flush
-// replies nil without a redundant dump (D-15, 03 IN-02 + 04 IN-02);
-// ANY difference replays in full, every snapshot record re-stamped fresh,
-// preserving the fresh-version dominance the restore replicates and wins
-// by. The replay runs in deterministic sorted-key order through the
-// store's write path, and the call returns only after one final flush
-// whose dump covers every replayed write — the same write-confirmation
-// contract as Set, batched into one flush because the per-key semantics
-// are identical while sequential per-write blocking would serialize N
-// writes at one debounce each. Errors surface unchanged — a missing
-// snapshot, a generation-level decode fault, a store rejection or a
-// failed confirming dump — never a silent empty success.
-func (e *Engine) Restore(name string) error {
+// as a whole-restore no-op: the engine stays clean, the returned record
+// list is empty and the final flush replies nil without a redundant dump
+// (D-15, 03 IN-02 + 04 IN-02); ANY difference replays in full, every
+// snapshot record re-stamped fresh, preserving the fresh-version dominance
+// the restore replicates and wins by. The replay runs in deterministic
+// sorted-key order through the store's write path, and the call returns
+// only after one final flush whose dump covers every replayed write — the
+// same write-confirmation contract as Set, batched into one flush because
+// the per-key semantics are identical while sequential per-write blocking
+// would serialize N writes at one debounce each. The returned list names
+// exactly the records the replay installed — sorted by key, skipped records
+// absent — and is returned even when the confirming dump failed, so a
+// snapshot load can replicate what is already in memory (PROTO-08) while
+// the error still reports the dump honestly: a failed final dump surfaces
+// as ErrDumpFailed carrying its cause, and a closed engine as ErrClosed.
+// Load and decode errors surface unchanged — a missing snapshot or a
+// generation-level decode fault — never a silent empty success.
+func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
 	data, err := e.dumps.ReadSnapshot(name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	records, _, err := Decode(data)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if restoreChanges(e.store.Records(), records) {
 		for _, key := range slices.Sorted(maps.Keys(records)) {
-			err = replayRecord(e.store, key, records[key])
+			_, _, err = replayRecord(e.store, key, records[key])
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		e.markDirty()
 	}
-	return e.flush()
+	return nil, e.flush()
 }
 
 // restoreChanges reports whether replaying the snapshot's records would
@@ -639,20 +658,25 @@ func restoreChanges(current, snap map[string]storage.Record) bool {
 // ErrNotFound is a skip — a missing or already-tombstoned key has nothing
 // to beat, and Delete writes nothing there anyway — and a live record as a
 // fresh-version Set whose ErrValueTooLarge is a skip, mirroring Open, so a
-// config-shrunk value limit never aborts a restore.
-func replayRecord(store *storage.Store, key string, rec storage.Record) error {
+// config-shrunk value limit never aborts a restore. The returned version is
+// the store-stamped fresh version and replayed reports whether the store
+// installed the record; a skip returns the zero version, replayed=false and
+// a nil error, so a real replay can never read as a skip. The tombstone flag
+// is not part of the signal — the caller already knows it from the snapshot
+// entry.
+func replayRecord(store *storage.Store, key string, rec storage.Record) (version.RecordVersion, bool, error) {
 	if rec.Deleted {
 		_, _, err := store.Delete(key)
 		if errors.Is(err, storage.ErrNotFound) {
-			return nil
+			return version.RecordVersion{}, false, nil
 		}
-		return err
+		return version.RecordVersion{}, false, err
 	}
 	_, _, err := store.Set(key, rec.Data)
 	if errors.Is(err, storage.ErrValueTooLarge) {
-		return nil
+		return version.RecordVersion{}, false, nil
 	}
-	return err
+	return version.RecordVersion{}, false, err
 }
 
 // Flush is the shutdown seam (D-19): the binary's signal path calls it

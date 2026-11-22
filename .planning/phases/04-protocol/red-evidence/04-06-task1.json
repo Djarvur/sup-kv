@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/app/persist/ -v -run '^TestEngine_restoreReturnsReplayed$'",
+  "exitCode": 1,
+  "output": "=== RUN   TestEngine_restoreReturnsReplayed\n=== PAUSE TestEngine_restoreReturnsReplayed\n=== CONT  TestEngine_restoreReturnsReplayed\n    engine_test.go:1446: Restore(snap) keys = [], want [alpha beta delta] (sorted, skipped records absent)\n--- FAIL: TestEngine_restoreReturnsReplayed (0.00s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/app/persist\t0.009s\nFAIL",
+  "targetTest": "TestEngine_restoreReturnsReplayed",
+  "targetFile": "internal/app/persist/engine_test.go",
+  "expected": "A restore whose snapshot differs from the current state returns every replayed record sorted by key with data and tombstone flag intact and versions strictly greater than the snapshot's.",
+  "actual": "Restore returned an empty list: the scaffold carries the new return shape but does not collect the records the replay installs.",
+  "semanticAssessment": "The target test executed and failed on its planned assertion (empty keys list versus the three replayed keys). The same run's siblings failed for the same reason: TestEngine_replayRecordSignal observed replayed=false and the zero version for live and tombstone successes, and TestEngine_restoreFailedFlushReturnsReplayed observed the raw fake save error instead of ErrDumpFailed. TestEngine_restoreNoOpReturnsEmpty and TestEngine_restoreSkipsReplay pass by construction — they pin preserved no-op/skip behavior. No build, fixture or discovery failure; no unrelated test failure."
+}

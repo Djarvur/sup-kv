@@ -306,7 +306,7 @@ func (s *Server) SnapshotLoad(_ context.Context, req *apiproto.SnapshotLoadReque
 	if s.gated() {
 		return nil, gateUnavailable()
 	}
-	err := s.engine.Restore(req.GetName())
+	_, err := s.engine.Restore(req.GetName())
 	if err != nil {
 		return nil, mapError(err)
 	}

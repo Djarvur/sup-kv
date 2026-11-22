@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -329,6 +330,17 @@ func (f *fakeDumpPort) snapshot(name string) []byte {
 	return f.snapshots[name]
 }
 
+// installSnapshot stores a hand-built snapshot generation under name — the
+// seam the restore-report tests use to supply a persist.Encode fixture.
+func (f *fakeDumpPort) installSnapshot(name string, data []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.snapshots == nil {
+		f.snapshots = make(map[string][]byte)
+	}
+	f.snapshots[name] = bytes.Clone(data)
+}
+
 // saveCount returns the number of completed saves.
 func (f *fakeDumpPort) saveCount() int {
 	f.mu.Lock()
@@ -613,7 +625,7 @@ func TestEngine_flushRacesRunExit(t *testing.T) {
 				if i%2 == 0 {
 					err = eng.Snapshot("raced")
 				} else {
-					err = eng.Restore("seed")
+					_, err = eng.Restore("seed")
 				}
 				raced <- err
 			}()
@@ -1047,7 +1059,7 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	}
 
 	preRestore := eng.Records()
-	err = eng.Restore("pre")
+	_, err = eng.Restore("pre")
 	if err != nil {
 		t.Fatalf("Restore(pre) error = %v, want nil", err)
 	}
@@ -1128,7 +1140,7 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 		t.Errorf("fresh Open() discarded = %d, want 0", discarded)
 	}
 	runEngine(t, eng3)
-	err = eng3.Restore("pre")
+	_, err = eng3.Restore("pre")
 	if err != nil {
 		t.Fatalf("fresh Restore(pre) error = %v, want nil", err)
 	}
@@ -1236,7 +1248,7 @@ func TestEngine_restoreMissingSnapshot(t *testing.T) {
 		t.Fatalf("seed Set(stable) error = %v, want nil", err)
 	}
 	before := eng.Records()
-	err = eng.Restore("nope")
+	_, err = eng.Restore("nope")
 	if err == nil {
 		t.Fatal("Restore(nope) = nil, want the missing-snapshot error")
 	}
@@ -1299,7 +1311,7 @@ func TestEngine_closeSurface(t *testing.T) {
 	if !errors.Is(err, persist.ErrClosed) {
 		t.Errorf("post-close Delete() error = %v, want ErrClosed", err)
 	}
-	err = eng.Restore("pre")
+	_, err = eng.Restore("pre")
 	if !errors.Is(err, persist.ErrClosed) {
 		t.Errorf("post-close Restore() error = %v, want ErrClosed", err)
 	}
@@ -1366,13 +1378,204 @@ func TestEngine_restoreCorruptSnapshot(t *testing.T) {
 	)
 	runEngine(t, eng2)
 	before := eng2.Records()
-	err = eng2.Restore("bad")
+	_, err = eng2.Restore("bad")
 	if err == nil {
 		t.Fatal("Restore(corrupt snapshot) = nil, want the generation-level decode error")
 	}
 	if !recordsEqual(eng2.Records(), before) {
 		t.Error("records changed across the corrupt-snapshot restore")
 	}
+}
+
+// snapshotFixture encodes records as a snapshot generation, filling each
+// record's checksum from the production domain first: Decode discards a
+// checksum-invalid record, so a hand-built fixture must carry the real
+// checksum or a restore test could pass for the wrong reason (the 03-08
+// hand-built-fixture rule).
+func snapshotFixture(t *testing.T, records map[string]storage.Record) []byte {
+	t.Helper()
+	for key, rec := range records {
+		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
+		records[key] = rec
+	}
+	dump, err := persist.Encode(records)
+	if err != nil {
+		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
+	}
+	return dump
+}
+
+// TestEngine_restoreReturnsReplayed proves the replay report PROTO-08's
+// snapshot-load notify consumes: a restore that changes the store returns
+// every snapshot record it replayed — sorted by key, each carrying the
+// store's freshly stamped version, the snapshot's data and tombstone flag —
+// while keys the snapshot never named keep their state untouched.
+func TestEngine_restoreReturnsReplayed(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		for key, value := range map[string]string{
+			"alpha": "old-alpha",
+			"beta":  "old-beta",
+			"gamma": "gamma-value",
+		} {
+			_, _, err := eng.Set(key, []byte(value))
+			if err != nil {
+				t.Fatalf("seed Set(%s) error = %v, want nil", key, err)
+			}
+		}
+
+		snapVersion := version.PackVersion(1, 0, synctestNodeID+1)
+		dumps.installSnapshot("snap", snapshotFixture(t, map[string]storage.Record{
+			"alpha": {Version: snapVersion, Data: []byte("snap-alpha")},
+			"beta":  {Version: snapVersion, Deleted: true},
+			"delta": {Version: snapVersion, Data: []byte("snap-delta")},
+		}))
+
+		restored, err := eng.Restore("snap")
+		if err != nil {
+			t.Fatalf("Restore(snap) error = %v, want nil", err)
+		}
+		keys := make([]string, len(restored))
+		for i, rec := range restored {
+			keys[i] = rec.Key
+		}
+		if want := []string{"alpha", "beta", "delta"}; !slices.Equal(keys, want) {
+			t.Fatalf("Restore(snap) keys = %v, want %v (sorted, skipped records absent)", keys, want)
+		}
+		for _, rec := range restored {
+			if rec.Version == (version.RecordVersion{}) {
+				t.Errorf("restored %s carries the zero version", rec.Key)
+			}
+			if rec.Version.Compare(snapVersion) != 1 {
+				t.Errorf("restored %s version %x does not dominate the snapshot's %x",
+					rec.Key, rec.Version[:], snapVersion[:])
+			}
+		}
+		byKey := make(map[string]persist.RestoredRecord, len(restored))
+		for _, rec := range restored {
+			byKey[rec.Key] = rec
+		}
+		if rec := byKey["alpha"]; rec.Deleted || string(rec.Data) != "snap-alpha" {
+			t.Errorf("restored alpha = (%q, deleted=%t), want the snapshot's live value", rec.Data, rec.Deleted)
+		}
+		if rec := byKey["beta"]; !rec.Deleted {
+			t.Error("restored beta is live, want the snapshot's tombstone")
+		}
+		if rec := byKey["delta"]; rec.Deleted || string(rec.Data) != "snap-delta" {
+			t.Errorf("restored delta = (%q, deleted=%t), want the snapshot's live value", rec.Data, rec.Deleted)
+		}
+		// gamma is absent from the snapshot: its current state stands.
+		rec, getErr := eng.Get("gamma")
+		if getErr != nil || string(rec.Data) != "gamma-value" {
+			t.Errorf("post-restore Get(gamma) = (%q, %v), want the untouched value", rec.Data, getErr)
+		}
+	})
+}
+
+// TestEngine_restoreNoOpReturnsEmpty proves the no-op report: a snapshot
+// equal to the store's current state returns an empty record list and nil,
+// marks nothing dirty and performs no dump — the whole-restore no-op
+// contract D-15 (03 IN-02 + 04 IN-02) with PROTO-08's empty answer.
+func TestEngine_restoreNoOpReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		_, _, err := eng.Set("keep", []byte("keep-value"))
+		if err != nil {
+			t.Fatalf("seed Set(keep) error = %v, want nil", err)
+		}
+		err = dumps.CreateSnapshot("same")
+		if err != nil {
+			t.Fatalf("CreateSnapshot(same) error = %v, want nil", err)
+		}
+		saves := dumps.saveCount()
+
+		restored, err := eng.Restore("same")
+		if err != nil {
+			t.Fatalf("Restore(same) error = %v, want nil", err)
+		}
+		if len(restored) != 0 {
+			t.Fatalf("Restore(same) returned %d records, want an empty list", len(restored))
+		}
+		if got := dumps.saveCount(); got != saves {
+			t.Errorf("completed saves after the no-op restore = %d, want the unchanged %d", got, saves)
+		}
+	})
+}
+
+// TestEngine_restoreFailedFlushReturnsReplayed proves a failed confirming
+// dump still reports what the replay installed (PROTO-08): Restore returns
+// the replayed records plus ErrDumpFailed, and the store keeps the replayed
+// state readable in memory — the dump failure is reported honestly, never
+// as a successful empty load.
+func TestEngine_restoreFailedFlushReturnsReplayed(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		_, _, err := eng.Set("alpha", []byte("old-alpha"))
+		if err != nil {
+			t.Fatalf("seed Set(alpha) error = %v, want nil", err)
+		}
+		snapVersion := version.PackVersion(1, 0, synctestNodeID+1)
+		dumps.installSnapshot("snap", snapshotFixture(t, map[string]storage.Record{
+			"alpha": {Version: snapVersion, Data: []byte("new-alpha")},
+		}))
+		dumps.mu.Lock()
+		dumps.failSaves = burstWrites
+		dumps.mu.Unlock()
+
+		restored, err := eng.Restore("snap")
+		if !errors.Is(err, persist.ErrDumpFailed) {
+			t.Fatalf("Restore(snap) error = %v, want ErrDumpFailed", err)
+		}
+		if len(restored) != 1 || restored[0].Key != "alpha" || string(restored[0].Data) != "new-alpha" {
+			t.Fatalf("Restore(snap) records = %+v, want the replayed alpha", restored)
+		}
+		rec, getErr := eng.Get("alpha")
+		if getErr != nil || string(rec.Data) != "new-alpha" {
+			t.Errorf("post-restore Get(alpha) = (%q, %v), want the replayed in-memory state", rec.Data, getErr)
+		}
+	})
+}
+
+// TestEngine_restoreSkipsReplay proves skipped shapes are absent from the
+// report (PROTO-08): a tombstone with no live record to beat and a value
+// over the store's reduced limit are both skips — Restore returns an empty
+// list and nil, installs nothing, and never notifies what it did not
+// replay.
+func TestEngine_restoreSkipsReplay(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		dumps := &fakeDumpPort{}
+		clk := clock.NewClock(time.Now, 0, 0, time.Minute)
+		store := storage.NewStore(synctestNodeID, clk, storage.Config{ValueMaxBytes: shrunkValueLimit})
+		eng := persist.New(store, dumps, persist.Config{})
+		defer startDumper(t, eng)()
+
+		snapVersion := version.PackVersion(1, 0, synctestNodeID+1)
+		dumps.installSnapshot("snap", snapshotFixture(t, map[string]storage.Record{
+			"absent-tomb": {Version: snapVersion, Deleted: true},
+			"oversize":    {Version: snapVersion, Data: bytes.Repeat([]byte("x"), shrunkValueLimit+1)},
+		}))
+
+		restored, err := eng.Restore("snap")
+		if err != nil {
+			t.Fatalf("Restore(snap) error = %v, want nil (both skips are not errors)", err)
+		}
+		if len(restored) != 0 {
+			t.Fatalf("Restore(snap) records = %+v, want an empty list (both shapes skip)", restored)
+		}
+		if got := len(eng.Records()); got != 0 {
+			t.Errorf("post-restore records = %d, want 0 (nothing was replayed)", got)
+		}
+	})
 }
 
 // TestEngine_applyRemoteTriggersDump proves the REPL-03 memory-apply contract
@@ -1517,7 +1720,7 @@ func TestEngine_configShrunkValueLimits(t *testing.T) {
 		t.Errorf("shrunk Set(huge) error = %v, want ErrValueTooLarge unchanged", err)
 	}
 	runEngine(t, shrunk)
-	err = shrunk.Restore("cfg")
+	_, err = shrunk.Restore("cfg")
 	if err != nil {
 		t.Fatalf("shrunk Restore(cfg) error = %v, want nil (oversized record skipped)", err)
 	}
@@ -1585,7 +1788,7 @@ func TestEngine_redundantDirty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateSnapshot(matching) error = %v, want nil", err)
 		}
-		err = eng.Restore("matching")
+		_, err = eng.Restore("matching")
 		if err != nil {
 			t.Fatalf("Restore(matching) error = %v, want nil", err)
 		}
