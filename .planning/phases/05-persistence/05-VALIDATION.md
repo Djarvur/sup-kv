@@ -10,7 +10,7 @@ validated: "2026-11-22"
 
 # Phase 5 — Validation Strategy
 
-> Per-phase validation contract. Audited after execution: every task in the 13 plans
+> Per-phase validation contract. Audited after execution: every task in the 12 plans
 > carries an automated verification that ran green on the committed tree.
 
 ---

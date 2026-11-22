@@ -71,7 +71,7 @@ the depguard architecture gate.
 | `internal/app/persist/load_stats_test.go` (new) | test (engine) | startup | `engine_test.go` fakes + `open_seed_test.go` | role-match |
 | `internal/app/persist/timeout_test.go` (new) | test (engine) | event-driven | `engine_blocking_test.go` | role-match |
 | `internal/app/persist/backoff_test.go` (new) | test (engine) | event-driven | `TestEngine_dumpFailureFansOut` (`engine_test.go:492-563`) | role-match |
-| `internal/app/persist/tiebreak_test.go` (new) | test (merge) | CRUD | `storage/merge_test.go` + `prop_small_space_test.go` | exact |
+| `internal/app/repl/retransmit_test.go` (mod) | test (wire law) | request-response | itself: `TestReplication_equalVersionAcked` `:1346-1373` | exact |
 | `internal/app/persist/encode_stream_test.go` (new) | test (codec) | streaming | `codec_test.go` property helpers | role-match |
 | `internal/app/storage/store_test.go` (mod) | test (store) | CRUD | itself: equal-version subtest `:510-530` | exact |
 | `internal/app/storage/merge_test.go` (mod) | test (merge) | CRUD | itself: `TestMerge_losersProperty` `:222-261` | exact |
@@ -1386,7 +1386,7 @@ header, any other row, or `scripts/red-runner` (its header at lines 1-40 states 
 | `internal/app/persist/load_stats_test.go` | `engine_test.go:248-391`, `open_seed_test.go:22-110` | fake port construction, `startDumper`, keyed `persist.Config`, real `persistfile.New(t.TempDir())` for composition |
 | `internal/app/persist/timeout_test.go` | `engine_blocking_test.go:14-126` | synctest bubble, parking fake, `waitParked`, release channel, assert at virtual instants; **never construct `persistfile` inside a bubble** (Pitfall 18) |
 | `internal/app/persist/backoff_test.go` | `engine_test.go:492-563` | `failSaves` counter, `saveAttempts()`/`save(i).at`, synctest virtual instants, assert exactly N attempts |
-| `internal/app/persist/tiebreak_test.go` | `storage/merge_test.go:194-261` + `prop_small_space_test.go` | table of law branches, seeded `testutil.RandRecord`, rewrite `cmpSame` expectation to the content law |
+| `internal/app/repl/retransmit_test.go` | `retransmit_test.go:1346-1373` | explicit `DataReplication` equal-version table and same-seed Ack/reply trace; no convergence claim (that proof is `internal/app/repl/sim_dump_test.go` in plan 05-07) |
 | `internal/app/persist/encode_stream_test.go` | `codec_test.go:19-116`, `bench_test.go:61-97` | property steps, `sealed`/`baseRecords` fixtures, a recording `io.Writer` for max-single-write |
 | `internal/persistfile/load_outcome_test.go` | `dumpfile_test.go:93-185` | temp-dir table, `writeFile`, marker oracle, root-skip for EACCES, fixed `now` for `.corrupt-<UTC>` names |
 | `internal/persistfile/sweep_test.go` | `dumpfile_test.go`, `fsops_test.go:172-185` | `fsopsEntries` sorted base-name oracle, `os.Chtimes` for the age bound, both directories |

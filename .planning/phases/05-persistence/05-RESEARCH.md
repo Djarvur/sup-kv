@@ -946,8 +946,8 @@ The WARN/ERROR text must never contain the values' bytes (only paths and error s
 
 **Line-oriented decode implementation (the P-03 fix):**
 
-- Use `bufio.NewReaderSize(bytes.NewReader(dump), maxDumpLineBytes(limit)+1)` and `ReadSlice('\n')`. `ReadSlice` bounds a line by the buffer size, returns `bufio.ErrBufferFull` for an overlong line (treat as a generation-level error — memory safety beats per-record isolation for a line that cannot be a legal record), and reports `io.EOF` on an unterminated final line.
-- `maxDumpLineBytes(limit)` = base64 expansion of the limit + the key ceiling + fixed JSON overhead, e.g. `(limit+2)/3*4 + storage.MaxKeyBytes + 256`. Name the constant and test the boundary: a record at exactly the limit parses; one byte over is discarded as `ValueLimit`, not as `Malformed`.
+- Use `bufio.NewReaderSize(bytes.NewReader(dump), maxDumpLineBytes()+1)` and `ReadSlice('\n')`. `ReadSlice` bounds a line by the buffer size, returns `bufio.ErrBufferFull` for an overlong line (treat as a generation-level error — memory safety beats per-record isolation for a line that cannot be a legal record), and reports `io.EOF` on an unterminated final line.
+- `maxDumpLineBytes()` is a property of the format, not of the current configuration: base64 expansion of the datagram ceiling (65 507 bytes) + the worst-case JSON escaping of a `storage.MaxKeyBytes` key (6 × 1 024: every byte can become `\u00XX`) + 256 bytes of fixed field overhead. It must not shrink with `valueMaxBytes`: a default-limit dump reopened at limit 16 must read, and its over-limit record is a `ValueLimit` discard, not an `ErrBufferFull` generation fault. Test the escaped max-length key round trip, the shrunken-config load, the at-configured-limit parse and the one-byte-over `ValueLimit` class.
 - Parse each line with `json.Unmarshal` into `recordLine` (not a stream `json.Decoder`). A syntax-corrupt line is isolated; the probe above proved the stream decoder cannot do this.
 - Header: first line, `json.Unmarshal` into `header`; unknown fields ignored (forward compatibility); empty input ⇒ generation-level error (existing test).
 - Duplicate keys: last-wins (preserve the existing documented behaviour).
@@ -1053,7 +1053,7 @@ err := e.dumps.SaveStream(func(w io.Writer) error {
 - Transient allocation per cycle: the `Records()` clone (≈1× state) plus one encoded line's worth per record (≈1.4× state *total allocated* over the cycle, but each line is garbage immediately). The acceptance metric is **peak live**, which drops from ~5× to ~1×; the benchmark must report `B/op` and a sampled peak (see below) so the claim is measured.
 - Residual, must be stated in the doc: `Records()` still holds the store's read lock while cloning every Data value (`store.go:369-382`), so writers are paused for O(state) at snapshot time (the review's 74 ms figure). Eliminating that pause needs a copy-on-write view and is out of scope for this phase.
 
-**Measurement:** extend `BenchmarkDump10kKeys` (or add `BenchmarkDumpCycle`) to report `B/op`, `bytes/op` and a peak sample taken with `runtime.ReadMemStats` after each record write in a `discardWriter` run; keep thresholds out of `make test` (shared-runner noise) and rely on the documented model + the nightly `bench-smoke` job for evidence. Add a deterministic structural test: `EncodeTo` into a writer that records the largest single `Write` must never see a write larger than roughly one line (`maxDumpLineBytes(limit)`), proving the dump is not materialized in one buffer.
+**Measurement:** extend `BenchmarkDump10kKeys` (or add `BenchmarkDumpCycle`) to report `B/op`, `bytes/op` and a named peak sample (`b.ReportMetric(..., "peak-live-B")`) taken with `runtime.ReadMemStats` after each record write in a `discardWriter` run; keep thresholds out of `make test` (shared-runner noise) and rely on the documented model + the nightly `bench-smoke` job for evidence. Add a deterministic structural test: `EncodeTo` into a writer that records the largest single `Write` must never see a write larger than one format line (`maxDumpLineBytes()`), proving the dump is not materialized in one buffer.
 
 **Acceptance tests:** `EncodeTo` output byte-identical to `Encode` for the same map; the max-single-write bound; the port contract test that a fill error removes the temp and surfaces classified; benchmark numbers recorded in the phase summary/OPERATIONS.
 ### D-07 (PERSIST-08) — bounded confirmation, bounded flush, bounded shutdown
@@ -1502,7 +1502,7 @@ This phase changes on-disk state and metric family names, so the inventory appli
 ### Pitfall 13: bounded line reading, not bounded ambition
 
 **What goes wrong:** `bufio.Scanner`'s default 64 KiB token limit silently stops on a 61 440-byte value's base64 line (≈81.9 KiB) — a legal dump becomes unreadable; `ReadString` with no bound allocates a hostile line.
-**How to avoid:** `bufio.NewReaderSize` sized from `maxDumpLineBytes(limit)`; `ErrBufferFull` ⇒ generation error; a boundary test at exactly the limit and one byte over.
+**How to avoid:** `bufio.NewReaderSize` sized from the config-independent `maxDumpLineBytes()`; `ErrBufferFull` ⇒ generation error; boundary tests for the escaped max-length key, the at-configured-limit parse, the one-byte-over `ValueLimit` class and the shrunken-config load.
 **Warning sign:** a default `bufio.Scanner`.
 
 ### Pitfall 14: the writer pause is not fixed by streaming
@@ -1574,9 +1574,9 @@ Illustrative shapes, consistent with the contracts above (not verbatim productio
 ```go
 func Decode(dump []byte, valueMaxBytes int) (map[string]storage.Record, DecodeStats, error) {
 	var stats DecodeStats
-	reader := bufio.NewReaderSize(bytes.NewReader(dump), maxDumpLineBytes(valueMaxBytes)+1)
+	reader := bufio.NewReaderSize(bytes.NewReader(dump), maxDumpLineBytes()+1)
 
-	headerLine, err := readLine(reader, valueMaxBytes)
+	headerLine, err := readLine(reader)
 	if err != nil || len(headerLine) == 0 {
 		return nil, DecodeStats{}, fmt.Errorf("persist: dump header unreadable: %w", err)
 	}
@@ -1825,7 +1825,7 @@ if e.retry > 0 {
 | Pattern | STRIDE | Standard Mitigation |
 |---------|--------|---------------------|
 | Corrupted or hand-edited dump (bit flips, truncation, injected newlines) | Tampering | Per-record CRC32 + per-line structural validation + completeness census; a bad record is isolated, a bad generation falls back and is preserved |
-| Hostile dump line causing unbounded allocation (DoS at startup) | Denial of Service | `ReadSlice` bounded by `maxDumpLineBytes(valueMaxBytes)`; overlong line ⇒ generation fault; no `ReadString` on untrusted bytes |
+| Hostile dump line causing unbounded allocation (DoS at startup) | Denial of Service | `ReadSlice` bounded by the config-independent `maxDumpLineBytes()`; overlong line ⇒ generation fault; no `ReadString` on untrusted bytes |
 | Fsync error silently treated as success | Tampering / Repudiation | File-data fsync keeps every error; only the directory step tolerates ENOTSUP/EINVAL, documented |
 | Evidence destruction by rotation | Tampering | Unusable generations are renamed out of `main`/`.prev` before any save; preserved names are never rotated or swept |
 | Path traversal via snapshot names | Tampering | Existing `validateName` (`[A-Za-z0-9._-]`, 1–64, no `.`/`..`) runs before any filesystem touch; unchanged |
@@ -1872,9 +1872,12 @@ if e.retry > 0 {
 
 **If a claim is wrong:** A1 and A2 change only implementation details (both are guarded by tests); A3/A4/A5 are constants fixed in `persist.Config` or `persistfile`; A6 is the one that would block a requirement if misread — resolve it in the first planning pass.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-Each question is answered with a recommendation; the planner should treat the recommendation as the resolution unless the user says otherwise.
+RESOLVED: every question below is resolved; the recommendation under each item is the accepted
+resolution and the plans implement it. The one recorded refinement is the decode line bound
+(Q1/D-03): it is sized from the format's maximum line, never from the configured limit, so a
+shrunken `--value-max-bytes` classifies over-limit records instead of faulting the generation.
 
 1. **Header count vs trailer vs version bump (D-03's "missing trailer" wording).**
    - What we know: D-03 allows "a record count or terminator"; it also says "format-version compatibility with the v1.0 dumps is preserved for reading" and "a missing trailer is treated as a truncated file".

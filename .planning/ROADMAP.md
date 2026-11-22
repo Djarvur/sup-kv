@@ -208,31 +208,33 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 - [ ] 05-02-PLAN.md — Dump census (`record_count`) and line-oriented decode with four-class stats (D-03/PERSIST-03, PERSIST-10)
-- [ ] 05-03-PLAN.md — Deterministic equal-version tie-break in the store and on the wire, ADR 0012 (D-12/PERSIST-07)
 
 **Wave 3** *(blocked on Wave 2)*
-- [ ] 05-04-PLAN.md — Streaming save (`SaveStream`/`EncodeTo`) and the port's load-result contract (D-06, D-10/PERSIST-06, PERSIST-11)
+- [ ] 05-03-PLAN.md — Deterministic equal-version tie-break in the store and on the wire, ADR 0012 (D-12/PERSIST-07; ordered after 05-02 on the shared engine/codec files)
 
 **Wave 4** *(blocked on Wave 3)*
-- [ ] 05-05-PLAN.md — Load outcomes, evidence preservation, orphan sweep, parent sync, dir-fsync tolerance, errno classes (D-02, D-08, D-09/PERSIST-02, PERSIST-09)
+- [ ] 05-04-PLAN.md — Streaming save (`SaveStream`/`EncodeTo`) and the port's load-result contract (D-06, D-10/PERSIST-06, PERSIST-11)
 
 **Wave 5** *(blocked on Wave 4)*
-- [ ] 05-06-PLAN.md — Engine load report, dirty after a backup/empty start, markDirty nudge, skip accounting, binary log/metrics (D-04, D-02, D-09/PERSIST-04, PERSIST-02, PERSIST-10)
+- [ ] 05-05-PLAN.md — Load outcomes, evidence preservation, orphan sweep, parent sync, dir-fsync tolerance, errno classes (D-02, D-08, D-09/PERSIST-02, PERSIST-09)
 
 **Wave 6** *(blocked on Wave 5)*
-- [ ] 05-07-PLAN.md — Injected now/after seam, bounded retry ladder with classes, simulator dump↔notify scenario (D-11, D-05/PERSIST-12, PERSIST-05)
+- [ ] 05-06-PLAN.md — Engine load report, dirty after a backup/empty start, markDirty nudge, skip accounting, binary log/metrics (D-04, D-02, D-09/PERSIST-04, PERSIST-02, PERSIST-10)
 
 **Wave 7** *(blocked on Wave 6)*
-- [ ] 05-08-PLAN.md — Confirmation/flush/shutdown deadlines, `ErrUnconfirmed`, RPC totality (D-07/PERSIST-08)
+- [ ] 05-07-PLAN.md — Injected now/after seam, bounded retry ladder with classes, simulator dump↔notify and tie-break convergence scenario (D-11, D-05/PERSIST-12, PERSIST-05)
 
 **Wave 8** *(blocked on Wave 7)*
-- [ ] 05-09-PLAN.md — Engine split into five internal roles, public API frozen (D-10/PERSIST-11)
-- [ ] 05-10-PLAN.md — OPERATIONS runbook: load outcomes, retry/health, evidence files, memory model, new metrics (PERSIST-02, PERSIST-05, PERSIST-06)
+- [ ] 05-08-PLAN.md — Confirmation/flush/shutdown deadlines, `ErrUnconfirmed`, RPC totality (D-07/PERSIST-08)
 
 **Wave 9** *(blocked on Wave 8)*
-- [ ] 05-11-PLAN.md — SPEC-DEVIATIONS: exactly seven rows amended with current evidence (PERSIST-01, PERSIST-02, PERSIST-07)
+- [ ] 05-09-PLAN.md — Engine split into five internal roles, public API frozen (D-10/PERSIST-11)
 
 **Wave 10** *(blocked on Wave 9)*
+- [ ] 05-10-PLAN.md — OPERATIONS runbook: load outcomes, retry/health, evidence files, memory model, new metrics (PERSIST-02, PERSIST-05, PERSIST-06)
+- [ ] 05-11-PLAN.md — SPEC-DEVIATIONS: exactly eight rows amended with current evidence (PERSIST-01, PERSIST-02, PERSIST-07)
+
+**Wave 11** *(blocked on Wave 10)*
 - [ ] 05-12-PLAN.md — Phase gate: flip the two P-01 rows, 7/7 red-runner with mutants, lint/test/darwin/bench
 
 
