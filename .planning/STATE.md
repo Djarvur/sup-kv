@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 06-02-PLAN.md
-last_updated: "2026-11-22T22:47:49.577Z"
+stopped_at: Completed 06-03-PLAN.md
+last_updated: "2026-11-22T22:58:37.391Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: fdc7b60bd8eeb15962bee9f0536d1350a464053c
+state_head: 149d7993dbdc4b34b2cf728414c38baee7dca36b
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 61
+  completed_plans: 62
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
@@ -120,6 +120,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P12 | 30min | 2 tasks | 2 files |
 | Phase 06 P01 | 721s | 3 tasks | 30 files |
 | Phase 06 P02 | 8min | 1 tasks | 19 files |
+| Phase 06 P03 | 7min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -363,6 +364,9 @@ Recent decisions affecting current work:
 - [Phase 06]: Zero captured peers and a nil WaitReplicated seam both report the honest (false, 0, 0); the zero-peer path still calls the seam with total 0 as the tracker release point (T-06-05).
 - [Phase 06]: The core seeds the tracked wait set from the captured ids intersected with the live peer table and emits WaitSetEmpty for a stale non-empty capture; the discovery-flush split and tracker promise-set enforcement stay with plan 06-11.
 - [Phase 06]: Core.PeerIDs/PeerGeneration feed a generation-gated Adapter.KnownPeerIDs atomic mirror; Adapter.KnownPeers stays for metrics only and ServerOptions.KnownPeers is removed.
+- [Phase 06]: 06-03: examples/client is a nested Go module (require github.com/Djarvur/sup-kv v0.0.0 + replace ../.. ) importing only the public api/supkvapi/v1 package plus gRPC; go mod tidy reclassified protobuf as indirect, and the committed tidy form is the canonical one. It is gated by one make client-example target and a dedicated client-example CI job (APIS-06).
+- [Phase 06]: 06-03: The example README states the last-read-value cache is consumer-library territory per ADR 0007 (14.7) and lists the deliberate omissions (no auth, retries, cache or snapshot RPCs). APIS-06's REQUIREMENTS.md checkbox stays pending because sibling plans 06-09/06-10/06-13 also declare it (#2388 shared-ID gate).
+- [Phase 06]: 06-03: /examples/client/client is gitignored because the plan's literal recipe (go build ./... inside the nested module) writes the executable beside main.go; the target itself is unchanged. The stale gsd-plan-head-before-06-03 ledger was reset to fc4ab65 before measuring (06-01 precedent).
 
 ### Pending Todos
 
@@ -385,7 +389,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T22:47:48.956Z
-Stopped at: Completed 06-02-PLAN.md
+Last session: 2026-11-22T22:58:36.803Z
+Stopped at: Completed 06-03-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
