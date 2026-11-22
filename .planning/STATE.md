@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-11-22T13:18:46.953Z"
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-11-22T13:46:49.580Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 4 complete, transitioned to Phase 5
-state_head: 4b88551e16de98113135c4a8dc2f2e00e9380bea
+state_head: 06691b8484f010df7dfb46048a0f23936c074e36
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 49
+  completed_plans: 50
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 5 (Persistence) — executing
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 12
 Status: Executing (05-01 complete, 05-02 next)
 Last activity: 2026-11-22 — 05-01 complete; 05-02 next
@@ -107,6 +107,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 04 P13 | 1178 | 3 tasks | 10 files |
 | Phase 05 P01 | 761s | 3 tasks | 14 files |
 | Phase 05 P02 | 868 | 3 tasks | 6 files |
+| Phase 05 P03 | 1224 | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -300,6 +301,11 @@ Recent decisions affecting current work:
 - [Phase 05]: Decode returns DecodeStats (Checksum, Version, ValueLimit, Malformed) with Total(); Open keeps its frozen (*Engine, int) shape by returning the total.
 - [Phase 05]: The dump reader bound is maxDumpLineBytes(), derived from the format's datagram and key ceilings and independent of valueMaxBytes, so a config-shrunk load classifies records instead of faulting.
 - [Phase 05]: format_version stays 1 with an optional record_count: fewer record lines than the count is an incomplete generation, more is tolerated, and an absent field is the documented v1.0 legacy path.
+- [Phase 05]: 05-03: The join order is (version, content): identical Deleted+Data is a full no-op, differing content resolves remove-wins first, then the greater Data by bytes.Compare; a tie-break win or loss reports exactly one Conflict pairing the equal version bytes
+- [Phase 05]: 05-03: storage.RecordsEqual (version, deleted, Data; checksum derived) is the one content comparison shared by MergeChanged's join and repl.applyRemote, so the merge law and the wire rule cannot drift
+- [Phase 05]: 05-03: MergeChanged returns (conflicts, changed, drift, err) and Merge delegates; Engine.ApplyRemote dirties on changed, replacing the Get probe and the Winner==rec.Version heuristic (research Pitfall 5)
+- [Phase 05]: 05-03: applyRemote Acks identical content early, applies differing content through the store, then answers from the stored record: incoming win Acks, stored win queues exactly one unicast DataReplication and no Ack
+- [Phase 05]: 05-03: ADR 0012 records the deviation from the Spec's random tail with the version layout, zero filler (S-HLC-07) and PFXD-01 as explicit non-changes; cross-node convergence stays 05-07's proof on the NotifyInstalled seam
 
 ### Pending Todos
 
@@ -322,7 +328,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T13:18:46.533Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-11-22T13:46:49.171Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None
 Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-02-PLAN.md is next)
