@@ -14,6 +14,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -28,6 +30,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // listedKeyNotArrivedMessage is the rule 14.5(6) status message for a read
@@ -432,22 +435,62 @@ func keyTooLongError(length int) error {
 		length, storage.MaxKeyBytes)
 }
 
-// mapError translates one engine error into its pinned RPC code, matching
-// with [errors.Is], never identity comparison — the table is pre-pinned in
-// the sentinel files' own docs (internal/app/storage/errors.go,
-// internal/app/persist/errors.go):
+// Status message constants of the error mapper (D-03). Every client-visible
+// string is a constant or a package sentinel: no error text — and therefore
+// no configured path, errno or wire-dialect detail — can cross the
+// untrusted client channel (T-06-11, T-06-12).
+const (
+	// internalErrorMessage is the totality fallback's exact text: every
+	// unmapped error answers this constant and the detail goes to the log
+	// instead, so an unforeseen failure can never leak through the response.
+	internalErrorMessage = "internal error"
+
+	// snapshotNotFoundMessage pins the missing-snapshot row. ReadSnapshot
+	// surfaces the adapter's [*fs.PathError], whose text names the configured
+	// snapshot path, so the mapper substitutes this constant.
+	snapshotNotFoundMessage = "snapshot not found"
+
+	// permissionDeniedMessage is the permission row, shared by the adapter's
+	// [fs.ErrPermission] and the port's FailurePermission class: both reduce
+	// to the same client-visible fact.
+	permissionDeniedMessage = "permission denied"
+
+	// diskFullMessage is the FailureDiskFull class's pinned text.
+	diskFullMessage = "disk full"
+)
+
+// mapError translates one engine or adapter error into its pinned RPC code,
+// matching with [errors.Is], never identity comparison — the table is
+// pre-pinned in the sentinel files' own docs (internal/app/storage/errors.go,
+// internal/app/persist/errors.go, internal/persistfile/snapshot.go) and in
+// the port's FailureClass vocabulary (internal/port/dump.go). The order is
+// the contract:
 //
 //	storage.ErrNotFound      -> codes.NotFound        ("key not found" — missing OR tombstoned)
 //	storage.ErrAlreadyExists -> codes.AlreadyExists   ("key already exists" — any record incl. tombstone)
 //	storage.ErrValueTooLarge -> codes.InvalidArgument ("value exceeds the maximum allowed size")
 //	persist.ErrDumpFailed    -> codes.Unavailable     ("dump failed; write not confirmed")
+//	port.FailureDiskFull     -> codes.ResourceExhausted ("disk full")
+//	port.FailurePermission   -> codes.PermissionDenied  ("permission denied")
 //	persist.ErrUnconfirmed   -> codes.Unavailable     ("write not confirmed before the confirmation timeout")
 //	persist.ErrClosed        -> codes.Unavailable     ("persist engine closed")
 //	persistfile.ErrInvalidSnapshotName -> codes.InvalidArgument ("invalid snapshot name")
+//	persistfile.ErrNoDump    -> codes.FailedPrecondition ("no dump on disk to snapshot")
+//	fs.ErrNotExist           -> codes.NotFound        ("snapshot not found")
+//	fs.ErrPermission         -> codes.PermissionDenied ("permission denied")
+//	context.Canceled         -> codes.Canceled
+//	context.DeadlineExceeded -> codes.DeadlineExceeded
 //
-// A status error passes through unchanged; any other unmapped error becomes
-// codes.Internal. Handlers stay total over any input — no panic path, the
-// applyRemote precedent.
+// The class rows sit after ErrDumpFailed because the engine wraps a failed
+// save as ErrDumpFailed — the write answers Unavailable, never a class —
+// while CreateSnapshot surfaces the adapter's class directly (T-06-13).
+// ErrNoDump precedes the fs rows so the adapter's own sentinel text
+// survives. A pre-built status error passes through unchanged. Every other
+// error is logged exactly once — a static message with the detail as an
+// attribute — and answered with internalErrorMessage, which is what makes
+// the mapping total and the response path-free: totality is structural, not
+// an enumeration of everything that can go wrong (D-03). Handlers stay total
+// over any input — no panic path, the applyRemote precedent.
 func mapError(err error) error {
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
@@ -458,17 +501,37 @@ func mapError(err error) error {
 		return status.Error(codes.InvalidArgument, storage.ErrValueTooLarge.Error())
 	case errors.Is(err, persist.ErrDumpFailed):
 		return status.Error(codes.Unavailable, persist.ErrDumpFailed.Error())
+	case port.FailureClassOf(err) == port.FailureDiskFull:
+		return status.Error(codes.ResourceExhausted, diskFullMessage)
+	case port.FailureClassOf(err) == port.FailurePermission:
+		return status.Error(codes.PermissionDenied, permissionDeniedMessage)
 	case errors.Is(err, persist.ErrUnconfirmed):
 		return status.Error(codes.Unavailable, persist.ErrUnconfirmed.Error())
 	case errors.Is(err, persist.ErrClosed):
 		return status.Error(codes.Unavailable, persist.ErrClosed.Error())
 	case errors.Is(err, persistfile.ErrInvalidSnapshotName):
 		return status.Error(codes.InvalidArgument, persistfile.ErrInvalidSnapshotName.Error())
+	case errors.Is(err, persistfile.ErrNoDump):
+		return status.Error(codes.FailedPrecondition, persistfile.ErrNoDump.Error())
+	case errors.Is(err, fs.ErrNotExist):
+		return status.Error(codes.NotFound, snapshotNotFoundMessage)
+	case errors.Is(err, fs.ErrPermission):
+		return status.Error(codes.PermissionDenied, permissionDeniedMessage)
+	case errors.Is(err, context.Canceled):
+		// The matched sentinel, not err: a wrapped cancellation would make
+		// status.FromContextError answer Unknown.
+		return status.FromContextError(context.Canceled).Err()
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.FromContextError(context.DeadlineExceeded).Err()
 	}
 	if _, ok := status.FromError(err); ok {
 		return err
 	}
-	return status.Errorf(codes.Internal, "internal error: %v", err)
+	// The fallback logs the detail (the operator's only view of an
+	// unclassified failure) and answers the constant — never err.Error()
+	// (T-06-11): static message, snake_case attribute, no path on the wire.
+	slog.Error("Unmapped RPC error", "detail", err.Error())
+	return status.Error(codes.Internal, internalErrorMessage)
 }
 
 // recordToProto maps one stored record onto the wire Record (D-01): the
