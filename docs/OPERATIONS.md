@@ -51,9 +51,11 @@ reordering and partitions):
 
 sup-kv is sized for small clusters and small values:
 
-- values are at most 60 KiB — 61440 bytes, the default of
-  `--value-max-bytes` (environment twin `SUPKV_VALUE_MAX_BYTES`). A write
-  with a larger value is rejected with `InvalidArgument`;
+- values are at most 60 KiB by default — 61440 bytes, the
+  `storage.ValueMaxBytes` default of `--value-max-bytes` (environment twin
+  `SUPKV_VALUE_MAX_BYTES`). A configured limit may raise it, never past the
+  64 408-byte datagram bound below. A write with a larger value is rejected
+  with `InvalidArgument`;
 - the whole state lives in RAM — thousands to tens of thousands of keys is
   the design envelope;
 - replication occupies one UDP broadcast segment — no WAN, no explicit peer
@@ -70,8 +72,13 @@ the two bounds that make that true:
   datagram that carries one (`key_too_long`). `Get` and `List` stay
   permissive so records written by an older version under a longer key
   remain readable.
-- **Values are at most `--value-max-bytes`** (environment twin
-  `SUPKV_VALUE_MAX_BYTES`, default 61 440 bytes).
+- **Values are at most the one value limit.** `storage.ValueMaxBytes` is
+  the single default — 61 440 bytes — and a configured
+  `--value-max-bytes` (environment twin `SUPKV_VALUE_MAX_BYTES`) is the
+  effective limit. A zero or negative `--value-max-bytes` is malformed
+  configuration: the node exits with code 2 and names the flag
+  (`value-max-bytes must be positive`) instead of falling back to the
+  default.
 - **The combined record must fit 65 507 bytes** — the maximum IPv4 UDP
   payload. With a maximal 1 024-byte key the largest fitting value is
   64 408 bytes: 1 024 + 64 408 plus the envelope overhead is exactly the
@@ -83,6 +90,87 @@ the two bounds that make that true:
   60s) bounds how far ahead of local time a received record version may
   be. Keep the same value on every node: a node with a smaller bound
   discards versions its peers still consider valid.
+
+## Load outcomes
+
+At startup the node walks the fallback chain — the main dump file, then its
+`.prev` generation — and reports exactly one outcome:
+
+- **Prompt** — neither file exists. A fresh start: no WARN and no ERROR,
+  just the normal empty-node startup. The node recovers its state from
+  peers;
+- **Main** — the main generation decoded. Nothing is logged about the
+  outcome itself;
+- **Backup** — the main generation was absent or unusable and `.prev`
+  decoded. Exactly one WARN names the main path and the cause, so an absent
+  main is reported as `fs.ErrNotExist` and an unreadable or undecodable one
+  as its read or decode error, together with the candidate's
+  `preserve_error`. The loaded `.prev` survives: the corrupt main left the
+  rotation path before any save, so the next rotate finds nothing to
+  displace it;
+- **Unusable** — no candidate decoded. Exactly one ERROR, carrying one
+  `<candidate>_path`/`<candidate>_cause`/`<candidate>_preserve_error` group
+  per candidate that actually failed (one or two, never a phantom). The
+  node starts empty and recovers from peers.
+
+Discarded records are counted by class in
+`supkv_dump_records_discarded_total`: `checksum`, `version`, `malformed`
+and `value_limit`. A record skipped because it exceeds the configured value
+limit is not evidence — it stays in the dump file until normal rotation
+replaces that generation — and the skip is counted and logged once with the
+count and the limit. A non-zero total of the other three classes is
+reported in one startup line.
+
+A candidate the load cannot accept is preserved, never deleted: it is
+renamed out of the rotation path before any save, to `<path>.corrupt-<UTC>`
+where the stamp is the UTC instant of the rejecting load, with `-1`, `-2`,
+… appended when two loads fall in the same second, so earlier evidence is
+never overwritten. These files are never rotated and never auto-deleted;
+an operator inspects them and removes them by hand when the evidence is no
+longer needed.
+
+**The preservation-failure hazard.** When the load line's `preserve_error`
+attribute is non-empty, the rename itself failed and the corrupt generation
+may still be sitting at `main`. A later successful save would then rotate
+it over `.prev`, destroying the last good generation — exactly what
+preservation exists to prevent. `preserve_error` is the signal to act:
+move the file it names out of the dump path before that save.
+
+**The startup orphan-temp sweep.** Every in-flight dump writes a temp file
+carrying the hidden `.tmp~` marker; `~` is outside the snapshot name
+charset, so no legal dump, `.prev` or `.corrupt-*` name and no operator
+snapshot name can contain it. At startup the node removes only regular
+files carrying that marker whose modification time is older than one hour,
+in the dump directory and the snapshot directory beside it. It never
+removes the main file (whatever its name), `.prev`, a `.corrupt-*`
+generation or an operator snapshot. The removal is one INFO line with the
+count; a sweep error is one WARN and never aborts the load.
+
+## Memory model
+
+A dump cycle's peak live heap is one state copy plus one record line. The
+engine takes exactly one `Records()` deep copy — the map plus every
+record's cloned value — and streams it through the adapter's 64 KiB
+buffered writer one encoded record line at a time. The only other live
+buffer is the record line being encoded, whose base64 expansion is at most
+about 1.34 times the configured value limit, so the encoded dump is never
+materialized as a second buffer. The kernel page cache that holds the
+written file is not process heap and is excluded from this model. Peak
+live therefore stays near one state size, not the two-plus of an
+encode-into-bytes design.
+
+One residual pause remains, and it is stated rather than claimed away:
+`Records()` clones every value while holding the store's read lock, so
+writers are paused for one state-sized copy at snapshot time. Eliminating
+that pause needs a copy-on-write view of the store and is residual work,
+not a property this model claims.
+
+Peak live and allocation churn are different numbers. `B/op` from the
+benchmark measures everything allocated over a cycle — the deep copy, then
+one line's worth per record, each line garbage as soon as it is written —
+and so reads higher (roughly 1.4 times the state size in total
+allocations) than the peak-live figure above. The bound this runbook states
+is peak live: one copy, plus one record line, plus the 64 KiB writer.
 
 ## Read semantics
 
@@ -156,8 +244,18 @@ The endpoint serves:
   `empty_key`, `key_too_long`, `tombstone_with_data`, `bad_checksum`,
   `bad_version`, `bad_sync_header`), `supkv_merges_conflicts_total`,
   `supkv_clock_drift_warnings_total`, `supkv_dumps_duration_seconds`,
-  `supkv_dumps_total`, `supkv_dumps_errors_total` — plus the standard
-  `go_*`/`process_*` runtime families;
+  `supkv_dumps_total`, `supkv_dumps_errors_total`,
+  `supkv_dumps_failures_total` (by failure class: `disk_full`,
+  `permission`, `other`), `supkv_dumps_unconfirmed_total` (writes answered
+  before their covering dump completed), `supkv_dump_load_total` (by
+  startup outcome: `prompt`, `main`, `backup`, `unusable`) and
+  `supkv_dump_records_discarded_total` (by load-time class: `checksum`,
+  `version`, `value_limit`, `malformed`) — plus the standard
+  `go_*`/`process_*` runtime families. The complete-catalog rule holds for
+  every labeled family, not only the discard counter: each class and
+  outcome is a fixed label value that renders as a zero-valued sample
+  rather than disappearing, because a zero count is information, not
+  absence;
 - `/debug/vars` (expvar) and `/debug/pprof/*` — runtime introspection.
 
 Because pprof is an arbitrary-cost endpoint, do not expose the metrics
@@ -181,6 +279,21 @@ Exit codes:
   `Restart=on-failure` reacts to this);
 - exit code 2 — malformed configuration: a bad flag value or a malformed
   `SUPKV_*` environment value.
+
+A failed dump is retried, not fatal. Each failed attempt logs exactly one
+ERROR carrying the failure class and the underlying error, and publishes
+its class counter; the node retries on a ladder that starts at 100 ms and
+doubles after every further failure up to a 5 s cap, and the next success
+resets it. Health stays `SERVING` under a persistent dump failure: reads
+keep serving and the node keeps retrying, because the failure is a
+durability risk, not a serving failure. It surfaces on writes instead — a
+write whose covering dump does not complete within the confirmation timeout
+is answered `Unavailable` (`write not confirmed before the confirmation
+timeout`) and counted in `supkv_dumps_unconfirmed_total`. Shutdown is
+bounded: the final flush waits at most the shutdown grace (a stuck fsync
+answers `Unconfirmed`, which keeps the failed-final-dump exit code 1), and
+a dumper goroutine still not stopped at process exit is abandoned with one
+WARN rather than hanging the shutdown.
 
 A `SIGKILL` (or host crash) skips the final dump, but confirmed writes are
 still safe: every client-confirmed write was already contained in a
