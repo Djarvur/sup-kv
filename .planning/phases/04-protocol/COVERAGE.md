@@ -1,0 +1,1 @@
+No external API integration: this phase implements sup-kv's own replication protocol over UDP datagrams between its own nodes, its internal gRPC/health interface, and the in-repo deterministic simulator — no third-party API, SDK, service, webhook or hosted endpoint is consumed or integrated.

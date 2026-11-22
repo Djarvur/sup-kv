@@ -160,7 +160,36 @@ Plans:
   3. Staleness never lies: a node holding `k@v5` that receives `k@v3` sends back exactly one unicast `DataReplication k@v5` and no `Ack` (the sender's `wait_for_replication` for `v3` reports `acked: false`); a local-write notification with a version not greater than the tracked one is ignored
   4. Misconfiguration and version mismatch are named errors: a third process under a known `node_id` with alternating `run_id`s is counted and logged as a configuration error and receives no full listing; an incompatible `proto_version` is checked before body decode, classified `bad_proto_version`, and WARN-logged rate-limited per peer per interval
   5. Replication is total and N-node behavior is specified: a write whose dump failed still broadcasts (counted as unconfirmed) and a snapshot load broadcasts its result; 3+-node behavior and timing is documented with real-socket three-node tests, and `wait_for_replication` semantics at N > 2 are in the API docs
-**Plans**: TBD
+**Plans**: 13 plans
+
+**Wave 1**
+- [ ] 04-01-PLAN.md — Complete-listing wire header, per-stream accumulation, one atomic mirror, pre-body proto-version verdict (PROTO-01, PROTO-07)
+
+**Wave 2**
+- [ ] 04-02-PLAN.md — Gated reads and listed-key RPC semantics: Unavailable/NotFound/AlreadyExists (PROTO-01)
+- [ ] 04-03-PLAN.md — Store/engine Observe and KeyCount: per-part HLC absorption and O(1) empty selection (PROTO-01, PROTO-02)
+
+**Wave 3**
+- [ ] 04-04-PLAN.md — `startup_gate_empty` end to end, including the stand-harness derivation (PROTO-02)
+- [ ] 04-05-PLAN.md — Identity-only egress (CR-02) and the stale-record answered-not-Acked outcome (PROTO-03)
+- [ ] 04-06-PLAN.md — Totality: dump-failed writes and snapshot-load replay broadcast (PROTO-08)
+- [ ] 04-07-PLAN.md — Three-node real-socket broadcast convergence (PROTO-09)
+
+**Wave 4**
+- [ ] 04-08-PLAN.md — First-seen/restart listings and the bounded shared listing build (PROTO-04, CR-01)
+
+**Wave 5**
+- [ ] 04-09-PLAN.md — Notification regression guard and alternating-identity configuration error (PROTO-05, PROTO-06)
+
+**Wave 6**
+- [ ] 04-10-PLAN.md — Simulator N=3, complete-listing window, 14.9 evidence anchor (PROTO-09, PROTO-01)
+
+**Wave 7**
+- [ ] 04-11-PLAN.md — Test-adaptation sweep and whole-suite green (adaptation wave)
+- [ ] 04-12-PLAN.md — `docs/04-MULTI-NODE.md`, operations and deviation-registry handoff (PROTO-09)
+
+**Wave 8**
+- [ ] 04-13-PLAN.md — R-03 TSV flip, Phase-3 critical ledger closure, full phase gate (PROTO-01…09)
 
 ### Phase 5: Persistence
 **Goal**: The dump path is honest about its limits and failures — one enforced value limit, visible load outcomes, generation integrity, bounded memory and blocking — so "a confirmed write is on disk" is a tested guarantee rather than a convention.
