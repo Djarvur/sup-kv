@@ -101,7 +101,9 @@ func TestFileStore_atomicRotation(t *testing.T) {
 // main generation advances the chain to .prev's bytes, the outcome names
 // exactly which generation served, and both generations missing is the
 // prompt start. Rows with a present-but-unparseable candidate also pin the
-// failure report and the unusable classification (D-02).
+// failure report and the unusable classification; a backup start always
+// carries exactly one main failure, fs.ErrNotExist when the main was merely
+// absent (D-02).
 func TestFileStore_fallbackChain(t *testing.T) {
 	t.Parallel()
 	prevGen := []byte("PREV-" + readableMarker)
@@ -139,7 +141,7 @@ func TestFileStore_fallbackChain(t *testing.T) {
 			want:        prevGen,
 			wantOutcome: port.LoadBackup,
 			wantGen:     port.GenPrev,
-			wantFails:   0,
+			wantFails:   1,
 		},
 		{
 			name:        "both generations removed is the prompt start",

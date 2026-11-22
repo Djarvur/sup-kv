@@ -12,6 +12,7 @@ package persistfile
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -27,11 +28,16 @@ import (
 // readability; grep still works for the owner), the dump files keep
 // [os.CreateTemp]'s 0600 default, and prevSuffix is the previous
 // generation's path suffix — the fallback chain walks main then
-// main+prevSuffix (D-02, D-08).
+// main+prevSuffix (D-02, D-08). A generation the load cannot accept is
+// preserved under corruptSuffix plus a UTC stamp (stampLayout), never
+// deleted: the corrupted bytes are the evidence an operator inspects
+// (D-02, T-5-12).
 const (
-	prevSuffix  = ".prev"
-	tempPattern = "dump-*"
-	dirMode     = 0o700
+	prevSuffix    = ".prev"
+	corruptSuffix = ".corrupt-"
+	stampLayout   = "20060102T150405Z"
+	tempPattern   = "dump-*"
+	dirMode       = 0o700
 )
 
 // FileStore persists whole dump bytes at one main file path, deriving the
@@ -54,6 +60,11 @@ type FileStore struct {
 
 // FileStore implements the whole-dump persistence seam.
 var _ port.DumpStore = (*FileStore)(nil)
+
+// errNotRegular is the preservation rejection of a candidate that is not a
+// regular file: only regular files are renamed out of the rotation path, so
+// no symlink is followed and no device is touched (T-5-13).
+var errNotRegular = errors.New("dump path is not a regular file")
 
 // New returns a FileStore persisting to dumpPath. The exported constructor
 // signature is unchanged by the fsops seam (D-07): the store builds its own
@@ -93,12 +104,17 @@ func (f *FileStore) SaveStream(fill func(io.Writer) error) error {
 // generation whose bytes pass parse together with the outcome, accepted
 // generation and every candidate fault (D-02). A read error or an oracle
 // rejection — a truncated or unparseable file counts as unreadable — is
-// recorded against its candidate and advances the chain; an absent candidate
-// is not a failure. No candidate at all is the prompt start, and candidates
-// that all fail are unusable. Load never deletes evidence: preservation is
-// the adapter's duty and lands with the sweep; now is the clock that names a
-// preserved generation.
-func (f *FileStore) Load(_ time.Time, parse func([]byte) error) port.LoadResult {
+// recorded against its candidate, preserved under a collision-free
+// .corrupt-<UTC> name and the chain advances; an absent candidate is not a
+// failure. No candidate at all is the prompt start, and candidates that all
+// fail are unusable. Presence is never lost from the report: when .prev is
+// accepted after an absent main, the main candidate is recorded with
+// [fs.ErrNotExist] as its cause, so the engine's single Backup WARN always
+// names why the main was not used. Preservation keeps the loaded .prev
+// alive: the corrupt main has left the rotation path before any save, so
+// the first rotate finds no main and is a no-op. now is the clock that names
+// a preserved generation; the adapter stays clock-free.
+func (f *FileStore) Load(now time.Time, parse func([]byte) error) port.LoadResult {
 	var result port.LoadResult
 	candidates := []struct {
 		generation port.Generation
@@ -107,31 +123,34 @@ func (f *FileStore) Load(_ time.Time, parse func([]byte) error) port.LoadResult 
 		{port.GenMain, f.path},
 		{port.GenPrev, f.path + prevSuffix},
 	}
+	mainAbsent := false
 	for _, candidate := range candidates {
 		data, err := os.ReadFile(candidate.path) // safe: the path derives from the configured dump path, never caller input
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
+				if candidate.generation == port.GenMain {
+					mainAbsent = true
+				}
 				continue // absent is the prompt start's shape, never a failure.
 			}
-			result.Failures = append(result.Failures, port.GenerationFailure{
-				Candidate: candidate.generation,
-				Path:      candidate.path,
-				Cause:     err,
-			})
+			result.Failures = append(result.Failures, failedCandidate(now, candidate.generation, candidate.path, err))
 			continue
 		}
 		err = parse(data)
 		if err != nil {
-			result.Failures = append(result.Failures, port.GenerationFailure{
-				Candidate: candidate.generation,
-				Path:      candidate.path,
-				Cause:     err,
-			})
+			result.Failures = append(result.Failures, failedCandidate(now, candidate.generation, candidate.path, err))
 			continue
 		}
 		result.Dump = data
 		result.Generation = candidate.generation
 		if candidate.generation == port.GenPrev {
+			if mainAbsent {
+				result.Failures = append([]port.GenerationFailure{{
+					Candidate: port.GenMain,
+					Path:      f.path,
+					Cause:     fs.ErrNotExist,
+				}}, result.Failures...)
+			}
 			result.Outcome = port.LoadBackup
 		} else {
 			result.Outcome = port.LoadMain
@@ -142,6 +161,75 @@ func (f *FileStore) Load(_ time.Time, parse func([]byte) error) port.LoadResult 
 		result.Outcome = port.LoadUnusable
 	}
 	return result
+}
+
+// failedCandidate records one candidate the load could not accept and moves
+// its bytes out of the rotation path: the failure carries the candidate, its
+// path and the read or parse cause, plus the preservation result (D-02,
+// T-5-12). A read error and an oracle rejection are the same evidence class.
+func failedCandidate(
+	now time.Time,
+	candidate port.Generation,
+	path string,
+	cause error,
+) port.GenerationFailure {
+	failure := port.GenerationFailure{
+		Candidate: candidate,
+		Path:      path,
+		Cause:     cause,
+	}
+	failure.Preserved, failure.PreserveErr = preserve(now, path)
+	return failure
+}
+
+// preserve renames the never-loaded candidate at path out of the rotation
+// path under <path>+corruptSuffix+<UTC stamp> (D-02, T-5-12). Lstat decides
+// regularity — a directory, device or symlink at the dump path is a failure
+// with a cause and no rename, so no link is ever followed; [os.Rename]
+// replaces the renamed entry itself (the directory is 0700, so the probe
+// window is owner-only). Two loads in the same second would derive the same
+// stamp, so base, base-1, base-2 … are probed with Lstat and the first free
+// name wins, never overwriting earlier evidence (Pitfall 15). After a
+// successful rename the parent directory is synced best-effort: the
+// evidence's durability must not turn a load into an error.
+func preserve(now time.Time, path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", &os.PathError{Op: "preserve", Path: path, Err: errNotRegular}
+	}
+	base := path + corruptSuffix + now.UTC().Format(stampLayout)
+	for n := 0; ; n++ {
+		candidate := base
+		if n > 0 {
+			candidate = fmt.Sprintf("%s-%d", base, n)
+		}
+		_, err = os.Lstat(candidate)
+		if errors.Is(err, fs.ErrNotExist) {
+			err = os.Rename(path, candidate)
+			if err != nil {
+				return "", err
+			}
+			syncDirBestEffort(filepath.Dir(path))
+			return candidate, nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+}
+
+// syncDirBestEffort fsyncs dir and discards every error — the preservation
+// path's evidence-durability attempt, which must never fail a load.
+func syncDirBestEffort(dir string) {
+	d, err := os.Open(dir) //nolint:gosec // G304: dir derives from the configured dump path, never caller input
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // saveAtomically implements the canonical atomic-write sequence (PERS-02,
