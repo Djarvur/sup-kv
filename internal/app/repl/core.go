@@ -33,8 +33,11 @@ import (
 
 // SupportedProtoVersion is the wire protocol version this core speaks: the
 // envelope version of every datagram it emits, and any inbound datagram
-// whose version differs is discarded as BadProtoVersion (REPL-09).
-const SupportedProtoVersion = 1
+// whose version differs is discarded as BadProtoVersion (REPL-09). Version 2
+// carries the DataSync completeness header (sync_id, chunk_index,
+// chunk_count): a version-1 listing cannot express completeness, so accepting
+// it would restore the first-chunk reading this version removes (PROTO-01).
+const SupportedProtoVersion = 2
 
 // The discard class tokens passed to [Config.OnDiscard] (D-08): stable
 // first-class strings — one per DiscardStats counter — that the
@@ -171,11 +174,13 @@ const (
 
 	// chunkOverheadBytes is the conservative fixed per-chunk estimate: the
 	// envelope fields (proto_version, node_id, run_id, crc32 and the body's
-	// tag plus length varint), the Body oneof wrapper and the DataSync
-	// repeated-field framing — roughly 45-50 bytes on the real wire. The
-	// stated guarantee of the two constants together: the real encoded
-	// datagram for any budgeted chunk is at most SyncChunkBytes.
-	chunkOverheadBytes = 64
+	// tag plus length varint), the Body oneof wrapper, the DataSync
+	// repeated-field framing and the completeness header (sync_id,
+	// chunk_index, chunk_count — roughly 60-70 bytes on the real wire with
+	// their field tags and a multi-byte sync_id). The stated guarantee of the
+	// two constants together: the real encoded datagram for any budgeted
+	// chunk is at most SyncChunkBytes.
+	chunkOverheadBytes = 96
 )
 
 // Config holds the replication timing parameters; it is immutable once
@@ -403,15 +408,28 @@ type queuedUnicast struct {
 	msg port.Message
 }
 
-// listingFIFO is one destination's in-flight DataSync listing: the chunks not
-// yet emitted, in rotated order. Exactly one FIFO exists per destination
-// (broadcastDst for the periodic round, a peer handle for a restart listing),
-// so a trigger that arrives while a listing is in flight finds the map entry
-// and is dropped after nextSync advances — the queue holds at most one round
-// of chunks (T-3-23).
+// listingFIFO is one destination's in-flight DataSync listing: the round's
+// sync_id and chunk count (stamped on every emitted chunk) and the chunks not
+// yet emitted, in rotated order with their ORIGINAL 1-based indices. Exactly
+// one FIFO exists per destination (broadcastDst for the periodic round, a
+// peer handle for a restart listing), so a trigger that arrives while a
+// listing is in flight finds the map entry and is dropped after nextSync
+// advances — the queue holds at most one round of chunks (T-3-23). Rotation
+// changes only the emission order: chunk_index always names the chunk's
+// position in the unrotated listing, or completeness could never be
+// recognized.
 type listingFIFO struct {
-	dst     string
-	entries [][]port.SyncEntry
+	dst    string
+	syncID uint64
+	count  uint32
+	chunks []queuedListingChunk
+}
+
+// queuedListingChunk is one not-yet-emitted chunk of a listing round: its
+// 1-based original index and its entries.
+type queuedListingChunk struct {
+	index   uint32
+	entries []port.SyncEntry
 }
 
 // syncStreamKey identifies one peer's in-flight listing round: its node_id,
@@ -794,6 +812,14 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		c.discards.Undecodable++
 		c.cfg.OnDiscard(DiscardUndecodable, in.Source)
 		return
+	case port.ProtoVersionMismatch:
+		// The adapter judged the envelope's version before decoding the body
+		// (D-07: a foreign version's body need not follow this version's CRC
+		// contract), so there is no message — only the counted, attributed
+		// discard.
+		c.discards.BadProtoVersion++
+		c.cfg.OnDiscard(DiscardBadProtoVersion, in.Source)
+		return
 	}
 	if in.ProtoVersion != SupportedProtoVersion {
 		c.discards.BadProtoVersion++
@@ -980,7 +1006,7 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 	case port.DataRequest:
 		c.handleDataRequest(now, in.Source, msg.Key)
 	case port.DataSync:
-		c.handleDataSync(now, in.Source, msg.Entries)
+		c.handleDataSync(now, in, msg, out)
 	case port.SyncEntry, nil:
 		// A standalone SyncEntry never travels (it lives inside DataSync),
 		// and a nil Msg on a Decoded verdict violates the adapter contract
@@ -1050,6 +1076,14 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram) {
 	known.lastHello = now
 	c.peers[in.NodeID] = known
 	if restarted {
+		// A new run under this node_id no longer stands behind the old run's
+		// listing: its keys leave the retained union (a content change the
+		// mirror must publish) and its partial rounds are discarded, so the
+		// bounded accumulator cannot inherit dead state.
+		if c.dropListedPeer(in.NodeID) > 0 {
+			c.listingGen++
+		}
+		c.dropPeerSyncStreams(in.NodeID)
 		c.enqueueRestartListing(now, in.NodeID, in.Source)
 		return
 	}
@@ -1185,33 +1219,36 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 	c.enqueueResponse(now, source, port.DataReplication{Key: key, Record: rec})
 }
 
-// handleDataSync compares one received DataSync listing against the local
-// store (REPL-05): each listing entry probes the store through the
-// tombstone-visible per-entry Version — never a whole-store snapshot and
-// never the Versions map, either of which would make the handler O(store)
-// per chunk (XPORT-06) — and compares by the full record-version order,
-// version.Compare, the same order storage.Merge joins by. The first received
-// DataSync datagram — any chunk, an empty listing included — sets the core's
-// syncArrived flag (the startup gate's sync half, API-04, the A1 reading:
-// the protocol deliberately carries no chunk-completeness state because
-// chunks are self-sufficient, so the first received chunk is the honest
-// first-sync-round signal and the startup_gate timeout is the backstop). A
-// locally absent key or a strictly newer listing version enqueues a unicast
-// DataRequest to the sender's handle; a strictly newer local record — read
-// through one point Lookup, tombstones included, so a local delete heals the
-// sender's live copy through the reply — enqueues a unicast exact-record
+// handleDataSync processes one DataSync part (REPL-05, PROTO-01). The header
+// names one peer's listing round; parts accumulate by
+// (node_id, run_id, sync_id) and the round is complete exactly when every
+// chunk index 1..chunk_count has arrived — the first part alone is never the
+// listing (the R-03 defect this shape removes). Only a complete round
+// publishes its key set through retainListedKeys, sets listingComplete once,
+// moves the listing generation when the published content actually changed,
+// and opens the gate (syncArrived) — all in this same handler, so no partial
+// listing can open it. The part's entries then compare per key against the
+// store exactly as before: a locally absent key or a strictly newer listing
+// version enqueues a unicast DataRequest; a strictly newer local record —
+// read through one point Lookup, tombstones included, so a local delete
+// heals the sender's live copy — enqueues a unicast exact-record
 // DataReplication; equal versions produce silence. Entries are processed in
-// received order (senders emit sorted, but the compare is per key and
-// order-independent by construction) and every response flows through the
-// single rate-limited egress queue — the scope pin; no reactive unicast has
-// a bypass path, which is what survives empty-node recovery (T-04-07).
-func (c *Core) handleDataSync(now time.Time, source string, entries []port.SyncEntry) {
-	c.syncArrived = true
-	for _, entry := range entries {
+// received order (the compare is per key and order-independent by
+// construction) and every response flows through the single rate-limited
+// egress queue — the scope pin; no reactive unicast has a bypass path, which
+// is what survives empty-node recovery (T-04-07). A directly-driven core
+// receives no header validation (the wired path classifies that before this
+// handler), so an impossible header returns without touching any state.
+func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.DataSync, _ *port.Outbox) {
+	if !validSyncHeader(msg) {
+		return
+	}
+	c.accumulateSync(in, msg)
+	for _, entry := range msg.Entries {
 		local, present := c.store.Version(entry.Key)
 		switch {
 		case !present || local.Compare(entry.Version) < 0:
-			c.enqueueResponse(now, source, port.DataRequest{Key: entry.Key})
+			c.enqueueResponse(now, in.Source, port.DataRequest{Key: entry.Key})
 		case local.Compare(entry.Version) > 0:
 			rec, ok := c.store.Lookup(entry.Key)
 			if !ok {
@@ -1219,9 +1256,277 @@ func (c *Core) handleDataSync(now time.Time, source string, entries []port.SyncE
 				// is gone, so there is nothing newer to send.
 				continue
 			}
-			c.enqueueResponse(now, source, port.DataReplication{Key: entry.Key, Record: rec})
+			c.enqueueResponse(now, in.Source, port.DataReplication{Key: entry.Key, Record: rec})
 		}
 	}
+}
+
+// validSyncHeader reports whether msg's completeness header is inside its
+// domain: at least one chunk, a 1-based index inside the round, and a count
+// at or under the stream cap (T-4-02). One step outside any bound is
+// invalid; an empty listing is a single empty chunk, never chunk_count 0.
+func validSyncHeader(msg port.DataSync) bool {
+	return msg.ChunkCount >= 1 &&
+		msg.ChunkIndex >= 1 &&
+		msg.ChunkIndex <= msg.ChunkCount &&
+		msg.ChunkCount <= maxSyncChunks
+}
+
+// accumulateSync folds one valid part into its round's stream, enforcing the
+// three bounds, and completes the listing when every index 1..count is
+// present. The stream key includes the peer's run_id, so a restart's fresh
+// sync_id counter cannot merge into the previous run's partial state.
+func (c *Core) accumulateSync(in port.InboundDatagram, msg port.DataSync) {
+	key := syncStreamKey{peer: in.NodeID, run: in.RunID, id: msg.SyncID}
+	stream := c.syncs[key]
+	if stream == nil {
+		c.makeSyncStreamRoom()
+		stream = &syncStream{
+			count:   msg.ChunkCount,
+			got:     make(map[uint32]struct{}, msg.ChunkCount),
+			entries: make(map[string]version.RecordVersion, len(msg.Entries)),
+		}
+		c.syncs[key] = stream
+	} else if stream.count != msg.ChunkCount {
+		// A part disagreeing with the live round's count never merges: the
+		// wired path classifies it as bad_sync_header and the stored count is
+		// the round's identity.
+		return
+	}
+	stream.got[msg.ChunkIndex] = struct{}{}
+	for _, entry := range msg.Entries {
+		if _, seen := stream.entries[entry.Key]; seen {
+			continue // idempotent: the same key twice contributes once
+		}
+		stream.entries[entry.Key] = entry.Version
+		c.syncEntries++
+	}
+	if c.enforceSyncBounds(key) {
+		return // the bounds dropped this round; nothing may complete from it
+	}
+	if !stream.complete() {
+		return
+	}
+	changed := c.retainListedKeys(in.NodeID, stream.entries)
+	if !c.listingComplete {
+		c.listingComplete = true
+		changed = true
+	}
+	if changed {
+		c.listingGen++
+	}
+	c.syncArrived = true
+	c.discardSyncStream(key)
+}
+
+// complete reports whether every chunk index 1..count has arrived — the
+// single completeness predicate: arrival of any one chunk proves nothing.
+func (s *syncStream) complete() bool {
+	if len(s.got) < int(s.count) {
+		return false
+	}
+	for i := uint32(1); i <= s.count; i++ {
+		if _, ok := s.got[i]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// makeSyncStreamRoom evicts least-progressed rounds until another stream can
+// be admitted. Eviction order is deterministic — fewest received chunks
+// first, then (peer, run bytes, sync_id) ascending — so same-seed replay
+// stays byte-identical (T-4-03, T-3-22).
+func (c *Core) makeSyncStreamRoom() {
+	for len(c.syncs) >= maxSyncStreams {
+		if !c.dropWeakestSyncStream() {
+			return
+		}
+	}
+}
+
+// enforceSyncBounds applies the per-stream and total entry caps after one
+// accumulation, reporting whether the round was dropped. A stream past
+// maxSyncEntriesPerStream is evicted whole; then least-progressed streams are
+// evicted until the total fits maxSyncEntriesTotal. Every eviction counts in
+// syncStreamDropped.
+func (c *Core) enforceSyncBounds(key syncStreamKey) bool {
+	stream := c.syncs[key]
+	if stream == nil {
+		return true
+	}
+	if len(stream.entries) > maxSyncEntriesPerStream {
+		c.evictSyncStream(key)
+		return true
+	}
+	for c.syncEntries > maxSyncEntriesTotal {
+		if !c.dropWeakestSyncStream() {
+			break
+		}
+	}
+	_, kept := c.syncs[key]
+	return !kept
+}
+
+// dropWeakestSyncStream evicts the least-progressed round and reports
+// whether one existed. The comparator is a total order over the streams, so
+// the choice never depends on map iteration order.
+func (c *Core) dropWeakestSyncStream() bool {
+	var weakest syncStreamKey
+	var weakestStream *syncStream
+	found := false
+	for key, stream := range c.syncs {
+		if !found || syncStreamLess(key, stream, weakest, weakestStream) {
+			weakest, weakestStream, found = key, stream, true
+		}
+	}
+	if !found {
+		return false
+	}
+	c.evictSyncStream(weakest)
+	return true
+}
+
+// syncStreamLess orders two partial rounds for deterministic eviction:
+// fewer received chunks is weaker (less likely to complete soon), then the
+// key's peer, run bytes and sync_id break ties ascending.
+func syncStreamLess(a syncStreamKey, aStream *syncStream, b syncStreamKey, bStream *syncStream) bool {
+	if len(aStream.got) != len(bStream.got) {
+		return len(aStream.got) < len(bStream.got)
+	}
+	if a.peer != b.peer {
+		return a.peer < b.peer
+	}
+	if cmp := bytes.Compare(a.run[:], b.run[:]); cmp != 0 {
+		return cmp < 0
+	}
+	return a.id < b.id
+}
+
+// evictSyncStream drops one partial round and counts the drop — the only
+// deletion path that counts; completion uses discardSyncStream.
+func (c *Core) evictSyncStream(key syncStreamKey) {
+	if _, ok := c.syncs[key]; !ok {
+		return
+	}
+	c.discardSyncStream(key)
+	c.syncStreamDropped++
+}
+
+// discardSyncStream deletes one partial round and releases its accumulated
+// entries from the total counter — the shared completion/eviction deletion.
+func (c *Core) discardSyncStream(key syncStreamKey) {
+	stream, ok := c.syncs[key]
+	if !ok {
+		return
+	}
+	c.syncEntries -= len(stream.entries)
+	delete(c.syncs, key)
+}
+
+// dropPeerSyncStreams discards every partial round a peer left behind — the
+// restart and peer-eviction cleanup, so a dead run's partial state cannot
+// occupy the bounded accumulator.
+func (c *Core) dropPeerSyncStreams(peer uint16) {
+	for key := range c.syncs {
+		if key.peer == peer {
+			c.discardSyncStream(key)
+		}
+	}
+}
+
+// retainListedKeys installs entries as peer's whole listed-key set, releases
+// the set it replaces through the union refcounts, refreshes the peer's LRU
+// position, and then evicts whole peer sets from the LRU front while the
+// retained total exceeds maxListedKeysTotal (T-4-41). It reports whether the
+// published content actually changed — the union membership or the peer's own
+// set — so an identical repeated listing moves no generation and the
+// adapter's mirror clones nothing. A key shared by several peers stays in the
+// union until its last lister drops it; eviction therefore shrinks the union,
+// the refcounts and the retained total together.
+func (c *Core) retainListedKeys(peer uint16, entries map[string]version.RecordVersion) bool {
+	if sameListedKeys(c.listedByPeer[peer], entries) {
+		c.touchListedPeer(peer)
+		return false
+	}
+	c.dropListedPeer(peer)
+	set := make(map[string]struct{}, len(entries))
+	for key := range entries {
+		set[key] = struct{}{}
+		c.listedRefs[key]++
+		if c.listedRefs[key] == 1 {
+			c.listedKeys[key] = struct{}{}
+			c.listedKeyCount++
+		}
+	}
+	c.listedByPeer[peer] = set
+	c.listedPos[peer] = c.listedOrder.PushBack(peer)
+	for c.listedKeyCount > maxListedKeysTotal {
+		front := c.listedOrder.Front()
+		if front == nil {
+			break
+		}
+		victim := front.Value.(uint16)
+		c.listedKeysEvicted += uint64(c.dropListedPeer(victim)) //nolint:gosec // G115: dropListedPeer returns a non-negative key count.
+	}
+	return true
+}
+
+// touchListedPeer moves peer to the LRU back without touching its set — the
+// identical-repeat path: recency updates, content does not.
+func (c *Core) touchListedPeer(peer uint16) {
+	if elem := c.listedPos[peer]; elem != nil {
+		c.listedOrder.MoveToBack(elem)
+		return
+	}
+	c.listedByPeer[peer] = make(map[string]struct{})
+	c.listedPos[peer] = c.listedOrder.PushBack(peer)
+}
+
+// dropListedPeer removes peer's whole listed-key contribution: every key whose
+// last lister it was leaves the union, the refcounts shrink, and the peer row
+// and LRU element go. It returns how many keys left the union — the count
+// ListedKeysEvicted publishes. Used both for replacement and eviction, so a
+// dead peer's keys can never survive in the mirror.
+func (c *Core) dropListedPeer(peer uint16) int {
+	set, ok := c.listedByPeer[peer]
+	if !ok {
+		return 0
+	}
+	released := 0
+	for key := range set {
+		c.listedRefs[key]--
+		if c.listedRefs[key] > 0 {
+			continue
+		}
+		delete(c.listedRefs, key)
+		if _, listed := c.listedKeys[key]; listed {
+			delete(c.listedKeys, key)
+			c.listedKeyCount--
+			released++
+		}
+	}
+	delete(c.listedByPeer, peer)
+	if elem := c.listedPos[peer]; elem != nil {
+		c.listedOrder.Remove(elem)
+		delete(c.listedPos, peer)
+	}
+	return released
+}
+
+// sameListedKeys reports whether peer's retained set already holds exactly
+// entries' keys — the identical-listing predicate the content-gated
+// generation depends on.
+func sameListedKeys(old map[string]struct{}, entries map[string]version.RecordVersion) bool {
+	if len(old) != len(entries) {
+		return false
+	}
+	for key := range entries {
+		if _, ok := old[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // enqueueResponse appends one reactive unicast to the egress queue
@@ -1438,19 +1743,20 @@ func (c *Core) warnIfNoPeer(now time.Time) {
 // of at most a tenth of the interval. The listing is built from
 // the store's shallow Versions view into entries for every record,
 // tombstones included (deletes reconcile through the same listing), sorted
-// by key in byte order and chunked by the conservative estimate; the chunks
-// are ENQUEUED in rotated order — round r starts at chunk r % len(chunks) —
-// and the shared listing pacer drains one datagram per
-// floor(1s/SyncResponseRate) interval (D-01), so a burst can never overflow
-// the receiver's buffer. A store with zero
-// records still emits one DataSync with an empty entry list — an empty
-// listing is a valid sync round that invites newer-flooding from receivers
-// (probe #7). The neighbor-restart trigger — a Hello carrying a new run_id
-// from a known node — enqueues the same chunk sequence UNICAST toward the
-// restarted peer in handleHello (REPL-07, plan 04-04), through the shared
-// listingChunks build. The timer advances even when the enqueue is skipped:
-// a trigger arriving while a broadcast listing is in flight must never
-// leave nextSync in the past, or every Advance would retrigger and the
+// by key in byte order and chunked by the conservative estimate. Every round
+// gets a fresh sync_id and stamps chunk_count on each chunk; the chunks are
+// ENQUEUED in rotated order — round r starts at chunk r % len(chunks) — while
+// each chunk keeps its ORIGINAL 1-based index, and the shared listing pacer
+// drains one datagram per floor(1s/SyncResponseRate) interval (D-01), so a
+// burst can never overflow the receiver's buffer. A store with zero
+// records still emits one DataSync with an empty entry list and count 1 — an
+// empty listing is a valid, complete sync round that invites newer-flooding
+// from receivers (probe #7). The neighbor-restart trigger — a Hello carrying
+// a new run_id from a known node — enqueues the same chunk sequence UNICAST
+// toward the restarted peer in handleHello (REPL-07, plan 04-04), through the
+// shared listingChunks build. The timer advances even when the enqueue is
+// skipped: a trigger arriving while a broadcast listing is in flight must
+// never leave nextSync in the past, or every Advance would retrigger and the
 // driver would never sleep (RESEARCH Pitfall 3).
 func (c *Core) syncListing(now time.Time) {
 	if !c.nextSync.IsZero() && now.Before(c.nextSync) {
@@ -1463,9 +1769,7 @@ func (c *Core) syncListing(now time.Time) {
 	chunks := c.listingChunks()
 	//nolint:gosec // G115: the modulus is len(chunks), an int, so the result fits.
 	start := int(c.syncRotation % uint64(len(chunks)))
-	for i := range chunks {
-		c.enqueueListingChunk(now, broadcastDst, chunks[(start+i)%len(chunks)])
-	}
+	c.enqueueListingRound(now, broadcastDst, chunks, start)
 	c.syncRotation++
 }
 
@@ -1485,52 +1789,84 @@ func (c *Core) enqueueRestartListing(now time.Time, peerID uint16, handle string
 	start := int(row.rotation % uint64(len(chunks)))
 	row.rotation++
 	c.peers[peerID] = row
+	c.enqueueListingRound(now, handle, chunks, start)
+}
+
+// enqueueListingRound allocates one round's sync_id and enqueues every chunk
+// in the given rotated emission order, each stamping the round's chunk count
+// and its own ORIGINAL 1-based index. Rotation changes only the order: an
+// index derived from the emission position would never match the receiver's
+// 1..count accumulation.
+func (c *Core) enqueueListingRound(now time.Time, dst string, chunks [][]port.SyncEntry, start int) {
+	syncID := c.nextSyncID
+	c.nextSyncID++
+	count := syncChunkCount(chunks)
 	for i := range chunks {
-		c.enqueueListingChunk(now, handle, chunks[(start+i)%len(chunks)])
+		idx := (start + i) % len(chunks)
+		c.enqueueListingChunk(now, dst, syncID, count, chunkOrdinal(idx), chunks[idx])
 	}
 }
 
-// enqueueListingChunk appends one DataSync chunk to a destination's FIFO.
-// The first chunk after an idle listing queue clamps nextListingAt to now,
-// so the first datagram of a round emits in the same Advance — the startup
-// one-chunk expectation and the R-01 first-send immediacy.
-func (c *Core) enqueueListingChunk(now time.Time, dst string, chunk []port.SyncEntry) {
+// chunkOrdinal returns the 0-based chunk position as the wire's 1-based
+// chunk_index.
+func chunkOrdinal(pos int) uint32 {
+	return uint32(pos + 1) //nolint:gosec // G115: bounded by maxSyncChunks, the chunker's ceiling.
+}
+
+// syncChunkCount returns the round's chunk count as the wire's uint32
+// chunk_count; the listing source is the in-memory store and the chunker
+// emits at most one chunk per entry, so the value is far below 2^32 for any
+// reachable store and within the receiver's maxSyncChunks for the documented
+// 20 000-key scale.
+func syncChunkCount(chunks [][]port.SyncEntry) uint32 {
+	return uint32(len(chunks)) //nolint:gosec // G115: a store cannot hold 2^32 entries in memory.
+}
+
+// enqueueListingChunk appends one DataSync chunk, stamped with its round's
+// sync_id, chunk_count and own index, to a destination's FIFO. The first
+// chunk after an idle listing queue clamps nextListingAt to now, so the first
+// datagram of a round emits in the same Advance — the startup one-chunk
+// expectation and the R-01 first-send immediacy.
+func (c *Core) enqueueListingChunk(now time.Time, dst string, syncID uint64, count, index uint32, chunk []port.SyncEntry) {
 	if c.listingCount == 0 {
 		c.nextListingAt = now
 	}
 	q := c.listingByDst[dst]
 	if q == nil {
-		q = &listingFIFO{dst: dst}
+		q = &listingFIFO{dst: dst, syncID: syncID, count: count}
 		c.listingByDst[dst] = q
 		c.listingOrder = append(c.listingOrder, dst)
 	}
-	q.entries = append(q.entries, chunk)
+	q.chunks = append(q.chunks, queuedListingChunk{index: index, entries: chunk})
 	c.listingCount++
 }
 
 // drainListings emits queued listing chunks at the shared pacer cadence
 // (D-01): while a listing slot is due, the FIFO at the head of the
-// destination order emits one datagram — broadcast for broadcastDst, unicast
-// for a peer handle — and the slot advances by the jittered interval. The
-// clamp shape is drainEgress': an Advance that arrives late emits one
-// datagram, never a backlog burst, and the next slot is measured from the
-// actual emission time. A destination whose FIFO empties leaves the order,
-// so its in-flight mark clears exactly when its listing completes (T-3-23).
+// destination order emits one datagram carrying its round's sync_id, the
+// round's chunk_count and the chunk's own original index — broadcast for
+// broadcastDst, unicast for a peer handle — and the slot advances by the
+// jittered interval. The clamp shape is drainEgress': an Advance that arrives
+// late emits one datagram, never a backlog burst, and the next slot is
+// measured from the actual emission time. A destination whose FIFO empties
+// leaves the order, so its in-flight mark clears exactly when its listing
+// completes (T-3-23).
 func (c *Core) drainListings(now time.Time, out *port.Outbox) {
 	for c.listingCount > 0 && !now.Before(c.nextListingAt) {
 		dst := c.listingOrder[0]
 		q := c.listingByDst[dst]
-		chunk := q.entries[0]
-		q.entries[0] = nil
-		q.entries = q.entries[1:]
+		chunk := q.chunks[0]
+		q.chunks[0] = queuedListingChunk{}
+		q.chunks = q.chunks[1:]
+		msg := port.DataSync{SyncID: q.syncID, ChunkIndex: chunk.index, ChunkCount: q.count, Entries: chunk.entries}
 		if dst == broadcastDst {
-			out.Broadcast(port.DataSync{Entries: chunk})
+			out.Broadcast(msg)
 		} else {
-			out.Unicast(dst, port.DataSync{Entries: chunk})
+			out.Unicast(dst, msg)
 		}
 		c.pacedSends++
 		c.listingCount--
-		if len(q.entries) == 0 {
+		if len(q.chunks) == 0 {
 			delete(c.listingByDst, dst)
 			c.listingOrder = c.listingOrder[1:]
 		}
@@ -1611,18 +1947,17 @@ func (c *Core) listingChunks() [][]port.SyncEntry {
 	return chunkSyncEntries(entries, c.cfg.SyncChunkBytes)
 }
 
-// chunkSyncEntries packs the sorted listing into self-sufficient chunks
-// (REPL-05, the A4 reading): the walk accumulates entries while the
-// conservative estimate usedEstimate + entryEstimate(next) stays at most
-// budget — a chunk filled to exactly the budget closes (probe #15), the
-// entry that would cross it opens the next chunk, and a single entry
-// whose own estimate already exceeds the budget ships alone as its own
-// oversized chunk — never dropped, never split, and carrying no
-// continuation state (no sequence numbers, no resumption cursor): any
-// single chunk is fully comparable alone. An empty listing yields one
-// empty chunk, so an empty store still announces itself (probe #7).
-// Identical store state produces the identical chunk sequence — the walk
-// is over the sorted listing, never a map (probe #11).
+// chunkSyncEntries packs the sorted listing into chunks (REPL-05, the A4
+// reading): the walk accumulates entries while the conservative estimate
+// usedEstimate + entryEstimate(next) stays at most budget — a chunk filled to
+// exactly the budget closes (probe #15), the entry that would cross it opens
+// the next chunk, and a single entry whose own estimate already exceeds the
+// budget ships alone as its own oversized chunk — never dropped, never split.
+// Every chunk is independently comparable; completeness is the round header's
+// job (sync_id/chunk_index/chunk_count), never a cursor inside the chunks. An
+// empty listing yields one empty chunk, so an empty store still announces
+// itself (probe #7). Identical store state produces the identical chunk
+// sequence — the walk is over the sorted listing, never a map (probe #11).
 func chunkSyncEntries(entries []port.SyncEntry, budget int) [][]port.SyncEntry {
 	var chunks [][]port.SyncEntry
 	// A budgeted chunk holds at most budget/entryOverheadBytes entries
@@ -1674,6 +2009,14 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 	}
 	for _, id := range expired {
 		delete(c.peers, id)
+		// The evicted peer's retained listing and partial rounds go with it:
+		// the mirror must never serve a dead peer's keys, and the union must
+		// not retain them (PROTO-01, T-4-41). A union change moves the
+		// generation so the publication follows.
+		if c.dropListedPeer(id) > 0 {
+			c.listingGen++
+		}
+		c.dropPeerSyncStreams(id)
 		// The per-peer ledger bounds the walk: only this peer's unacked
 		// entries lose it as a waiter. Entries stay tracked (suspension),
 		// and acked stays untouched (an eviction is never an Ack).
@@ -1906,17 +2249,15 @@ func (c *Core) Retransmissions() uint64 {
 	return c.retransmitted
 }
 
-// SyncArrived reports whether at least one DataSync datagram has been
-// received — the startup gate's sync half (API-04), false until the first
-// handleDataSync and true forever after. The reading is pinned by A1: the
-// first received DataSync datagram counts as the first sync round, because
-// the protocol deliberately carries no chunk-completeness state — chunks
-// are self-sufficient (chunkSyncEntries) — and the startup_gate timeout is
-// the backstop for a node whose peers never announce. Set on the driver
-// goroutine only; like Discards this is a value read sanctioned for the
-// adapter's post-event mirroring, so cross-goroutine readers (Phase 5's
-// gate resolver) see the state through the adapter's atomic, never by
-// calling into a core the driver owns.
+// SyncArrived reports whether a COMPLETE listing has been processed — every
+// chunk of some peer's round received, not merely the first arrival (the
+// startup gate's sync half, API-04, PROTO-01). The flag flips in
+// handleDataSync's all-chunks branch and never resets; ListingComplete is the
+// same fact read from the listing state. Set on the driver goroutine only;
+// like Discards this is a value read sanctioned for the adapter's post-event
+// mirroring, so cross-goroutine readers (Phase 5's gate resolver) see the
+// state through the adapter's one atomic listing pointer, never by calling
+// into a core the driver owns.
 func (c *Core) SyncArrived() bool {
 	return c.syncArrived
 }

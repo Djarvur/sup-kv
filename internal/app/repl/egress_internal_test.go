@@ -88,6 +88,22 @@ func missingEntries(n int) []port.SyncEntry {
 	return entries
 }
 
+// egressSync feeds one complete one-part listing, from source under syncID,
+// through the DataSync handler — the white-box shape the egress tests drive.
+func egressSync(core *Core, now time.Time, source string, syncID uint64, entries []port.SyncEntry) {
+	msg := port.DataSync{SyncID: syncID, ChunkIndex: 1, ChunkCount: 1, Entries: entries}
+	in := port.InboundDatagram{
+		Source:       source,
+		Status:       port.Decoded,
+		ProtoVersion: SupportedProtoVersion,
+		NodeID:       egressTestPeer,
+		RunID:        [16]byte{1},
+		Msg:          msg,
+	}
+	var out port.Outbox
+	core.handleDataSync(now, in, msg, &out)
+}
+
 // TestEgress_boundedDeduped proves the XPORT-07 acceptance: two DataSync
 // listings carrying the same 1 000 missing keys leave exactly 1 000
 // DataRequest answers queued, not 2 000 — the identity is
@@ -99,8 +115,8 @@ func TestEgress_boundedDeduped(t *testing.T) {
 	const missing = 1000
 	entries := missingEntries(missing)
 
-	core.handleDataSync(now, "peer", entries)
-	core.handleDataSync(now, "peer", entries)
+	egressSync(core, now, "peer", 1, entries)
+	egressSync(core, now, "peer", 2, entries)
 	if got := core.QueuedResponses(); got != missing {
 		t.Fatalf("two listings of %d missing keys queued %d answers, want %d — the dedupe identity collapsed the duplicates", missing, got, missing)
 	}

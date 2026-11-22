@@ -25,7 +25,7 @@ import (
 // Sync-budget test constants: the fixed wall-clock millisecond (the D-02
 // seam), the wired node, the design-default chunk budget (docs/IDEA.md
 // §Parameters), and the oversized-key length whose own core-side estimate
-// (len+24+64) exceeds the budget.
+// (len+24) alone exceeds the budget.
 const (
 	wireNowMs       = int64(1730000000000)
 	wireNodeID      = uint16(7)
@@ -39,11 +39,12 @@ const (
 )
 
 // wireGraduatedLens are the eight graduated key lengths whose per-entry
-// estimates (len+24) sum to exactly 1336: with the 64-byte chunk overhead
-// the first emitted chunk closes at exactly the 1400-byte budget — the
-// tightest chunk the estimator can build, and therefore the one whose real
-// encoded size proves the estimate's slack.
-var wireGraduatedLens = [8]int{100, 130, 160, 140, 120, 150, 170, 174}
+// estimates (len+24) sum to exactly 1112: with the 96-byte chunk overhead
+// (envelope, DataSync framing and the completeness header) the first emitted
+// chunk closes at exactly the 1400-byte budget — the tightest chunk the
+// estimator can build, and therefore the one whose real encoded size proves
+// the estimate's slack.
+var wireGraduatedLens = [8]int{96, 126, 156, 136, 116, 146, 166, 170}
 
 // wireStateStore adapts *storage.Store to repl.StateStore — the Phase 4
 // consumer seam — by delegating the core's four methods.
@@ -147,12 +148,17 @@ func TestSync_chunkWireBudget(t *testing.T) {
 		}
 		if len(sync.Entries) == 1 && sync.Entries[0].Key == wireOversizedKey() {
 			sawOversized = true
-			// One datagram carrying exactly the one oversized entry — its
-			// own unavoidable minimum: re-encoding that single-entry
-			// DataSync directly must yield the identical size (nothing
-			// piggybacked, nothing split off), and the budget is exceeded
-			// by exactly the entry's own excess.
-			minimum, err := encodeDatagram(wireNodeID, runID, port.DataSync{Entries: sync.Entries})
+			// One datagram carrying exactly the one oversized entry under the
+			// same completeness header — its own unavoidable minimum. Both
+			// datagrams have the same shape (identical sync_id, chunk_index
+			// and chunk_count), so the size comparison isolates the entry, and
+			// the budget is exceeded by exactly the entry's own excess.
+			minimum, err := encodeDatagram(wireNodeID, runID, port.DataSync{
+				SyncID:     sync.SyncID,
+				ChunkIndex: sync.ChunkIndex,
+				ChunkCount: sync.ChunkCount,
+				Entries:    sync.Entries,
+			})
 			if err != nil {
 				t.Fatalf("encode the oversized single-entry chunk: %v", err)
 			}

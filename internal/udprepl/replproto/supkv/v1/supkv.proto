@@ -1,9 +1,9 @@
 // sup-kv replication wire schema: one Envelope per UDP datagram carrying a
 // CRC32 over the marshaled Body, and one of the five protocol messages
 // inside the Body oneof (docs/IDEA.md §Replication protocol). All five
-// messages are defined here because the schema is one file; the Phase 4
-// wave-1 core consumes only Hello, DataReplication and Ack — DataRequest
-// and DataSync land with the later plans on the same schema.
+// messages are defined here because the schema is one file; every message is
+// carried from protocol version 2 on, where DataSync's completeness header
+// makes a listing's chunk structure explicit.
 syntax = "proto3";
 
 package supkv.v1;
@@ -61,10 +61,17 @@ message DataRequest {
   string key = 1;
 }
 
-// DataSync is one self-sufficient chunk of the sorted key→version listing
-// exchanged for full reconciliation (REPL-05).
+// DataSync is one chunk of the sorted key→version listing exchanged for
+// full reconciliation (REPL-05, REPL-07). The header makes completeness a
+// wire fact: every chunk of one listing round carries the same sync_id and
+// chunk_count, plus its own 1-based chunk_index, so the receiver knows the
+// listing is complete exactly when every index 1..chunk_count has arrived —
+// a first chunk alone is never the whole listing.
 message DataSync {
   repeated SyncEntry entries = 1;
+  uint64 sync_id = 2;
+  uint32 chunk_index = 3;
+  uint32 chunk_count = 4;
 }
 
 // SyncEntry is one key→version pair inside a DataSync chunk.

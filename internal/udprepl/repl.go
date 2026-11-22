@@ -1138,9 +1138,13 @@ func encodeDatagram(nodeID uint16, runID [16]byte, msg port.Message) ([]byte, er
 // an empty datagram or an envelope that fails to unmarshal classifies
 // Undecodable; envelope fields violating their wire domain — a node_id
 // beyond the 16-bit range, a run_id that is not 16 bytes — classify
-// Undecodable too; a CRC mismatch classifies BadCRC with the envelope
-// fields carried over and the body NOT unmarshaled; only a passing CRC is
-// the body decoded, and any body fault classifies Undecodable.
+// Undecodable too; a proto_version other than the one this build speaks
+// classifies ProtoVersionMismatch with the envelope fields carried over and
+// NO body decode — the verdict precedes the CRC gate because a foreign
+// version's body need not follow this version's framing contract (D-07); a
+// CRC mismatch classifies BadCRC with the envelope fields carried over and
+// the body NOT unmarshaled; only a passing CRC is the body decoded, and any
+// body fault classifies Undecodable.
 func decode(datagram []byte) port.InboundDatagram {
 	var env replproto.Envelope
 	if len(datagram) == 0 || proto.Unmarshal(datagram, &env) != nil {
@@ -1154,6 +1158,10 @@ func decode(datagram []byte) port.InboundDatagram {
 		NodeID:       uint16(env.GetNodeId()), //nolint:gosec // G115: the maxNodeIDWire check above proved the value fits 16 bits.
 	}
 	copy(in.RunID[:], env.GetRunId())
+	if in.ProtoVersion != repl.SupportedProtoVersion {
+		in.Status = port.ProtoVersionMismatch
+		return in
+	}
 	if crc32.ChecksumIEEE(env.GetBody()) != env.GetCrc32() {
 		in.Status = port.BadCRC
 		return in
@@ -1197,7 +1205,12 @@ func protoBody(msg port.Message) (*replproto.Body, error) {
 		for i, entry := range m.Entries {
 			entries[i] = &replproto.SyncEntry{Key: entry.Key, Version: entry.Version[:]}
 		}
-		return &replproto.Body{Msg: &replproto.Body_DataSync{DataSync: &replproto.DataSync{Entries: entries}}}, nil
+		return &replproto.Body{Msg: &replproto.Body_DataSync{DataSync: &replproto.DataSync{
+			SyncId:     m.SyncID,
+			ChunkIndex: m.ChunkIndex,
+			ChunkCount: m.ChunkCount,
+			Entries:    entries,
+		}}}, nil
 	default:
 		return nil, fmt.Errorf("%w: %T", errNoStandaloneBody, msg)
 	}
@@ -1243,7 +1256,12 @@ func portMessage(body *replproto.Body) (port.Message, bool) {
 			}
 			entries[i] = port.SyncEntry{Key: entry.GetKey(), Version: ver}
 		}
-		return port.DataSync{Entries: entries}, true
+		return port.DataSync{
+			SyncID:     msg.DataSync.GetSyncId(),
+			ChunkIndex: msg.DataSync.GetChunkIndex(),
+			ChunkCount: msg.DataSync.GetChunkCount(),
+			Entries:    entries,
+		}, true
 	default:
 		return nil, false
 	}

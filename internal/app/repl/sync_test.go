@@ -21,7 +21,7 @@ import (
 // default rate — ⌊1s/500⌋ = 2ms, docs/IDEA.md §Parameters — the key no
 // test store ever holds (REPL-04's silence row), the design-default sync
 // interval (IDEA §Parameters), and the oversized-key length whose own
-// estimate (len+24+64) exceeds the 1400-byte chunk budget.
+// estimate (len+24) alone exceeds the 1400-byte chunk budget.
 const (
 	responseSpacing = 2 * time.Millisecond
 	keyUnknown      = "cfg/never-written"
@@ -30,10 +30,11 @@ const (
 )
 
 // graduatedKeyLens are the eight graduated key lengths whose per-entry
-// estimates (len+24) sum to exactly 1336: with the 64-byte chunk overhead
-// the first chunk closes at exactly the 1400-byte budget (probe #15's
-// at-boundary case).
-var graduatedKeyLens = [8]int{100, 130, 160, 140, 120, 150, 170, 174}
+// estimates (len+24) sum to exactly 1112: with the 96-byte chunk overhead
+// (the envelope, the DataSync framing and the completeness header) the first
+// chunk closes at exactly the 1400-byte budget (probe #15's at-boundary
+// case).
+var graduatedKeyLens = [8]int{96, 126, 156, 136, 116, 146, 166, 170}
 
 // requestFrom builds a decoded DataRequest datagram from peerID (REPL-04:
 // unicast "send me this key").
@@ -262,7 +263,7 @@ func graduatedKey(i, keyLen int) string {
 }
 
 // oversizedKey returns the sorted-last key whose own estimate
-// (len+24+64 = 1488) already exceeds the 1400-byte budget — it must ship
+// (len+24 = 1424) already exceeds the 1400-byte budget — it must ship
 // alone as one oversized chunk, never dropped, never split.
 func oversizedKey() string {
 	return "z" + strings.Repeat("y", oversizedKeyLen-1)
@@ -375,9 +376,10 @@ func listingFrom(snap map[string]storage.Record) []port.SyncEntry {
 // within sync_chunk_bytes — the chunk filled to exactly the budget closes,
 // the entry that would cross it opens the next chunk, and a single entry
 // whose own estimate exceeds the budget ships alone as one oversized
-// chunk, never dropped, never split (A4: chunks are self-sufficient, no
-// continuation state). An empty store still emits one zero-entry listing
-// (probe #7: an empty listing is a valid sync round).
+// chunk, never dropped, never split. Every chunk is independently
+// comparable; completeness travels in the round header, never inside the
+// chunk. An empty store still emits one zero-entry listing (probe #7: an
+// empty listing is a complete sync round).
 func TestSync_chunking(t *testing.T) {
 	t.Parallel()
 	t.Run("exact-budget close, boundary crossing and the oversized single entry", func(t *testing.T) {
@@ -415,7 +417,7 @@ func TestSync_chunking(t *testing.T) {
 			wantFirst = append(wantFirst, graduatedKey(i, graduatedKeyLens[i]))
 		}
 		if got := syncEntryKeys(syncs[0]); !slices.Equal(got, wantFirst) {
-			t.Fatalf("the at-budget chunk holds %d keys, want exactly the first %d graduated keys (64 + sum(len+24) = 1400)", len(got), len(wantFirst))
+			t.Fatalf("the at-budget chunk holds %d keys, want exactly the first %d graduated keys (96 + sum(len+24) = 1400)", len(got), len(wantFirst))
 		}
 		if got := syncEntryKeys(syncs[1]); !slices.Equal(got, []string{graduatedKey(8, 50), graduatedKey(9, 50)}) {
 			t.Fatalf("the follow-up chunk holds %v, want the two keys that crossed the budget boundary", got)
@@ -737,14 +739,12 @@ func TestSync_emptyListing(t *testing.T) {
 	}
 }
 
-// TestSync_syncArrived proves the startup gate's sync half (API-04, the A1
-// reading): SyncArrived() is false until the first received DataSync
-// datagram — our own startup listing emission does not count, only a
-// receipt, and an unrelated Hello receipt does not either — flips true on
-// the first received DataSync chunk (an empty listing is a valid chunk:
-// chunks are self-sufficient, the protocol carries no completeness state,
-// and the startup_gate timeout is the backstop), and stays true through
-// further unrelated events, never resetting.
+// TestSync_syncArrived proves the startup gate's sync half (API-04,
+// PROTO-01): SyncArrived() is false until a COMPLETE listing arrives — our
+// own startup listing emission does not count, only a receipt, an unrelated
+// Hello receipt does not either, and no partial chunk does. A single-part
+// listing (here the empty one) completes the round and flips the flag; the
+// flag then stays true through further unrelated events, never resetting.
 func TestSync_syncArrived(t *testing.T) {
 	t.Parallel()
 	now := at(0)
@@ -766,13 +766,13 @@ func TestSync_syncArrived(t *testing.T) {
 		t.Fatal("SyncArrived() = true after a Hello receipt, want false")
 	}
 
-	// One received DataSync datagram — the empty listing chunk — flips it:
-	// any received chunk counts (A1), from any sender (the compare path
+	// One complete received listing — the single-part empty one — flips it:
+	// every chunk of the round is present, from any sender (the compare path
 	// never consults the peer table).
 	core.HandleDatagram(now, syncFrom(peerID2), &out)
 	out.Drain()
 	if !core.SyncArrived() {
-		t.Fatal("SyncArrived() = false after a received DataSync datagram, want true")
+		t.Fatal("SyncArrived() = false after a complete DataSync listing, want true")
 	}
 
 	// Further unrelated events never reset it: a sync-timer Advance and
