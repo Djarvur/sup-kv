@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 5
 current_phase_name: Persistence
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 05-04-PLAN.md
-last_updated: "2026-11-22T14:13:18.525Z"
+stopped_at: Completed 05-05-PLAN.md
+last_updated: "2026-11-22T14:37:45.620Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 4 complete, transitioned to Phase 5
-state_head: 0e7e7225f8d8e00c30cf0288308fbd27266284fe
+state_head: f5e954ab131bd3346ca207e1a6f9c5d207142635
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 59
-  completed_plans: 51
+  completed_plans: 52
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 5 (Persistence) — executing
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 12
 Status: Executing (05-01 complete, 05-02 next)
 Last activity: 2026-11-22 — 05-01 complete; 05-02 next
@@ -109,6 +109,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 05 P02 | 868 | 3 tasks | 6 files |
 | Phase 05 P03 | 1224 | 3 tasks | 9 files |
 | Phase 05 P04 | 13min | 3 tasks | 13 files |
+| Phase 05 P05 | 829s | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -313,6 +314,11 @@ Recent decisions affecting current work:
 - [Phase 05]: Save leaves port.DumpStore; FileStore.Save stays as a byte-fixture convenience over SaveStream and the engine has no byte-slice save path
 - [Phase 05]: Load classifies only in 05-04: absent candidates are non-failures, present-but-unreadable ones carry path and cause, and preservation/sweep stay for 05-05
 - [Phase 05]: peak-live-B samples runtime.MemStats HeapAlloc at the fill's end, the peak moment when the one Records() copy and the adapter's bufio are both live
+- [Phase 05]: 05-05: Preservation is load-time: every rejected regular generation is renamed to .corrupt-<UTC>[-N] before any save, so the first post-backup rotation finds no main and .prev stays byte-identical (PERSIST-02, T-5-12).
+- [Phase 05]: 05-05: The temp marker is .tmp~ (outside the snapshot charset), superseding the research dump-* prefix; the sweep selects by marker on regular files, age-bounds at one hour, and excludes the configured main/.prev/.corrupt-* exactly in the dump directory (PERSIST-09, T-5-14).
+- [Phase 05]: 05-05: A Backup start always carries exactly one main failure — fs.ErrNotExist when the main was absent — so the engine's single WARN needs no synthesised cause.
+- [Phase 05]: 05-05: ensureDir syncs a created directory's parent before the temp write; existing directories keep the five-step TEST-03 order, and CreateSnapshot uses the same helper (D-08).
+- [Phase 05]: 05-05: Only the directory fsync tolerates ENOTSUP/EINVAL; file-data fsync keeps every error, and classifySaveError wraps every SaveStream error with port.FailureClass while preserving errors.Is (T-5-15/T-5-16).
 
 ### Pending Todos
 
@@ -335,7 +341,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T14:13:18.126Z
-Stopped at: Completed 05-04-PLAN.md
+Last session: 2026-11-22T14:37:45.222Z
+Stopped at: Completed 05-05-PLAN.md
 Resume file: None
 Next action: continue Phase 5 with `/gsd:execute-phase 5` (05-02-PLAN.md is next)
