@@ -173,3 +173,48 @@ func TestSync_listingGenerationContentOnly(t *testing.T) {
 		t.Fatalf("listed union %v lost %q after the shrink", got, keyB.Key)
 	}
 }
+
+// TestSync_listingGenerationSharedKeys pins the union-membership half of the
+// content contract: the generation moves when a key enters or leaves the
+// union, never merely because one peer's own set was rewritten. A second peer
+// listing keys the first already lists changes no membership; a peer dropping
+// keys another still lists changes none; the last lister's release does.
+func TestSync_listingGenerationSharedKeys(t *testing.T) {
+	t.Parallel()
+	now := time.UnixMilli(listedTestNowMs)
+	core := newListedCore()
+	var out port.Outbox
+	keyA := port.SyncEntry{Key: "shared/a", Version: version.PackVersion(listedTestNowMs, 1, listedTestPeer)}
+	keyB := port.SyncEntry{Key: "shared/b", Version: version.PackVersion(listedTestNowMs, 2, listedTestPeer)}
+	send := func(peer uint16, syncID uint64, entries ...port.SyncEntry) {
+		t.Helper()
+		core.HandleDatagram(now, listedDatagram(peer, syncID, entries), &out)
+		out.Drain()
+	}
+
+	send(listedTestPeer, 1, keyA, keyB)
+	first := core.ListingGeneration()
+	if first == 0 {
+		t.Fatal("the first complete listing moved no generation, want a move")
+	}
+
+	// A second peer lists the identical keys: the union does not change.
+	send(listedTestPeer+1, 2, keyA, keyB)
+	if got := core.ListingGeneration(); got != first {
+		t.Fatalf("a second peer's identical listing moved the generation %d -> %d, want no move — the union did not change", first, got)
+	}
+	// The second peer drops to an empty listing: the first peer still lists
+	// both keys, so the union still does not change.
+	send(listedTestPeer+1, 3)
+	if got := core.ListingGeneration(); got != first {
+		t.Fatalf("a peer dropping shared keys moved the generation %d -> %d, want no move — another peer still lists them", first, got)
+	}
+	// The last lister drops both: now the union empties.
+	send(listedTestPeer, 4)
+	if got := core.ListingGeneration(); got == first {
+		t.Fatalf("the last lister's release left the generation at %d, want a move", got)
+	}
+	if got := len(core.ListedKeysSnapshot()); got != 0 {
+		t.Fatalf("listed union holds %d keys after the last lister released them, want 0", got)
+	}
+}

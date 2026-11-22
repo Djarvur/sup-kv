@@ -1492,37 +1492,42 @@ func (c *Core) dropPeerSyncStreams(peer uint16) {
 // the set it replaces through the union refcounts, refreshes the peer's LRU
 // position, and then evicts whole peer sets from the LRU front while the
 // retained total exceeds maxListedKeysTotal (T-4-41). It reports whether the
-// published content actually changed — the union membership or the peer's own
-// set — so an identical repeated listing moves no generation and the
-// adapter's mirror clones nothing. A key shared by several peers stays in the
-// union until its last lister drops it; eviction therefore shrinks the union,
-// the refcounts and the retained total together.
+// UNION membership actually changed — a key entering or leaving the union,
+// not merely a peer's own set being rewritten — so a key shared with another
+// peer neither enters nor leaves it, and an identical repeated listing moves
+// no generation and the adapter's mirror clones nothing. A key shared by
+// several peers stays in the union until its last lister drops it; eviction
+// therefore shrinks the union, the refcounts and the retained total together.
 func (c *Core) retainListedKeys(peer uint16, entries map[string]version.RecordVersion) bool {
 	if sameListedKeys(c.listedByPeer[peer], entries) {
 		c.touchListedPeer(peer)
 		return false
 	}
-	c.dropListedPeer(peer)
+	released := c.dropListedPeer(peer)
 	set := make(map[string]struct{}, len(entries))
+	added := 0
 	for key := range entries {
 		set[key] = struct{}{}
 		c.listedRefs[key]++
 		if c.listedRefs[key] == 1 {
 			c.listedKeys[key] = struct{}{}
 			c.listedKeyCount++
+			added++
 		}
 	}
 	c.listedByPeer[peer] = set
 	c.listedPos[peer] = c.listedOrder.PushBack(peer)
+	evicted := 0
 	for c.listedKeyCount > maxListedKeysTotal {
 		front := c.listedOrder.Front()
 		if front == nil {
 			break
 		}
 		victim := front.Value.(uint16)
-		c.listedKeysEvicted += uint64(c.dropListedPeer(victim)) //nolint:gosec // G115: dropListedPeer returns a non-negative key count.
+		evicted += c.dropListedPeer(victim)
 	}
-	return true
+	c.listedKeysEvicted += uint64(evicted)
+	return released > 0 || added > 0 || evicted > 0
 }
 
 // touchListedPeer moves peer to the LRU back without touching its set — the
