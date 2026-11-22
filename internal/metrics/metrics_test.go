@@ -204,6 +204,7 @@ var families = []struct {
 	{"supkv_dumps_total", "counter"},
 	{"supkv_dumps_errors_total", "counter"},
 	{"supkv_dumps_failures_total", "counter"},
+	{"supkv_dumps_unconfirmed_total", "counter"},
 	{"supkv_dump_load_total", "counter"},
 	{"supkv_dump_records_discarded_total", "counter"},
 	{"go_goroutines", "gauge"},
@@ -266,6 +267,7 @@ func TestMetrics_families(t *testing.T) {
 		"supkv_dumps_failures_total{class=\"disk_full\"} 0\n",
 		"supkv_dumps_failures_total{class=\"permission\"} 0\n",
 		"supkv_dumps_failures_total{class=\"other\"} 0\n",
+		"supkv_dumps_unconfirmed_total 0\n",
 		"supkv_dump_load_total{outcome=\"prompt\"} 0\n",
 		"supkv_dump_load_total{outcome=\"main\"} 0\n",
 		"supkv_dump_load_total{outcome=\"backup\"} 0\n",
@@ -321,7 +323,7 @@ func TestMetrics_values(t *testing.T) {
 	src.EgressDropped = func() uint64 { return 3 }
 	src.ReadErrors = func() uint64 { return 5 }
 	src.DumpStats = func() persist.DumpStats {
-		return persist.DumpStats{Errors: 6, DiskFull: 2, Permission: 3}
+		return persist.DumpStats{Errors: 6, DiskFull: 2, Permission: 3, Unconfirmed: 4}
 	}
 	src.LoadStats = func() persist.LoadStats {
 		return persist.LoadStats{
@@ -339,6 +341,7 @@ func TestMetrics_values(t *testing.T) {
 		"supkv_dumps_failures_total{class=\"disk_full\"} 2\n",
 		"supkv_dumps_failures_total{class=\"permission\"} 3\n",
 		"supkv_dumps_failures_total{class=\"other\"} 1\n",
+		"supkv_dumps_unconfirmed_total 4\n",
 		"supkv_dump_load_total{outcome=\"prompt\"} 0\n",
 		"supkv_dump_load_total{outcome=\"main\"} 0\n",
 		"supkv_dump_load_total{outcome=\"backup\"} 1\n",

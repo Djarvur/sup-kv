@@ -63,17 +63,28 @@ var errFakeSnapshot = errors.New("fakeDumpStore: no snapshot generations in this
 // seam's doc sanctions (internal/port/dump.go): it records every saved
 // generation in memory and injects failures — no filesystem, no cleanup,
 // fully parallel-safe per harness instance. A non-nil snapshot backs the
-// ReadSnapshot seam the snapshot-load totality tests drive.
+// ReadSnapshot seam the snapshot-load totality tests drive. hold is the
+// PERSIST-08 stand-in for a hung fsync: a non-nil channel parks every
+// SaveStream until the test releases it, so the engine's confirmation
+// deadline expires against a real standing dump.
 type fakeDumpStore struct {
 	mu       sync.Mutex
 	failSave bool
 	saved    [][]byte
 	snapshot []byte
+	hold     chan struct{}
 }
 
 // SaveStream runs fill into memory and records the generation, or fails
-// while failSave is set — the injection point for persist.ErrDumpFailed.
+// while failSave is set — the injection point for persist.ErrDumpFailed. A
+// hold channel parks the call first, the hung-dumper stand-in.
 func (f *fakeDumpStore) SaveStream(fill func(io.Writer) error) error {
+	f.mu.Lock()
+	hold := f.hold
+	f.mu.Unlock()
+	if hold != nil {
+		<-hold
+	}
 	var buf bytes.Buffer
 	err := fill(&buf)
 	if err != nil {
@@ -86,6 +97,26 @@ func (f *fakeDumpStore) SaveStream(fill func(io.Writer) error) error {
 	}
 	f.saved = append(f.saved, bytes.Clone(buf.Bytes()))
 	return nil
+}
+
+// holdDumps parks every subsequent SaveStream until releaseDumps runs.
+func (f *fakeDumpStore) holdDumps() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.hold == nil {
+		f.hold = make(chan struct{})
+	}
+}
+
+// releaseDumps unparks any standing SaveStream; safe when nothing is held.
+func (f *fakeDumpStore) releaseDumps() {
+	f.mu.Lock()
+	hold := f.hold
+	f.hold = nil
+	f.mu.Unlock()
+	if hold != nil {
+		close(hold)
+	}
 }
 
 // Load reports the empty start: every test begins as a fresh node — the
@@ -167,6 +198,10 @@ type testServerConfig struct {
 
 	// dumps backs the engine; nil means the in-memory fakeDumpStore.
 	dumps port.DumpStore
+
+	// confirmTimeout is the engine's PERSIST-08 confirmation deadline; zero
+	// keeps the 10 s design default.
+	confirmTimeout time.Duration
 
 	// gate is the ServerOptions the api server is constructed with. The
 	// builder always launches the gate resolver; tests that need an open
@@ -271,6 +306,9 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	if dumps == nil {
 		fake = &fakeDumpStore{}
 		dumps = fake
+		// A test may park the dumper; release it at cleanup so the engine
+		// goroutine can exit after cancelEng.
+		t.Cleanup(fake.releaseDumps)
 	}
 	eng, _ := persist.Open(
 		42,
@@ -278,7 +316,11 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 		time.Minute,
 		dumps,
 		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
-		persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond},
+		persist.Config{
+			Debounce:       time.Millisecond,
+			MaxWait:        50 * time.Millisecond,
+			ConfirmTimeout: cfg.confirmTimeout,
+		},
 	)
 	engCtx, cancelEng := context.WithCancel(t.Context())
 	go func() { _ = eng.Run(engCtx) }()
@@ -925,6 +967,101 @@ func TestServer_closedWriteDoesNotNotify(t *testing.T) {
 
 	if calls := capture.snapshot(); len(calls) != 0 {
 		t.Fatalf("notify calls after closed writes = %d, want 0: %+v", len(calls), calls)
+	}
+}
+
+// unconfirmedHarness builds an open-gate notify harness whose engine has a
+// short confirmation timeout and whose dumper is parked — the PERSIST-08
+// timed-out-write setup (a hung fsync, stood in by the fake's hold).
+func unconfirmedHarness(t *testing.T) (*testHarness, *notifyCapture) {
+	t.Helper()
+	capture := &notifyCapture{}
+	h := buildTestServer(t, testServerConfig{
+		gate:           openGateOptions(),
+		notify:         capture.notify,
+		confirmTimeout: 50 * time.Millisecond,
+	})
+	awaitGateOpen(t, h)
+	return h, capture
+}
+
+// TestServer_unconfirmedSetMapsAndNotifies proves PROTO-08's totality for
+// the PERSIST-08 class: a Set whose covering dump outlives the confirmation
+// timeout is installed in memory, so it is notified to replication before
+// the RPC answers Unavailable. The status message is the sentinel's own, so
+// the unconfirmed class is distinguishable from a dump failure, and the
+// engine counts the outcome.
+func TestServer_unconfirmedSetMapsAndNotifies(t *testing.T) {
+	t.Parallel()
+
+	ts, capture := unconfirmedHarness(t)
+	ctx := t.Context()
+	ts.dumps.holdDumps()
+
+	const key = "unconfirmed/set"
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: key, Value: []byte("set-value"), WaitForReplication: true,
+	})
+	assertCode(t, "Set with a hung dump", err, codes.Unavailable)
+	if got := status.Convert(err).Message(); got != persist.ErrUnconfirmed.Error() {
+		t.Errorf("Set with a hung dump message = %q, want %q", got, persist.ErrUnconfirmed.Error())
+	}
+
+	calls := capture.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("notify calls = %d, want exactly 1 for the unconfirmed write: %+v", len(calls), calls)
+	}
+	call := calls[0]
+	if call.key != key || !bytes.Equal(call.rec.Data, []byte("set-value")) || call.rec.Deleted {
+		t.Errorf("notified record = (key %q, data %q, deleted %t), want the request's live record",
+			call.key, call.rec.Data, call.rec.Deleted)
+	}
+	if call.track {
+		t.Error("unconfirmed write notified with track=true, want false (the RPC reports an error)")
+	}
+	ver, present := ts.engine.Version(key)
+	if !present || call.rec.Version != ver {
+		t.Errorf("notified version %x = engine version %x (present=%t), want the store-stamped version",
+			call.rec.Version[:], ver[:], present)
+	}
+	if got := ts.engine.DumpStats().Unconfirmed; got != 1 {
+		t.Errorf("DumpStats().Unconfirmed = %d, want 1", got)
+	}
+}
+
+// TestServer_unconfirmedDeleteMapsAndNotifies proves the tombstone half: a
+// Delete whose dump outlives the confirmation timeout notifies exactly one
+// tombstone with track=false before Unavailable.
+func TestServer_unconfirmedDeleteMapsAndNotifies(t *testing.T) {
+	t.Parallel()
+
+	ts, capture := unconfirmedHarness(t)
+	ctx := t.Context()
+	_, _, seedErr := ts.engine.Set("unconfirmed/delete", []byte("doomed"))
+	if seedErr != nil {
+		t.Fatalf("seed Set(unconfirmed/delete) error = %v, want nil", seedErr)
+	}
+	ts.dumps.holdDumps()
+
+	_, err := ts.client.Delete(ctx, &apiproto.DeleteRequest{
+		Key: "unconfirmed/delete", WaitForReplication: true,
+	})
+	assertCode(t, "Delete with a hung dump", err, codes.Unavailable)
+	if got := status.Convert(err).Message(); got != persist.ErrUnconfirmed.Error() {
+		t.Errorf("Delete with a hung dump message = %q, want %q", got, persist.ErrUnconfirmed.Error())
+	}
+
+	calls := capture.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("notify calls = %d, want exactly 1 for the unconfirmed tombstone: %+v", len(calls), calls)
+	}
+	call := calls[0]
+	if call.key != "unconfirmed/delete" || !call.rec.Deleted || len(call.rec.Data) != 0 {
+		t.Errorf("notified record = (key %q, deleted %t, data %q), want the request's tombstone",
+			call.key, call.rec.Deleted, call.rec.Data)
+	}
+	if call.track {
+		t.Error("unconfirmed delete notified with track=true, want false")
 	}
 }
 
