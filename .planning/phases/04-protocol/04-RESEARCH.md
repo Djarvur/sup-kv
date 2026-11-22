@@ -719,7 +719,20 @@ srv := grpcapi.NewServer(engine, adapter.NotifyLocalWrite, hub, grpcapi.ServerOp
 | A7 | `Delete` on a listed-but-not-arrived key stays `NotFound` (unspecified by 14.5) | Pattern 3 | If the owner wants it `Unavailable`, add one check and a test; no wire impact. |
 | A8 | No new packages are needed | Standard Stack | A new package would need the legitimacy gate; none is currently imagined. |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+**Resolved at phase planning, 2026-11-22.** The decisions below are recorded in `04-CONTEXT.md`'s research-resolutions addendum and the named plan sections; the question bodies are retained as the evidence trail, not as open work.
+
+| OQ | Resolution | Recorded in |
+|----|------------|-------------|
+| 1 | A strictly older `DataReplication` is answered with the newer record and no Ack; an equal version is Acked (S-PROTO-16 wins over the first "≤" draft). | CONTEXT addendum (D-03 refined); 04-05 task 1 |
+| 2 | Delete on a listed-but-not-arrived key keeps the local `NotFound`; 14.5(6) names reads, so no `Unavailable` is required. | CONTEXT addendum; 04-02 task 2 step 4 |
+| 3 | Three-node real-socket coverage uses three in-process adapters on one shared `SO_REUSEADDR` port; the unicast limitation is documented. | CONTEXT addendum; 04-12 (`docs/04-MULTI-NODE.md`) |
+| 4 | Caps chosen: `maxListingDestinations = 32` and `maxListingChunks = 65 536` — one worst-case 20k-key listing round (20 000 chunks) fits. | 04-08 task 1 step 5 |
+| 5 | The peer table stays uncapped this phase; the unbounded table is recorded as a residual trusted-LAN risk owned by Phase 7. | 04-12 truth 2; CONTEXT handoffs |
+| 6 | Listing drift updates the clock only and does not feed `MergeStats`; OBSV-05 owns drift semantics in Phase 7. | CONTEXT addendum; 04-11 task 1 step 1 |
+| 7 | `startup_gate_empty` validates positivity only (non-positive values exit through the usage path); Phase 7's one-point validation owns cross-parameter relations. | CONTEXT addendum; 04-04 task 1 step 3 |
+| 8 | The literal "any neighbor's complete list opens the gate" reading stands; the mixed-cluster empty-list window is documented rather than changed. | CONTEXT addendum; 04-12 (`docs/04-MULTI-NODE.md`), pinned by 04-04's two-empty-nodes test |
 
 1. **Equal-version DataReplication (D-03 wording).**
    - What we know: D-03 says "received version ≤ held version" → answer + no Ack; S-PROTO-16 says an Ack goes for an applied or already-equal version; retransmission recovery relies on duplicate Acks.
