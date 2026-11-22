@@ -89,56 +89,39 @@ func (c Config) normalized() Config {
 	return c
 }
 
-// waiter is one write's confirmation ticket: done is closed exactly once,
-// and err — written before the close — carries the resolution. The ticket
-// needs no version: runDump captures the list before taking the Records
-// snapshot, so every captured waiter is covered by that dump (see
-// confirmWaiters). Channel close over [sync.Cond] because only channels
-// broadcast an error to every waiter (D-03, D-05).
-//
-// claimed is the single-claim protocol's guard (PERSIST-08, T-5-26): every
-// resolver — a dump's success or failure fan-out, Run's exit sweep, or the
-// awaiting caller's timeout — sets it under the engine mutex before writing
-// err and closing done, and a resolver that finds it already set leaves both
-// untouched. Capture alone never claims: a dump that merely took the waiter
-// into its captured slice never owns it, so a dump hanging after capture
-// cannot keep the caller's timeout from resolving the write.
-type waiter struct {
-	done    chan struct{}
-	err     error
-	claimed bool
-}
-
 // Engine is the write-confirmation engine over one storage.Store: a local
 // write registers a waiter and blocks until a dump whose snapshot contains
 // that record completed (nil — the write is on disk, PERS-04), failed
 // (ErrDumpFailed — the record stays readable in memory, D-05), or did not
 // complete within ConfirmTimeout (ErrUnconfirmed — the record is installed
 // but not yet durable, PERSIST-08). Engine is safe for concurrent use by
-// multiple goroutines; the engine mutex is held only to swap waiter lists and
-// the dirty epoch, never across codec or port I/O, and exactly one dumper
-// goroutine — the caller-launched Run — serializes every Save.
+// multiple goroutines; the confirmation mutex is held only to swap waiter
+// lists and the dirty epoch, never across codec or port I/O, and exactly one
+// dumper goroutine — the caller-launched Run — serializes every Save.
+//
+// Engine is the composition root of the five internal roles (D-10,
+// PERSIST-11): the embedded confirmer owns the waiters and the dirty epoch,
+// *scheduler owns the dump loop, the retry ladder and the dump counters, and
+// the loader, facade and snapshot method groups stay methods on Engine so
+// every exported signature is unchanged. The confirmer is embedded rather
+// than held in a named field because the pre-split white-box tests read
+// Engine.mu and Engine.waiters and call Engine.markDirty directly — the move
+// is internal-only and those tests are its API assertion.
 type Engine struct {
-	mu      sync.Mutex
-	store   *storage.Store
-	dumps   port.DumpStore
-	cfg     Config
-	waiters []*waiter
-	dirty   bool
-	oldest  time.Time
+	*confirmer
+
+	store *storage.Store
+	dumps port.DumpStore
+	cfg   Config
 
 	// retryDelay and retryAt are the dump-failure ladder state (D-05,
 	// PERSIST-05): zero while healthy; a failed attempt advances the delay
 	// and fixes the instant the retry channel is armed for, so intervening
 	// writes cannot postpone the next attempt. Both are written by the dumper
-	// goroutine under mu and read by rearm.
+	// goroutine under retryMu and read by rearm.
+	retryMu    sync.Mutex
 	retryDelay time.Duration
 	retryAt    time.Time
-
-	changed chan struct{}
-	flushCh chan chan error
-	runDone chan struct{}
-	closed  bool
 
 	// valueMaxBytes is the store's effective value limit, captured once at
 	// construction: the dump encoder and the snapshot decoder both pass it, so
@@ -153,20 +136,12 @@ type Engine struct {
 	// An engine built by New leaves it zero (Loaded false).
 	loadStats LoadStats
 
-	// dumpNanos, dumpTotal and dumpErrors carry DumpStats lock-free for
-	// scrapers (OBS-01): runDump is the single writer — the serialized
-	// dumper — so atomic reads need no engine mutex. dumpDiskFull and
-	// dumpPermission split the failed attempts by the adapter's class
-	// (PERSIST-05); both are subsets of dumpErrors. dumpUnconfirmed counts
-	// confirmation timeouts (PERSIST-08): its writers are the awaiting write
-	// goroutines, one increment per timed-out waiter, and it is no subset of
-	// dumpErrors — the dump's outcome may still be unknown.
-	dumpNanos       atomic.Int64
-	dumpTotal       atomic.Uint64
-	dumpErrors      atomic.Uint64
-	dumpDiskFull    atomic.Uint64
-	dumpPermission  atomic.Uint64
-	dumpUnconfirmed atomic.Uint64
+	// stats is the engine's one dump-stats holder (OBS-01, PERSIST-11): the
+	// confirmer and the scheduler share this same pointer, so the timeout
+	// counter and the dump counters are one published value. Declared here
+	// while the scheduler still lives in this file; it moves with the
+	// scheduler role.
+	stats *dumpStats
 }
 
 // DumpStats is the dump-cycle gauge OBS-01 reads: the last dump's
@@ -207,18 +182,33 @@ type LoadStats struct {
 	SweepErr   error
 }
 
+// dumpStats is the engine's one unexported atomic stats holder (OBS-01,
+// PERSIST-11): the scheduler records every attempt's span and outcome here,
+// the confirmer's timeout branch increments unconfirmed, and DumpStats reads
+// the fields into the exported value copy. One published holder means the
+// two writers and the exporter never see two copies of a counter.
+type dumpStats struct {
+	durationNanos atomic.Int64
+	total         atomic.Uint64
+	errors        atomic.Uint64
+	diskFull      atomic.Uint64
+	permission    atomic.Uint64
+	unconfirmed   atomic.Uint64
+}
+
 // New returns an engine persisting store's state through dumps. store and
 // dumps must be non-nil. The engine spawns no goroutine itself: the caller
 // launches Run, whose lifecycle is the documented API contract.
 func New(store *storage.Store, dumps port.DumpStore, cfg Config) *Engine {
+	cfg = cfg.normalized()
+	stats := &dumpStats{}
 	return &Engine{
+		confirmer:     newConfirmer(cfg, stats),
 		store:         store,
 		dumps:         dumps,
-		cfg:           cfg.normalized(),
-		changed:       make(chan struct{}, 1),
-		flushCh:       make(chan chan error, 1),
-		runDone:       make(chan struct{}),
+		cfg:           cfg,
 		valueMaxBytes: store.ValueMaxBytes(),
+		stats:         stats,
 	}
 }
 
@@ -296,10 +286,7 @@ func (e *Engine) startLoadDirty(outcome port.LoadOutcome, at time.Time) {
 	if outcome == port.LoadMain {
 		return
 	}
-	e.mu.Lock()
-	e.dirty = true
-	e.oldest = at
-	e.mu.Unlock()
+	e.startDirty(at)
 }
 
 // LoadStats returns the startup load report Open captured — a value copy,
@@ -349,8 +336,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		var fired bool
 		select {
 		case <-ctx.Done():
-			e.sweepClosed()
-			close(e.runDone)
+			e.exit()
 			return ctx.Err()
 		case <-e.changed:
 		case <-debounce:
@@ -378,10 +364,7 @@ func (e *Engine) Run(ctx context.Context) error {
 // (D-10) — while a clean engine has nothing unconfirmed on disk and replies
 // nil without a redundant save.
 func (e *Engine) flushDump() error {
-	e.mu.Lock()
-	dirty := e.dirty
-	e.mu.Unlock()
-	if !dirty {
+	if !e.isDirty() {
 		return nil
 	}
 	return e.runDump()
@@ -399,10 +382,10 @@ func (e *Engine) flushDump() error {
 // during backoff registers a waiter covered by that attempt instead of
 // postponing it.
 func (e *Engine) rearm(deadline, retry <-chan time.Time) (nextDebounce, nextDeadline, nextRetry <-chan time.Time) {
-	e.mu.Lock()
-	dirty, oldest := e.dirty, e.oldest
+	dirty, oldest := e.epoch()
+	e.retryMu.Lock()
 	delay, at := e.retryDelay, e.retryAt
-	e.mu.Unlock()
+	e.retryMu.Unlock()
 	if delay > 0 {
 		if retry == nil {
 			retry = e.cfg.After(max(at.Sub(e.cfg.Now()), 0))
@@ -417,44 +400,6 @@ func (e *Engine) rearm(deadline, retry <-chan time.Time) (nextDebounce, nextDead
 		deadline = e.cfg.After(oldest.Add(e.cfg.MaxWait).Sub(e.cfg.Now()))
 	}
 	return nextDebounce, deadline, nil
-}
-
-// sweepClosed is Run's exit sweep: under the same mutex hold the write
-// paths check, closed flips before the waiters are taken, so no writer can
-// register after the sweep and block forever; every stranded waiter then
-// resolves with ErrClosed, as does every flush request already handed to
-// the exiting Run — the reply channels are buffered, so the sends never
-// block (Pitfall 4). Run closes runDone only after the sweep returns: a
-// reply observed once runDone is closed is exactly one the sweep answered,
-// so flush can tell the answered from the stranded apart. A waiter the
-// caller's timeout already claimed is skipped — the timeout owns its close
-// (PERSIST-08, T-5-26).
-func (e *Engine) sweepClosed() {
-	e.mu.Lock()
-	e.closed = true
-	stranded := e.waiters
-	e.waiters = nil
-	claimed := make([]*waiter, 0, len(stranded))
-	for _, w := range stranded {
-		if w.claimed {
-			continue
-		}
-		w.claimed = true
-		w.err = ErrClosed
-		claimed = append(claimed, w)
-	}
-	e.mu.Unlock()
-	for _, w := range claimed {
-		close(w.done)
-	}
-	for {
-		select {
-		case reply := <-e.flushCh:
-			reply <- ErrClosed
-		default:
-			return
-		}
-	}
 }
 
 // runDump is the serialized dump cycle: under the mutex it captures the
@@ -479,11 +424,7 @@ func (e *Engine) sweepClosed() {
 // success — so a persistent failure never busy-loops (D-05, PERSIST-05,
 // research A8).
 func (e *Engine) runDump() error {
-	e.mu.Lock()
-	captured := e.waiters
-	e.waiters = nil
-	e.dirty = false
-	e.mu.Unlock()
+	captured := e.capture()
 
 	start := e.cfg.Now()
 	records := e.store.Records()
@@ -510,15 +451,15 @@ func (e *Engine) runDump() error {
 // callback must not block.
 func (e *Engine) handleDumpFailure(err error) {
 	class := port.FailureClassOf(err)
-	e.mu.Lock()
+	e.retryMu.Lock()
 	e.retryDelay = nextRetry(e.retryDelay)
 	e.retryAt = e.cfg.Now().Add(e.retryDelay)
-	e.mu.Unlock()
+	e.retryMu.Unlock()
 	switch class {
 	case port.FailureDiskFull:
-		e.dumpDiskFull.Add(1)
+		e.stats.diskFull.Add(1)
 	case port.FailurePermission:
-		e.dumpPermission.Add(1)
+		e.stats.permission.Add(1)
 	case port.FailureOther:
 	}
 	if e.cfg.OnDumpFailure != nil {
@@ -543,20 +484,20 @@ func nextRetry(d time.Duration) time.Duration {
 // resetRetry clears the ladder after a successful attempt: the next failure
 // starts again from the base delay and covers the waiters immediately.
 func (e *Engine) resetRetry() {
-	e.mu.Lock()
+	e.retryMu.Lock()
 	e.retryDelay = 0
 	e.retryAt = time.Time{}
-	e.mu.Unlock()
+	e.retryMu.Unlock()
 }
 
 // recordDump stores one dump cycle's observability (OBS-01): the span of
 // the Encode+Save pair, the attempt total and — when err is non-nil — the
 // error count, all through the lock-free atomics DumpStats reads.
 func (e *Engine) recordDump(span time.Duration, err error) {
-	e.dumpNanos.Store(int64(span))
-	e.dumpTotal.Add(1)
+	e.stats.durationNanos.Store(int64(span))
+	e.stats.total.Add(1)
 	if err != nil {
-		e.dumpErrors.Add(1)
+		e.stats.errors.Add(1)
 	}
 }
 
@@ -564,68 +505,12 @@ func (e *Engine) recordDump(span time.Duration, err error) {
 // the atomics, safe from any goroutine; runDump is the single writer.
 func (e *Engine) DumpStats() DumpStats {
 	return DumpStats{
-		DurationSeconds: float64(e.dumpNanos.Load()) / float64(time.Second),
-		Total:           e.dumpTotal.Load(),
-		Errors:          e.dumpErrors.Load(),
-		DiskFull:        e.dumpDiskFull.Load(),
-		Permission:      e.dumpPermission.Load(),
-		Unconfirmed:     e.dumpUnconfirmed.Load(),
-	}
-}
-
-// confirmWaiters resolves every waiter captured by a completed dump with
-// nil. Nothing is retained: the capture proof in runDump is that await
-// appends a waiter only after the caller's store write installed the record
-// and under the same mutex the capture holds, while the capture precedes
-// Encode(e.store.Records()) — every captured record is therefore inside the
-// snapshot the dump saved, and confirmation always means on-disk
-// containment, never elapsed time (PERS-04, RESEARCH Pitfall 15). A write
-// that loses the race to the capture is not in captured; it stays
-// registered and the next dump — or Run's exit sweep — resolves it. A
-// captured waiter the caller's timeout already claimed is skipped: the
-// timeout owns its resolution and close (PERSIST-08, T-5-26).
-func (e *Engine) confirmWaiters(captured []*waiter) {
-	e.mu.Lock()
-	claimed := make([]*waiter, 0, len(captured))
-	for _, w := range captured {
-		if w.claimed {
-			continue
-		}
-		w.claimed = true
-		w.err = nil
-		claimed = append(claimed, w)
-	}
-	e.mu.Unlock()
-	for _, w := range claimed {
-		close(w.done)
-	}
-}
-
-// failWaiters resolves every current waiter — the captured list plus any
-// registered during the failed dump — with ErrDumpFailed, and re-dirties
-// the engine from a fresh epoch so the surviving records reach the next
-// successful dump. Waiters the caller's timeout already claimed are skipped:
-// the timeout owns their resolution and close (PERSIST-08, T-5-26).
-func (e *Engine) failWaiters(captured []*waiter) {
-	e.mu.Lock()
-	stranded := make([]*waiter, 0, len(captured)+len(e.waiters))
-	stranded = append(stranded, captured...)
-	stranded = append(stranded, e.waiters...)
-	e.waiters = nil
-	e.dirty = true
-	e.oldest = e.cfg.Now()
-	claimed := make([]*waiter, 0, len(stranded))
-	for _, w := range stranded {
-		if w.claimed {
-			continue
-		}
-		w.claimed = true
-		w.err = ErrDumpFailed
-		claimed = append(claimed, w)
-	}
-	e.mu.Unlock()
-	for _, w := range claimed {
-		close(w.done)
+		DurationSeconds: float64(e.stats.durationNanos.Load()) / float64(time.Second),
+		Total:           e.stats.total.Load(),
+		Errors:          e.stats.errors.Load(),
+		DiskFull:        e.stats.diskFull.Load(),
+		Permission:      e.stats.permission.Load(),
+		Unconfirmed:     e.stats.unconfirmed.Load(),
 	}
 }
 
@@ -662,61 +547,6 @@ func (e *Engine) SetIfAbsent(key string, data []byte) (version.RecordVersion, ti
 		return ver, drift, err
 	}
 	return ver, drift, e.await()
-}
-
-// await registers a waiter — the caller's record is freshly installed in the
-// store — marks the engine dirty and blocks until a dump resolution closes
-// the waiter or the confirmation timeout expires. Registering under the same
-// mutex hold that marks dirty is what lets runDump treat every captured
-// waiter as covered: the store write happened before this call, and the
-// dump's capture cannot interleave between that write and the append. The
-// dirty-mark path is generic — any state change dirties; only local writes
-// register waiters, and remote merges reuse the dirty path without waiters.
-//
-// The timeout branch is the single-claim protocol's other half (PERSIST-08,
-// T-5-26/T-5-27): under the mutex it first re-checks claimed — a resolver
-// that won the race set the error and owns the close, so await only waits
-// for that close and returns the resolver's answer. Otherwise it claims the
-// waiter, stores ErrUnconfirmed, removes it from the slice so a permanently
-// hung dumper cannot grow memory, unlocks, counts the unconfirmed outcome and
-// returns. The record stays installed; the engine stays dirty exactly as the
-// capture proof promises. Only ErrUnconfirmed is returned — never nil,
-// never ErrDumpFailed.
-func (e *Engine) await() error {
-	w := &waiter{done: make(chan struct{})}
-	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
-		return ErrClosed
-	}
-	if !e.dirty {
-		e.oldest = e.cfg.Now()
-	}
-	e.dirty = true
-	e.waiters = append(e.waiters, w)
-	e.mu.Unlock()
-	select {
-	case e.changed <- struct{}{}:
-	default:
-	}
-	timeout := e.cfg.After(e.cfg.ConfirmTimeout)
-	select {
-	case <-w.done:
-		return w.err
-	case <-timeout:
-	}
-	e.mu.Lock()
-	if w.claimed {
-		e.mu.Unlock()
-		<-w.done // the resolver owns the close; return its answer.
-		return w.err
-	}
-	w.claimed = true
-	w.err = ErrUnconfirmed
-	e.waiters = slices.DeleteFunc(e.waiters, func(candidate *waiter) bool { return candidate == w })
-	e.mu.Unlock()
-	e.dumpUnconfirmed.Add(1)
-	return ErrUnconfirmed
 }
 
 // ApplyRemote joins one remotely replicated record into the store and,
@@ -1039,10 +869,7 @@ func (e *Engine) FlushTimeout(d time.Duration) error {
 // because the dump's outcome is unknown rather than failed.
 func (e *Engine) flush(d time.Duration) error {
 	reply := make(chan error, 1)
-	e.mu.Lock()
-	closed := e.closed
-	e.mu.Unlock()
-	if closed {
+	if e.isClosed() {
 		return ErrClosed
 	}
 	timeout := e.cfg.After(d)
@@ -1065,26 +892,5 @@ func (e *Engine) flush(d time.Duration) error {
 		}
 	case <-timeout:
 		return fmt.Errorf("%w: flush", ErrUnconfirmed)
-	}
-}
-
-// markDirty marks the engine dirty from a fresh epoch without registering a
-// waiter and wakes an idle dumper through the non-blocking e.changed nudge:
-// the restore replay's store writes are unconfirmed until the final flush's
-// covering dump — the cover discipline of await without the per-write
-// blocking — and the mid-replay error path needs the same wake-up (Phase-4
-// review New-1). The nudge lives here, not at each caller, so every dirty
-// path sends exactly one signal; the channel has capacity one and the send is
-// non-blocking, so repeated marks collapse into one wake-up.
-func (e *Engine) markDirty() {
-	e.mu.Lock()
-	if !e.dirty {
-		e.oldest = e.cfg.Now()
-	}
-	e.dirty = true
-	e.mu.Unlock()
-	select {
-	case e.changed <- struct{}{}:
-	default:
 	}
 }
