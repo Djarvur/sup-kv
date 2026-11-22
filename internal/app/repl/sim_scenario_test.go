@@ -514,7 +514,7 @@ const scnHelloInterval = time.Second
 
 // TestScenario_longPartition proves TEST-09's long-partition bound (the
 // review's T-09 remedy) on three nodes: after a partition longer than
-// peer_timeout, convergence is NOT BEFORE the first post-heal sync and NOT
+// peer_timeout, convergence is NOT EARLIER than the heal instant and NOT
 // LATER than the documented partition-heal bound (boundPartitionHeal) — the
 // D-06 no-fresh-loss qualifier holding because no write follows the heal, so
 // every record written on a live node before the heal instant is present in
@@ -523,9 +523,11 @@ const scnHelloInterval = time.Second
 // (TestPeerTable_lifecycle, probe #18), so a partition ending exactly at the
 // deadline already evicts: the peer-table-survives side ends one hello round
 // before the deadline (the repeating ladder heals it without a sync round)
-// and the evicted side runs one hello round past it (only the first
-// post-heal sync round replays the partition's writes). The heal instant
-// itself must show divergence — the partition was real.
+// and the evicted side runs one hello round past it (the evicted peer's first
+// unblocked Hello takes the first-seen path and its targeted listing replays
+// the partition's writes before the next periodic sync tick, D-04/PROTO-04).
+// Both sides must therefore converge before the first post-heal sync tick;
+// the heal instant itself must show divergence — the partition was real.
 func TestScenario_longPartition(t *testing.T) {
 	t.Parallel()
 	seed := chaosSeed(t)
@@ -617,25 +619,19 @@ func TestScenario_longPartition(t *testing.T) {
 			firstPostHealSync := at(syncInterval)
 			model := chaosModelStore(cluster.WriteLog())
 			bound := partEnd.Add(boundPartitionHeal(len(writes)))
-			if tc.evicted {
-				// Not before the first post-heal sync: a returning node learns
-				// the partition's writes only from a listing, and no listing is
-				// emitted between the heal and the tick.
-				sched.RunUntil(firstPostHealSync.Add(-time.Nanosecond))
-				if chaosConverged(cluster, model) {
-					t.Fatalf("the cluster converged before the first post-heal sync — the heal-term lower bound is vacuous %s", scnReplay(seed, test))
-				}
-			}
 			convergedAt, withinBound := scnConvergeBy(sched, cluster, model, bound)
 			if !withinBound {
 				t.Fatalf("the cluster did not converge within the documented heal bound %v %s",
 					boundPartitionHeal(len(writes)), scnReplay(seed, test))
 			}
-			// The subtest shape decides which side of the first post-heal sync
-			// convergence must land on: the evicted peers need the sync's
-			// reconciliation term, the surviving peers must heal without it.
-			if usedSyncTerm := !convergedAt.Before(firstPostHealSync); usedSyncTerm != tc.evicted {
-				t.Fatalf("convergence at +%v against the first post-heal sync (+%v) contradicts the %q subtest shape (evicted=%v) %s",
+			// Both subtest shapes heal WITHOUT the periodic sync term: the
+			// surviving table through the retransmission ladder, the evicted
+			// table through the evicted peers' first unblocked Hello and its
+			// first-seen targeted listing (D-04, PROTO-04). Convergence at or
+			// after the first post-heal sync would mean the first-seen path
+			// failed and the assertion would be riding the periodic round.
+			if !convergedAt.Before(firstPostHealSync) {
+				t.Fatalf("convergence at +%v did not precede the first post-heal sync (+%v): the %q subtest (evicted=%v) needed the periodic sync term %s",
 					convergedAt.Sub(partStart), firstPostHealSync.Sub(partStart), tc.name, tc.evicted, scnReplay(seed, test))
 			}
 			scnAssertRecordsPresent(t, cluster, writes, seed, test)
@@ -1120,21 +1116,17 @@ func TestScenario_burst(t *testing.T) {
 // TestScenario_emptyDisk proves TEST-04's empty-disk recovery bound: a
 // converged two-node cluster gains a brand-new member with an empty store
 // (fresh node id and handle — a join, never a restart listing), and the
-// joiner converges to the full state within N/sync_response_rate plus the
-// documented pacing margin. The bound's arithmetic, from the mechanism:
-// the joiner learns state only from the peers' periodic DataSync listings
-// (a new node id is never targeted), so the fill starts at their next
-// sync_interval tick — at most one sync_interval plus the positive-only sync
-// jitter (a tenth of the interval) after the join — and then
-// rides the egress limiter: both peers' listings (each node's periodic timer
-// carries its own deterministic jitter, so the two may fire up to the jitter
-// envelope apart) enqueue up to 2N DataRequests on the joiner's single FIFO,
-// spaced
-// floor(1s/rate) with the first immediate, so the last departs at
-// (2N-1)*spacing and its reply lands one spacing later; the measurement
-// step is one spacing wide, adding at most one more. Bound:
-// sync_interval + sync_interval/10 + 2N*spacing + 2*spacing, all stated
-// terms.
+// joiner converges to the full state within one Hello round-trip plus
+// N/sync_response_rate of pacing. The bound's arithmetic, from the mechanism:
+// the joiner's startup Hello is delivered one simOneWay later, and each peer
+// answers its first Hello with one targeted first-seen listing (PROTO-04) —
+// there is no sync_interval term, because the joiner is unknown to the peers
+// and the first-seen path fires immediately rather than at the next periodic
+// tick. Both listings enqueue up to 2N DataRequests on the joiner's single
+// egress FIFO, spaced floor(1s/rate) with the first immediate, so the last
+// departs at (2N-1)*spacing and its reply lands one spacing later; the
+// measurement step is one spacing wide, adding at most one more. Bound:
+// simOneWay + 2N*spacing + 4*spacing, all stated terms.
 func TestScenario_emptyDisk(t *testing.T) {
 	t.Parallel()
 	seed := chaosSeed(t)
@@ -1144,7 +1136,7 @@ func TestScenario_emptyDisk(t *testing.T) {
 
 	const nKeys = 50
 	pace := time.Second / time.Duration(simDefaultResponseRate)
-	bound := syncInterval + syncInterval/10 + time.Duration(2*nKeys+2)*pace
+	bound := simOneWay + time.Duration(2*nKeys+4)*pace
 
 	sched := simnet.NewScheduler(at(0))
 	cluster := simnet.NewCluster(sched, rng, 2, repl.Config{}, simFixedDelay(nil))
@@ -1204,8 +1196,9 @@ func TestScenario_emptyDisk(t *testing.T) {
 // handle, fresh run id, empty store — and (a) the peers detect the run_id
 // change and answer with the targeted full listing, so the replacement
 // re-converges in milliseconds, far inside one sync_interval (the listing
-// is immediate; only a brand-new node id waits for the periodic rounds —
-// the empty-disk scenario's path); (b) the replay traffic the listing
+// is immediate, and a brand-new node id healed by its own first-seen listing
+// takes the same path — the empty-disk scenario's path); (b) the replay
+// traffic the listing
 // solicits rides the egress limiter on both sides (the replacement's
 // DataRequests and the peers' DataReplication replies — the plan-04-04
 // reconciliation contract observed live), while the listing itself never

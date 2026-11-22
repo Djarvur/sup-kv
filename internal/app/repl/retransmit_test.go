@@ -1148,7 +1148,10 @@ func TestRetransmit_pacedStormBound(t *testing.T) {
 		stormRate    = 500
 	)
 	now0 := at(0)
-	core, st := newTestCore()
+	// One large chunk: the seed Hello's first-seen listing is a single queued
+	// chunk (PROTO-04), so the record-send count stays exactly stormPending
+	// and the listing never muddies the storm measurement.
+	core, st := newTestCoreWithConfig(repl.Config{SyncChunkBytes: 1 << 20})
 	var out port.Outbox
 	core.Advance(now0, &out)
 	out.Drain()
@@ -1158,8 +1161,9 @@ func TestRetransmit_pacedStormBound(t *testing.T) {
 	helloAt := now0.Add(time.Millisecond)
 	core.HandleDatagram(helloAt, helloFrom(peerID1), &out)
 	out.Drain()
-	if got := core.QueuedSends(); got != stormPending {
-		t.Fatalf("the discovery flush queued %d record sends, want %d — one per pending entry", got, stormPending)
+	if got, want := core.QueuedSends(), stormPending+1; got != want {
+		t.Fatalf("the discovery flush plus its first-seen listing queued %d sends, want %d (one record send per pending entry and one listing chunk)",
+			got, want)
 	}
 
 	interval := time.Second / stormRate
@@ -1293,6 +1297,9 @@ func TestReplication_staleAnsweredNotAcked(t *testing.T) {
 	core.Advance(now, &out) // startup Hello + empty listing
 	out.Drain()
 	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	// Drain the first-seen listing so the only unicast left below is the
+	// stale-record answer (PROTO-04).
+	advanceDrain(core, &out, now)
 	out.Drain()
 
 	v5 := version.PackVersion(testNowMs, 5, peerID1)

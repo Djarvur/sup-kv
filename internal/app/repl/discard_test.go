@@ -165,6 +165,9 @@ func TestDiscard_classes(t *testing.T) {
 			want:       repl.DiscardStats{},
 			wantPeerID: strangerID,
 			wantPeer:   &repl.PeerInfo{Handle: handleFor(strangerID), RunID: testRunID(strangerID), LastHello: now},
+			// The stranger's first Hello enqueues its first-seen listing on
+			// the pacer (PROTO-04): one empty-store chunk is queued.
+			wantQueued: 1,
 		},
 		{
 			// The discrimination pin: run_id EQUALITY with the remembered
@@ -199,6 +202,10 @@ func TestDiscard_classes(t *testing.T) {
 			if row.seedPeer1 {
 				var seed port.Outbox
 				core.HandleDatagram(now, helloFrom(peerID1), &seed)
+				// The seed Hello now enqueues its own first-seen listing; drain
+				// it so the row's wantQueued counts only the row's own trigger
+				// (PROTO-04, RESEARCH Pitfall 4).
+				advanceDrain(core, &seed, now)
 				seed.Drain()
 				logs = nil
 			}
