@@ -248,7 +248,19 @@ Plans:
   3. Snapshot load is a full rollback (14.1): keys absent from the snapshot are deleted, the result broadcasts to peers, and the rewritten `TestEngine_snapshotCreateLoadRestore` proves the new behavior
   4. `List` does not copy the world: pagination or streaming over the key→version view, with cost independent of value sizes
   5. The proto is public: proto and generated Go code live outside `internal/`; a Go client example builds in CI as a separate module; the last-read-value file pattern is documented as consumer-library territory (14.7)
-**Plans**: TBD
+**Plans**: 10 plans
+
+Plans:
+- [ ] 06-01-PLAN.md — Public API schema: move to api/supkvapi/v1, add List page fields, compatibility alias, import sweep, buf gates
+- [ ] 06-02-PLAN.md — Honest wait_for_replication: write-time peer set, zero-peer false, unknown-Ack inert, no wait-set growth
+- [ ] 06-03-PLAN.md — Standalone Go client example module and CI gate
+- [ ] 06-04-PLAN.md — Total, path-free error mapping with adapter-side failure classes
+- [ ] 06-05-PLAN.md — Keyset-paginated List over the live key→version view
+- [ ] 06-06-PLAN.md — Durability-gated Watch feed with a bounded pending queue and Unavailable shutdown
+- [ ] 06-07-PLAN.md — Explicit gRPC transport limits and one-way health
+- [ ] 06-08-PLAN.md — Snapshot load as a full rollback with broadcast
+- [ ] 06-09-PLAN.md — docs/API.md phase-owned contract sections and doc-anchor guard
+- [ ] 06-10-PLAN.md — Documentation and registry ripple (EXAMPLES, MULTI-NODE, SPEC-DEVIATIONS, AGENTS)
 
 ### Phase 7: Observability and Configuration
 **Goal**: An operator can see what the node is doing and misconfiguration fails fast — lifecycle logs, one validation point, metric definitions that match the binary, distinct exit codes, and a machine-enforced dependency boundary.
