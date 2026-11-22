@@ -116,9 +116,15 @@ tightening of this rule and the final `docs/API.md` wording.
 
 ## Protocol bounds
 
-The bounds are code constants in `internal/app/repl/core.go`. Each refused
-or evicted item is counted by an exported accessor; nothing is dropped
-silently.
+The bounds are code constants in `internal/app/repl/core.go`. Every discarded
+datagram class (including `bad_sync_header`) and the egress-queue drop are
+published in the `/metrics` families; the four replication-core queue counters
+below are exported accessors that the tests and the simulator read —
+**test-visible today, not yet published**: Phase 7's OBSV catalog owns their
+metrics families and names (OBSV-03/OBSV-05), so no `/metrics` series is
+promised for them by this document yet. Nothing is dropped or evicted without
+a count, but reading `Core.SyncStreamDropped`, `Core.ListingDropped` or
+`Core.NotificationsRegressed` today means a test, not a scrape.
 
 | Bound | Value | What it bounds | Why this value |
 |---|---|---|---|
@@ -146,10 +152,12 @@ time; `sync_interval` is the floor, never a guarantee, for a large store.
 
 The counters are `Core.SyncStreamDropped` (streams the entry bounds
 dropped), `Core.ListedKeysEvicted` (keys released from the retained union,
-including whole-peer-set LRU eviction), `Core.ListingDropped` (refused
-listing triggers — each destination- or chunk-bound refusal is one count)
-and `Core.NotificationsRegressed` (local-write notifications ignored as not
-greater than the tracked version). The receive path also counts every
+including whole-peer-set LRU eviction and the two-interval expiry, CR-01),
+`Core.ListingDropped` (refused listing triggers — each destination- or
+chunk-bound refusal is one count, and a refused targeted trigger is re-armed,
+WR-01) and `Core.NotificationsRegressed` (local-write notifications ignored
+as not greater than the tracked version; a strictly older one also resolves
+its waiter as Superseded, WR-03). The receive path also counts every
 discarded datagram class, including `bad_sync_header` for a listing part
 whose header is outside its domain.
 
