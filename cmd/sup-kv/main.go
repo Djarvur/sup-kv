@@ -574,9 +574,15 @@ func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.Ca
 		ValueMaxBytes: cfg.valueMaxBytes,
 		OnChange:      hub.Ingest,
 	}, persist.Config{Debounce: cfg.dumpDebounce, MaxWait: cfg.dumpMaxWait})
-	logLoadStats(engine.LoadStats())
-	if discarded > 0 {
-		log.Printf("sup-kv: discarded %d undecodable dumped records at startup", discarded)
+	stats := engine.LoadStats()
+	logLoadStats(stats)
+	if skipped := stats.Decoded.ValueLimit; skipped > 0 {
+		slog.Warn("Dumped records skipped by the configured value limit",
+			"count", skipped,
+			"value_max_bytes", cfg.valueMaxBytes)
+	}
+	if remaining := discarded - stats.Decoded.ValueLimit; remaining > 0 {
+		log.Printf("sup-kv: discarded %d undecodable dumped records at startup", remaining)
 	}
 	engineCtx, engineCancel := context.WithCancel(context.Background())
 	engineDone := make(chan error, 1)

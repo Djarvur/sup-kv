@@ -200,7 +200,28 @@ func Open(
 		Swept:      result.Swept,
 		SweepErr:   result.SweepErr,
 	}
+	eng.startLoadDirty(result.Outcome, now())
 	return eng, stats.Total()
+}
+
+// startLoadDirty arms the post-load dirty epoch for every outcome but Main
+// (D-04, PERSIST-04): a Prompt start has no generation at all, a Backup
+// start's memory came from .prev, and an Unusable start is empty — each must
+// flush before a Snapshot bytes-copies the file, otherwise the snapshot could
+// capture a corrupt main and the first rotation could displace the last good
+// generation. A Main load — even one whose decode discarded records — starts
+// clean: the loaded generation is on disk and the same decoder reproduces the
+// same in-memory state, while rewriting it would shorten the PERSIST-10
+// evidence window. Called once by Open before Run exists, so no nudge is
+// needed here; the first write's markDirty wakes the dumper.
+func (e *Engine) startLoadDirty(outcome port.LoadOutcome, at time.Time) {
+	if outcome == port.LoadMain {
+		return
+	}
+	e.mu.Lock()
+	e.dirty = true
+	e.oldest = at
+	e.mu.Unlock()
 }
 
 // LoadStats returns the startup load report Open captured — a value copy,
@@ -528,8 +549,8 @@ func (e *Engine) await() error {
 // replication core Acks a DataReplication as soon as the record is
 // applied to memory, and the dump that persists it is asynchronous to that
 // confirmation — the running Run picks the dirty flag up and dumps on the
-// debounce schedule, so the changed e.changed nudge (the same non-blocking
-// signal await sends) is what wakes an idle dumper to re-arm its timers.
+// debounce schedule, so markDirty's non-blocking e.changed nudge is what wakes
+// an idle dumper to re-arm its timers.
 // The dirty decision is exactly storage.Store.MergeChanged's changed result
 // (D-15, 03 IN-02 + 04 IN-02, threat T-6-01; PERSIST-07, ADR 0012): the
 // store alone knows whether the incoming record became the stored record —
@@ -554,10 +575,6 @@ func (e *Engine) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict
 		return conflicts, drift, nil
 	}
 	e.markDirty()
-	select {
-	case e.changed <- struct{}{}:
-	default:
-	}
 	return conflicts, drift, nil
 }
 
@@ -838,10 +855,14 @@ func (e *Engine) flush() error {
 	}
 }
 
-// markDirty marks the engine dirty from a fresh epoch without registering
-// a waiter: the restore replay's store writes are unconfirmed until the
-// final flush's covering dump — the cover discipline of await without the
-// per-write blocking.
+// markDirty marks the engine dirty from a fresh epoch without registering a
+// waiter and wakes an idle dumper through the non-blocking e.changed nudge:
+// the restore replay's store writes are unconfirmed until the final flush's
+// covering dump — the cover discipline of await without the per-write
+// blocking — and the mid-replay error path needs the same wake-up (Phase-4
+// review New-1). The nudge lives here, not at each caller, so every dirty
+// path sends exactly one signal; the channel has capacity one and the send is
+// non-blocking, so repeated marks collapse into one wake-up.
 func (e *Engine) markDirty() {
 	e.mu.Lock()
 	if !e.dirty {
@@ -849,4 +870,8 @@ func (e *Engine) markDirty() {
 	}
 	e.dirty = true
 	e.mu.Unlock()
+	select {
+	case e.changed <- struct{}{}:
+	default:
+	}
 }
