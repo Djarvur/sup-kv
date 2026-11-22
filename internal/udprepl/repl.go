@@ -132,10 +132,8 @@ type inboundEvent struct {
 // may reuse its buffer once the call returns. The queue carries no track
 // flag: the tracker is created synchronously in NotifyLocalWrite before the
 // enqueue, so no later code can mistake a notification for a tracker
-// creation site.
-// localWrite is one queued author notification: the key and the defensively
-// copied record, plus whether the record is a REPLAY of already-installed
-// state (a snapshot load) rather than a live write. A replay takes the core's
+// creation site. The replay flag marks a notification for already-installed
+// state (a snapshot load) rather than a live write; a replay takes the core's
 // paced record-send path instead of the immediate broadcast (WR-04).
 type localWrite struct {
 	key    string

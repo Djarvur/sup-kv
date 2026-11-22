@@ -907,10 +907,10 @@ type Core struct {
 	listingGen      uint64
 	listingComplete bool
 	nextSyncID      uint64
-	// time of the first Advance — the warning's clock origin — helloSeen
-	// flips on the first Hello received from any peer, and peerWarned
-	// latches the one-shot WARN. Driver-goroutine-only, like every other
-	// core field (D-04); the WARN never repeats per interval.
+	// firstAdvance is the time of the first Advance (the warning's clock
+	// origin); helloSeen flips on the first Hello received from any peer, and
+	// peerWarned latches the one-shot WARN. Driver-goroutine-only, like every
+	// other core field (D-04); the WARN never repeats per interval.
 	firstAdvance time.Time
 	helloSeen    bool
 	peerWarned   bool
