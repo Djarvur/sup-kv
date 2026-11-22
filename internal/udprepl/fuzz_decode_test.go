@@ -7,9 +7,10 @@ package udprepl_test
 //
 //   - decode() never panics on any input (a panic is a fuzz failure);
 //   - a Decoded verdict never carries a nil Msg;
-//   - BadCRC and Undecodable verdicts carry no Msg at all;
+//   - BadCRC, Undecodable and ProtoVersionMismatch verdicts carry no Msg at
+//     all, and ProtoVersionMismatch preserves the foreign envelope version;
 //   - the verdict always lies inside the fixed vocabulary
-//     Decoded/BadCRC/Undecodable.
+//     Decoded/BadCRC/Undecodable/ProtoVersionMismatch.
 //
 // It deliberately does NOT assert that arbitrary garbage is always rejected:
 // a body can parse and decode (the negative table's XPORT-10 rows prove two
@@ -86,8 +87,15 @@ func FuzzDecode(f *testing.F) {
 			if in.Msg != nil {
 				t.Fatalf("Undecodable verdict carries a decoded Msg %T", in.Msg)
 			}
+		case port.ProtoVersionMismatch:
+			if in.Msg != nil {
+				t.Fatalf("ProtoVersionMismatch verdict carries a decoded Msg %T — a foreign version's body must not be decoded", in.Msg)
+			}
+			if in.ProtoVersion == repl.SupportedProtoVersion {
+				t.Fatalf("ProtoVersionMismatch verdict carries the supported version %d", in.ProtoVersion)
+			}
 		default:
-			t.Fatalf("decode verdict %d outside the fixed vocabulary Decoded/BadCRC/Undecodable", in.Status)
+			t.Fatalf("decode verdict %d outside the fixed vocabulary Decoded/BadCRC/Undecodable/ProtoVersionMismatch", in.Status)
 		}
 	})
 }
@@ -121,7 +129,12 @@ func fuzzDecodeSeeds(runID [16]byte) ([][]byte, error) {
 		},
 		port.Ack{Key: fuzzDecodeKey, Version: ver},
 		port.DataRequest{Key: fuzzDecodeKey},
-		port.DataSync{Entries: []port.SyncEntry{{Key: "fuzz/a", Version: ver}, {Key: "fuzz/b", Version: ver}}},
+		port.DataSync{
+			SyncID:     1,
+			ChunkIndex: 1,
+			ChunkCount: 1,
+			Entries:    []port.SyncEntry{{Key: "fuzz/a", Version: ver}, {Key: "fuzz/b", Version: ver}},
+		},
 	}
 	seeds := make([][]byte, 0, len(valid)+6)
 	for _, msg := range valid {
@@ -157,6 +170,8 @@ func fuzzDecodeSeeds(runID [16]byte) ([][]byte, error) {
 
 	// Wrong proto_version with a correct CRC: the production encoder always
 	// stamps SupportedProtoVersion, so only the crafting seam can build it.
+	// decode() judges the version before the CRC/body, so this seed lands in
+	// the ProtoVersionMismatch verdict with no body decoded.
 	versionMismatch, err := udprepl.EncodeDatagramForTestVersion(
 		port.Hello{}, fuzzDecodeNodeID, runID, repl.SupportedProtoVersion+1)
 	if err != nil {

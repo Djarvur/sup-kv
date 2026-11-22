@@ -3,13 +3,16 @@ package udprepl_test
 // The decoder negative table (TEST-08, D-08) and the deletion codec
 // round-trip (TEST-02 level 1). The table drives decode() — the adapter's
 // mechanical half — and asserts each corruption's verdict from the fixed
-// vocabulary (Decoded/BadCRC/Undecodable), plus the core's discard counter
-// delta for every class, observed through Adapter.Discards() after feeding
-// the datagram over a real loopback socket. The wire-validation rows (empty
-// key, tombstone-with-data, key length, record checksum, far-future version
-// — XPORT-03/04/10) assert the classes the core's validation pipeline
-// landed in 03-08: decode() still frames them (Decoded) and the core
-// discards them before any store or clock call. No production code is
+// vocabulary (Decoded/BadCRC/Undecodable/ProtoVersionMismatch), plus the
+// core's discard counter delta for every class, observed through
+// Adapter.Discards() after feeding the datagram over a real loopback socket.
+// The wire-validation rows (empty key, tombstone-with-data, key length,
+// record checksum, far-future version — XPORT-03/04/10) assert the classes
+// the core's validation pipeline landed in 03-08: decode() still frames them
+// (Decoded) and the core discards them before any store or clock call. The
+// proto-version rows pin the pre-body verdict and its order: a foreign
+// version classifies before the CRC gate, so a foreign version with a
+// corrupted body is bad_proto_version, never bad_crc. No production code is
 // touched — the negative table is the pin; fuzz targets with committed
 // corpora are the sibling plan 02-17, wave 3.
 //
@@ -158,26 +161,73 @@ func TestDecode_negativeTable(t *testing.T) {
 				t.Helper()
 				// The adversarial crafting seam: production encoding always
 				// stamps SupportedProtoVersion, so only this helper can build
-				// a CRC-passing envelope the core's version gate rejects.
-				datagram, err := udprepl.EncodeDatagramForTestVersion(port.Hello{}, nodeIDB, runIDB, repl.SupportedProtoVersion+1)
-				if err != nil {
-					t.Fatalf("encode version-mismatch fixture: %v", err)
-				}
-				return datagram
+				// a foreign-version envelope.
+				return negVersionEncode(t, repl.SupportedProtoVersion+1)
 			},
-			wantStatus: port.Decoded,
+			wantStatus: port.ProtoVersionMismatch,
 			wantClass:  repl.DiscardBadProtoVersion,
 			feed:       true,
 			check: func(t *testing.T, in port.InboundDatagram) {
 				t.Helper()
-				// The split the table pins: decode() does not judge the
-				// version — the core's gate does, and its counter is the
-				// observable.
+				// The pre-body verdict: no body was decoded, but the envelope
+				// fields the core needs to attribute the discard survived.
+				if in.Msg != nil {
+					t.Fatalf("ProtoVersionMismatch verdict carries a decoded Msg %T — the body must never be decoded for a foreign version", in.Msg)
+				}
 				if in.ProtoVersion != repl.SupportedProtoVersion+1 {
 					t.Fatalf("ProtoVersion = %d, want %d", in.ProtoVersion, repl.SupportedProtoVersion+1)
 				}
-				if _, ok := in.Msg.(port.Hello); !ok {
-					t.Fatalf("Msg = %T, want port.Hello (decode only frames, the core judges the version)", in.Msg)
+				if in.NodeID != nodeIDB || in.RunID != runIDB {
+					t.Fatalf("ProtoVersionMismatch verdict lost the envelope identity: node_id %d run_id %x", in.NodeID, in.RunID)
+				}
+			},
+		},
+		{
+			name:       "proto_version_zero_is_a_mismatch",
+			build:      func(t *testing.T) []byte { t.Helper(); return negVersionEncode(t, 0) },
+			wantStatus: port.ProtoVersionMismatch,
+			wantClass:  repl.DiscardBadProtoVersion,
+			feed:       true,
+			check:      negVersionMismatchCheck(0),
+		},
+		{
+			name:       "proto_version_one_the_previous_wire_version_is_a_mismatch",
+			build:      func(t *testing.T) []byte { t.Helper(); return negVersionEncode(t, 1) },
+			wantStatus: port.ProtoVersionMismatch,
+			wantClass:  repl.DiscardBadProtoVersion,
+			feed:       true,
+			check:      negVersionMismatchCheck(1),
+		},
+		{
+			name:       "proto_version_max_uint32_is_a_mismatch",
+			build:      func(t *testing.T) []byte { t.Helper(); return negVersionEncode(t, ^uint32(0)) },
+			wantStatus: port.ProtoVersionMismatch,
+			wantClass:  repl.DiscardBadProtoVersion,
+			feed:       true,
+			check:      negVersionMismatchCheck(^uint32(0)),
+		},
+		{
+			// The ordering trap (D-07, Pitfall 12): a future version's body
+			// need not follow this version's CRC contract, so the version
+			// verdict must win over the CRC gate. The same corruption on a
+			// same-version datagram stays BadCRC (the row above).
+			name: "future_proto_version_wins_over_corrupted_body",
+			build: func(t *testing.T) []byte {
+				t.Helper()
+				datagram := negVersionEncode(t, repl.SupportedProtoVersion+1)
+				datagram[len(datagram)-1] ^= corruptByte
+				return datagram
+			},
+			wantStatus: port.ProtoVersionMismatch,
+			wantClass:  repl.DiscardBadProtoVersion,
+			feed:       true,
+			check: func(t *testing.T, in port.InboundDatagram) {
+				t.Helper()
+				if in.Msg != nil {
+					t.Fatalf("combined foreign-version/corrupt-body row decoded a Msg %T, want nil", in.Msg)
+				}
+				if in.ProtoVersion != repl.SupportedProtoVersion+1 {
+					t.Fatalf("ProtoVersion = %d, want %d — the pre-body verdict must preserve it", in.ProtoVersion, repl.SupportedProtoVersion+1)
 				}
 			},
 		},
@@ -354,10 +404,15 @@ func TestDecode_negativeTable(t *testing.T) {
 			name: "bad_version_far_future_sync_entry",
 			build: func(t *testing.T) []byte {
 				t.Helper()
-				return negEncode(t, port.DataSync{Entries: []port.SyncEntry{
-					{Key: "neg/sync-entry-ok", Version: version.PackVersion(testNowMs, 8, nodeIDB)},
-					{Key: "neg/sync-entry-poison", Version: negFarFutureVersion()},
-				}})
+				return negEncode(t, port.DataSync{
+					SyncID:     1,
+					ChunkIndex: 1,
+					ChunkCount: 1,
+					Entries: []port.SyncEntry{
+						{Key: "neg/sync-entry-ok", Version: version.PackVersion(testNowMs, 8, nodeIDB)},
+						{Key: "neg/sync-entry-poison", Version: negFarFutureVersion()},
+					},
+				})
 			},
 			wantStatus: port.Decoded,
 			wantClass:  repl.DiscardBadVersion,
@@ -604,6 +659,8 @@ func discardCount(stats repl.DiscardStats, class string) uint64 {
 		return stats.BadChecksum
 	case repl.DiscardBadVersion:
 		return stats.BadVersion
+	case repl.DiscardBadSyncHeader:
+		return stats.BadSyncHeader
 	default:
 		return 0
 	}
@@ -632,6 +689,8 @@ func bumpDiscard(stats *repl.DiscardStats, class string) {
 		stats.BadChecksum++
 	case repl.DiscardBadVersion:
 		stats.BadVersion++
+	case repl.DiscardBadSyncHeader:
+		stats.BadSyncHeader++
 	}
 }
 
@@ -644,6 +703,36 @@ func negEncode(t *testing.T, msg port.Message) []byte {
 		t.Fatalf("encode %T fixture: %v", msg, err)
 	}
 	return datagram
+}
+
+// negVersionEncode encodes one Hello through the explicit-version crafting
+// seam — the only way to build a CRC-correct foreign-version datagram, since
+// the production encoder always stamps SupportedProtoVersion.
+func negVersionEncode(t *testing.T, protoVersion uint32) []byte {
+	t.Helper()
+	datagram, err := udprepl.EncodeDatagramForTestVersion(port.Hello{}, nodeIDB, runIDB, protoVersion)
+	if err != nil {
+		t.Fatalf("encode version-%d fixture: %v", protoVersion, err)
+	}
+	return datagram
+}
+
+// negVersionMismatchCheck returns the shared assertion of a foreign-version
+// row: no body decoded, and the envelope identity plus the foreign version
+// preserved for attribution.
+func negVersionMismatchCheck(protoVersion uint32) func(t *testing.T, in port.InboundDatagram) {
+	return func(t *testing.T, in port.InboundDatagram) {
+		t.Helper()
+		if in.Msg != nil {
+			t.Fatalf("ProtoVersionMismatch verdict carries a decoded Msg %T, want nil", in.Msg)
+		}
+		if in.ProtoVersion != protoVersion {
+			t.Fatalf("ProtoVersion = %d, want %d preserved", in.ProtoVersion, protoVersion)
+		}
+		if in.NodeID != nodeIDB || in.RunID != runIDB {
+			t.Fatalf("ProtoVersionMismatch verdict lost the envelope identity: node_id %d run_id %x", in.NodeID, in.RunID)
+		}
+	}
 }
 
 // negEnvelope hand-builds one envelope whose CRC covers body exactly — the

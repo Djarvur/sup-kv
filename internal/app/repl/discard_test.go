@@ -628,6 +628,22 @@ func TestDiscard_onDiscardSeam(t *testing.T) {
 			wantDiscards: repl.DiscardStats{BadProtoVersion: 1},
 		},
 		{
+			// The adapter's pre-body verdict, consumed as protocol input: the
+			// core counts and attributes it exactly like the field check, with
+			// no message to process (D-07).
+			name: "the adapter's proto-version verdict fires bad_proto_version without a body",
+			in: port.InboundDatagram{
+				Source:       handleFor(peerID1),
+				Status:       port.ProtoVersionMismatch,
+				ProtoVersion: repl.SupportedProtoVersion + 1,
+				NodeID:       peerID1,
+				RunID:        testRunID(peerID1),
+			},
+			wantEvents:   1,
+			wantClass:    repl.DiscardBadProtoVersion,
+			wantDiscards: repl.DiscardStats{BadProtoVersion: 1},
+		},
+		{
 			name: "own broadcast echo fires own_broadcast",
 			in: port.InboundDatagram{
 				Source:       handleFor(localID),
