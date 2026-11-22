@@ -217,7 +217,7 @@ Plans:
 - [ ] 05-05-PLAN.md — Load outcomes, evidence preservation, orphan sweep, parent sync, dir-fsync tolerance, errno classes (D-02, D-08, D-09/PERSIST-02, PERSIST-09)
 
 **Wave 5** *(blocked on Wave 4)*
-- [ ] 05-06-PLAN.md — Engine load report, dirty-after-restore-start, markDirty nudge, skip accounting, binary log/metrics (D-04, D-02, D-09/PERSIST-04, PERSIST-02, PERSIST-10)
+- [ ] 05-06-PLAN.md — Engine load report, dirty after a backup/empty start, markDirty nudge, skip accounting, binary log/metrics (D-04, D-02, D-09/PERSIST-04, PERSIST-02, PERSIST-10)
 
 **Wave 6** *(blocked on Wave 5)*
 - [ ] 05-07-PLAN.md — Injected now/after seam, bounded retry ladder with classes, simulator dump↔notify scenario (D-11, D-05/PERSIST-12, PERSIST-05)
