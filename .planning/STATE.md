@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 08-01-PLAN.md
-last_updated: "2026-11-23T17:55:54.129Z"
+stopped_at: Completed 08-02-PLAN.md
+last_updated: "2026-11-23T18:18:52.116Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: 67535a2f7dd0dec6c210a477db9e9ef70503e1d1
+state_head: 7609b93ed64d490bd28f504263367a1b952cdd07
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 84
+  completed_plans: 85
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -145,6 +145,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P10 | 281s | 2 tasks | 4 files |
 | Phase 07 P11 | 1105 | 2 tasks | 2 files |
 | Phase 08 P01 | 746s | 3 tasks | 9 files |
+| Phase 08 P02 | 954 | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -476,6 +477,10 @@ Recent decisions affecting current work:
 - [Phase 08]: Phase 8 thresholds are one compiled const block in internal/testutil/perf.go; no env parsing and no threshold file (D-06).
 - [Phase 08]: The perf burst row reuses the frozen red generator read-only; TestPerfBurstBoundsMatchRedContract pins the perf thresholds to the frozen red constants.
 - [Phase 08]: make perf is manual and Linux-only: SUPKV_PERF=1, .tmp/perf dump base, -p 1, no -race, then the functional stand line; CI keeps the threshold-free bench-smoke.
+- [Phase 08]: pendingByKey is a single-slot map[string]pendingKey, not a set-valued index: the one-pair-per-key invariant is total, so a hidden second pair is a bug the fixed-seed differential names rather than a state the index accommodates
+- [Phase 08]: PendingVisits counts pending entries INSPECTED, never handler calls or emissions: that reading makes the pre-index 2N/N counts and the post-index zeros the same measurement, and the field comment obliges any new pending-set loop to increment it
+- [Phase 08]: 08-02 RED evidence is the counter-instrumented split (write 2N, apply N red; idle-Advance tripwire green): referencing pendingByKey in a RED commit would have been a package build failure, which #3770 refuses as INVALID_RED, so the invariant/differential proofs landed in GREEN
+- [Phase 08]: PERF-05 remains unmarked in REQUIREMENTS.md: 08-02 lands the core fix and deterministic proofs, while 08-04 (docs) and 08-05 (paired wall-clock gates) still cover the requirement; requirements ready-ids still reports it blocked
 
 ### Pending Todos
 
@@ -498,7 +503,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T17:54:43.325Z
-Stopped at: Completed 08-01-PLAN.md
+Last session: 2026-11-23T18:18:51.497Z
+Stopped at: Completed 08-02-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
