@@ -817,8 +817,17 @@ type Core struct {
 	// known peer, the set of pending keys it is still waiting on, so peer
 	// eviction touches only that peer's unacked entries instead of scanning
 	// the whole pending set (D-03). pendingOrder lists every pending pair in
-	// createdAt order for the O(1) oldest-age gauge.
+	// createdAt order for the O(1) oldest-age gauge. pendingByKey is the
+	// per-key index into pending: it maps a key to the one tracked pair the
+	// notification guard allows (the one-pair-per-key invariant is total — the
+	// guard rejects not-greater versions and removeSupersededLocal removes the
+	// smaller pair before the insert — so a single slot is exactly equivalent
+	// to a set-valued index). Maintenance is exactly two sites: the insert in
+	// trackLocalWrite and the delete in removePending, whose equality guard
+	// keeps a stale call from evicting a newer pair; any new insert or delete
+	// path must go through them.
 	pending      map[pendingKey]pendingEntry
+	pendingByKey map[string]pendingKey
 	peerUnacked  map[uint16]map[pendingKey]struct{}
 	pendingOrder *list.List
 
@@ -1002,6 +1011,7 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 		cfg:                  cfg,
 		peers:                make(map[uint16]peer),
 		pending:              make(map[pendingKey]pendingEntry),
+		pendingByKey:         make(map[string]pendingKey),
 		peerUnacked:          make(map[uint16]map[pendingKey]struct{}),
 		pendingOrder:         list.New(),
 		retry:                retryHeap{index: make(map[pendingKey]int)},
@@ -1659,23 +1669,19 @@ func (c *Core) applyRemote(
 	// displaced only when the applied record actually replaced it — a
 	// strictly greater version, or an equal version the incoming record won
 	// on content (the identical-content case returned above, so equal
-	// versions here always mean differing records). A pending version the
-	// incoming record did not beat stays tracked and counts nothing, and
-	// every displaced entry emits its Superseded result with the TRACKED
-	// version — the displaced write's resolution is an honest false
-	// (XPORT-12).
-	for pk := range c.pending {
+	// versions here always mean differing records). The candidate is read from
+	// the key's index slot, so an apply for an untracked key inspects no
+	// pending entry. A pending version the incoming record did not beat stays
+	// tracked and counts nothing, and a displaced entry emits its Superseded
+	// result with the TRACKED version — the displaced write's resolution is an
+	// honest false (XPORT-12).
+	if pk, tracked := c.pendingByKey[msg.Key]; tracked {
 		c.pendingVisits++
-		if pk.key != msg.Key {
-			continue
+		if cmp := msg.Record.Version.Compare(pk.version); cmp > 0 || (cmp == 0 && incomingWon) {
+			c.mergeStats.Conflicts++
+			out.Superseded(pk.key, pk.version)
+			c.removePending(pk)
 		}
-		cmp := msg.Record.Version.Compare(pk.version)
-		if cmp < 0 || (cmp == 0 && !incomingWon) {
-			continue
-		}
-		c.mergeStats.Conflicts++
-		out.Superseded(pk.key, pk.version)
-		c.removePending(pk)
 	}
 	if incomingWon {
 		out.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})
@@ -2423,6 +2429,7 @@ func (c *Core) trackLocalWrite(now time.Time, key string, rec storage.Record, pe
 		}
 		entry.elem = c.insertPendingOrder(pk, now)
 		c.pending[pk] = entry
+		c.pendingByKey[pk.key] = pk
 		for id := range waitSet {
 			c.ledgerAdd(id, pk)
 		}
@@ -3422,16 +3429,21 @@ func (c *Core) insertPendingOrder(pk pendingKey, createdAt time.Time) *list.Elem
 }
 
 // removePending deletes one tracked pair from every structure that holds it
-// — the pending map, the createdAt-ordered list and every still-waiting
-// peer's ledger set. The pointed-to deletion is shared by the drain,
-// supersession and stale-record paths, so no path can leak a list node or a
-// ledger entry (T-3-14).
+// — the pending map, the per-key index, the createdAt-ordered list and every
+// still-waiting peer's ledger set. The pointed-to deletion is shared by the
+// drain, supersession and stale-record paths, so no path can leak a list node,
+// an index slot or a ledger entry (T-3-14). The index delete is guarded by
+// equality: a stale call for an already-replaced pair must never evict the
+// newer pair that now owns the key.
 func (c *Core) removePending(pk pendingKey) {
 	entry, ok := c.pending[pk]
 	if !ok {
 		return
 	}
 	delete(c.pending, pk)
+	if cur, ok := c.pendingByKey[pk.key]; ok && cur == pk {
+		delete(c.pendingByKey, pk.key)
+	}
 	if entry.elem != nil {
 		c.pendingOrder.Remove(entry.elem)
 	}
@@ -3444,32 +3456,36 @@ func (c *Core) removePending(pk pendingKey) {
 // trackedVersion returns the version currently tracked for key, if any.
 // The notification guard keeps the pending set at most one pair per key: a
 // not-greater notification never creates a second entry, and a newer one
-// first removes every smaller pair (removeSupersededLocal). The scan is over
-// the pending set, never the store — see NotifyLocalWrite for why.
+// first removes the smaller pair (removeSupersededLocal). The lookup reads the
+// key's single index slot, never the pending set: a hit inspects one entry, a
+// miss inspects none, so the guard is key-local at any pending-set size.
 func (c *Core) trackedVersion(key string) (version.RecordVersion, bool) {
-	for pk := range c.pending {
-		c.pendingVisits++
-		if pk.key == key {
-			return pk.version, true
-		}
+	pk, ok := c.pendingByKey[key]
+	if !ok {
+		return version.RecordVersion{}, false
 	}
-	return version.RecordVersion{}, false
+	c.pendingVisits++
+	return pk.version, true
 }
 
-// removeSupersededLocal deletes every tracked pair under key whose version is
-// strictly smaller than newer — the local-write supersession rule
-// (REPL-02). An equal version is not smaller, so an equal-version duplicate
-// notification leaves tracking untouched. Each displaced pair emits its
-// Superseded result with the TRACKED (older) version — a waiter for that
-// write learns its version lost to a newer local write (XPORT-12).
+// removeSupersededLocal deletes the tracked pair under key when its version is
+// strictly smaller than newer — the local-write supersession rule (REPL-02),
+// resolved through the key's index slot instead of a pending-set scan. An
+// equal version is not smaller, so an equal-version duplicate notification
+// leaves tracking untouched. The displaced pair emits its Superseded result
+// with the TRACKED (older) version — a waiter for that write learns its
+// version lost to a newer local write (XPORT-12).
 func (c *Core) removeSupersededLocal(key string, newer version.RecordVersion, out *port.Outbox) {
-	for pk := range c.pending {
-		c.pendingVisits++
-		if pk.key == key && pk.version.Compare(newer) < 0 {
-			out.Superseded(pk.key, pk.version)
-			c.removePending(pk)
-		}
+	pk, ok := c.pendingByKey[key]
+	if !ok {
+		return
 	}
+	c.pendingVisits++
+	if pk.version.Compare(newer) >= 0 {
+		return
+	}
+	out.Superseded(pk.key, pk.version)
+	c.removePending(pk)
 }
 
 // ledgerAdd records that peerID is waiting on pk — the per-peer index behind
