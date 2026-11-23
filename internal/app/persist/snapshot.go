@@ -278,13 +278,16 @@ func restoreChanges(current, snap map[string]storage.Record) bool {
 // write path (D-09): a tombstone replays as a fresh-version Delete whose
 // ErrNotFound is a skip — a missing or already-tombstoned key has nothing
 // to beat, and Delete writes nothing there anyway — and a live record as a
-// fresh-version Set whose ErrValueTooLarge is a skip, mirroring Open, so a
-// config-shrunk value limit never aborts a restore. The returned version is
-// the store-stamped fresh version and replayed reports whether the store
-// installed the record; a skip returns the zero version, replayed=false and
-// a nil error, so a real replay can never read as a skip. The tombstone flag
-// is not part of the signal — the caller already knows it from the snapshot
-// entry.
+// fresh-version Set. The decoder already applied the store's own configured
+// limit (Restore decodes with e.valueMaxBytes, captured from
+// store.ValueMaxBytes()), so Set's only error class, ErrValueTooLarge, cannot
+// fire and both the decoder and the store remain the bound's authorities
+// (IN-01); any error that does surface is a genuine invariant violation and
+// aborts the replay. The returned version is the store-stamped fresh version
+// and replayed reports whether the store installed the record; a skip returns
+// the zero version, replayed=false and a nil error, so a real replay can never
+// read as a skip. The tombstone flag is not part of the signal — the caller
+// already knows it from the snapshot entry.
 func replayRecord(store *storage.Store, key string, rec storage.Record) (version.RecordVersion, bool, error) {
 	if rec.Deleted {
 		ver, _, err := store.Delete(key)
@@ -297,9 +300,6 @@ func replayRecord(store *storage.Store, key string, rec storage.Record) (version
 		return ver, true, nil
 	}
 	ver, _, err := store.Set(key, rec.Data)
-	if errors.Is(err, storage.ErrValueTooLarge) {
-		return version.RecordVersion{}, false, nil
-	}
 	if err != nil {
 		return version.RecordVersion{}, false, err
 	}

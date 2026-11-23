@@ -7,6 +7,7 @@ package persist
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 	"time"
 
@@ -22,10 +23,15 @@ const replaySignalNode = uint16(0x0304)
 // TestEngine_replayRecordSignal proves the replayed bool is an explicit
 // install/skip signal, never conflated with the tombstone flag: a live
 // replay and a tombstone replay both report replayed=true with the freshly
-// stamped nonzero version, while both skip shapes — a tombstone with
-// nothing to beat and a value over the reduced store limit — report
-// replayed=false with the zero version and a nil error. A real replay and a
-// skip can therefore never read the same.
+// stamped nonzero version, while the one skip shape — a tombstone with
+// nothing to beat — reports replayed=false with the zero version and a nil
+// error. A real replay and a skip can therefore never read the same.
+//
+// The over-limit class is deliberately NOT a skip (IN-01): Restore decodes
+// with the store's own configured limit, so Decode discards such a record
+// (and CR-01 refuses the whole load), and replayRecord never sees one. A
+// direct call proves the store stays the bound's authority: the error
+// surfaces instead of silently installing nothing.
 func TestEngine_replayRecordSignal(t *testing.T) {
 	t.Parallel()
 	clk := clock.NewClock(time.Now, 0, 0, time.Minute)
@@ -75,17 +81,14 @@ func TestEngine_replayRecordSignal(t *testing.T) {
 		t.Errorf("replayRecord(absent tombstone) version = %x, want the zero version", skipVer[:])
 	}
 
-	skipVer, replayed, err = replayRecord(store, "oversize", storage.Record{
+	_, replayed, err = replayRecord(store, "oversize", storage.Record{
 		Data: bytes.Repeat([]byte("x"), 17),
 	})
-	if err != nil {
-		t.Fatalf("replayRecord(oversize) error = %v, want nil", err)
+	if !errors.Is(err, storage.ErrValueTooLarge) {
+		t.Fatalf("replayRecord(oversize) error = %v, want ErrValueTooLarge (the store is the bound's authority)", err)
 	}
 	if replayed {
-		t.Error("replayRecord(oversize) replayed = true, want false for a skip")
-	}
-	if skipVer != (version.RecordVersion{}) {
-		t.Errorf("replayRecord(oversize) version = %x, want the zero version", skipVer[:])
+		t.Error("replayRecord(oversize) replayed = true, want false on the rejected Set")
 	}
 	if liveVer == skipVer {
 		t.Error("a live replay and a skip read the same version, want distinguishable signals")
