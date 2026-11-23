@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 11
+current_plan: 10
 status: executing
-stopped_at: Completed 06-08-PLAN.md
-last_updated: "2026-11-23T01:27:55.295Z"
-last_activity: 2026-11-22
-last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: 339b06ba9664bbb79c2d0cb88c93b49a0849cc99
+stopped_at: Completed 06-09-PLAN.md
+last_updated: "2026-11-23T01:40:23.063Z"
+last_activity: 2026-11-23
+last_activity_desc: Completed 06-09-PLAN.md
+state_head: 6ddcc07a880f0cb826fe5c7cbd64e3d4ac60d71c
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 69
+  completed_plans: 70
 ---
 
 # Project State
@@ -25,15 +25,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-19)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 5 — Persistence
+**Current focus:** Phase 6 — API and Semantics
 
 ## Current Position
 
-Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 11
+Phase: 6 (API and Semantics) — EXECUTING
+Current Plan: 10
 Total Plans in Phase: 13
-Status: Ready to execute
-Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
+Status: Executing
+Last activity: 2026-11-23 — Completed 06-09-PLAN.md
 
 Progress: [███░░░░░░░] 33%
 
@@ -128,6 +128,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P12 | 361 | 2 tasks | 7 files |
 | Phase 06 P07 | 522s | 3 tasks | 11 files |
 | Phase 06 P08 | 705s | 3 tasks | 4 files |
+| Phase 06 P09 | 284s | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -408,6 +409,9 @@ Recent decisions affecting current work:
 - [Phase 06]: Rollback tombstones join RestoredRecord (nil Data, Deleted=true), so SnapshotLoad's existing notify loop broadcasts them with zero handler wiring, including when the final dump fails (PROTO-08 / T-06-26).
 - [Phase 06]: A rollback delete rides storage.Store.Delete, whose ErrNotFound is a benign concurrent skip that burns no version; concurrent writes after the rollback set is computed are ordinary LWW, not snapshot isolation.
 - [Phase 06]: 06-08 tasks 2 and 3 were investigated unexpected GREENs (behaviour landed in Task 1's GREEN commit and the handler needed no change), so their test commits are the deliverables; gocognit/nestif/revive/noinlineerr forced the replay-pass helper split (04-07 / 06-04 precedent).
+- [Phase 06]: 06-09: docs/API.md and TestAPIDoc land as one contract pair — the anchor table reads the repo file and pins one literal per mandated statement, so section deletion or heading drift fails the normal test gate (T-06-29); the doc comment states the honest scope (presence and drift, not sentence truth).
+- [Phase 06]: 06-09: the error table follows the mapper's first-match order and adds the handler validation rows beside it; the ordering rationale (pre-built status pass-through, ErrDumpFailed before the port classes, ErrNoDump before the fs rows, context through the matched sentinel, logged constant fallback) is part of the documented contract.
+- [Phase 06]: 06-09: every limit is documented as implemented (caller-bounded wait, non-linearizable rollback, current-memory snapshot) and the Phase 9/DOCS-05 remainder is named pending; requirements-completed stays empty on the #2388 shared-ID gate, with 06-13 closing the checkboxes.
 
 ### Pending Todos
 
@@ -430,7 +434,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T01:27:54.685Z
-Stopped at: Completed 06-08-PLAN.md
+Last session: 2026-11-23T01:40:22.477Z
+Stopped at: Completed 06-09-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
