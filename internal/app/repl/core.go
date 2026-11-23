@@ -65,6 +65,16 @@ const (
 	DiscardOwnBroadcast    = "own_broadcast"
 	DiscardDuplicateNodeID = "duplicate_node_id"
 
+	// DiscardUnboundListing is the retained-listing binding's own class
+	// (CR-01, Phase-4 review New-2): a listing from a sender identity the
+	// peer table does not hold — or whose envelope run_id differs from the
+	// row's — is not a duplicate identity but a listing that may legitimately
+	// have overtaken its Hello, so it gets its own operator story rather than
+	// masquerading as duplicate_node_id. The drop itself is unchanged: it is
+	// counted, WARNed through the shared limiter and taken before the clock
+	// call, the accumulation and the completeness publication.
+	DiscardUnboundListing = "unbound_listing"
+
 	// DiscardEmptyKey and its four siblings below are the wire-validation
 	// classes (XPORT-03, XPORT-04, XPORT-10, D-06), in the pinned
 	// intra-message order [Core.validate] applies: a datagram carrying any
@@ -306,10 +316,11 @@ type Config struct {
 	// OnDiscard is invoked at every HandleDatagram discard site with the
 	// class token (DiscardBadCRC, ...) and a short metadata detail — the
 	// source handle, the offending node id (D-08). Additive to Log: the
-	// duplicate-node_id configuration errors keep their Log call, and the
-	// core itself stays silent (D-09) — this is a plain callback the
-	// adapter or main side may bridge into structured logging or counters;
-	// the class is a first-class value, never a message prefix to parse.
+	// duplicate-node_id and unbound_listing configuration WARNs keep their
+	// Log call, and the core itself stays silent (D-09) — this is a plain
+	// callback the adapter or main side may bridge into structured logging
+	// or counters; the class is a first-class value, never a message prefix
+	// to parse.
 	OnDiscard func(class, detail string)
 
 	// OnPeerEvent receives every peer-table lifecycle transition (D-01,
@@ -446,6 +457,14 @@ type DiscardStats struct {
 	BadProtoVersion uint64
 	OwnEcho         uint64
 	DuplicateNodeID uint64
+
+	// UnboundListing covers the retained-listing binding (CR-01, D-04's
+	// New-2): a DataSync whose node_id has no live peer-table row, or whose
+	// envelope run_id differs from the row's, is discarded before any
+	// retention, completeness or entry comparison. It is separate from
+	// DuplicateNodeID — an unbound listing is not an identity collision, and
+	// the two stories have different operator remedies.
+	UnboundListing uint64
 
 	// The wire-validation classes (XPORT-03, XPORT-04, XPORT-10): one
 	// counter per rejection [Core.validate] produces. EmptyKey and
@@ -1274,11 +1293,11 @@ func (c *Core) allowWarn(now time.Time, nodeID uint16, class string) bool {
 // warnRateLimited logs msg unless the same (node_id, class) slot already
 // warned inside the last discardWarnInterval of event time — the one shared
 // limiter behind every counted classification WARN: the validation classes,
-// bad_sync_header and all three duplicate-node_id paths, so a flapping,
-// hostile or misconfigured peer can flood neither the log nor the listing
-// path (T-3-25, T-4-04, T-4-28). A slot's first warning always fires, and
-// the bookkeeping is a plain per-slot timestamp on the handler's now, never
-// a wall-clock read and never a global throttle.
+// bad_sync_header, the unbound_listing drop and all three duplicate_node_id
+// paths, so a flapping, hostile or misconfigured peer can flood neither the
+// log nor the listing path (T-3-25, T-4-04, T-4-28). A slot's first warning
+// always fires, and the bookkeeping is a plain per-slot timestamp on the
+// handler's now, never a wall-clock read and never a global throttle.
 func (c *Core) warnRateLimited(now time.Time, nodeID uint16, class, msg string) {
 	if !c.allowWarn(now, nodeID, class) {
 		return
@@ -1760,11 +1779,11 @@ func (c *Core) handleDataRequest(now time.Time, source, key string) {
 // A listing is TRUSTED state — it makes arbitrary key names unreadable and
 // uncreatable through the RPC layer — so it is accepted only from a real
 // peer identity (CR-01): a datagram whose node_id has no peer-table row, or
-// whose envelope run_id differs from the row's, is the named
-// duplicate-node-id configuration error. It is counted, WARNed through the
-// shared limiter and dropped BEFORE the clock call, the accumulation and the
-// completeness publication: an unbound sender can neither retain keys, nor
-// complete a round, nor open the gate.
+// whose envelope run_id differs from the row's, is the named unbound_listing
+// class. It is counted, WARNed through the shared limiter and dropped BEFORE
+// the clock call, the accumulation and the completeness publication: an
+// unbound sender can neither retain keys, nor complete a round, nor open the
+// gate.
 func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.DataSync, _ *port.Outbox) {
 	if !validSyncHeader(msg) {
 		return
@@ -1803,18 +1822,19 @@ func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.D
 // sender that never sent a Hello (or that forges a different run under a
 // known node_id) would otherwise install permanent state, flush a real
 // peer's protective set and open the startup gate past both backstops. The
-// drop is the named configuration-error class (D-06's identity family),
-// counted and rate-limited exactly like the duplicate-identity paths, and
-// nothing — no clock call, no accumulation, no completeness — follows it.
+// drop is the unbound_listing class (D-04's New-2, distinct from
+// duplicate_node_id: a listing may legitimately overtake its Hello), counted
+// and rate-limited exactly like the duplicate-identity paths, and nothing —
+// no clock call, no accumulation, no completeness — follows it.
 func (c *Core) listingBound(now time.Time, in port.InboundDatagram) bool {
 	if known, ok := c.peers[in.NodeID]; ok && known.runID == in.RunID {
 		return true
 	}
-	c.discards.DuplicateNodeID++
-	c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf(
+	c.discards.UnboundListing++
+	c.cfg.OnDiscard(DiscardUnboundListing, fmt.Sprintf(
 		"node_id %d listing from unbound run at handle %q", in.NodeID, in.Source))
-	c.warnRateLimited(now, in.NodeID, DiscardDuplicateNodeID, fmt.Sprintf(
-		"sup-kv: configuration error: node_id %d sent a listing from a run the peer table does not hold, datagram discarded (CR-01)",
+	c.warnRateLimited(now, in.NodeID, DiscardUnboundListing, fmt.Sprintf(
+		"sup-kv: node_id %d sent a listing from a run the peer table does not hold, datagram discarded (CR-01)",
 		in.NodeID,
 	))
 	return false

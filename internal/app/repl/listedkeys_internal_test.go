@@ -141,8 +141,11 @@ func TestSync_unboundListingDiscarded(t *testing.T) {
 	core.HandleDatagram(now, listedSpoofDatagram(0x66, [16]byte{0xEE}, "spoof-102", victimKey), &out)
 	out.Drain()
 
-	if got := core.Discards().DuplicateNodeID; got != 1 {
-		t.Fatalf("DuplicateNodeID discards after an unbound listing = %d, want 1 — the drop is the named configuration-error class (CR-01)", got)
+	if got := core.Discards().UnboundListing; got != 1 {
+		t.Fatalf("UnboundListing discards after an unbound listing = %d, want 1 — the drop is the dedicated unbound_listing class (CR-01, New-2)", got)
+	}
+	if got := core.Discards().DuplicateNodeID; got != 0 {
+		t.Fatalf("DuplicateNodeID discards after an unbound listing = %d, want 0 — an unbound listing is not an identity collision", got)
 	}
 	if got := len(core.ListedKeysSnapshot()); got != 0 {
 		t.Fatalf("the unbound listing retained %d keys, want 0 — the union must never take an unknown identity's keys", got)
@@ -207,8 +210,11 @@ func TestSync_forgedRunIDCannotReplaceListing(t *testing.T) {
 	if _, ok := union["attacker/key"]; ok {
 		t.Fatal("a forged-run listing installed attacker/key, want it discarded")
 	}
-	if got := core.Discards().DuplicateNodeID; got != 1 {
-		t.Fatalf("DuplicateNodeID discards after the forged-run listing = %d, want 1", got)
+	if got := core.Discards().UnboundListing; got != 1 {
+		t.Fatalf("UnboundListing discards after the forged-run listing = %d, want 1 — the run-mismatched drop is the unbound_listing class", got)
+	}
+	if got := core.Discards().DuplicateNodeID; got != 0 {
+		t.Fatalf("DuplicateNodeID discards after the forged-run listing = %d, want 0 — a forged run is not an identity collision", got)
 	}
 	if got := core.PeerSnapshot()[listedTestPeer].RunID; got != legitRun {
 		t.Fatalf("the peer row's run became %x, want the authoritative %x", got[:], legitRun[:])

@@ -57,6 +57,7 @@ type Adapter struct {
 	badProtoVersion atomic.Uint64
 	ownEcho         atomic.Uint64
 	duplicateNodeID atomic.Uint64
+	unboundListing  atomic.Uint64
 	emptyKey        atomic.Uint64
 	keyTooLong      atomic.Uint64
 	tombstoneData   atomic.Uint64

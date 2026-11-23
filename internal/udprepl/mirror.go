@@ -8,9 +8,10 @@ import (
 )
 
 // Discards returns the discard-class counters (D-02) mirrored after the
-// latest event-loop iteration — safe from any goroutine. The wire-validation
-// classes (empty_key, key_too_long, tombstone_with_data, bad_checksum,
-// bad_version and bad_sync_header) are counted by the core's validation
+// latest event-loop iteration — safe from any goroutine. The CR-01
+// retained-listing class (unbound_listing) and the wire-validation classes
+// (empty_key, key_too_long, tombstone_with_data, bad_checksum, bad_version
+// and bad_sync_header) are counted by the core's validation and binding
 // pipeline and mirrored here exactly like the original classification
 // classes.
 func (a *Adapter) Discards() repl.DiscardStats {
@@ -20,6 +21,7 @@ func (a *Adapter) Discards() repl.DiscardStats {
 		BadProtoVersion:   a.badProtoVersion.Load(),
 		OwnEcho:           a.ownEcho.Load(),
 		DuplicateNodeID:   a.duplicateNodeID.Load(),
+		UnboundListing:    a.unboundListing.Load(),
 		EmptyKey:          a.emptyKey.Load(),
 		KeyTooLong:        a.keyTooLong.Load(),
 		TombstoneWithData: a.tombstoneData.Load(),
@@ -181,6 +183,7 @@ func (a *Adapter) mirrorStats() {
 	a.badProtoVersion.Store(d.BadProtoVersion)
 	a.ownEcho.Store(d.OwnEcho)
 	a.duplicateNodeID.Store(d.DuplicateNodeID)
+	a.unboundListing.Store(d.UnboundListing)
 	a.emptyKey.Store(d.EmptyKey)
 	a.keyTooLong.Store(d.KeyTooLong)
 	a.tombstoneData.Store(d.TombstoneWithData)

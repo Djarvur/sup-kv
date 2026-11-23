@@ -343,11 +343,12 @@ func classify(in port.InboundDatagram, peers map[uint16]*modelPeer, now time.Tim
 	if _, isSync := in.Msg.(port.DataSync); isSync {
 		// The retained-listing binding (CR-01): a listing from an identity the
 		// table does not hold, or from a run_id that differs from the row's, is
-		// the duplicate-node_id configuration error — it never reaches the
-		// retention, the completeness flag or the compare path.
+		// the unbound_listing class (New-2) — it never reaches the retention,
+		// the completeness flag or the compare path, and it is NOT the
+		// duplicate-node_id identity class.
 		known, ok := peers[in.NodeID]
 		if !ok || known.runID != in.RunID {
-			return "DuplicateNodeID"
+			return "UnboundListing"
 		}
 	}
 	if isHello {
@@ -452,6 +453,8 @@ func bump(stats *repl.DiscardStats, class string) {
 		stats.OwnEcho++
 	case "DuplicateNodeID":
 		stats.DuplicateNodeID++
+	case "UnboundListing":
+		stats.UnboundListing++
 	case "EmptyKey":
 		stats.EmptyKey++
 	case "KeyTooLong":
@@ -630,7 +633,8 @@ func TestDiscard_totality(t *testing.T) {
 			discardRounds, got, want)
 	}
 	sum := got.BadCRC + got.Undecodable + got.BadProtoVersion + got.OwnEcho + got.DuplicateNodeID +
-		got.EmptyKey + got.KeyTooLong + got.TombstoneWithData + got.BadChecksum + got.BadVersion
+		got.UnboundListing + got.EmptyKey + got.KeyTooLong + got.TombstoneWithData + got.BadChecksum +
+		got.BadVersion + got.BadSyncHeader
 	if sum != discarded {
 		t.Errorf("counter sum %d != discarded datagrams %d — a datagram was counted twice or processed anyway", sum, discarded)
 	}
@@ -643,6 +647,54 @@ func TestDiscard_totality(t *testing.T) {
 type discardEvent struct {
 	class  string
 	detail string
+}
+
+// TestDiscard_unboundListingClass proves the CR-01 binding's own class
+// (D-04's New-2): a listing from an unknown node id increments
+// UnboundListing — never DuplicateNodeID — fires OnDiscard with the
+// unbound_listing token and a metadata detail, and produces exactly one WARN
+// that tells the unbound-listing story: such a listing may legitimately have
+// overtaken its Hello, so the line must not claim a configuration error.
+func TestDiscard_unboundListingClass(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	var (
+		logs   []string
+		events []discardEvent
+	)
+	core, _ := newTestCoreWithConfig(repl.Config{
+		OnDiscard: func(class, detail string) {
+			events = append(events, discardEvent{class: class, detail: detail})
+		},
+		Log: func(msg string) { logs = append(logs, msg) },
+	})
+	var out port.Outbox
+	entry := port.SyncEntry{Key: "unbound/key", Version: validWireVersion(1)}
+	core.HandleDatagram(now, datagramFrom(strangerID, syncPart(entry)), &out)
+	out.Drain()
+
+	got := core.Discards()
+	if got.UnboundListing != 1 {
+		t.Fatalf("UnboundListing = %d after one unbound listing, want 1: %+v", got.UnboundListing, got)
+	}
+	if got.DuplicateNodeID != 0 {
+		t.Fatalf("DuplicateNodeID = %d after one unbound listing, want 0 — the drop is not an identity collision: %+v", got.DuplicateNodeID, got)
+	}
+	if len(events) != 1 || events[0].class != repl.DiscardUnboundListing {
+		t.Fatalf("OnDiscard events = %+v, want exactly one %q event", events, repl.DiscardUnboundListing)
+	}
+	if !strings.Contains(events[0].detail, fmt.Sprintf("node_id %d", strangerID)) {
+		t.Fatalf("OnDiscard detail %q does not name node_id %d", events[0].detail, strangerID)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("Config.Log fired %d time(s) for one unbound listing, want 1: %v", len(logs), logs)
+	}
+	if !strings.Contains(logs[0], fmt.Sprintf("node_id %d", strangerID)) || !strings.Contains(logs[0], "CR-01") {
+		t.Fatalf("the unbound-listing WARN %q does not name node_id %d and the CR-01 binding", logs[0], strangerID)
+	}
+	if strings.Contains(logs[0], "configuration error") {
+		t.Fatalf("the unbound-listing WARN %q claims a configuration error — such a listing may legitimately overtake its Hello", logs[0])
+	}
 }
 
 // TestDiscard_onDiscardSeam proves the D-08 seam: every discard branch of
@@ -859,16 +911,18 @@ func onlyClass(class string) repl.DiscardStats {
 		stats.BadVersion = 1
 	case repl.DiscardBadSyncHeader:
 		stats.BadSyncHeader = 1
+	case repl.DiscardUnboundListing:
+		stats.UnboundListing = 1
 	}
 	return stats
 }
 
 // sumDiscards totals every discard class — the conservation check across all
-// eleven counters.
+// twelve counters.
 func sumDiscards(stats repl.DiscardStats) uint64 {
 	return stats.BadCRC + stats.Undecodable + stats.BadProtoVersion + stats.OwnEcho +
-		stats.DuplicateNodeID + stats.EmptyKey + stats.KeyTooLong + stats.TombstoneWithData +
-		stats.BadChecksum + stats.BadVersion + stats.BadSyncHeader
+		stats.DuplicateNodeID + stats.UnboundListing + stats.EmptyKey + stats.KeyTooLong +
+		stats.TombstoneWithData + stats.BadChecksum + stats.BadVersion + stats.BadSyncHeader
 }
 
 // validationRow is one TestDiscard_validationClasses table row: the datagram,

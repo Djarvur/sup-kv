@@ -649,6 +649,8 @@ func discardCount(stats repl.DiscardStats, class string) uint64 {
 		return stats.OwnEcho
 	case repl.DiscardDuplicateNodeID:
 		return stats.DuplicateNodeID
+	case repl.DiscardUnboundListing:
+		return stats.UnboundListing
 	case repl.DiscardEmptyKey:
 		return stats.EmptyKey
 	case repl.DiscardKeyTooLong:
@@ -679,6 +681,8 @@ func bumpDiscard(stats *repl.DiscardStats, class string) {
 		stats.OwnEcho++
 	case repl.DiscardDuplicateNodeID:
 		stats.DuplicateNodeID++
+	case repl.DiscardUnboundListing:
+		stats.UnboundListing++
 	case repl.DiscardEmptyKey:
 		stats.EmptyKey++
 	case repl.DiscardKeyTooLong:

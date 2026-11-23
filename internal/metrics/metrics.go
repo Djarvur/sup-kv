@@ -379,6 +379,7 @@ func trafficFamilies(disc repl.DiscardStats, sentBy repl.SentByType) []Family {
 				{Labels: []Label{{Name: labelClass, Value: "bad_proto_version"}}, Value: float64(disc.BadProtoVersion)},
 				{Labels: []Label{{Name: labelClass, Value: "own_broadcast"}}, Value: float64(disc.OwnEcho)},
 				{Labels: []Label{{Name: labelClass, Value: "duplicate_node_id"}}, Value: float64(disc.DuplicateNodeID)},
+				{Labels: []Label{{Name: labelClass, Value: "unbound_listing"}}, Value: float64(disc.UnboundListing)},
 				{Labels: []Label{{Name: labelClass, Value: "empty_key"}}, Value: float64(disc.EmptyKey)},
 				{Labels: []Label{{Name: labelClass, Value: "key_too_long"}}, Value: float64(disc.KeyTooLong)},
 				{Labels: []Label{{Name: labelClass, Value: "tombstone_with_data"}}, Value: float64(disc.TombstoneWithData)},

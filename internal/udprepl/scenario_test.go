@@ -332,6 +332,8 @@ func scenarioAssertClassExact(t *testing.T, driven string, got, before repl.Disc
 		want.OwnEcho++
 	case repl.DiscardDuplicateNodeID:
 		want.DuplicateNodeID++
+	case repl.DiscardUnboundListing:
+		want.UnboundListing++
 	}
 	if got != want {
 		t.Fatalf("%s shot: discards = %+v, want exactly %+v — only %s incremented", driven, got, want, driven)

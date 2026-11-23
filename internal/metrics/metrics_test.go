@@ -281,6 +281,7 @@ func TestMetrics_families(t *testing.T) {
 		"supkv_datagrams_discarded_total{class=\"bad_proto_version\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"own_broadcast\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"duplicate_node_id\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"unbound_listing\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"empty_key\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"key_too_long\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"tombstone_with_data\"} 0\n",
@@ -369,6 +370,7 @@ func TestMetrics_values(t *testing.T) {
 			BadChecksum:       14,
 			BadVersion:        15,
 			BadSyncHeader:     16,
+			UnboundListing:    17,
 		}
 	}
 	src.Paced = func() uint64 { return 7001 }
@@ -409,6 +411,7 @@ func TestMetrics_values(t *testing.T) {
 		"supkv_datagrams_discarded_total{class=\"bad_checksum\"} 14\n",
 		"supkv_datagrams_discarded_total{class=\"bad_version\"} 15\n",
 		"supkv_datagrams_discarded_total{class=\"bad_sync_header\"} 16\n",
+		"supkv_datagrams_discarded_total{class=\"unbound_listing\"} 17\n",
 	} {
 		if !strings.Contains(out, line) {
 			t.Errorf("output lacks the by-effect sample line %q:\n%s", line, out)
