@@ -213,8 +213,11 @@ by the live change feed, with these pinned semantics:
   `deleted=true`, in the same shape as any other change.
 - **Ordering is install order, which is version order per key.** A key's events
   arrive in non-decreasing version order: a strictly greater version installs
-  normally, and an equal-version tie-break winner can install once. An event
-  already contained in the subscriber's snapshot is suppressed.
+  normally, and an equal-version tie-break winner can install once — an
+  equal-version content change is a real change, not a duplicate. An event
+  already contained in the subscriber's snapshot — the same version and the
+  same content — is suppressed; the same version with different content is
+  delivered.
 - **The snapshot and the live feed have deliberately different durability.**
   The snapshot is current memory and may include a write whose dump has not
   confirmed yet; the live feed never does. That asymmetry is the contract, not

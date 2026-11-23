@@ -391,6 +391,73 @@ func TestWatch_replicatedChange(t *testing.T) {
 	recvNone(t, stream)
 }
 
+// TestWatch_equalVersionTieBreakDelivered is the WR-02 regression: the
+// exact-cut floor must suppress only an event the subscriber's snapshot
+// already contains exactly, never every equal-version install. The store's
+// deterministic (version, content) law installs an equal-version content
+// winner and a remove-wins tombstone as real changes and fires the change
+// tap (storage.Config.OnChange: "a tie-break win at an equal version IS a
+// change"), so a subscriber whose snapshot holds the losing content at that
+// version must receive each install — otherwise its view diverges from the
+// store until it resubscribes, and APIS-04's "each confirmed write yields
+// exactly one event" does not hold for the winner.
+func TestWatch_equalVersionTieBreakDelivered(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	tieVersion := version.PackVersion(1_700_000_000_000, 1, 0x0C1)
+	_, _, err := ts.engine.ApplyRemote("tie/key", storage.Record{Version: tieVersion, Data: []byte("aaa")})
+	if err != nil {
+		t.Fatalf("seed ApplyRemote(tie/key): want nil, got error: %v", err)
+	}
+
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "tie/"})
+	if err != nil {
+		t.Fatalf("Watch tie/: want OK, got error: %v", err)
+	}
+	snapEv := recvEvent(t, stream)
+	if got := snapEv.GetRecord(); got.GetKey() != "tie/key" || got.GetDeleted() ||
+		!bytes.Equal(got.GetValue(), []byte("aaa")) {
+		t.Fatalf("snapshot event = (%s, deleted=%t, %q), want the seeded (tie/key, false, aaa)",
+			got.GetKey(), got.GetDeleted(), got.GetValue())
+	}
+
+	// Equal-version content winner: the greater Data bytes install at the
+	// SAME version, and the tap fires. The subscriber's snapshot holds "aaa"
+	// at that version, so only a content-aware floor delivers the winner.
+	conflicts, _, err := ts.engine.ApplyRemote("tie/key", storage.Record{Version: tieVersion, Data: []byte("bbb")})
+	if err != nil {
+		t.Fatalf("ApplyRemote(equal-version winner): want nil, got error: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Winner != tieVersion || conflicts[0].Loser != tieVersion {
+		t.Fatalf("ApplyRemote(equal-version winner) conflicts = %v, want one equal-version conflict", conflicts)
+	}
+	winner := recvEvent(t, stream)
+	if got := winner.GetRecord(); got.GetKey() != "tie/key" || got.GetDeleted() ||
+		!bytes.Equal(got.GetValue(), []byte("bbb")) || !bytes.Equal(got.GetVersion(), tieVersion[:]) {
+		t.Fatalf("tie-break event = (%s, deleted=%t, %q, version %x), want (tie/key, false, bbb, %x)",
+			got.GetKey(), got.GetDeleted(), got.GetValue(), got.GetVersion(), tieVersion[:])
+	}
+
+	// Remove-wins at the same version: the tombstone beats the live value and
+	// is a change in its own right. A subscriber that never learned the delete
+	// would keep serving a value the store no longer has.
+	conflicts, _, err = ts.engine.ApplyRemote("tie/key", storage.Record{Version: tieVersion, Deleted: true})
+	if err != nil {
+		t.Fatalf("ApplyRemote(remove-wins): want nil, got error: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Winner != tieVersion || conflicts[0].Loser != tieVersion {
+		t.Fatalf("ApplyRemote(remove-wins) conflicts = %v, want one equal-version conflict", conflicts)
+	}
+	tomb := recvEvent(t, stream)
+	if got := tomb.GetRecord(); got.GetKey() != "tie/key" || !got.GetDeleted() ||
+		!bytes.Equal(got.GetVersion(), tieVersion[:]) {
+		t.Fatalf("remove-wins event = (%s, deleted=%t, version %x), want the (tie/key, true, %x) tombstone",
+			got.GetKey(), got.GetDeleted(), got.GetVersion(), tieVersion[:])
+	}
+}
+
 // TestWatch_prefix proves D-04 on both phases: the snapshot of a prefixed
 // subscription carries only its subset, the empty prefix sees all keys
 // (tombstone included, the Q3 asymmetry with List), and the live phase is

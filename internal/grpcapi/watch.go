@@ -53,6 +53,18 @@ func watchOverwhelmed() error {
 	return status.Error(codes.ResourceExhausted, "watch subscriber overwhelmed; resubscribe")
 }
 
+// watchSnapshotContent is one key's identity in a subscriber's subscribe-time
+// snapshot: the stored version and the store checksum. The checksum is
+// derived from the key, the version, the data bytes and the tombstone flag
+// (storage.RecordChecksum), so equal version + equal checksum means the live
+// event is the record the snapshot already delivered. Storing the checksum
+// rather than the value keeps a subscriber's snapshot cost at 20 bytes per
+// key, never the store's value bytes.
+type watchSnapshotContent struct {
+	version  version.RecordVersion
+	checksum uint32
+}
+
 // watchEvent is one change notification inside the hub: the key, the stored
 // record the tap handed over, and the store content generation the install
 // produced. The generation is the durability gate's unit (APIS-04, D-04): an
@@ -89,12 +101,16 @@ type watchSubscriber struct {
 	// empty prefix matches all keys.
 	prefix string
 
-	// snapshot holds the per-key version each live event must strictly
-	// dominate to be delivered (the exact-cut rule): only strictly greater
-	// versions ever install, so an event not dominating the snapshot
-	// version is necessarily already contained in the snapshot state, and
-	// a key absent from the snapshot has nothing to dominate.
-	snapshot map[string]version.RecordVersion
+	// snapshot holds the per-key content identity the subscriber's snapshot
+	// carried: the version and the store checksum (keyed, versioned and
+	// content-derived, recomputed on every install). An event is already
+	// contained — and suppressed — only when it carries the same version AND
+	// the same content identity; a strictly greater version is new
+	// information. At an equal version the store's deterministic tie-break can
+	// install new content (remove-wins, or the greater Data bytes), and that
+	// install IS a change the subscriber must see (store.join, D-06/APIS-04),
+	// so the version alone is not enough to decide suppression.
+	snapshot map[string]watchSnapshotContent
 
 	// err is the stream's termination status for a closed events channel:
 	// the resubscribe status on a disconnect, the Unavailable shutdown status
@@ -330,9 +346,12 @@ func (h *WatchHub) unsubscribe(sub *watchSubscriber) {
 
 // handleSubscribe registers the subscriber and takes the exact-cut
 // snapshot on the hub goroutine: every event the hub relays from this
-// point on either strictly dominates the snapshot version for its key
-// (delivered) or is already contained in the snapshot state (suppressed),
-// with no lock over the store beyond Records' read snapshot. Tombstones
+// point on is suppressed only when the subscriber's snapshot already holds
+// exactly it — the same version and the same content identity — and is
+// otherwise delivered, including an equal-version tie-break winner or
+// remove-wins tombstone the store installed after the cut (store.join's
+// contract; only an identical equal-version record is a no-op there), with
+// no lock over the store beyond Records' read snapshot. Tombstones
 // are part of the state, so the snapshot delivers them as ordinary
 // deleted=true events (D-02, the Q3 pin — List excluding them is the
 // deliberate asymmetry). The snapshot is emitted in sorted-key order —
@@ -342,14 +361,14 @@ func (h *WatchHub) handleSubscribe(req watchSubscribeRequest) {
 	sub := &watchSubscriber{
 		events:   make(chan watchEvent, h.buffer),
 		prefix:   req.prefix,
-		snapshot: make(map[string]version.RecordVersion, len(records)),
+		snapshot: make(map[string]watchSnapshotContent, len(records)),
 	}
 	snapshot := make([]watchEvent, 0, len(records))
 	for key, rec := range records {
 		if !strings.HasPrefix(key, sub.prefix) {
 			continue
 		}
-		sub.snapshot[key] = rec.Version
+		sub.snapshot[key] = watchSnapshotContent{version: rec.Version, checksum: rec.Checksum}
 		snapshot = append(snapshot, watchEvent{key: key, rec: rec})
 	}
 	slices.SortFunc(snapshot, func(a, b watchEvent) int {
@@ -426,17 +445,29 @@ func (h *WatchHub) dispatch(ev watchEvent) {
 }
 
 // wants reports whether sub should receive ev: the prefix filter (D-04)
-// and the exact-cut suppression — a live event whose version does not
-// strictly dominate the snapshot version for its key is necessarily
-// already contained in the snapshot state (only strictly greater versions
-// ever install), so it is suppressed; a key absent from the snapshot is
-// new information and always delivered.
+// and the exact-cut suppression — a live event is suppressed only when the
+// subscriber's snapshot already contains exactly it, meaning the same
+// version AND the same content identity; every other event is new
+// information. A strictly greater version is delivered. At an equal version,
+// the store's deterministic tie-break can install a winner with the same
+// version and different content (remove-wins, or the greater Data bytes),
+// and the store's OnChange contract says such a tie-break win IS a change
+// (D-06, APIS-04), so it is delivered; only an identical equal-version
+// record — which the store's join rejects as a no-op, so it never reaches
+// the tap — would be suppressed. A key absent from the snapshot is new
+// information and always delivered.
 func (*WatchHub) wants(sub *watchSubscriber, ev watchEvent) bool {
 	if !strings.HasPrefix(ev.key, sub.prefix) {
 		return false
 	}
-	snapVer, seen := sub.snapshot[ev.key]
-	return !seen || ev.rec.Version.Compare(snapVer) > 0
+	snap, seen := sub.snapshot[ev.key]
+	if !seen {
+		return true
+	}
+	if ev.rec.Version.Compare(snap.version) > 0 {
+		return true
+	}
+	return ev.rec.Version == snap.version && ev.rec.Checksum != snap.checksum
 }
 
 // disconnect ends one overwhelmed subscriber: the resubscribe status goes
