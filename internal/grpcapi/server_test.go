@@ -233,6 +233,12 @@ type testServerConfig struct {
 	// otherwise hold every generation in memory.
 	discardDumps bool
 
+	// limits, when non-nil, builds the grpc.Server with the explicit
+	// production transport options (plan 06-07): the receive and send
+	// ceilings plus the keepalive parameters. Nil keeps the plain
+	// grpc.NewServer() every pre-06-07 test was written against.
+	limits *grpcapi.TransportLimits
+
 	// gate is the ServerOptions the api server is constructed with. The
 	// builder always launches the gate resolver; tests that need an open
 	// gate pass always-open wiring and call awaitGateOpen.
@@ -387,7 +393,15 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	t.Cleanup(cancelGate)
 	go api.RunGate(gateCtx)
 
-	srv := grpc.NewServer()
+	// The transport envelope is explicit only where a test asks for it
+	// (plan 06-07's receive-ceiling and page-fit proofs); every other
+	// harness keeps the plain server so its assertions stay about behavior,
+	// not transport settings.
+	var serverOpts []grpc.ServerOption
+	if cfg.limits != nil {
+		serverOpts = cfg.limits.ServerOptions()
+	}
+	srv := grpc.NewServer(serverOpts...)
 	apiproto.RegisterSupKVServiceServer(srv, api)
 	healthpb.RegisterHealthServer(srv, api.Health())
 

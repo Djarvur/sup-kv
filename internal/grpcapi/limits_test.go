@@ -27,7 +27,8 @@ func TestGRPC_maxRecv(t *testing.T) {
 
 	limits := grpcapi.LimitsFor(testValueLimit)
 	ts := buildTestServer(t, testServerConfig{
-		gate: openGateOptions(),
+		gate:   openGateOptions(),
+		limits: &limits,
 	})
 	awaitGateOpen(t, ts)
 	ctx := t.Context()
@@ -59,6 +60,7 @@ func TestGRPC_worstCasePageFitsSendLimit(t *testing.T) {
 		gate:          openGateOptions(),
 		valueMaxBytes: storage.ValueMaxBytes,
 		discardDumps:  true,
+		limits:        &limits,
 	})
 	awaitGateOpen(t, ts)
 
