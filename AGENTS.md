@@ -16,9 +16,17 @@
    (rule `sup-kv-port-stdlib-only`); and `api/**` may not import
    `github.com/Djarvur/sup-kv/internal` (rule
    `sup-kv-public-api-no-internal`), so the published client package stays
-   importable from another module. These rules live in `.golangci.yml`. Any
-   change to the boundary is a visible `.golangci.yml` diff, never a quiet
-   code-side workaround.
+   importable from another module. Three more additive rules hold the
+   adapter direction: `sup-kv-adapters-not-in-core` (neither `internal/app`
+   nor `internal/port` imports an adapter), `sup-kv-metrics-no-adapters`
+   (the exporter imports value seams, never a socket, dump or API adapter)
+   and `sup-kv-grpcapi-no-repl-metrics` (the API adapter imports neither the
+   replication adapter nor the exporter). One composition edge is allowed
+   with a written justification in `.golangci.yml`: `grpcapi` imports
+   `internal/persistfile` for its two snapshot sentinels and
+   `internal/app/persist` for the `*persist.Engine` store facade. These
+   rules live in `.golangci.yml`. Any change to the boundary is a visible
+   `.golangci.yml` diff, never a quiet code-side workaround.
 2. **Vendored lint config provenance.** `.golangci.yml` is the
    powerman/golangci-lint-strict config for golangci-lint **exactly** 2.15.0,
    fetched from
@@ -40,6 +48,13 @@
   the replication proto under `internal/udprepl/replproto/` remains internal.
 - `cmd/sup-kv/` — the single binary; `main()` holds no testable logic
   (flags/env/signals live there from Phase 5, nothing else).
+- `internal/config/` — composition-level configuration: `Parse` (flag > env >
+  default), `Validate` (every startup range and relation in one pass) and
+  `Usage` (the rendered help). It imports the standard library and the own
+  module's constants (`internal/app/repl`, `internal/app/storage`,
+  `internal/udprepl`) and deliberately lives outside the `internal/app`
+  no-I/O rule: it reads the environment and validates the adapters' datagram
+  ceiling, which the lint gate's `sup-kv-app-no-io` must not cover.
 - `examples/client/` — a separate Go module (`examples/client/go.mod`, module
   path `example.com/sup-kv-client`, deliberately outside the root module's
   prefix, with a `replace` to the root) that imports only the public API
