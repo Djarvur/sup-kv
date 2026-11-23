@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
-current_plan: 6
+current_plan: 7
 status: executing
-stopped_at: Completed 07-05-PLAN.md
-last_updated: "2026-11-23T08:37:34.662Z"
+stopped_at: Completed 07-06-PLAN.md
+last_updated: "2026-11-23T09:36:40.252Z"
 last_activity: 2026-11-23
-last_activity_desc: Completed 07-05-PLAN.md (received-lead drift); 6 plans remain in Phase 7
-state_head: 4a6ff542590af81bec2639490d409e67972619f1
+last_activity_desc: Completed 07-06-PLAN.md (pending-displacement conflict counter); 5 plans remain in Phase 7
+state_head: 355f8aab53a962e1183a5f2c404c928b47dfb0e7
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 77
+  completed_plans: 78
 ---
 
 # Project State
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 7 (Observability and Configuration) — EXECUTING
-Current Plan: 6
+Current Plan: 7
 Total Plans in Phase: 11
 Status: Ready to execute
-Last activity: 2026-11-23 — Completed 07-05-PLAN.md; 6 plans remain
+Last activity: 2026-11-23 — Completed 07-06-PLAN.md; 5 plans remain
 
 Progress: [████░░░░░░] 44%
 
@@ -137,6 +137,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P03 | 261 | 2 tasks | 1 files |
 | Phase 07 P04 | 819s | 2 tasks | 3 files |
 | Phase 07 P05 | 1154 | 2 tasks | 10 files |
+| Phase 07 P06 | 27min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -442,6 +443,12 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-05: the drift signal is the received reading's lead — Clock.Update compares remoteL with the wall clock, Tick keeps the local-versus-wall diagnostic, and the core counts only drift > 0.
 - [Phase 07]: 07-05: a DataSync part counts one drift warning from maxEntryVersion, never per entry, so a listing cannot inflate the counter (T-07-16).
 - [Phase 07]: 07-05: the drift rows are seeded through localWrite and the tie-break row asserts only drift, leaving 07-06's pending-only conflict definition unconstrained.
+- [Phase 07]: 07-06: supkv_merges_conflicts_total counts only the displacement of a pending (unacked) local write, walked from c.pending after a successful apply — the store's per-outcome Conflict slice is no longer read (ADR 0004, OBSV-03).
+- [Phase 07]: 07-06: an equal-version tie-break win that displaces a pending write counts 1 and emits Superseded; a loss leaves the entry tracked — the old loop handled only strictly greater versions.
+- [Phase 07]: 07-06: one post-apply stored-record read yields incomingWon and serves both the reply verdict and the displacement count, so they cannot disagree.
+- [Phase 07]: 07-06: the apply-failure WARN rides the shared (node_id, apply_failure) limiter and names only the quoted handle; the key name is gone (T-07-17, T-07-18).
+- [Phase 07]: 07-06: TestStand_metricsByEffect stops node B before A's write and drives the displacement with one crafted wire-valid higher-version DataReplication, keeping an exact conflicts == 1 assertion.
+- [Phase 07]: 07-06: the chaos scenario logs the aggregate conflict count instead of asserting it — a definition is proven by constructed unit and stand rows, not a scheduler-dependent total.
 
 ### Pending Todos
 
@@ -464,7 +471,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T08:37:32.678Z
-Stopped at: Completed 07-05-PLAN.md
+Last session: 2026-11-23T09:36:39.101Z
+Stopped at: Completed 07-06-PLAN.md
 Resume file: None
-Next action: start plan 07-05 (`/gsd:execute-phase 7` continues the phase)
+Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)

@@ -292,7 +292,7 @@ Plans:
   3. Metrics mean what they say (14.4): the conflict counter counts only the displacement of a local unconfirmed record by another value; a failed send is not counted as sent; `process_resident_memory_bytes` reports current RSS; dump-duration and drift-counter semantics are defined — and every definition is confirmed by a test
   4. Exit codes and shutdown are distinct and ordered: usage error, startup failure and final-dump failure have distinct codes; a `Serve` error does not skip the final dump; the final dump is time-bounded; the signal handler is installed before dump load and bind; `--help` lists the five env-only variables
   5. Boundaries are machine-enforced and units decomposed: a depguard rule forbids adapter imports from `app`/`port` and the observed cross-imports (`metrics`→`udprepl`, `grpcapi`→`persistfile`/`*persist.Engine`) — any boundary change is a visible `.golangci.yml` diff; socket, loop, mirror and codec are separate units in `udprepl` and `main.go` is wiring only
-**Plans**: 5/11 plans executed
+**Plans**: 6/11 plans executed
 
 Plans:
 **Wave 1**
@@ -305,7 +305,7 @@ Plans:
 - [x] 07-05-PLAN.md — Tracer: received-lead drift signal in Clock.Update plus positive-lead counting for records and listing maxima (OBSV-05, OBSV-03; D-02)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 07-06-PLAN.md — Tracer: pending-displacement conflict counting, keyless rate-limited apply-failure WARN, rebuilt stand conflict proof (OBSV-03; D-05)
+- [x] 07-06-PLAN.md — Tracer: pending-displacement conflict counting, keyless rate-limited apply-failure WARN, rebuilt stand conflict proof (OBSV-03; D-05)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 07-07-PLAN.md — Tracer: gate-open reason, typed peer/drift seams, startup and load-outcome records (OBSV-01, OBSV-06, OBSV-05; D-01)
@@ -365,6 +365,6 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 4. Protocol | v1.1 | 0/? | Not started | - |
 | 5. Persistence | v1.1 | 0/? | Not started | - |
 | 6. API and Semantics | v1.1 | 13/13 | Complete | 2026-11-23 |
-| 7. Observability and Configuration | v1.1 | 5/11 | In Progress | - |
+| 7. Observability and Configuration | v1.1 | 6/11 | In Progress | - |
 | 8. Performance | v1.1 | 0/? | Not started | - |
 | 9. Documentation and Release | v1.1 | 0/? | Not started | - |
