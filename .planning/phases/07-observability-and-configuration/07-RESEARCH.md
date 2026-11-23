@@ -2688,49 +2688,57 @@ The existing helper proves the pattern:
 | A13 | `SentByType` moves to `internal/app/repl` with an alias in `udprepl` if tests need it | D-07 | If aliasing is dropped, two `metrics` test references must be updated |
 | A14 | `grpcapi`'s `persistfile`/`*persist.Engine` imports are allowed with a written justification rather than refactored | D-07 | D-07 allows "removed or explicitly allowed"; a refactor to a consumer interface is larger and can be a Phase 9+ change |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-No question is left without a recommendation; the planner/user should lock the `[ASSUMED]` rows above before execution.
+Every question below is RESOLVED; the resolution is recorded in `.planning/phases/07-observability-and-configuration/07-CONTEXT.md` ("Research resolutions") and implemented by the named plan. The `[ASSUMED]` rows above are therefore locked before execution.
 
 1. **Should `max-clock-lead` default to 2 m?**
    - What we know: `drift_warn=60 s` is the Spec default; the future bound is inclusive; with equal defaults the drift WARN is unreachable.
    - What's unclear: the owner may prefer a different bound (e.g., 5 m) or may accept changing `drift_warn`.
    - Recommendation: 2 m (2 × `drift_warn`) and a strict relation; update OPERATIONS/tests in the same commit.
+   - **Resolved:** 2 m with the strict `max_clock_lead >= drift_warn + 1 ms` rule (07-CONTEXT research resolution; plan 07-02).
 
 2. **Does "unconfirmed" mean unacked or undumped?**
    - What we know: the review-engine fix text says "the replication core knows the unacked set"; the core has `pending`; the confirmer is in `persist`.
    - What's unclear: no owner decision explicitly defines the term.
    - Recommendation: pending/unacked; document the definition in the metric Help and OPERATIONS.
+   - **Resolved:** pending/unacked — D-05's refinement (07-CONTEXT; plans 07-05/07-06).
 
 3. **Should the drift counter count listing maxima?**
    - What we know: `Observe` already absorbs listing versions and returns a drift signal; the current code discards it.
    - What's unclear: whether a listing part is a "received version" for the Spec WARN.
    - Recommendation: yes, once per part's max version; it is cheap and makes the metric total over received versions.
+   - **Resolved:** yes, once per part's maximum version — D-02's refinement (07-CONTEXT; plan 07-05).
 
 4. **Darwin current RSS?**
    - What we know: `getrusage` is peak-only; darwin is development-only per ADR 0010.
    - What's unclear: whether a darwin-current source is worth a sysctl/libproc dependency.
    - Recommendation: Linux exact via `/proc/self/statm`; darwin documented peak fallback; no new dependency.
+   - **Resolved:** Linux exact current RSS; darwin documented peak fallback — D-05's refinement (07-CONTEXT; plan 07-09).
 
 5. **Refactor `grpcapi` off `*persist.Engine` and `persistfile`?**
    - What we know: 12 engine methods plus two sentinels; D-07 permits an explicit justified exception.
    - What's unclear: whether the owner wants the stronger boundary now.
    - Recommendation: allow with a written `.golangci.yml` justification; defer a consumer-interface refactor unless the owner asks.
+   - **Resolved:** explicitly allowed with the written `.golangci.yml` justification — D-07's refinement (07-CONTEXT; plan 07-03).
 
 6. **Where do the four counter names sit?**
    - What we know: no frozen test pins them; existing names use `supkv_replication_*` and `_total`.
    - What's unclear: whether `notifications_regressed` belongs under `supkv_replication_` or a new `supkv_local_` prefix.
    - Recommendation: `supkv_replication_*` for all four (they are replication-core counters), documented in OPERATIONS.
+   - **Resolved:** `supkv_replication_*` for all four (assumption A11; plans 07-09/07-10).
 
 7. **Should the startup log include metrics certificate/key paths?**
    - What we know: they are file paths, not secrets, and the metrics listener is opt-in.
    - What's unclear: the owner's tolerance for path disclosure in logs.
    - Recommendation: log `metrics_addr` and `metrics_tls` only; omit certificate/key paths.
+   - **Resolved:** `metrics_addr` and `metrics_tls` only — D-01 (07-CONTEXT; plans 07-07/07-10).
 
 8. **Should `serve` errors run the final dump on a listener that never served?**
    - What we know: D-06 requires it; a Serve error can occur after clients have written.
    - What's unclear: whether a startup-only Serve failure should skip the dump.
    - Recommendation: always run the bounded shutdown/final dump; a startup failure before `wire` still exits 1 without a dump.
+   - **Resolved:** always run the bounded final dump; a pre-`wire` startup failure exits 1 without one — D-06 (07-CONTEXT; plan 07-04).
 
 ## Environment Availability
 

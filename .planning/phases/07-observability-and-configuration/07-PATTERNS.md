@@ -947,8 +947,10 @@ limiter table to copy for the apply-failure limiter and drift WARN.
 must add `unbound_listing` and move the unbound-listing expectation off `DuplicateNodeID`.
 
 **`internal/app/repl/listedkeys_internal_test.go`** — `TestSync_unboundListingDiscarded` (`:134-170`) and
-`TestSync_forgedRunIDCannotReplaceListing` (`:177-215`) assert `Discards().DuplicateNodeID`; the unbound
-case moves to `UnboundListing`, the forged-run case stays `DuplicateNodeID`.
+`TestSync_forgedRunIDCannotReplaceListing` (`:177-215`) both assert `Discards().DuplicateNodeID`, and BOTH
+route through `listingBound` (an unknown node_id; a known node_id with a mismatched run_id), so both
+expectations move to `UnboundListing == 1` with `DuplicateNodeID == 0`. `DuplicateNodeID` stays only for the
+own-node-id-foreign-run, the second-handle and the alternating-run paths inside `HandleDatagram`/`handleHello`.
 
 **`internal/udprepl/decode_negative_test.go`** and **`internal/udprepl/scenario_test.go`** — add
 `unbound_listing` to the class-string switches/totality models (research lists exact lines; re-grep before
