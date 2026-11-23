@@ -47,11 +47,11 @@ func (e *Engine) Snapshot(name string) error {
 // snapshot's own records (re-stamped fresh) and the ROLLBACK tombstones of
 // current live keys the snapshot does not name (nil Data, Deleted true) —
 // so the notify sequence a snapshot load drives replicates the restored key
-// set. Records a replay skips — a tombstone with nothing to beat, a value
-// the store's shrunk limit rejects, a live key a concurrent writer already
-// deleted — are absent, and the order is the replay's deterministic
-// sorted-key order (the sorted union of snapshot keys and rollback keys),
-// so the notify sequence a snapshot load drives is stable across runs.
+// set. Records a replay skips — a tombstone with nothing to beat, a live key
+// a concurrent writer already deleted — are absent, and the order is the
+// replay's deterministic sorted-key order (the sorted union of snapshot keys
+// and rollback keys), so the notify sequence a snapshot load drives is stable
+// across runs.
 type RestoredRecord struct {
 	Key     string
 	Version version.RecordVersion
@@ -98,15 +98,31 @@ type RestoredRecord struct {
 // back with the error, so no installed-but-unreturned record can be lost
 // (IN-04) — the caller's snapshot-load notify covers exactly that list.
 // Load and decode errors surface unchanged — a missing snapshot or a
-// generation-level decode fault — never a silent empty success.
+// generation-level decode fault — never a silent empty success. A snapshot
+// that is readable at generation level but not clean at record level is
+// refused with ErrSnapshotIncomplete BEFORE any store change: the decoder
+// discards a corrupted record per class, so the decoded map is not the
+// snapshot's key set, and a full rollback computed from it would delete a
+// live key the snapshot names but could not decode (CR-01) — a tombstone
+// that would then dominate the peers' good copies. A partially readable
+// snapshot is therefore not a rollback source at all; the in-memory state and
+// the on-disk generations stay untouched.
 func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
 	data, err := e.dumps.ReadSnapshot(name)
 	if err != nil {
 		return nil, err
 	}
-	records, _, err := Decode(data, e.valueMaxBytes)
+	records, stats, err := Decode(data, e.valueMaxBytes)
 	if err != nil {
 		return nil, err
+	}
+	if stats.Total() > 0 {
+		// The decoded map omits every discarded line, so its key set cannot
+		// distinguish "the snapshot does not name this key" from "the snapshot
+		// names this key but the line did not decode". Refuse the whole load
+		// rather than invent rollback deletes from a partial key set.
+		return nil, fmt.Errorf("%w: snapshot %q has %d unreadable record lines",
+			ErrSnapshotIncomplete, name, stats.Total())
 	}
 	restored, err := e.replaySnapshot(records)
 	if err != nil {
@@ -194,9 +210,9 @@ func replayKeys(snap, current map[string]storage.Record) []string {
 
 // replaySnapshotKey installs one snapshot record through replayRecord's
 // ordinary Set/Delete rules and reports the record the store installed: a
-// fresh Set carrying the snapshot's data, or a fresh tombstone. Skipped
-// records (a tombstone with nothing to beat, an over-limit value) install
-// nothing and are absent from the report.
+// fresh Set carrying the snapshot's data, or a fresh tombstone. A skipped
+// record (a tombstone with nothing to beat) installs nothing and is absent
+// from the report.
 func (e *Engine) replaySnapshotKey(key string, snapRec storage.Record) (RestoredRecord, bool, error) {
 	ver, replayed, err := replayRecord(e.store, key, snapRec)
 	if err != nil || !replayed {

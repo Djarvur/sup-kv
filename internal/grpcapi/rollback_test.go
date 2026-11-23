@@ -2,11 +2,13 @@ package grpcapi_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"slices"
 	"testing"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/app/persist"
@@ -51,6 +53,42 @@ func installRollbackSnapshot(t *testing.T, dumps *fakeDumpStore, dump []byte, fa
 	defer dumps.mu.Unlock()
 	dumps.snapshot = bytes.Clone(dump)
 	dumps.failSave = failSave
+}
+
+// corruptSnapshotChecksum returns dump with exactly the named record line's
+// checksum incremented by one, leaving its version, data and tombstone flag
+// intact: the decoder discards precisely that line as the checksum class
+// while the generation stays readable and its census is satisfied — the CR-01
+// regression fixture (a snapshot valid except for one unreadable record).
+func corruptSnapshotChecksum(t *testing.T, dump []byte, key string) []byte {
+	t.Helper()
+	lines := bytes.Split(bytes.TrimSuffix(dump, []byte("\n")), []byte("\n"))
+	found := false
+	for i, line := range lines {
+		var parsed map[string]any
+		err := json.Unmarshal(line, &parsed)
+		if err != nil {
+			t.Fatalf("parse dump line %d: %v", i, err)
+		}
+		if parsed["key"] != key {
+			continue
+		}
+		checksum, ok := parsed["checksum"].(float64)
+		if !ok {
+			t.Fatalf("dump line %d for key %q has no numeric checksum", i, key)
+		}
+		parsed["checksum"] = checksum + 1
+		corrupted, err := json.Marshal(parsed)
+		if err != nil {
+			t.Fatalf("re-encode dump line %d: %v", i, err)
+		}
+		lines[i] = corrupted
+		found = true
+	}
+	if !found {
+		t.Fatalf("dump has no record line for key %q", key)
+	}
+	return bytes.Join(lines, []byte("\n"))
 }
 
 // TestServer_snapshotLoadRollback proves the RPC half of APIS-07 / decision
@@ -187,6 +225,50 @@ func TestServer_snapshotLoadRollback(t *testing.T) {
 		}
 		if calls := capture.snapshot(); len(calls) != 0 {
 			t.Fatalf("the no-op load notified %d records, want 0", len(calls))
+		}
+	})
+
+	t.Run("partially readable snapshot is refused", func(t *testing.T) {
+		t.Parallel()
+
+		ts, capture := newNotifyServer(t)
+		seedRollbackKeys(t, ts.engine, map[string]string{
+			"snap/keep":   "live-keep",
+			"snap/victim": "live-victim",
+		})
+		preLoad := ts.engine.Records()
+		partial := map[string]storage.Record{
+			"snap/keep":   {Version: snapVersion, Data: []byte("snap-keep")},
+			"snap/victim": {Version: snapVersion, Data: []byte("snap-victim")},
+		}
+		// Both keys are NAMED by the snapshot; victim's line carries a flipped
+		// checksum, so the decoder discards it. A rollback computed from the
+		// decoded map alone would treat victim as absent and delete the live
+		// value (CR-01): the load must refuse before applying anything.
+		installRollbackSnapshot(t, ts.dumps, corruptSnapshotChecksum(t, rollbackSnapshotFixture(t, partial), "snap/victim"), false)
+
+		_, err := ts.client.SnapshotLoad(t.Context(), &apiproto.SnapshotLoadRequest{Name: "rollback"})
+		assertCode(t, "SnapshotLoad of a partially readable snapshot", err, codes.DataLoss)
+		if got, want := status.Convert(err).Message(), "snapshot does not decode cleanly"; got != want {
+			t.Fatalf("SnapshotLoad refusal message = %q, want the constant %q", got, want)
+		}
+		if calls := capture.snapshot(); len(calls) != 0 {
+			t.Fatalf("the refused load notified %d records, want 0 (nothing was applied or replicated)", len(calls))
+		}
+		for key, want := range map[string]string{
+			"snap/keep":   "live-keep",
+			"snap/victim": "live-victim",
+		} {
+			rec, getErr := ts.engine.Get(key)
+			if getErr != nil || string(rec.Data) != want {
+				t.Errorf("Get(%s) after the refused load = (%q, %v), want the live value %q",
+					key, rec.Data, getErr, want)
+			}
+			if stored := ts.engine.Records()[key]; stored.Version != preLoad[key].Version {
+				prior := preLoad[key]
+				t.Errorf("%s version changed across the refused load (%x -> %x), want it untouched",
+					key, prior.Version[:], stored.Version[:])
+			}
 		}
 	})
 }

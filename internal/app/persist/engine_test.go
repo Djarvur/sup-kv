@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1613,6 +1614,102 @@ func TestEngine_restoreCorruptSnapshot(t *testing.T) {
 	}
 }
 
+// corruptKeyChecksum returns dump with exactly the named record line's
+// checksum incremented by one, leaving its version, data and tombstone flag
+// intact: the decoder then discards precisely that line as the checksum
+// class while the generation stays readable and its census is satisfied —
+// the CR-01 regression fixture (a snapshot that is valid except for one
+// record the decoder cannot read).
+func corruptKeyChecksum(t *testing.T, dump []byte, key string) []byte {
+	t.Helper()
+	lines := bytes.Split(bytes.TrimSuffix(dump, []byte("\n")), []byte("\n"))
+	found := false
+	for i, line := range lines {
+		var parsed map[string]any
+		err := json.Unmarshal(line, &parsed)
+		if err != nil {
+			t.Fatalf("parse dump line %d: %v", i, err)
+		}
+		if parsed["key"] != key {
+			continue
+		}
+		checksum, ok := parsed["checksum"].(float64)
+		if !ok {
+			t.Fatalf("dump line %d for key %q has no numeric checksum", i, key)
+		}
+		parsed["checksum"] = checksum + 1
+		corrupted, err := json.Marshal(parsed)
+		if err != nil {
+			t.Fatalf("re-encode dump line %d: %v", i, err)
+		}
+		lines[i] = corrupted
+		found = true
+	}
+	if !found {
+		t.Fatalf("dump has no record line for key %q", key)
+	}
+	return bytes.Join(lines, []byte("\n"))
+}
+
+// TestEngine_restorePartialSnapshotRefused is the CR-01 regression: a
+// snapshot that is readable at generation level but has one record line the
+// decoder discards (a flipped checksum) must fail the load BEFORE applying
+// anything. The decoded map omits the corrupted key, so a full rollback
+// computed from it would treat that key as "absent from the snapshot" and
+// delete the live value with a fresh tombstone that then replicates
+// cluster-wide. The refusal keeps every live record, burns no version,
+// sends no dump and surfaces ErrSnapshotIncomplete — the DataLoss class.
+func TestEngine_restorePartialSnapshotRefused(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		for key, value := range map[string]string{
+			"keep":   "live-keep",
+			"victim": "live-victim",
+		} {
+			_, _, err := eng.Set(key, []byte(value))
+			if err != nil {
+				t.Fatalf("seed Set(%s) error = %v, want nil", key, err)
+			}
+		}
+
+		snapVersion := version.PackVersion(2, 0, synctestNodeID+1)
+		valid := snapshotFixture(t, map[string]storage.Record{
+			"keep":   {Version: snapVersion, Data: []byte("snap-keep")},
+			"victim": {Version: snapVersion, Data: []byte("snap-victim")},
+		})
+		dumps.installSnapshot("snap", corruptKeyChecksum(t, valid, "victim"))
+
+		before := eng.Records()
+		saves := dumps.saveCount()
+		restored, err := eng.Restore("snap")
+		if !errors.Is(err, persist.ErrSnapshotIncomplete) {
+			t.Fatalf("Restore(partially readable snapshot) error = %v, want ErrSnapshotIncomplete", err)
+		}
+		if restored != nil {
+			t.Fatalf("Restore(partially readable snapshot) returned %d records, want nil (nothing applied)",
+				len(restored))
+		}
+		if !recordsEqual(eng.Records(), before) {
+			t.Error("records changed across the refused restore")
+		}
+		// The corrupted line still NAMES victim, so the rollback must not read
+		// its absence from the decoded map as "the snapshot does not name it".
+		for key, want := range map[string]string{"keep": "live-keep", "victim": "live-victim"} {
+			rec, getErr := eng.Get(key)
+			if getErr != nil || string(rec.Data) != want {
+				t.Errorf("Get(%s) after the refused restore = (%q, %v), want the live value %q",
+					key, rec.Data, getErr, want)
+			}
+		}
+		if got := dumps.saveCount(); got != saves {
+			t.Errorf("the refused restore ran %d extra saves, want 0 (nothing reaches the dumper)", got-saves)
+		}
+	})
+}
+
 // snapshotFixture encodes records as a snapshot generation, filling each
 // record's checksum from the production domain first: Decode discards a
 // checksum-invalid record, so a hand-built fixture must carry the real
@@ -1858,12 +1955,13 @@ func TestEngine_restoreFailedFlushReturnsReplayed(t *testing.T) {
 	})
 }
 
-// TestEngine_restoreSkipsReplay proves skipped shapes are absent from the
-// report (PROTO-08): a tombstone with no live record to beat and a value
-// over the store's reduced limit are both skips — the value-limit record is
-// discarded at decode (the codec now applies the configured limit), the
-// tombstone at replay — so Restore returns an empty list and nil, installs
-// nothing, and never notifies what it did not replay.
+// TestEngine_restoreSkipsReplay proves the remaining replay skip is absent
+// from the report (PROTO-08): a tombstone with no live record to beat is a
+// replay skip — Delete's ErrNotFound writes nothing and burns no version — so
+// Restore returns an empty list and nil, installs nothing, and never notifies
+// what it did not replay. The value-limit class is no longer a skip: a
+// snapshot holding one is refused as partially readable before any change
+// (CR-01, TestEngine_configShrunkValueLimits).
 func TestEngine_restoreSkipsReplay(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -1876,15 +1974,14 @@ func TestEngine_restoreSkipsReplay(t *testing.T) {
 		snapVersion := version.PackVersion(1, 0, synctestNodeID+1)
 		dumps.installSnapshot("snap", snapshotFixture(t, map[string]storage.Record{
 			"absent-tomb": {Version: snapVersion, Deleted: true},
-			"oversize":    {Version: snapVersion, Data: bytes.Repeat([]byte("x"), shrunkValueLimit+1)},
 		}))
 
 		restored, err := eng.Restore("snap")
 		if err != nil {
-			t.Fatalf("Restore(snap) error = %v, want nil (both skips are not errors)", err)
+			t.Fatalf("Restore(snap) error = %v, want nil (the tombstone skip is not an error)", err)
 		}
 		if len(restored) != 0 {
-			t.Fatalf("Restore(snap) records = %+v, want an empty list (both shapes skip)", restored)
+			t.Fatalf("Restore(snap) records = %+v, want an empty list (the tombstone skips)", restored)
 		}
 		if got := len(eng.Records()); got != 0 {
 			t.Errorf("post-restore records = %d, want 0 (nothing was replayed)", got)
@@ -1982,8 +2079,10 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 // TestEngine_configShrunkValueLimits pins the config-shrink resilience
 // paths: Open discards a dumped record the shrunk value limit rejects at
 // decode — the codec applies the configured limit, so the record counts in
-// the value-limit class and never reaches the merge belt — Restore skips the
-// same class instead of failing, and a direct Set surfaces
+// the value-limit class and never reaches the merge belt — Restore refuses
+// the same snapshot as partially readable (CR-01: a full rollback from the
+// decoded key set could delete a key the snapshot names but the shrunk limit
+// discarded, so the load fails before any change), and a direct Set surfaces
 // storage.ErrValueTooLarge unchanged with no waiter registered
 // (PERSIST-01/PERS-02/PERS-05).
 //
@@ -2035,17 +2134,26 @@ func TestEngine_configShrunkValueLimits(t *testing.T) {
 		t.Errorf("shrunk Set(huge) error = %v, want ErrValueTooLarge unchanged", err)
 	}
 	runEngine(t, shrunk)
+	slimBefore, slimErr := shrunk.Get("slim")
+	if slimErr != nil {
+		t.Fatalf("pre-refusal Get(slim) error = %v, want nil", slimErr)
+	}
 	_, err = shrunk.Restore("cfg")
-	if err != nil {
-		t.Fatalf("shrunk Restore(cfg) error = %v, want nil (oversized record skipped)", err)
+	if !errors.Is(err, persist.ErrSnapshotIncomplete) {
+		t.Fatalf("shrunk Restore(cfg) error = %v, want ErrSnapshotIncomplete (the snapshot holds a value-limit discard)",
+			err)
 	}
 	_, err = shrunk.Get("fat")
 	if !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("post-restore Get(fat) error = %v, want ErrNotFound (replay skipped)", err)
+		t.Errorf("post-refusal Get(fat) error = %v, want ErrNotFound (still absent)", err)
 	}
 	slimRec, slimErr = shrunk.Get("slim")
 	if slimErr != nil || string(slimRec.Data) != "slim" {
-		t.Errorf("post-restore Get(slim) = (%q, %v), want (slim, nil)", slimRec.Data, slimErr)
+		t.Errorf("post-refusal Get(slim) = (%q, %v), want (slim, nil)", slimRec.Data, slimErr)
+	}
+	if got := slimRec.Version; got != slimBefore.Version {
+		t.Errorf("post-refusal slim version %x changed, want the pre-refusal %x (no replay)",
+			got[:], slimBefore.Version[:])
 	}
 }
 

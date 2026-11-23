@@ -23,4 +23,16 @@ var (
 	// resolve exactly once, so no writer can block past the engine's
 	// shutdown.
 	ErrClosed = errors.New("persist engine closed")
+
+	// ErrSnapshotIncomplete is returned by Restore when the named snapshot is
+	// readable at generation level but does not decode cleanly at record
+	// level: at least one record line was discarded in the checksum, version,
+	// value-limit or malformed class, so the decoded map is not the
+	// snapshot's key set. A full rollback computed from a partial key set
+	// would delete keys the snapshot names but the decoder could not read
+	// (CR-01), so the load refuses before touching the store: the in-memory
+	// state and the on-disk generations stay untouched. Phase 6 maps it to
+	// the DataLoss RPC code — the snapshot artifact exists but part of its
+	// content is unrecoverable.
+	ErrSnapshotIncomplete = errors.New("snapshot does not decode cleanly")
 )

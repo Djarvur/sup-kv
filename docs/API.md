@@ -153,6 +153,7 @@ contract, and the row order is part of it — the first match wins.
 | `PermissionDenied` | `permission denied` | a dump failure classified as permission, or `fs.ErrPermission` from the filesystem |
 | `Unavailable` | `write not confirmed before the confirmation timeout` | the covering dump outlived the confirmation timeout |
 | `Unavailable` | `persist engine closed` | the engine is closed (process shutdown) |
+| `DataLoss` | `snapshot does not decode cleanly` | a `SnapshotLoad` of a snapshot readable at generation level but with at least one record line the decoder discarded (checksum, version, value-limit or malformed class); nothing is applied |
 | `InvalidArgument` | `invalid snapshot name` | a snapshot name outside the adapter's closed charset |
 | `FailedPrecondition` | `no dump on disk to snapshot` | a snapshot operation needs a dump that does not exist |
 | `NotFound` | `snapshot not found` | the named snapshot is absent from disk |
@@ -248,6 +249,15 @@ invalid name is `InvalidArgument`. A create is a write and is gated like one.
 - Every current live key **absent from the snapshot** is deleted with a fresh
   tombstone, so the snapshot's key set becomes the store's key set and the
   rollback tombstones join the result.
+- **A partially readable snapshot is refused, not partially applied.** If
+  decoding the snapshot discards any record line — a checksum mismatch, an
+  unreadable version, a malformed line, or a value over the node's current
+  value limit — `SnapshotLoad` fails with `DataLoss`
+  (`snapshot does not decode cleanly`) before any change: no record is
+  replayed, no live key is deleted, nothing is broadcast, and the in-memory
+  state and on-disk generations stay untouched. Full-rollback deletion
+  therefore runs only on a cleanly decoded snapshot; a partly damaged
+  recovery artifact can never be turned into cluster-wide deletes.
 - A key already tombstoned locally and absent from the snapshot is already
   rolled back: **no version is burned** on it and no record is produced.
 - The replay and the rollback walk one deterministic sorted-key order, and the

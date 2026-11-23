@@ -348,7 +348,11 @@ func (s *Server) SnapshotCreate(_ context.Context, req *apiproto.SnapshotCreateR
 // notifies every record the replay installed with track=false (PROTO-08):
 // a snapshot load replicates its result even when the confirming dump
 // failed, because the replayed state is in memory; a no-op load notifies
-// nothing, and a closed engine's abandoned work is not notified.
+// nothing, and a closed engine's abandoned work is not notified. A snapshot
+// that does not decode cleanly is refused before any change (persist.
+// ErrSnapshotIncomplete, mapped to DataLoss): the engine returns no records,
+// so nothing is notified and the live state and on-disk generations stay
+// untouched (CR-01).
 func (s *Server) SnapshotLoad(_ context.Context, req *apiproto.SnapshotLoadRequest) (*apiproto.SnapshotLoadResponse, error) {
 	if s.gated() {
 		return nil, gateUnavailable()
@@ -468,6 +472,7 @@ const (
 //	port.FailurePermission   -> codes.PermissionDenied  ("permission denied")
 //	persist.ErrUnconfirmed   -> codes.Unavailable     ("write not confirmed before the confirmation timeout")
 //	persist.ErrClosed        -> codes.Unavailable     ("persist engine closed")
+//	persist.ErrSnapshotIncomplete -> codes.DataLoss    ("snapshot does not decode cleanly")
 //	persistfile.ErrInvalidSnapshotName -> codes.InvalidArgument ("invalid snapshot name")
 //	persistfile.ErrNoDump    -> codes.FailedPrecondition ("no dump on disk to snapshot")
 //	fs.ErrNotExist           -> codes.NotFound        ("snapshot not found")
@@ -503,6 +508,14 @@ func mapError(err error) error {
 		return status.Error(codes.Unavailable, persist.ErrUnconfirmed.Error())
 	case errors.Is(err, persist.ErrClosed):
 		return status.Error(codes.Unavailable, persist.ErrClosed.Error())
+	case errors.Is(err, persist.ErrSnapshotIncomplete):
+		// DataLoss, not Unavailable: the snapshot artifact exists and was read,
+		// but part of its content is unrecoverable — a full rollback from the
+		// partial key set could delete live keys, so the load was refused
+		// before any change (CR-01). The snapshot's name is a client-supplied
+		// label, but the row answers the sentinel constant like every other
+		// mapped error.
+		return status.Error(codes.DataLoss, persist.ErrSnapshotIncomplete.Error())
 	case errors.Is(err, persistfile.ErrInvalidSnapshotName):
 		return status.Error(codes.InvalidArgument, persistfile.ErrInvalidSnapshotName.Error())
 	case errors.Is(err, persistfile.ErrNoDump):

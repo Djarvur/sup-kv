@@ -124,6 +124,12 @@ func TestMapError_totalTable(t *testing.T) {
 			message: "persist engine closed",
 		},
 		{
+			name:    "persist.ErrSnapshotIncomplete",
+			err:     persist.ErrSnapshotIncomplete,
+			want:    codes.DataLoss,
+			message: "snapshot does not decode cleanly",
+		},
+		{
 			name:    "persistfile.ErrInvalidSnapshotName",
 			err:     persistfile.ErrInvalidSnapshotName,
 			want:    codes.InvalidArgument,
