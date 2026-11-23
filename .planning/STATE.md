@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 08-02-PLAN.md
-last_updated: "2026-11-23T18:18:52.116Z"
+stopped_at: Completed 08-04-PLAN.md
+last_updated: "2026-11-23T18:31:59.127Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: 7609b93ed64d490bd28f504263367a1b952cdd07
+state_head: bde702c1ced3b4e84e5c60972cc07303398f5c36
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 85
+  completed_plans: 86
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -146,6 +146,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P11 | 1105 | 2 tasks | 2 files |
 | Phase 08 P01 | 746s | 3 tasks | 9 files |
 | Phase 08 P02 | 954 | 3 tasks | 2 files |
+| Phase 08 P04 | 408 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -481,6 +482,8 @@ Recent decisions affecting current work:
 - [Phase 08]: PendingVisits counts pending entries INSPECTED, never handler calls or emissions: that reading makes the pre-index 2N/N counts and the post-index zeros the same measurement, and the field comment obliges any new pending-set loop to increment it
 - [Phase 08]: 08-02 RED evidence is the counter-instrumented split (write 2N, apply N red; idle-Advance tripwire green): referencing pendingByKey in a RED commit would have been a package build failure, which #3770 refuses as INVALID_RED, so the invariant/differential proofs landed in GREEN
 - [Phase 08]: PERF-05 remains unmarked in REQUIREMENTS.md: 08-02 lands the core fix and deterministic proofs, while 08-04 (docs) and 08-05 (paired wall-clock gates) still cover the requirement; requirements ready-ids still reports it blocked
+- [Phase 08]: The paced replay seam carries storage.Record{Version} at both hops (gRPC LocalReplayNotify and the adapter enqueue); the nil-ReplayNotify fallback and the live NotifyLocalWrite clone stay unchanged, because the live seam's contract still carries the full record.
+- [Phase 08]: The replay allocation gate is an assertion, not a report: 60 KiB record, AllocedBytesPerOp() ceiling 1 KiB; RED measured 65536 bytes/op, GREEN 0, and the passing run logs the measurement.
 
 ### Pending Todos
 
@@ -503,7 +506,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T18:18:51.497Z
-Stopped at: Completed 08-02-PLAN.md
+Last session: 2026-11-23T18:31:58.539Z
+Stopped at: Completed 08-04-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
