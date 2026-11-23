@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 06-05-PLAN.md
-last_updated: "2026-11-23T00:15:40.512Z"
+stopped_at: Completed 06-06-PLAN.md
+last_updated: "2026-11-23T00:37:33.387Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: 14b8a9179edff1de6d2670f393876e916434f29b
+state_head: 4f4acba51c2275d6c77d714ff4dcea9aa3e8ca0e
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 65
+  completed_plans: 66
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
@@ -124,6 +124,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P04 | 7min | 3 tasks | 6 files |
 | Phase 06 P11 | 30min | 2 tasks | 11 files |
 | Phase 06 P05 | 817s | 3 tasks | 14 files |
+| Phase 06 P06 | 580s | 1 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -386,6 +387,11 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-05: the byte budget stops before an over-budget entry and leaves it as the next page's first, while the first entry is always included, so a page is never empty non-terminal and progress is structural
 - [Phase 06]: 06-05: the page walk takes a lookup function so the view-to-lookup race (tombstone or vanished key) is pinned deterministically in list_internal_test.go instead of raced through the RPC surface
 - [Phase 06]: 06-05: APIS-02's checkbox stays pending because requirements ready-ids reports it blocked (the #2388 shared-ID gate among 06-01/06-05/06-07)
+- [Phase 06]: 06-06: storage.Config.OnChange carries the just-incremented install generation; persist.Config.OnConfirmed publishes the generation read immediately before Records() after confirmWaiters and never on a failed dump, so the watermark always describes the saved snapshot.
+- [Phase 06]: 06-06: WatchHub holds ingress installs in a pending queue bounded at watchIngress and releases only the leading gen <= confirmed prefix, dropping what it dispatches, so delivery is exactly-once in install order; Confirm is a CAS maximum with a buffered(1) wake, so a repeated or lower confirmation delivers nothing.
+- [Phase 06]: 06-06: either overflow flavor (full ingress or full pending) sheds every subscriber with ResourceExhausted and clears pending; resubscription re-snapshots (D-02), and the bounded-policy pin plus startup suppression and Unavailable shutdown remain 06-12's expansion slice.
+- [Phase 06]: 06-06: the subscribe snapshot stays the current in-memory state (what Get sees) while the live feed is the durable change feed; the asymmetry is the documented D-04 contract, not a defect.
+- [Phase 06]: 06-06: RED is the two compile-clean integration tests (held dump; dump-failed-then-confirmed); the tap-generation and hub-gate unit tests need symbols this plan introduces, so they landed with GREEN (06-05 store-view precedent). APIS-04's checkbox stays pending on the #2388 shared-ID gate among 06-06/06-09/06-13.
 
 ### Pending Todos
 
@@ -408,7 +414,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T00:15:39.941Z
-Stopped at: Completed 06-05-PLAN.md
+Last session: 2026-11-23T00:37:32.831Z
+Stopped at: Completed 06-06-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
