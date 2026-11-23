@@ -201,6 +201,7 @@ func (c *notifyCapture) snapshot() []notifyCall {
 type testHarness struct {
 	client       apiproto.SupKVServiceClient
 	health       healthpb.HealthClient
+	api          *grpcapi.Server
 	engine       *persist.Engine
 	hub          *grpcapi.WatchHub
 	dumps        *fakeDumpStore // nil on the file-backed harness
@@ -424,6 +425,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	return &testHarness{
 		client:       apiproto.NewSupKVServiceClient(conn),
 		health:       healthpb.NewHealthClient(conn),
+		api:          api,
 		engine:       eng,
 		hub:          hub,
 		dumps:        fake,

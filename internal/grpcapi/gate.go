@@ -127,6 +127,11 @@ func (s *Server) Health() *health.Server {
 	return s.healthSrv
 }
 
+// Shutdown closes the health endpoint when shutdown begins (D-05, APIS-05).
+func (s *Server) Shutdown() {
+	s.healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+}
+
 // gated reports whether the startup gate is still closed, so every data
 // RPC — reads and writes alike — is rejected with Unavailable (API-04,
 // D-01). The purpose is that a cold node must not answer from a picture it

@@ -320,6 +320,62 @@ func TestHealth_reflectsGate(t *testing.T) {
 	}
 }
 
+// healthOneWaySetKey is the key the one-way test writes to prove the gate
+// opened: a successful Set is observable proof that openGate ran, hence that
+// its health flip was attempted after Shutdown.
+const healthOneWaySetKey = "health/one-way"
+
+// TestHealth_shutdownIsOneWay proves the shutdown half of the health
+// contract (D-05, APIS-05, T-06-23, RESEARCH Pitfall 9): the gate resolver's
+// backstop can fire after shutdown began, and its SERVING flip must be
+// ignored. The test calls Shutdown twice (the call is idempotent) before the
+// 50 ms backstop elapses, waits for the backstop by observing a successful
+// Set — the write proves openGate ran, so the late status flip was attempted
+// — and then requires health to still read NOT_SERVING.
+func TestHealth_shutdownIsOneWay(t *testing.T) {
+	t.Parallel()
+
+	ts := buildTestServer(t, testServerConfig{
+		gate: grpcapi.ServerOptions{
+			SyncArrived: func() bool { return false },
+			StartupGate: gateTestBackstop,
+		},
+	})
+	ctx := t.Context()
+
+	ts.api.Shutdown()
+	ts.api.Shutdown()
+
+	waitFor(t, gateWait, "the startup-gate backstop to open the gate", func() bool {
+		_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: healthOneWaySetKey, Value: []byte("v")})
+		return err == nil
+	})
+
+	resp, err := ts.health.Check(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("health Check after Shutdown and the late backstop: want OK, got error: %v", err)
+	}
+	if got := resp.GetStatus(); got != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("health after Shutdown: want NOT_SERVING even though the backstop opened the gate, got %v", got)
+	}
+}
+
+// TestHealth_backstopWithoutShutdownServes is the control for the one-way
+// test: the same 50 ms backstop harness without a prior Shutdown reaches
+// SERVING, so the one-way assertion observes a real ignored transition
+// rather than a gate that never opens.
+func TestHealth_backstopWithoutShutdownServes(t *testing.T) {
+	t.Parallel()
+
+	ts := buildTestServer(t, testServerConfig{
+		gate: grpcapi.ServerOptions{
+			SyncArrived: func() bool { return false },
+			StartupGate: gateTestBackstop,
+		},
+	})
+	awaitGateOpen(t, ts)
+}
+
 // newFileServer builds the snapshot-test harness: a real persistfile
 // FileStore over a temp dir backs the engine, so snapshot names cross the
 // production validation — persistfile's validateName is the single
