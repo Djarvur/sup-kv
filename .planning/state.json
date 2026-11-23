@@ -31,7 +31,7 @@
     {
       "number": "6",
       "name": "Hardening — Failure Scenarios, Observability, Benchmarks",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "7",
@@ -66,7 +66,7 @@
     {
       "number": "6",
       "name": "API and Semantics",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "7",
@@ -85,9 +85,9 @@
     }
   ],
   "next": {
-    "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 6 of 9 · executing"
+    "command": "/gsd-progress",
+    "label": "Show progress",
+    "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-11-23T01:49:06.482Z"
+  "updated_at": "2026-11-23T03:55:34.933Z"
 }
