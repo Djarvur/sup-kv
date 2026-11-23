@@ -127,9 +127,16 @@ func (s *Server) Health() *health.Server {
 	return s.healthSrv
 }
 
-// Shutdown closes the health endpoint when shutdown begins (D-05, APIS-05).
+// Shutdown begins the one-way health transition (D-05, APIS-05, T-06-23):
+// it calls the standard health server's Shutdown, which marks every known
+// service — the empty whole-server name included — NOT_SERVING and ignores
+// every later SetServingStatus. That is what closes the shutdown race: the
+// binary calls this before cancelling the API context, so a gate resolver
+// backstop that fires afterwards can no longer return the node to SERVING
+// (RESEARCH Pitfall 9). The call is idempotent, and Resume must never be
+// called — resuming would reopen the exact window this method closes.
 func (s *Server) Shutdown() {
-	s.healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	s.healthSrv.Shutdown()
 }
 
 // gated reports whether the startup gate is still closed, so every data

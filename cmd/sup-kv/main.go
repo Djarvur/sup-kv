@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
@@ -211,7 +210,8 @@ type config struct {
 // wired bundles the running services with their lifecycle handles — the
 // plumbing main's shutdown path needs, no behavior of its own. metricsSrv is
 // nil when --metrics-addr is unset: the endpoint is opt-in with no listener
-// at all (D-01).
+// at all (D-01). api is the gRPC API server; its one-way Shutdown closes the
+// health endpoint (D-05, APIS-05).
 type wired struct {
 	engine       *persist.Engine
 	engineCancel context.CancelFunc
@@ -219,7 +219,7 @@ type wired struct {
 	replCancel   context.CancelFunc
 	replDone     <-chan struct{}
 	apiCancel    context.CancelFunc
-	health       *health.Server
+	api          *grpcapi.Server
 	gs           *grpc.Server
 	metricsSrv   *http.Server
 }
@@ -754,7 +754,7 @@ func wire(cfg config) (*wired, net.Listener, error) {
 		replCancel:   replCancel,
 		replDone:     replDone,
 		apiCancel:    apiCancel,
-		health:       srv.Health(),
+		api:          srv,
 		gs:           gs,
 		metricsSrv:   metricsSrv,
 	}, listener, nil
@@ -903,18 +903,24 @@ func serve(node *wired, listener net.Listener, sig <-chan os.Signal) error {
 }
 
 // shutdown runs the pinned graceful-shutdown sequence (D-19 — the order is
-// the contract, RESEARCH Pattern 6): shed client traffic through the health
-// endpoint, shut the opt-in metrics/debug listener down — positioned right
-// after the health flip so scrapers see the close the moment the node stops
-// serving, while the rest of the drain stays observable through logs
-// (Pitfall 7) — cancel the API context to end Watch streams and the hub
-// (GracefulStop blocks forever while any stream is open), bound
-// GracefulStop with the grace period and fall back to Stop, stop
+// the contract, RESEARCH Pattern 6): close the health endpoint one-way
+// through the API server's Shutdown, shut the opt-in metrics/debug listener
+// down — positioned right after the health close so scrapers see it the
+// moment the node stops serving, while the rest of the drain stays
+// observable through logs (Pitfall 7) — cancel the API context to end Watch
+// streams and the hub (GracefulStop blocks forever while any stream is open),
+// bound GracefulStop with the grace period and fall back to Stop, stop
 // replication and wait for the adapter goroutine, Flush — the final
 // write-confirmed dump covering remote-merged dirtiness — and only then
 // cancel the engine context, whose exit sweep now finds no waiters. A final
 // dump failure is the returned error: a clean exit is reserved for a
 // confirmed shutdown.
+//
+// The health close is the standard health server's Shutdown, never a direct
+// SetServingStatus (D-05, APIS-05, T-06-23): it is one-way, so the gate
+// resolver's backstop firing after this point cannot flip the node back to
+// SERVING while it drains (RESEARCH Pitfall 9). apiCancel follows it, and
+// neither path calls health.Resume.
 //
 // Both remaining waits are bounded by the same shutdownGrace (PERSIST-08,
 // T-5-24): the final flush is FlushTimeout, so a stuck fsync answers
@@ -930,7 +936,7 @@ func serve(node *wired, listener net.Listener, sig <-chan os.Signal) error {
 // sequence and therefore survives the force stop — the confirmed dump still
 // lands, and a clean shutdown still exits 0.
 func shutdown(node *wired, sig <-chan os.Signal) error {
-	node.health.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	node.api.Shutdown()
 	if node.metricsSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		err := node.metricsSrv.Shutdown(ctx)
