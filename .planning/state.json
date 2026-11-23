@@ -56,12 +56,12 @@
     {
       "number": "4",
       "name": "Protocol",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "5",
       "name": "Persistence",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "6",
@@ -71,12 +71,12 @@
     {
       "number": "7",
       "name": "Observability and Configuration",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "8",
       "name": "Performance",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "9",
@@ -86,8 +86,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 8)",
-    "reason": "Phase 8 of 9 — needs a plan"
+    "label": "Advance to the next step",
+    "reason": "Phase 8 of 9 · executing"
   },
-  "updated_at": "2026-11-23T14:34:00.271Z"
+  "updated_at": "2026-11-23T17:55:54.149Z"
 }

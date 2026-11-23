@@ -4,19 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: Not started
-status: planning
-stopped_at: Phase 7 complete, ready to plan Phase 8
-last_updated: "2026-11-23T14:34:00.250Z"
+current_plan: 2
+status: executing
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-11-23T17:55:54.129Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: 7d9913e2d12b78a03ef99fc8a7f88dd5be3d10d8
+state_head: 67535a2f7dd0dec6c210a477db9e9ef70503e1d1
 progress:
   total_phases: 9
-  completed_phases: 4
-  total_plans: 83
-  completed_plans: 83
-  percent: 44
+  completed_phases: 7
+  total_plans: 94
+  completed_plans: 84
 ---
 
 # Project State
@@ -31,9 +30,9 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: Not started
+Current Plan: 2
 Total Plans in Phase: 11
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
 
 Progress: [████░░░░░░] 44%
@@ -145,6 +144,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P09 | 921s | 3 tasks | 12 files |
 | Phase 07 P10 | 281s | 2 tasks | 4 files |
 | Phase 07 P11 | 1105 | 2 tasks | 2 files |
+| Phase 08 P01 | 746s | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -473,6 +473,9 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-11: The first full red-runner attempt failed only on an ordinary stand test (TestStand_persistLoadUnusableSingle, 'SIGKILL <pid>: os: process already finished') while all seven expectation rows were green; the full gate re-ran unchanged and passed, so the transient was recorded in deferred-items for Phase 8 instead of being fixed in a no-source gate plan.
 - [Phase 07]: 07-11: buf-breaking ran the real FILE-policy comparison against refs/remotes/origin/master (d6b2a75) because supkv.proto is now published there, not the D-08 deferral.
 - [Phase 07]: 07-11: The phase gate produced zero task commits — it changes no source and every gate passed on the committed tree, so the record lives in 07-11-SUMMARY.md (the 01-04 precedent).
+- [Phase 08]: Phase 8 thresholds are one compiled const block in internal/testutil/perf.go; no env parsing and no threshold file (D-06).
+- [Phase 08]: The perf burst row reuses the frozen red generator read-only; TestPerfBurstBoundsMatchRedContract pins the perf thresholds to the frozen red constants.
+- [Phase 08]: make perf is manual and Linux-only: SUPKV_PERF=1, .tmp/perf dump base, -p 1, no -race, then the functional stand line; CI keeps the threshold-free bench-smoke.
 
 ### Pending Todos
 
@@ -495,7 +498,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T12:13:48.467Z
-Stopped at: Phase 7 complete, ready to plan Phase 8
+Last session: 2026-11-23T17:54:43.325Z
+Stopped at: Completed 08-01-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
