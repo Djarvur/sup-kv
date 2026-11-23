@@ -36,7 +36,7 @@
     {
       "number": "7",
       "name": "v1.0 — Docs, Examples and Release",
-      "status": "complete"
+      "status": "in_progress"
     },
     {
       "number": "1",
@@ -89,5 +89,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 7 of 9 · executing"
   },
-  "updated_at": "2026-11-23T06:56:03.426Z"
+  "updated_at": "2026-11-23T07:10:01.822Z"
 }
