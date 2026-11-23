@@ -108,12 +108,15 @@ const (
 // Lookup is skipped while the token advances past it, so the walk always
 // progresses.
 func listPage(engine *persist.Engine, req *apiproto.ListRequest) (*apiproto.ListResponse, error) {
-	pageSize := resolveListPageSize(req.GetPageSize())
+	pageSize, err := resolveListPageSize(req.GetPageSize(), req.GetPageToken() != "")
+	if err != nil {
+		return nil, err
+	}
 	start := ""
 	if token := req.GetPageToken(); token != "" {
-		decoded, err := decodeListToken(token)
-		if err != nil {
-			return nil, err
+		decoded, decodeErr := decodeListToken(token)
+		if decodeErr != nil {
+			return nil, decodeErr
 		}
 		start = decoded
 	}
@@ -135,30 +138,37 @@ func listPage(engine *persist.Engine, req *apiproto.ListRequest) (*apiproto.List
 	if pageSize == 0 {
 		return &apiproto.ListResponse{Keys: keys}, nil
 	}
-	return pagedResponse(engine, keys, pageSize), nil
+	return pagedResponse(engine.Lookup, keys, pageSize), nil
 }
 
 // resolveListPageSize maps a request's page_size onto the resolved page
-// size: zero and negative values keep the legacy all-keys listing, and a
-// value above the maximum clamps to it. The returned size is what the page
-// walk bounds itself by.
-func resolveListPageSize(pageSize int32) int {
-	if pageSize <= 0 {
-		return 0
+// size: zero without a token keeps the legacy all-keys listing, zero with a
+// token is InvalidArgument (the legacy listing has no page to continue), a
+// negative size is InvalidArgument, and a value above the maximum clamps to
+// it. The returned size is what the page walk bounds itself by.
+func resolveListPageSize(pageSize int32, hasToken bool) (int, error) {
+	switch {
+	case pageSize < 0:
+		return 0, status.Error(codes.InvalidArgument, invalidPageSizeMessage)
+	case pageSize == 0 && hasToken:
+		return 0, status.Error(codes.InvalidArgument, invalidPageSizeMessage)
+	case pageSize == 0:
+		return 0, nil
+	case pageSize > maxListPageSize:
+		return maxListPageSize, nil
+	default:
+		return int(pageSize), nil
 	}
-	if pageSize > maxListPageSize {
-		return maxListPageSize
-	}
-	return int(pageSize)
 }
 
 // pagedResponse walks the sorted matching keys and fills one page: at most
-// pageSize entries, each record read through Lookup so only the page's
+// pageSize entries, each record read through lookup so only the page's
 // values are copied, and the encoded last examined key as the token when
 // any matching key follows it. A key that raced away between the view and
-// the Lookup is skipped while the token still advances past it, and the
-// page always includes at least one entry, so the walk cannot stall.
-func pagedResponse(engine *persist.Engine, keys []string, pageSize int) *apiproto.ListResponse {
+// the lookup is skipped while the token still advances past it.
+func pagedResponse(lookup func(key string) (storage.Record, bool), keys []string,
+	pageSize int,
+) *apiproto.ListResponse {
 	capacity := min(pageSize, len(keys))
 	resp := &apiproto.ListResponse{
 		Keys:    make([]string, 0, capacity),
@@ -170,7 +180,7 @@ func pagedResponse(engine *persist.Engine, keys []string, pageSize int) *apiprot
 			break
 		}
 		lastExamined = i
-		rec, ok := engine.Lookup(key)
+		rec, ok := lookup(key)
 		if !ok || rec.Deleted {
 			continue
 		}
@@ -200,12 +210,13 @@ func encodeListToken(key string) string {
 }
 
 // decodeListToken reads one opaque page_token back into its position. A
-// RawURLEncoding decode failure is client error with the constant message:
-// the token crosses from an untrusted client into the page seek, so a bad
-// token is rejected, never interpreted (T-06-15).
+// RawURLEncoding decode failure and a decoded key longer than
+// storage.MaxKeyBytes are both client error with the constant message: the
+// token crosses from an untrusted client into the page seek, so an
+// out-of-domain token is rejected, never interpreted (T-06-15).
 func decodeListToken(token string) (string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil {
+	if err != nil || len(raw) > storage.MaxKeyBytes {
 		return "", status.Error(codes.InvalidArgument, invalidPageTokenMessage)
 	}
 	return string(raw), nil
