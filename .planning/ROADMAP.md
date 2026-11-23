@@ -292,7 +292,7 @@ Plans:
   3. Metrics mean what they say (14.4): the conflict counter counts only the displacement of a local unconfirmed record by another value; a failed send is not counted as sent; `process_resident_memory_bytes` reports current RSS; dump-duration and drift-counter semantics are defined — and every definition is confirmed by a test
   4. Exit codes and shutdown are distinct and ordered: usage error, startup failure and final-dump failure have distinct codes; a `Serve` error does not skip the final dump; the final dump is time-bounded; the signal handler is installed before dump load and bind; `--help` lists the five env-only variables
   5. Boundaries are machine-enforced and units decomposed: a depguard rule forbids adapter imports from `app`/`port` and the observed cross-imports (`metrics`→`udprepl`, `grpcapi`→`persistfile`/`*persist.Engine`) — any boundary change is a visible `.golangci.yml` diff; socket, loop, mirror and codec are separate units in `udprepl` and `main.go` is wiring only
-**Plans**: 2/11 plans executed
+**Plans**: 3/11 plans executed
 
 Plans:
 **Wave 1**
@@ -300,7 +300,7 @@ Plans:
 - [x] 07-02-PLAN.md — Tracer: internal/config with one Validate rule table, wiring-only main, sync-chunk/value bounds, codec value guard and the 2 m max-clock-lead default (OBSV-02, OBSV-08; D-03, D-04)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 07-03-PLAN.md — Tracer: three additive depguard rules with per-rule import probes and the written grpcapi exception (OBSV-07; D-07)
+- [x] 07-03-PLAN.md — Tracer: three additive depguard rules with per-rule import probes and the written grpcapi exception (OBSV-07; D-07)
 - [ ] 07-04-PLAN.md — Tracer: exit codes 0/1/2/3, injectable run, signals before wire, Serve errors still dumping (OBSV-04; D-06)
 - [ ] 07-05-PLAN.md — Tracer: received-lead drift signal in Clock.Update plus positive-lead counting for records and listing maxima (OBSV-05, OBSV-03; D-02)
 
@@ -358,7 +358,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 4. Replication and Deterministic Simulator | v1.0 | 13/13 | Complete    | 2026-11-22 |
 | 5. gRPC API and Binary | v1.0 | 12/12 | Complete    | 2026-11-22 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 13/13 | Complete | 2026-11-16 |
-| 7. v1.0 — Docs, Examples and Release | v1.0 | 1/11 | In Progress |  |
+| 7. v1.0 — Docs, Examples and Release | v1.0 | 3/11 | In Progress |  |
 | 1. Spec Reference and Decisions | v1.1 | 4/4 | Complete | 2026-11-19 |
 | 2. Stand and Simulator as Tests | v1.1 | 17/17 | Complete | 2026-11-21 |
 | 3. Transport | v1.1 | 13/13 | Complete | 2026-11-22 |

@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 07-02-PLAN.md
-last_updated: "2026-11-23T07:38:09.835Z"
+stopped_at: Completed 07-03-PLAN.md
+last_updated: "2026-11-23T07:51:32.787Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 6 complete, transitioned to Phase 7
-state_head: 7b6efc8562396f5a5af78797cc045a58deb9d1ba
+state_head: b35e6067a33a91e80820cdc2cda33a4bae717c90
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 74
+  completed_plans: 75
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 7 (Observability and Configuration) — READY TO EXECUTE
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 6 complete, transitioned to Phase 7
@@ -134,6 +134,7 @@ Progress: [████░░░░░░] 44%
 | Phase 06 P13 | 20min | 2 tasks | 2 files |
 | Phase 07 P01 | 567s | 2 tasks | 9 files |
 | Phase 07 P02 | 1324s | 3 tasks | 14 files |
+| Phase 07 P03 | 261 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -430,6 +431,9 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-02: the max-clock-lead default moved to 2 m in the binary and the core in the same commit as the drift-vs-lead rule, because the 1 m default would fail its own validation and violate the 'every default stays accepted' prohibition.
 - [Phase 07]: 07-02: Usage resolves defaults from the process environment (preserving SUPKV_MAX_CLOCK_LEAD=90s --help showing 1m30s) while Parse stays pure over its getenv seam; repl.MaxSyncResponseRate is exported as an int so the cap is never a literal in config.
 - [Phase 07]: 07-02: persist.EncodeTo rejects an out-of-domain value limit before the header write wrapping storage.ErrValueTooLarge, closing IN-04; version.Validate and the core docs state the 2 m default and the max_clock_lead >= drift_warn + 1 ms relation.
+- [Phase 07]: 07-03: Three named depguard rules (adapters-not-in-core, metrics-no-adapters, grpcapi-no-repl-metrics) enforce cmd -> adapters -> core/ports; adapters are named individually with !$test so port -> app/storage/version and internal/testutil stay legal
+- [Phase 07]: 07-03: The grpcapi -> persistfile / *persist.Engine composition edge is explicitly allowed in .golangci.yml with its written justification (two snapshot sentinels, 12 engine methods, Watch hub Records/Set) rather than hidden behind a //nolint
+- [Phase 07]: 07-03: A depguard rule is proven by a used-import probe under the full config; a blank-import probe is masked by golangci-lint uniq-by-line (revive blank-imports shares the import position) — the Phase 6 WR-03 lesson generalized
 
 ### Pending Todos
 
@@ -452,7 +456,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T07:38:09.091Z
-Stopped at: Completed 07-02-PLAN.md
+Last session: 2026-11-23T07:51:32.040Z
+Stopped at: Completed 07-03-PLAN.md
 Resume file: None
 Next action: start plan 07-03 (`/gsd:execute-phase 7` continues the phase)
