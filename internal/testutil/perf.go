@@ -22,6 +22,18 @@ const (
 
 	// perfSkipRace is the skip a perf test reports under the race detector.
 	perfSkipRace = "perf: numbers are measured without -race — run `make perf`"
+
+	// perfDumpEnvVar is the operator's dump-directory override; `make perf`
+	// sets it to a directory on the repository's real filesystem so a
+	// measurement never lands on a memory-backed /tmp.
+	perfDumpEnvVar = "SUPKV_PERF_DUMP_DIR"
+
+	// perfDumpDirMode is the per-test dump subdirectory's owner-only mode.
+	perfDumpDirMode = 0o750
+
+	// perfUnknown is the hardware block's field placeholder: a missing
+	// kernel file degrades one field to it instead of failing the run.
+	perfUnknown = "unknown"
 )
 
 // The Phase 8 threshold table (D-06). Every value is a documented bound with
@@ -86,4 +98,40 @@ func RequirePerf(tb testing.TB) {
 	if RaceEnabled() {
 		tb.Skip(perfSkipRace)
 	}
+}
+
+// raceLabel renders the race build-tag state for the hardware block.
+func raceLabel() string {
+	if RaceEnabled() {
+		return "on"
+	}
+	return "off"
+}
+
+// perfDumpDir is the platform-independent dump-directory rule: a fresh
+// per-test subdirectory under SUPKV_PERF_DUMP_DIR when the operator set it,
+// else the test's TempDir, logged with the media facts the platform probes
+// report. Both PerfDumpDir variants delegate here so the rule has one
+// definition.
+func perfDumpDir(tb testing.TB, fstype, device func(string) string) string {
+	tb.Helper()
+	var dir string
+	if base := os.Getenv(perfDumpEnvVar); base != "" {
+		//nolint:gosec // G703: the operator supplies the dump base; a wrong path fails the run loudly, and no request input reaches it.
+		err := os.MkdirAll(base, perfDumpDirMode)
+		if err != nil {
+			tb.Fatalf("SUPKV_PERF_DUMP_DIR %q: %v", base, err)
+		}
+		//nolint:usetesting // t.TempDir() would create under the test's own root; the operator's base must hold the dump so a -v run reports its media.
+		created, err := os.MkdirTemp(base, "perf-*")
+		if err != nil {
+			tb.Fatalf("SUPKV_PERF_DUMP_DIR %q: create per-test dump directory: %v", base, err)
+		}
+		tb.Cleanup(func() { _ = os.RemoveAll(created) }) //nolint:gosec // G703: created is the subdirectory MkdirTemp just made under the operator's base.
+		dir = created
+	} else {
+		dir = tb.TempDir()
+	}
+	tb.Logf("perf dump dir: %s fs=%s dev=%s", dir, fstype(dir), device(dir))
+	return dir
 }

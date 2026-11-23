@@ -33,6 +33,7 @@ func TestHardwareBlock(t *testing.T) {
 	if strings.Contains(block, "\n") {
 		t.Fatalf("HardwareBlock() must be one line, got:\n%s", block)
 	}
+	t.Log(block)
 	for _, want := range []string{"CPU=", "logical=", "RAM=", "load=", "go=", "race=", "GOMAXPROCS=", "root-disk=", "rotational="} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("HardwareBlock() = %q, missing the %q fact", block, want)
@@ -75,7 +76,8 @@ func TestPerfDumpFSType(t *testing.T) {
 	}
 
 	const shmPath = "/dev/shm"
-	if _, err := os.Stat(shmPath); err != nil {
+	_, err := os.Stat(shmPath)
+	if err != nil {
 		t.Logf("skipping the tmpfs assertion: %s is absent (%v)", shmPath, err)
 		return
 	}
@@ -94,7 +96,7 @@ func TestPerfDumpDevice(t *testing.T) {
 		t.Fatalf("PerfDumpDevice(repo root) = %q, want <device>,rotational=<0|1|unknown>", got)
 	}
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if got := PerfDumpDevice(missing); got != "unknown" {
-		t.Fatalf("PerfDumpDevice(%q) = %q, want %q for an unresolvable path", missing, got, "unknown")
+	if unresolved := PerfDumpDevice(missing); unresolved != "unknown" {
+		t.Fatalf("PerfDumpDevice(%q) = %q, want %q for an unresolvable path", missing, unresolved, "unknown")
 	}
 }
