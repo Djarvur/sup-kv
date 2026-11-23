@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime"
+	goruntime "runtime"
 	"syscall"
 	"time"
 
@@ -51,14 +51,53 @@ var (
 	commit  = "dev" //nolint:gochecknoglobals // the -X ldflags mechanism (D-18) can only write package-level vars.
 )
 
-// Process exit codes: a configuration error (missing or malformed knob)
-// exits with exitUsage; a failed final dump during shutdown exits with
-// exitDumpFailed — a clean exit 0 is reserved for a shutdown whose final
-// write-confirmed dump completed (D-19).
+// Process exit codes (D-06, O-05): a clean shutdown whose final
+// write-confirmed dump completed exits 0; a usage or configuration error
+// exits exitUsage; a startup or Serve failure exits exitStartup; and a failed
+// final dump during shutdown exits exitDumpFailed. Precedence: the final-dump
+// failure (3) wins over a Serve error (1) — the dump failure is the
+// operator's data-loss signal — while a startup failure never runs a final
+// dump (no client-confirmed write exists yet) and can only be 1.
 const (
-	exitDumpFailed = 1
+	exitStartup    = 1
 	exitUsage      = 2
+	exitDumpFailed = 3
 )
+
+// The wiring stages a startup failure names: each fatal step of wire reports
+// its stage, so the one Startup-failed ERROR record identifies where the node
+// gave up instead of a bare message (D-06).
+const (
+	stageReplicationBind = "replication_bind"
+	stageGRPCListen      = "grpc_listen"
+	stageMetricsListen   = "metrics_listen"
+)
+
+// startupError carries the wiring stage a startup failure came from. run logs
+// its stage and detail as one ERROR record, so a fatal startup fault survives
+// SUPKV_LOG_LEVEL=error instead of the pre-D-06 fatal-log exit, which rendered
+// as an INFO record and vanished at that level (review O-01).
+type startupError struct {
+	stage string
+	err   error
+}
+
+// Error renders the stage and the cause for any caller that sees only an
+// error string.
+func (e *startupError) Error() string {
+	return e.stage + ": " + e.err.Error()
+}
+
+// Unwrap exposes the underlying cause to [errors.Is] and [errors.As].
+func (e *startupError) Unwrap() error { return e.err }
+
+// startupStage names the stage err carries, "startup" when it carries none.
+func startupStage(err error) string {
+	if staged, ok := errors.AsType[*startupError](err); ok {
+		return staged.stage
+	}
+	return "startup"
+}
 
 // loadFailureAttrsPerCandidate is the number of attributes one candidate
 // load failure contributes: its path, its cause and its preservation error.
@@ -97,6 +136,18 @@ type wired struct {
 	metricsSrv   *http.Server
 }
 
+// runtime is the lifecycle seam run orchestrates (D-06): the four production
+// functions and the signal release, declared with exactly the directions they
+// have, so productionRuntime is a direct assignment and no adapter closure
+// stands between the tested seam and the real path.
+type runtime struct {
+	installSignals func() chan os.Signal
+	stopSignals    func(chan<- os.Signal)
+	wire           func(config.Config) (*wired, net.Listener, error)
+	serve          func(*wired, net.Listener, <-chan os.Signal) error
+	shutdown       func(*wired, <-chan os.Signal) error
+}
+
 func main() {
 	cfg, err := config.Parse(os.Args[1:], os.Getenv)
 	if errors.Is(err, config.ErrHelp) {
@@ -130,27 +181,56 @@ func main() {
 	// node would send broadcasts but never receive them.
 	warnOnNonWildcardBind(cfg.BindAddr)
 
-	node, listener, err := wire(cfg)
+	os.Exit(run(cfg, productionRuntime()))
+}
+
+// run is the lifecycle seam (D-06): signals are armed before wire, so a
+// SIGTERM during dump load or bind still takes the graceful path instead of
+// killing the process with the default disposition (P1-IN-01). A wire failure
+// is one ERROR record naming the failing stage and returns exitStartup
+// without a shutdown — no client-confirmed write exists yet. A Serve error is
+// one ERROR record but still runs the full D-19 shutdown, bounded final dump
+// included, before the exit code is chosen; precedence makes a failed final
+// dump (3) win over the Serve error (1) on the same path. Signal ownership
+// spans serving and shutdown alike: the channel is released only after the
+// final dump, so a second SIGTERM during the drain is observed as the
+// operator's hurry-up and takes shutdown's force path.
+func run(cfg config.Config, rt runtime) int {
+	sig := rt.installSignals()
+	node, listener, err := rt.wire(cfg)
 	if err != nil {
-		log.Fatalf("sup-kv: %v", err)
+		slog.Error("Startup failed", "stage", startupStage(err), "detail", err.Error())
+		rt.stopSignals(sig)
+		return exitStartup
 	}
-	// Signal ownership spans serving AND the D-19 shutdown (P1-IN-01): the
-	// armed channel is released only after shutdown completes, so a second
-	// SIGTERM during the graceful drain is observed as an operator's
-	// hurry-up — it takes the force-stop path — instead of killing the
-	// process with the default disposition and forfeiting the final dump.
-	sig := armSignals()
-	err = serve(node, listener, sig)
-	if err != nil {
-		log.Fatalf("sup-kv: grpc serve exited before the shutdown signal: %v", err)
+	serveErr := rt.serve(node, listener, sig)
+	if serveErr != nil {
+		slog.Error("Serve failed", "detail", serveErr.Error())
 	}
-	err = shutdown(node, sig) // D-19: the order is the contract
-	signal.Stop(sig)
-	if err != nil {
-		log.Printf("sup-kv: %v", err)
-		os.Exit(exitDumpFailed)
+	shutdownErr := rt.shutdown(node, sig) // D-19: the order is the contract
+	if shutdownErr != nil {
+		slog.Error("Final dump failed", "detail", shutdownErr.Error())
 	}
-	os.Exit(0)
+	rt.stopSignals(sig)
+	switch {
+	case shutdownErr != nil:
+		return exitDumpFailed
+	case serveErr != nil:
+		return exitStartup
+	default:
+		return 0
+	}
+}
+
+// productionRuntime assembles run's seam from the real lifecycle functions.
+func productionRuntime() runtime {
+	return runtime{
+		installSignals: armSignals,
+		stopSignals:    signal.Stop,
+		wire:           wire,
+		serve:          serve,
+		shutdown:       shutdown,
+	}
 }
 
 // usageError reports a configuration error through the usage path: the error
@@ -353,7 +433,10 @@ func wire(cfg config.Config) (*wired, net.Listener, error) {
 	adapter, err := newReplicationAdapter(cfg, engine)
 	if err != nil {
 		engineCancel()
-		return nil, nil, fmt.Errorf("bind replication socket: %w", err)
+		return nil, nil, &startupError{
+			stage: stageReplicationBind,
+			err:   fmt.Errorf("bind replication socket: %w", err),
+		}
 	}
 	// XPORT-05 startup evidence: the EFFECTIVE (kernel-doubled, clamped)
 	// buffer sizes, never the requested constants — the adapter read them
@@ -387,7 +470,7 @@ func wire(cfg config.Config) (*wired, net.Listener, error) {
 	listener, gs, err := listenGRPC(cfg.GRPCAddr, srv, grpcapi.LimitsFor(cfg.ValueMaxBytes))
 	if err != nil {
 		abortWire(engineCancel, replCancel, apiCancel, nil)
-		return nil, nil, err
+		return nil, nil, &startupError{stage: stageGRPCListen, err: err}
 	}
 
 	var metricsSrv *http.Server
@@ -395,7 +478,7 @@ func wire(cfg config.Config) (*wired, net.Listener, error) {
 		metricsSrv, err = listenMetrics(cfg, metricsSources(adapter, engine))
 		if err != nil {
 			abortWire(engineCancel, replCancel, apiCancel, listener)
-			return nil, nil, err
+			return nil, nil, &startupError{stage: stageMetricsListen, err: err}
 		}
 	}
 
@@ -527,8 +610,8 @@ func listenGRPC(grpcAddr string, srv *grpcapi.Server, limits grpcapi.TransportLi
 // armSignals takes ownership of SIGTERM/SIGINT for the whole run — serving
 // and the D-19 shutdown alike (P1-IN-01). The buffered channel holds the
 // first signal for serve and a possible second for shutdown's force path,
-// and nothing restores the default disposition until [signal.Stop] runs in
-// main after the final dump, so no repeated signal can kill the process
+// and nothing restores the default disposition until run stops the channel
+// after the final dump, so no repeated signal can kill the process
 // mid-shutdown.
 func armSignals() chan os.Signal {
 	sig := make(chan os.Signal, signalBuffer)
@@ -541,8 +624,7 @@ func armSignals() chan os.Signal {
 // deliberately outlives serve — releasing it here would re-arm the default
 // disposition and let a second signal kill the D-19 shutdown with no final
 // dump, the P1-IN-01 regression). A Serve failure before any signal is an
-// error return: the node cannot do its one job, and main decides the
-// verdict.
+// error return: the node cannot do its one job, and run decides the verdict.
 func serve(node *wired, listener net.Listener, sig <-chan os.Signal) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- node.gs.Serve(listener) }()
@@ -579,8 +661,9 @@ func serve(node *wired, listener net.Listener, sig <-chan os.Signal) error {
 // ErrUnconfirmed instead of hanging the process, and the engineDone wait is
 // a select against a grace timer — a dumper still stuck in the kernel at
 // process exit is abandoned with one WARN, which is the deliberate choice
-// over an unkillable shutdown. A flush error keeps the exit-code-1 path: a
-// clean exit still means the final dump was confirmed.
+// over an unkillable shutdown. A flush error returns the failed-final-dump
+// error and run maps it to exit code 3: a clean exit still means the final
+// dump was confirmed.
 //
 // A second SIGTERM/SIGINT observed on sig while GracefulStop drains is an
 // operator's hurry-up: it takes the same force path as the grace deadline
@@ -649,5 +732,5 @@ func awaitEngineStop(done <-chan error, grace time.Duration) {
 // commit and the Go runtime version, "dev" standing in for unstamped
 // fields.
 func printVersion() {
-	fmt.Printf("sup-kv %s %s %s\n", version, commit, runtime.Version())
+	fmt.Printf("sup-kv %s %s %s\n", version, commit, goruntime.Version())
 }

@@ -1010,6 +1010,51 @@ func TestMain_duplicateBind(t *testing.T) {
 	}
 }
 
+// TestMain_fatalBindLoggedAtError pins D-06's silent-exit fix at the binary
+// boundary: a fatal bind at SUPKV_LOG_LEVEL=error exits 1 AND leaves exactly
+// one parsed ERROR record naming the startup stage. The pre-D-06 log.Fatalf
+// rendered as an INFO record through slog.SetDefault and vanished at error
+// level, exiting 1 with no explanation (review O-01).
+func TestMain_fatalBindLoggedAtError(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	// Occupy one explicit loopback address, exactly as TestMain_duplicateBind
+	// does: a plain datagram bind sets no SO_REUSEADDR, so the binary's
+	// production bind must be refused by the kernel.
+	occupier, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a loopback udp4 address: %v", err)
+	}
+	t.Cleanup(func() { _ = occupier.Close() })
+	occupied := occupier.LocalAddr().(*net.UDPAddr)
+
+	out, err := runToCompletion(t, bin, []string{"SUPKV_LOG_LEVEL=error"},
+		"--node-id=1",
+		"--bind-addr="+occupied.String(),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(occupied.Port),
+		"--grpc-addr=127.0.0.1:"+strconv.Itoa(freeTCPPort(t)),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+	)
+	assertExitCode(t, err, exitStartupCode)
+
+	var errRecords []logRecord
+	for _, record := range parseLogRecords(out) {
+		if record.Level == "ERROR" {
+			errRecords = append(errRecords, record)
+		}
+	}
+	if len(errRecords) != 1 {
+		t.Fatalf("a fatal bind at SUPKV_LOG_LEVEL=error produced %d parsed ERROR records, want exactly 1:\n%s", len(errRecords), out)
+	}
+	if errRecords[0].Msg != "Startup failed" {
+		t.Fatalf("the fatal-bind ERROR record msg = %q, want %q:\n%s", errRecords[0].Msg, "Startup failed", out)
+	}
+	if errRecords[0].Stage == "" {
+		t.Fatalf("the fatal-bind ERROR record names no stage:\n%s", out)
+	}
+}
+
 // TestMain_lifecycle drives the whole node lifecycle through the real
 // binary: the startup gate opens (SERVING over real TCP — the timeout path,
 // since a lone node receives no DataSync), a SupKV client Sets and Gets one
@@ -1124,6 +1169,33 @@ func parseSocketBuffersLine(output string) (recv, send int, ok bool) {
 		return *entry.RecvBuf, *entry.SendBuf, true
 	}
 	return 0, 0, false
+}
+
+// logRecord is the one JSON record shape the lifecycle-log tests parse: the
+// level and static message every handler emits, plus the optional stage a
+// startup failure names (D-06).
+type logRecord struct {
+	Level string `json:"level"`
+	Msg   string `json:"msg"`
+	Stage string `json:"stage"`
+}
+
+// parseLogRecords parses every JSON-object line of output, skipping the
+// non-JSON lines a usage error or the binary's own stdout may carry.
+func parseLogRecords(output string) []logRecord {
+	var records []logRecord
+	for line := range strings.SplitSeq(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var record logRecord
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		records = append(records, record)
+	}
+	return records
 }
 
 // TestShutdown_secondSignal pins the P1-IN-01 contract end-to-end: signal
@@ -1241,12 +1313,15 @@ func TestShutdown_secondSignal(t *testing.T) {
 }
 
 // Structured-logging test constants (D-06/D-07/D-08): the broadcast
-// capability probe's wait, and main's configuration-error exit code
-// (exitUsage — the collected env-error path the malformed SUPKV_LOG_* values
-// must abort through, never a silent default).
+// capability probe's wait, and the D-06 exit table observed at the binary
+// boundary — 1 for a startup or Serve failure, 2 for a usage/configuration
+// error (the collected env-error path the malformed SUPKV_LOG_* values must
+// abort through, never a silent default) and 3 for a failed final dump.
 const (
 	logProbeWait        = 300 * time.Millisecond
+	exitStartupCode     = 1
 	exitUsageCode       = 2
+	exitDumpFailedCode  = 3
 	datagramCeilingLine = "datagram ceiling"
 
 	// startupGateRangeProbe bounds the non-positive startup-gate rows: the
