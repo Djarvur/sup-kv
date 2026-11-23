@@ -504,11 +504,13 @@ func (a *Adapter) logReadError(err error) {
 // flush encodes and sends every outbound message the core emitted for the
 // just-handled event: broadcast to the configured broadcast address,
 // unicast to the handle resolved through [net.ResolveUDPAddr] — handles are
-// opaque to the core; only here do they become addresses (D-03). Each
-// encode-successful message counts into its SentByType kind (OBS-01) — the
-// datagram is on its way to the socket; an encode failure counts nowhere.
-// Failures are logged, never panics: a transient send error must not take
-// the node down.
+// opaque to the core; only here do they become addresses (D-03). A message
+// counts into its SentByType kind only AFTER the socket accepted it
+// (OBSV-03, D-05): an encode failure, a unicast resolve failure and a failed
+// WriteToUDP count nowhere. "Sent" means the datagram was successfully
+// handed to the socket, never that it was delivered — UDP sent is not
+// delivery. Failures are logged, never panics: a transient send error must
+// not take the node down.
 func (a *Adapter) flush(out *port.Outbox) {
 	for _, ob := range out.Drain() {
 		datagram, err := encodeDatagram(a.nodeID, a.runID, ob.Msg)
@@ -516,23 +518,29 @@ func (a *Adapter) flush(out *port.Outbox) {
 			a.log(err.Error())
 			continue
 		}
-		a.countSent(ob.Msg)
+		var addr *net.UDPAddr
 		if ob.Broadcast {
-			a.write(datagram, a.broadcastAddr)
-			continue
+			addr = a.broadcastAddr
+		} else {
+			addr, err = net.ResolveUDPAddr("udp4", ob.To)
+			if err != nil {
+				a.log(fmt.Sprintf("udprepl: resolve unicast handle %q: %v", ob.To, err))
+				continue
+			}
 		}
-		addr, err := net.ResolveUDPAddr("udp4", ob.To)
+		err = a.write(datagram, addr)
 		if err != nil {
-			a.log(fmt.Sprintf("udprepl: resolve unicast handle %q: %v", ob.To, err))
-			continue
+			continue // write already logged; a refused datagram was never sent.
 		}
-		a.write(datagram, addr)
+		a.countSent(ob.Msg)
 	}
 }
 
 // countSent adds one to the message kind's send counter (OBS-01) — the
-// five-kind vocabulary of the wire Body oneof, counted in flush where every
-// outbound message crosses the encode step on the event-loop goroutine.
+// five-kind vocabulary of the wire Body oneof. It is called only after
+// [Adapter.write] returned nil (OBSV-03, D-05): the counter means datagrams
+// successfully handed to the socket, by message type, not datagrams the
+// adapter tried to emit.
 func (a *Adapter) countSent(msg port.Message) {
 	switch msg.(type) {
 	case port.Hello:
@@ -548,12 +556,15 @@ func (a *Adapter) countSent(msg port.Message) {
 	}
 }
 
-// write sends one datagram to addr, logging (never panicking on) a failure.
-func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) {
+// write sends one datagram to addr and returns the socket's verdict, logging
+// (never panicking on) a failure — flush counts the send only on a nil
+// return (OBSV-03, D-05).
+func (a *Adapter) write(datagram []byte, addr *net.UDPAddr) error {
 	_, err := a.conn.WriteToUDP(datagram, addr)
 	if err != nil {
 		a.log(fmt.Sprintf("udprepl: send to %s: %v", addr, err))
 	}
+	return err
 }
 
 // armTimer re-arms (or first creates) t for the next deadline and returns
