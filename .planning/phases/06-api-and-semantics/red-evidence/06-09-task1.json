@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./cmd/sup-kv/ -run '^TestAPIDoc$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestAPIDoc\n=== PAUSE TestAPIDoc\n=== CONT  TestAPIDoc\n    api_docs_test.go:73: read ../../docs/API.md: open ../../docs/API.md: no such file or directory\n--- FAIL: TestAPIDoc (0.00s)\nFAIL\nsup-kv smoke: tests failed with code 1\nFAIL\tgithub.com/Djarvur/sup-kv/cmd/sup-kv\t0.687s\nFAIL\n",
+  "targetTest": "TestAPIDoc",
+  "targetFile": "cmd/sup-kv/api_docs_test.go",
+  "expected": "docs/API.md exists and carries the Task 1 anchors: the title, the public proto section (import path, supkvapi.v1, SupKVService, make proto), the wait_for_replication section (write-time peer set, zero known peers, acked=false, total_peers=0, Superseded, wait_timeout_ms, caller-bounded) and the List pagination section (page_size, page_token, next_page_token, byte-wise, position, unset, legacy, keys only, 256, 6 MiB, empty token).",
+  "actual": "cmd/sup-kv/api_docs_test.go compiled and ran, and TestAPIDoc failed at api_docs_test.go:73 with 'read ../../docs/API.md: open ../../docs/API.md: no such file or directory' — docs/API.md does not exist yet.",
+  "semanticAssessment": "The target test compiled cleanly and failed on the planned precondition: the guarded document is absent. No fixture, discovery, build or unrelated failure is present, so the run is a valid RED for the Task 1 deliverable (the document and its anchor guard)."
+}
