@@ -73,8 +73,9 @@ type Clock struct {
 // counterMax) instead of bumping l out of the domain, so writes at the
 // exhausted domain may repeat versions: an honest, documented degradation,
 // never a wrap to zero. driftWarn bounds the
-// tolerated divergence between l and the wall clock before Tick and Update
-// report a drift signal; driftWarn less than or equal to zero disables the
+// tolerated divergence before Tick and Update report a drift signal — Tick
+// measures its own l against the wall clock, Update the received reading
+// against it (OBSV-05); driftWarn less than or equal to zero disables the
 // signal.
 func NewClock(now func() time.Time, initialL int64, initialC uint16, driftWarn time.Duration) *Clock {
 	return &Clock{l: min(max(initialL, 0), maxL), c: initialC & counterMask, now: now, driftWarn: driftWarn}
@@ -113,15 +114,19 @@ func (c *Clock) Tick() (l int64, counter uint16, drift time.Duration) {
 // per the Kulkarni receive rule: l becomes the maximum of the local l, the
 // remote l and the wall clock — saturated at the maxL domain ceiling (see
 // NewClock) — and the counter is picked so the next local
-// Tick beats the remote reading. The drift signal follows the Tick
-// convention. A remote counter above the 12-bit range is masked, so Update
+// Tick beats the remote reading. The drift signal is the RECEIVED reading's
+// lead against the wall clock (OBSV-05): positive when remoteL leads the
+// wall beyond driftWarn, zero within tolerance including exactly driftWarn,
+// and negative when the wall clock jumped past remoteL beyond driftWarn — a
+// reading the core never counts. Tick keeps the separate local-versus-wall
+// diagnostic. A remote counter above the 12-bit range is masked, so Update
 // is total over every input.
 func (c *Clock) Update(remoteL int64, remoteC uint16) (l int64, counter uint16, drift time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	remoteC &= counterMask
 	ptMs := c.now().UnixMilli()
-	drift = driftBetween(c.l, ptMs, c.driftWarn)
+	drift = driftBetween(remoteL, ptMs, c.driftWarn)
 	newL := max(c.l, remoteL, ptMs)
 	newL = min(newL, maxL) // a wall or remote reading beyond the domain saturates.
 	switch {
