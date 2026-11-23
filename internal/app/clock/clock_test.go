@@ -492,11 +492,17 @@ func TestClock_watermarkClampedIntoDomain(t *testing.T) {
 	})
 }
 
-// TestClock_driftSignal covers the signed drift contract: zero within
-// tolerance including exactly DriftWarn out, positive when l runs ahead of
-// the wall clock beyond DriftWarn, negative on a forward wall-clock jump
-// beyond DriftWarn past l, and always zero when DriftWarn is disabled
-// (VERS-05, D-01).
+// TestClock_driftSignal covers the signed drift contract per operation. Tick
+// reports the local-versus-wall divergence (its operand is the clock's own
+// l): zero within tolerance including exactly DriftWarn out, positive when l
+// runs ahead of the wall clock beyond DriftWarn, negative on a forward
+// wall-clock jump beyond DriftWarn past l. Update reports the RECEIVED
+// reading's lead (its operand is remoteL, never the local l): positive when
+// the received version leads the wall beyond DriftWarn — the OBSV-05 warning
+// source — zero within tolerance including exactly DriftWarn, and negative
+// when the wall clock jumped past the received reading beyond DriftWarn, a
+// reading the core never counts. Both ops return zero when DriftWarn is
+// disabled (VERS-05, D-01, OBSV-05).
 func TestClock_driftSignal(t *testing.T) {
 	t.Parallel()
 	warnMs := int64(testDriftWarn / time.Millisecond)
@@ -505,6 +511,7 @@ func TestClock_driftSignal(t *testing.T) {
 		name     string
 		op       string
 		initialL int64
+		remoteL  int64
 		nowMs    int64
 		warn     time.Duration
 		want     time.Duration
@@ -540,19 +547,39 @@ func TestClock_driftSignal(t *testing.T) {
 			warn: -time.Minute, want: 0,
 		},
 		{
-			name: "update: l one ms beyond DriftWarn ahead of the wall is positive",
-			op:   "update", initialL: testNowMs + warnMs + 1, nowMs: testNowMs,
+			name: "update: received reading exactly DriftWarn ahead of the wall is within tolerance",
+			op:   "update", remoteL: testNowMs + warnMs, nowMs: testNowMs,
+			warn: testDriftWarn, want: 0,
+		},
+		{
+			name: "update: received reading one ms beyond DriftWarn ahead is positive",
+			op:   "update", remoteL: testNowMs + warnMs + 1, nowMs: testNowMs,
 			warn: testDriftWarn, want: beyond,
 		},
 		{
-			name: "update: a forward wall jump beyond DriftWarn past l is negative",
-			op:   "update", initialL: testNowMs, nowMs: testNowMs + warnMs + 1,
+			name: "update: a received reading behind the wall is never a warning",
+			op:   "update", remoteL: testNowMs - 1, nowMs: testNowMs,
+			warn: testDriftWarn, want: 0,
+		},
+		{
+			name: "update: a local l far ahead does not move the received-lead signal",
+			op:   "update", initialL: testNowMs + warnMs + 1, remoteL: testNowMs, nowMs: testNowMs,
+			warn: testDriftWarn, want: 0,
+		},
+		{
+			name: "update: a forward wall jump beyond DriftWarn past the received reading is negative",
+			op:   "update", remoteL: testNowMs, nowMs: testNowMs + warnMs + 1,
 			warn: testDriftWarn, want: -beyond,
 		},
 		{
-			name: "update: DriftWarn of zero disables the signal",
-			op:   "update", initialL: testNowMs + 3600_000, nowMs: testNowMs,
+			name: "update: DriftWarn of zero disables the signal even an hour out",
+			op:   "update", remoteL: testNowMs + 3600_000, nowMs: testNowMs,
 			warn: 0, want: 0,
+		},
+		{
+			name: "update: negative DriftWarn disables the signal even an hour out",
+			op:   "update", remoteL: testNowMs + 3600_000, nowMs: testNowMs,
+			warn: -time.Minute, want: 0,
 		},
 	}
 	for _, tt := range tests {
@@ -564,7 +591,7 @@ func TestClock_driftSignal(t *testing.T) {
 			case "tick":
 				_, _, drift = clk.Tick()
 			case "update":
-				_, _, drift = clk.Update(tt.nowMs, 0)
+				_, _, drift = clk.Update(tt.remoteL, 0)
 			default:
 				t.Fatalf("unknown op %q", tt.op)
 			}
@@ -598,12 +625,12 @@ func TestClock_driftSignalSaturates(t *testing.T) {
 			t.Errorf("drift after a maxL Merge = %v, want a saturated reading >= %v", drift, floor)
 		}
 	})
-	t.Run("update from a saturated clock reports a saturated positive drift", func(t *testing.T) {
+	t.Run("update from a far-ahead received reading reports a saturated positive drift", func(t *testing.T) {
 		t.Parallel()
-		clk := clock.NewClock(fixedNow(testNowMs), maxL, 0, testDriftWarn)
-		_, _, drift := clk.Update(testNowMs, 0)
+		clk := clock.NewClock(fixedNow(testNowMs), 0, 0, testDriftWarn)
+		_, _, drift := clk.Update(maxL, 0)
 		if drift <= 0 || drift < floor {
-			t.Errorf("drift at maxL = %v, want a saturated reading >= %v", drift, floor)
+			t.Errorf("drift on a maxL received reading = %v, want a saturated reading >= %v", drift, floor)
 		}
 	})
 	t.Run("a pre-epoch wall reading reads positive, not sign-flipped", func(t *testing.T) {

@@ -1293,12 +1293,12 @@ func TestStore_observeMonotone(t *testing.T) {
 	}
 }
 
-// TestStore_observeReturnsDrift pins the drift return: the signal is the
-// clock's own divergence from the wall clock at the event (the Kulkarni
-// receive rule absorbs the remote reading first), exactly like Merge's
-// return. An in-tolerance observation returns zero; a stamp beyond the
-// drift-warn threshold drives a nonzero reading on the observation AFTER
-// its absorption (the absorb-then-warn sequence TestMergeStats_counts pins).
+// TestStore_observeReturnsDrift pins the drift return to the RECEIVED
+// reading: the signal is the received stamp's lead against the wall clock at
+// the event, exactly like Merge's return (OBSV-05, D-02). An in-tolerance
+// observation returns zero, and a stamp beyond the drift-warn threshold
+// returns a positive drift on its FIRST observation — the signal depends on
+// the stamp, not on prior absorption — and stays positive on a repeat.
 func TestStore_observeReturnsDrift(t *testing.T) {
 	t.Parallel()
 
@@ -1315,7 +1315,7 @@ func TestStore_observeReturnsDrift(t *testing.T) {
 		}
 	})
 
-	t.Run("a version beyond the drift threshold drives a nonzero drift after its absorption", func(t *testing.T) {
+	t.Run("a far-ahead version returns a positive drift on the first observation", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
 		_, _, err := store.Set("seat", []byte("seat"))
@@ -1323,11 +1323,11 @@ func TestStore_observeReturnsDrift(t *testing.T) {
 			t.Fatalf("seed Set() error = %v, want nil", err)
 		}
 		far := version.PackVersion(testNowMs+int64(testDriftWarn/time.Millisecond)+1000, 0, nodeB)
-		if drift := store.Observe(far); drift != 0 {
-			t.Fatalf("first Observe(far) drift = %v, want 0 (the stamp is absorbed, not yet warned)", drift)
+		if drift := store.Observe(far); drift <= 0 {
+			t.Fatalf("first Observe(far) drift = %v, want a positive warning past the threshold", drift)
 		}
 		if drift := store.Observe(far); drift <= 0 {
-			t.Fatalf("second Observe(far) drift = %v, want a positive warning past the threshold", drift)
+			t.Fatalf("repeat Observe(far) drift = %v, want a positive warning — the signal depends on the stamp", drift)
 		}
 	})
 }
