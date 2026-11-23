@@ -932,6 +932,13 @@ type Core struct {
 	// it (no adapter mirror this phase).
 	notificationsRegressed uint64
 
+	// pendingVisits counts every pending entry the core's whole-set loops
+	// inspect — the deterministic, load-independent measure of the scan
+	// surface the XPORT-02/PERF-05 flatness gates assert. Driver-goroutine-only
+	// mutation behind the copying PendingVisits accessor; it is a test seam,
+	// never a published metric.
+	pendingVisits uint64
+
 	// The listing accumulator (PROTO-01): one syncStream per
 	// (peer, run, sync_id) round, bounded by maxSyncStreams,
 	// maxSyncEntriesPerStream and maxSyncEntriesTotal; syncEntries is the
@@ -1501,6 +1508,7 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 		return
 	}
 	for _, pk := range sortedPendingKeys(c.pending) {
+		c.pendingVisits++
 		entry := c.pending[pk]
 		// The flush re-arms the ladder and queues the record send so the new
 		// peer receives the pending set, but it deliberately does NOT add the
@@ -1657,6 +1665,7 @@ func (c *Core) applyRemote(
 	// version — the displaced write's resolution is an honest false
 	// (XPORT-12).
 	for pk := range c.pending {
+		c.pendingVisits++
 		if pk.key != msg.Key {
 			continue
 		}
@@ -2968,6 +2977,7 @@ func (c *Core) scanRetransmit(now time.Time) {
 	due := c.popDueRetries(now)
 	slices.SortFunc(due, compareRetryItems)
 	for _, item := range due {
+		c.pendingVisits++
 		c.enqueueRecordSend(now, item.pk, true)
 	}
 }
@@ -3319,6 +3329,16 @@ func (c *Core) PacedSends() uint64 {
 	return c.pacedSends
 }
 
+// PendingVisits returns how many pending entries the core's whole-set loops
+// have inspected since construction — the deterministic cost seam for the
+// XPORT-02/PERF-05 flatness gates. It counts inspections of pending entries,
+// never handler calls or emissions, and it is a test seam: deliberately not a
+// published metric and not mirrored by the adapter. Driver-goroutine-only,
+// like every other core counter.
+func (c *Core) PendingVisits() uint64 {
+	return c.pendingVisits
+}
+
 // PeerCount returns the number of known peers — the O(1) peer-table gauge
 // the production adapter's per-event mirror reads (RESEARCH Pitfall 8: the
 // copying PeerSnapshot allocates a whole map per call and is fit for tests
@@ -3428,6 +3448,7 @@ func (c *Core) removePending(pk pendingKey) {
 // the pending set, never the store — see NotifyLocalWrite for why.
 func (c *Core) trackedVersion(key string) (version.RecordVersion, bool) {
 	for pk := range c.pending {
+		c.pendingVisits++
 		if pk.key == key {
 			return pk.version, true
 		}
@@ -3443,6 +3464,7 @@ func (c *Core) trackedVersion(key string) (version.RecordVersion, bool) {
 // write learns its version lost to a newer local write (XPORT-12).
 func (c *Core) removeSupersededLocal(key string, newer version.RecordVersion, out *port.Outbox) {
 	for pk := range c.pending {
+		c.pendingVisits++
 		if pk.key == key && pk.version.Compare(newer) < 0 {
 			out.Superseded(pk.key, pk.version)
 			c.removePending(pk)
