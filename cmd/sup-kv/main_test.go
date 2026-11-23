@@ -1274,6 +1274,183 @@ func gateOpenRecords(output string) []logRecord {
 	return records
 }
 
+// TestMain_startupLogRecord pins the D-01 startup record at the binary
+// boundary: one parsed "Starting sup-kv" INFO record carries the build
+// identity and the effective configuration, and no certificate/key key ever
+// reaches it (T-07-21).
+func TestMain_startupLogRecord(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	bind := "0.0.0.0:" + strconv.Itoa(udpPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+
+	node := startLoggedNode(t, bin, []string{"SUPKV_LOG_FORMAT=json", "SUPKV_LOG_LEVEL=info"},
+		"--node-id=1",
+		"--bind-addr="+bind,
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
+	)
+	awaitServing(t, addr, servingDeadline)
+
+	var record map[string]any
+	waitFor(t, servingDeadline, "the Starting sup-kv record", func() bool {
+		found, ok := findLogMap(node.stderr.String(), "Starting sup-kv")
+		record = found
+		return ok
+	})
+	if got, ok := record["level"]; !ok || got != "INFO" {
+		t.Fatalf("the startup record level = %v (present %t), want INFO:\n%v", got, ok, record)
+	}
+	for key, want := range map[string]any{
+		"version":        "dev",
+		"node_id":        float64(1),
+		"bind_addr":      bind,
+		"dump_path":      dumpPath,
+		"max_clock_lead": "2m0s",
+		"metrics_tls":    false,
+	} {
+		if got, ok := record[key]; !ok || got != want {
+			t.Fatalf("startup record[%q] = %v (present %t), want %v:\n%v", key, got, ok, want, record)
+		}
+	}
+	if got, ok := record["go_version"]; !ok || got == "" {
+		t.Fatalf("startup record[go_version] = %v (present %t), want a non-empty runtime version:\n%v", got, ok, record)
+	}
+	for _, forbidden := range []string{"metrics_cert", "metrics_key", "metrics_client_ca"} {
+		if _, present := record[forbidden]; present {
+			t.Fatalf("the startup record carries the secret-bearing key %q, want it absent:\n%v", forbidden, record)
+		}
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the startup-record run")
+}
+
+// TestMain_startupLogLoadOutcome pins the D-01 load-outcome record across a
+// real restart: a fresh directory logs exactly one INFO "Dump load" with
+// outcome=prompt and records=0 and, after the first run's final dump carries
+// a committed key, the second run logs exactly one with outcome=main and
+// records >= 1.
+func TestMain_startupLogLoadOutcome(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	env := []string{"SUPKV_LOG_FORMAT=json", "SUPKV_LOG_LEVEL=info"}
+	flags := func(addr string) []string {
+		return []string{
+			"--node-id=1",
+			"--bind-addr=0.0.0.0:" + strconv.Itoa(freeUDPPort(t)),
+			"--broadcast-addr=127.255.255.255:" + strconv.Itoa(freeUDPPort(t)),
+			"--dump-path=" + dumpPath,
+			"--grpc-addr=" + addr,
+			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
+		}
+	}
+
+	firstAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	first := startLoggedNode(t, bin, env, flags(firstAddr)...)
+	awaitServing(t, firstAddr, servingDeadline)
+	waitFor(t, servingDeadline, "the fresh start's Dump load record", func() bool {
+		return countLogMaps(first.stderr.String(), "Dump load") == 1
+	})
+	prompt := assertOneLoadRecord(t, first.stderr.String(), "prompt")
+	if got := prompt["records"]; got != float64(0) {
+		t.Fatalf("fresh-start Dump load records = %v, want 0", got)
+	}
+
+	// Commit one key so the first run's final dump carries a record for the
+	// restart to load.
+	client := apiproto.NewSupKVServiceClient(supKVConn(t, firstAddr))
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	t.Cleanup(cancel)
+	_, err := client.Set(ctx, &apiproto.SetRequest{Key: smokeKey, Value: []byte(smokeValue)})
+	if err != nil {
+		t.Fatalf("Set(%q): %v", smokeKey, err)
+	}
+	signalAndWaitExit(t, first)
+	assertNoPanic(t, first, "the fresh-start run")
+
+	secondAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	second := startLoggedNode(t, bin, env, flags(secondAddr)...)
+	awaitServing(t, secondAddr, servingDeadline)
+	waitFor(t, servingDeadline, "the restart's Dump load record", func() bool {
+		return countLogMaps(second.stderr.String(), "Dump load") == 1
+	})
+	mainRecord := assertOneLoadRecord(t, second.stderr.String(), "main")
+	if got, ok := mainRecord["records"].(float64); !ok || got < 1 {
+		t.Fatalf("restart Dump load records = %v, want at least 1 — the first run's dump must be loaded", mainRecord["records"])
+	}
+	signalAndWaitExit(t, second)
+	assertNoPanic(t, second, "the load-outcome restart")
+}
+
+// assertOneLoadRecord requires exactly one parsed "Dump load" record and the
+// expected outcome token, returning its attributes for field assertions.
+func assertOneLoadRecord(t *testing.T, output, wantOutcome string) map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, record := range parseLogMaps(output) {
+		if record["msg"] == "Dump load" {
+			records = append(records, record)
+		}
+	}
+	if len(records) != 1 {
+		t.Fatalf("%d Dump load record(s), want exactly 1:\n%s", len(records), output)
+	}
+	if got := records[0]["outcome"]; got != wantOutcome {
+		t.Fatalf("Dump load outcome = %v, want %q:\n%v", got, wantOutcome, records[0])
+	}
+	return records[0]
+}
+
+// countLogMaps returns how many parsed records carry msg.
+func countLogMaps(output, msg string) int {
+	count := 0
+	for _, record := range parseLogMaps(output) {
+		if record["msg"] == msg {
+			count++
+		}
+	}
+	return count
+}
+
+// parseLogMaps parses every JSON-object line of output into its raw
+// attribute map — the shape field-level assertions read when a fixed struct
+// would not cover every catalog key.
+func parseLogMaps(output string) []map[string]any {
+	var records []map[string]any
+	for line := range strings.SplitSeq(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+// findLogMap returns the first parsed record whose msg equals msg.
+func findLogMap(output, msg string) (map[string]any, bool) {
+	for _, record := range parseLogMaps(output) {
+		if record["msg"] == msg {
+			return record, true
+		}
+	}
+	return nil, false
+}
+
 // parseSocketBuffersLine extracts recv_buf and send_buf from the startup
 // "Socket buffers" JSON log line. ok reports the line appeared with both
 // integer attrs present; the caller asserts their positivity.

@@ -104,6 +104,18 @@ func startupStage(err error) string {
 // load failure contributes: its path, its cause and its preservation error.
 const loadFailureAttrsPerCandidate = 3
 
+// The startup/load catalog's stable outcome and generation tokens (D-01):
+// every start's one load record carries them, so the values are constants
+// rather than repeated literals.
+const (
+	loadTokenPrompt   = "prompt"
+	loadTokenMain     = "main"
+	loadTokenBackup   = "backup"
+	loadTokenUnusable = "unusable"
+	loadTokenPrev     = "prev"
+	loadTokenNone     = "none"
+)
+
 // shutdownGrace bounds GracefulStop during the D-19 shutdown: past it,
 // gs.Stop() force-closes whatever is still open (T-05-10 — a hang here
 // would leave committed data only in memory when the supervisor SIGKILLs).
@@ -182,6 +194,11 @@ func main() {
 	// node would send broadcasts but never receive them.
 	warnOnNonWildcardBind(cfg.BindAddr)
 
+	// The operator's first record (D-01, OBSV-01): what this binary is and
+	// every effective knob, secrets-free. It precedes wire, so a bind failure
+	// still has a preceding Starting record at info level.
+	logStartup(cfg)
+
 	os.Exit(run(cfg, productionRuntime()))
 }
 
@@ -257,6 +274,46 @@ func setupLogging(cfg config.Config) {
 		h = slog.NewTextHandler(os.Stderr, opts)
 	}
 	slog.SetDefault(slog.New(h))
+}
+
+// logStartup emits the lifecycle catalog's first record (D-01, OBSV-01): the
+// build identity and every effective configuration value, so an operator can
+// reconstruct what the node is and how it was launched from one line. Empty
+// values are logged as empty — an unset metrics address is meaningful — and
+// the certificate/key material is deliberately absent: only the metrics
+// address and whether TLS is on cross this boundary, never the env-only
+// cert/key/CA paths or their contents (T-07-21).
+func logStartup(cfg config.Config) {
+	slog.Info("Starting sup-kv",
+		"version", version,
+		"commit", commit,
+		"go_version", goruntime.Version(),
+		"node_id", cfg.NodeID,
+		"bind_addr", cfg.BindAddr,
+		"broadcast_addr", cfg.BroadcastAddr,
+		"dump_path", cfg.DumpPath,
+		"grpc_addr", cfg.GRPCAddr,
+		"metrics_addr", cfg.MetricsAddr,
+		"metrics_tls", cfg.MetricsCert != "",
+		"value_max_bytes", cfg.ValueMaxBytes,
+		"sync_chunk_bytes", cfg.SyncChunkBytes,
+		"sync_response_rate", cfg.SyncResponseRate,
+		"startup_gate", cfg.StartupGate.String(),
+		"startup_gate_empty", cfg.StartupGateEmpty.String(),
+		"wait_timeout", cfg.WaitTimeout.String(),
+		"hello_interval", cfg.HelloInterval.String(),
+		"peer_timeout", cfg.PeerTimeout.String(),
+		"ack_timeout", cfg.AckTimeout.String(),
+		"ack_timeout_max", cfg.AckTimeoutMax.String(),
+		"retransmit_interval", cfg.RetransmitInterval.String(),
+		"sync_interval", cfg.SyncInterval.String(),
+		"max_clock_lead", cfg.MaxClockLead.String(),
+		"dump_debounce", cfg.DumpDebounce.String(),
+		"dump_max_wait", cfg.DumpMaxWait.String(),
+		"drift_warn", cfg.DriftWarn.String(),
+		"log_level", cfg.LogLevel.String(),
+		"log_format", cfg.LogFormat,
+	)
 }
 
 // warnOnNonWildcardBind emits XPORT-09's one startup WARN when --bind-addr
@@ -374,7 +431,7 @@ func startEngine(cfg config.Config, hub *grpcapi.WatchHub) (*persist.Engine, con
 		},
 	})
 	stats := engine.LoadStats()
-	logLoadStats(stats)
+	logLoadStats(stats, engine.KeyCount())
 	if skipped := stats.Decoded.ValueLimit; skipped > 0 {
 		slog.Warn("Dumped records skipped by the configured value limit",
 			"count", skipped,
@@ -396,20 +453,31 @@ func logDiscardedRecords(count int) {
 	log.Printf("sup-kv: discarded %d undecodable dumped records at startup", count)
 }
 
-// logLoadStats reports one startup load in the one-line-per-class policy
-// (D-02, PERSIST-02/PERSIST-09): a Backup emits exactly one WARN naming the
-// main generation's path, cause and preservation error; an Unusable exactly
-// one ERROR carrying one attribute group per candidate that actually failed
-// — one or two, never a phantom — and both are silent for Prompt and Main.
-// A non-zero sweep count is one INFO and a sweep error one WARN; a clean
-// start therefore logs nothing here.
-func logLoadStats(stats persist.LoadStats) {
+// logLoadStats reports one startup load in the one-record-per-class policy
+// (D-02, PERSIST-02/PERSIST-09, OBSV-01): a Prompt or Main load is one INFO
+// "Dump load" record; a Backup keeps its single WARN naming the main
+// generation's path, cause and preservation error; an Unusable keeps its
+// single ERROR carrying one attribute group per candidate that actually
+// failed — one or two, never a phantom. All three carry the catalog's four
+// outcome attributes, so one record per start says what was loaded
+// regardless of outcome. A non-zero sweep count is one INFO and a sweep
+// error one WARN; a clean start therefore logs exactly the one load record.
+func logLoadStats(stats persist.LoadStats, records int) {
+	// The catalog's stable per-start attributes (D-01): the outcome token,
+	// the accepted generation, the loaded key count and the decode census.
+	loadAttrs := []any{
+		"outcome", loadOutcomeName(stats.Outcome),
+		"generation", loadGenerationName(stats),
+		"records", records,
+		"discarded", stats.Decoded.Total(),
+	}
 	switch stats.Outcome {
 	case port.LoadBackup:
-		logBackupFallback(stats)
+		logBackupFallback(stats, loadAttrs)
 	case port.LoadUnusable:
-		logUnusableGenerations(stats)
+		logUnusableGenerations(stats, loadAttrs)
 	case port.LoadPrompt, port.LoadMain:
+		slog.Info("Dump load", loadAttrs...)
 	}
 	if stats.Swept > 0 {
 		slog.Info("Orphan temp sweep removed files", "count", stats.Swept)
@@ -419,40 +487,78 @@ func logLoadStats(stats persist.LoadStats) {
 	}
 }
 
-// logBackupFallback emits the one WARN for a .prev fallback. The main
-// candidate is found by scanning Failures by Candidate — never by slice
-// index — so an absent main's recorded fs.ErrNotExist cause is what the line
-// names, and a contract-violating empty list degrades to a path-less WARN
-// instead of an index panic.
-func logBackupFallback(stats persist.LoadStats) {
+// loadOutcomeName renders the port's load outcome as the catalog's stable
+// token: prompt, main, backup or unusable.
+func loadOutcomeName(outcome port.LoadOutcome) string {
+	switch outcome {
+	case port.LoadMain:
+		return loadTokenMain
+	case port.LoadBackup:
+		return loadTokenBackup
+	case port.LoadUnusable:
+		return loadTokenUnusable
+	case port.LoadPrompt:
+		return loadTokenPrompt
+	}
+	return loadTokenPrompt
+}
+
+// loadGenerationName names the report's generation for the load record: the
+// accepted candidate for a main/backup load, and "none" when nothing was
+// accepted (prompt or unusable). The port's zero Generation is GenMain, so
+// the outcome — never the enum value alone — decides whether a generation
+// was accepted.
+func loadGenerationName(stats persist.LoadStats) string {
+	switch stats.Outcome {
+	case port.LoadMain:
+		return loadTokenMain
+	case port.LoadBackup:
+		return loadTokenPrev
+	case port.LoadPrompt, port.LoadUnusable:
+		return loadTokenNone
+	}
+	return loadTokenNone
+}
+
+// logBackupFallback emits the one WARN for a .prev fallback, carrying the
+// catalog's load attributes beside the cause. The main candidate is found by
+// scanning Failures by Candidate — never by slice index — so an absent main's
+// recorded fs.ErrNotExist cause is what the line names, and a
+// contract-violating empty list degrades to a path-less WARN instead of an
+// index panic.
+func logBackupFallback(stats persist.LoadStats, loadAttrs []any) {
 	failure, ok := candidateFailure(stats.Failures, port.GenMain)
 	if !ok {
-		slog.Warn("Dump generation fallback")
+		slog.Warn("Dump generation fallback", loadAttrs...)
 		return
 	}
-	slog.Warn("Dump generation fallback",
+	attrs := append([]any{
 		"main_path", failure.Path,
 		"cause", errorText(failure.Cause),
-		"preserve_error", errorText(failure.PreserveErr))
+		"preserve_error", errorText(failure.PreserveErr),
+	}, loadAttrs...)
+	slog.Warn("Dump generation fallback", attrs...)
 }
 
 // logUnusableGenerations emits the one ERROR for an unusable chain: one
 // <candidate>_path/<candidate>_cause/<candidate>_preserve_error group per
-// failure actually present, in the adapter's chain order. Iterating Failures
-// handles the absent-candidate case by construction — a single corrupt
-// generation yields one group and no phantom .prev entry.
-func logUnusableGenerations(stats persist.LoadStats) {
-	attrs := make([]any, 0, loadFailureAttrsPerCandidate*len(stats.Failures))
+// failure actually present, in the adapter's chain order, followed by the
+// catalog's load attributes. Iterating Failures handles the
+// absent-candidate case by construction — a single corrupt generation yields
+// one group and no phantom .prev entry.
+func logUnusableGenerations(stats persist.LoadStats, loadAttrs []any) {
+	attrs := make([]any, 0, loadFailureAttrsPerCandidate*len(stats.Failures)+len(loadAttrs))
 	for _, failure := range stats.Failures {
-		prefix := "prev"
+		prefix := loadTokenPrev
 		if failure.Candidate == port.GenMain {
-			prefix = "main"
+			prefix = loadTokenMain
 		}
 		attrs = append(attrs,
 			prefix+"_path", failure.Path,
 			prefix+"_cause", errorText(failure.Cause),
 			prefix+"_preserve_error", errorText(failure.PreserveErr))
 	}
+	attrs = append(attrs, loadAttrs...)
 	slog.Error("No usable dump generation", attrs...)
 }
 
