@@ -19,56 +19,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"log/slog"
-	"math"
 	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
-
-	"google.golang.org/protobuf/proto"
 
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
-	replproto "github.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1"
 )
 
-// maxNodeIDWire is the highest node_id the 16-bit NodeID domain admits;
-// an envelope beyond it is schema-malformed and classifies Undecodable.
-const maxNodeIDWire = 0xFFFF
-
-// wireIDSize is the wire size of both the run_id and the RFC 9562
-// RecordVersion fields: exactly 16 bytes each.
-const wireIDSize = 16
-
 const (
-	// datagramBufSize is the one receive buffer size for the socket's
-	// lifetime: 65 507 bytes is the maximum IPv4 UDP payload (65 535 − 20
-	// IP − 8 UDP headers). A smaller buffer silently truncates reads — Go
-	// surfaces no MSG_TRUNC — so large records would arrive as quiet
-	// corruption surfacing only as bad-CRC discards (RESEARCH Pitfall 4).
-	datagramBufSize = 65507
-
-	// socketRecvBuffer and socketSendBuffer are the REQUESTED kernel
-	// socket-buffer sizes. The kernel doubles each request and clamps it to
-	// rmem_max/wmem_max, and getsockopt returns the doubled, clamped value
-	// (RESEARCH Pattern 7); the requested constants are therefore never the
-	// honest socket sizes and never reach the startup log — only the
-	// read-back values do. darwin's ~9 KiB datagram send limit
-	// (net.inet.udp.maxdgram) is documented by ADR 0010, not fixed here.
-	socketRecvBuffer = 4 << 20
-	socketSendBuffer = 1 << 20
-
-	// maxBufferRequestWidth bounds a requested socket-buffer width: the
-	// kernel doubles the request, so a larger request would overflow a
-	// 32-bit int on read-back (T-3-01).
-	maxBufferRequestWidth = math.MaxInt32 / 2
-
 	// inboundQueue bounds the datagrams waiting for the event loop; beyond
 	// it the read goroutine blocks and the socket receive buffer
 	// backpressences the segment.
@@ -92,23 +56,6 @@ const (
 	// log (T-3-36) while the counter carries the reliable signal. Adapter
 	// side, so the wall clock is the sanctioned time source here.
 	readErrorLogInterval = time.Second
-)
-
-// errNoStandaloneBody rejects a port message that has no datagram body of
-// its own on the wire schema.
-var errNoStandaloneBody = errors.New("udprepl: message has no standalone datagram body")
-
-// errBufferRequestRange and errSendBufferTooSmall are the socket-buffer
-// configuration sentinels: the request-width guard (T-3-01) and the
-// one-maximal-datagram send floor (T-3-03) wrap them with the compared
-// sizes, so callers can match the class without parsing the numbers.
-// errUnexpectedSocketType guards the one assertion the udp4 listen path needs
-// ([net.PacketConn] to [*net.UDPConn]): unreachable with the standard library,
-// but a construction failure must return, never panic, if it ever were.
-var (
-	errBufferRequestRange   = errors.New("udprepl: socket buffer request out of range")
-	errSendBufferTooSmall   = errors.New("udprepl: effective send buffer cannot hold one maximal datagram")
-	errUnexpectedSocketType = errors.New("udprepl: unexpected socket type from udp4 listen")
 )
 
 // ErrRunLoopExited is the NotifyLocalWrite verdict once the adapter's event
@@ -212,46 +159,6 @@ func insertPeer(peers []uint16, id uint16) []uint16 {
 		return peers
 	}
 	return slices.Insert(peers, pos, id)
-}
-
-// packetConn is the adapter's socket seam: the datagram operations the
-// replication adapter uses, exactly as [*net.UDPConn] provides them. The
-// interface exists so the receive path can be driven by a fake in the
-// white-box read-loop test (XPORT-08) — a non-closed read error must be
-// provably survivable, and no real socket produces one on demand. LocalAddr
-// joins the read/write/buffer/raw/close set because construction derives the
-// core's own opaque handle from it (D-03).
-type packetConn interface {
-	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
-	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
-	SetReadBuffer(size int) error
-	SetWriteBuffer(size int) error
-	SyscallConn() (syscall.RawConn, error)
-	LocalAddr() net.Addr
-	Close() error
-}
-
-// options is the resolved construction option set — the values [New]
-// threads into its socket construction.
-type options struct {
-	// addressReuse requests SO_REUSEADDR before bind. Test-only: production
-	// never sets it (XPORT-09, T-3-34).
-	addressReuse bool
-}
-
-// Option adjusts one aspect of [New]'s socket construction. The only
-// production-relevant shape is the default: no options at all.
-type Option func(*options)
-
-// WithAddressReuse makes [New] set SO_REUSEADDR before bind, restoring the
-// same-host shared-port topology the real-socket smoke test needs. It is
-// explicitly test-only: in production a second process binding the node's
-// address must fail with EADDRINUSE rather than silently split unicast
-// traffic between two sockets the kernel chooses between (XPORT-09).
-func WithAddressReuse() Option {
-	return func(o *options) {
-		o.addressReuse = true
-	}
 }
 
 // Adapter is the UDP replication adapter for one node: it owns the bound
@@ -451,126 +358,6 @@ func New(bindAddr, broadcastAddr string, nodeID uint16, store repl.StateStore, c
 // operator-configured SUPKV_LOG_LEVEL=debug ever lets a flood reach stderr.
 func logDiscard(class, detail string) {
 	slog.Debug("Discarded datagram", "class", class, "detail", detail)
-}
-
-// listenDatagram binds the udp4 socket. Only when the resolved options ask
-// for address reuse does it set SO_REUSEADDR through a pre-bind Control hook;
-// production resolves the zero options, so a second process binding the same
-// address fails with EADDRINUSE and can never silently split the node's
-// unicast traffic between two sockets (XPORT-09, T-3-34). SO_BROADCAST is
-// deliberately absent: Go sets it on every datagram socket (RESEARCH
-// Pattern 7), and setting it here would only disguise that the reuse option
-// is the sole socket-option concern.
-func listenDatagram(bindAddr string, o options) (*net.UDPConn, error) {
-	var lc net.ListenConfig
-	if o.addressReuse {
-		var opErr error
-		lc.Control = func(_, _ string, c syscall.RawConn) error {
-			err := c.Control(func(fd uintptr) {
-				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-			})
-			if err != nil {
-				return fmt.Errorf("socket control: %w", err)
-			}
-			if opErr != nil {
-				return fmt.Errorf("socket options: %w", opErr)
-			}
-			return nil
-		}
-	}
-	packetConn, err := lc.ListenPacket(context.Background(), "udp4", bindAddr)
-	if err != nil {
-		return nil, err
-	}
-	conn, ok := packetConn.(*net.UDPConn)
-	if !ok {
-		_ = packetConn.Close()
-		return nil, fmt.Errorf("%w: got %T", errUnexpectedSocketType, packetConn)
-	}
-	return conn, nil
-}
-
-// configureSocketBuffers applies the adapter's requested SO_RCVBUF/SO_SNDBUF
-// sizes and returns the kernel's effective values read back through
-// getsockopt. The kernel doubles each request and clamps it to
-// rmem_max/wmem_max, so the returned values are the honest socket sizes and
-// the only ones safe to report (RESEARCH Pattern 7).
-//
-// The requested widths are validated before any setsockopt: their doubled
-// read-back must still fit a 32-bit int (T-3-01). Every failure is wrapped
-// with the operation and the requested size; a non-nil error means the
-// socket must not be used.
-func configureSocketBuffers(conn *net.UDPConn) (recv, send int, err error) {
-	err = validateBufferRequest(socketRecvBuffer)
-	if err != nil {
-		return 0, 0, err
-	}
-	err = validateBufferRequest(socketSendBuffer)
-	if err != nil {
-		return 0, 0, err
-	}
-	err = conn.SetReadBuffer(socketRecvBuffer)
-	if err != nil {
-		return 0, 0, fmt.Errorf("udprepl: set receive buffer %d: %w", socketRecvBuffer, err)
-	}
-	err = conn.SetWriteBuffer(socketSendBuffer)
-	if err != nil {
-		return 0, 0, fmt.Errorf("udprepl: set send buffer %d: %w", socketSendBuffer, err)
-	}
-	recv, err = socketOption(conn, syscall.SO_RCVBUF)
-	if err != nil {
-		return 0, 0, fmt.Errorf("udprepl: read receive buffer after requesting %d: %w", socketRecvBuffer, err)
-	}
-	send, err = socketOption(conn, syscall.SO_SNDBUF)
-	if err != nil {
-		return 0, 0, fmt.Errorf("udprepl: read send buffer after requesting %d: %w", socketSendBuffer, err)
-	}
-	return recv, send, nil
-}
-
-// validateBufferRequest rejects a requested buffer width the kernel read-back
-// cannot represent honestly: a non-positive request is meaningless, and a
-// request above MaxInt32/2 would overflow a 32-bit int once the kernel
-// doubles it (T-3-01). The doubled read-back itself is never computed in Go
-// code — the kernel returns it directly.
-func validateBufferRequest(requested int) error {
-	if requested <= 0 || requested > maxBufferRequestWidth {
-		return fmt.Errorf("%w: %d (valid 1..%d)", errBufferRequestRange, requested, maxBufferRequestWidth)
-	}
-	return nil
-}
-
-// socketOption reads one SOL_SOCKET integer option from conn's descriptor —
-// the getsockopt read-back behind configureSocketBuffers.
-func socketOption(conn *net.UDPConn, opt int) (int, error) {
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return 0, fmt.Errorf("udprepl: socket syscall conn: %w", err)
-	}
-	var value int
-	var opErr error
-	err = raw.Control(func(fd uintptr) {
-		value, opErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, opt)
-	})
-	if err != nil {
-		return 0, fmt.Errorf("udprepl: socket control: %w", err)
-	}
-	if opErr != nil {
-		return 0, fmt.Errorf("udprepl: getsockopt option %d: %w", opt, opErr)
-	}
-	return value, nil
-}
-
-// checkSendBuffer enforces the startup floor (T-3-03): the effective send
-// buffer must hold one maximal datagram, or every largest record would be
-// rejected by the kernel while the node appeared healthy. The error names
-// both the actual and the required size so the operator can compare them
-// against wmem_max. A pure function — no socket involved.
-func checkSendBuffer(actual int) error {
-	if actual < datagramBufSize {
-		return fmt.Errorf("%w: effective %d bytes, need %d bytes", errSendBufferTooSmall, actual, datagramBufSize)
-	}
-	return nil
 }
 
 // Run is the single event-loop goroutine the caller launches (D-04). It
@@ -971,16 +758,12 @@ func (a *Adapter) EgressDropped() uint64 {
 	return a.egressDropped.Load()
 }
 
-// SentByType counts the outbound datagrams this adapter has encoded and
-// handed to its socket, by message kind (the OBS-01 replication-topology
-// seam) — the vocabulary mirrors the wire Body oneof.
-type SentByType struct {
-	Hello       uint64
-	Data        uint64
-	Ack         uint64
-	DataRequest uint64
-	Sync        uint64
-}
+// SentByType is the alias of the core package's send-type value: the
+// vocabulary moved to internal/app/repl so the metrics exporter reads it
+// without importing this socket adapter (D-07). The alias — distinct from
+// the accessor method below — keeps every existing udprepl test compiling
+// unchanged.
+type SentByType = repl.SentByType
 
 // SentByType returns the per-kind send counts — a value copy over the
 // atomics flush increments, safe from any goroutine.
@@ -1242,176 +1025,4 @@ func stopTimer(t *time.Timer) {
 	if t != nil {
 		t.Stop()
 	}
-}
-
-// encodeDatagram frames msg as one full wire datagram from nodeID's runID
-// (D-01): the port struct maps onto the proto Body oneof, whose marshaled
-// bytes travel as the Envelope body under a CRC32 — corruption detection
-// only, never tamper protection, per the accepted trust model.
-func encodeDatagram(nodeID uint16, runID [16]byte, msg port.Message) ([]byte, error) {
-	body, err := protoBody(msg)
-	if err != nil {
-		return nil, err
-	}
-	bodyBytes, err := proto.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("udprepl: marshal body: %w", err)
-	}
-	env := &replproto.Envelope{
-		ProtoVersion: repl.SupportedProtoVersion,
-		NodeId:       uint32(nodeID),
-		RunId:        runID[:],
-		Crc32:        crc32.ChecksumIEEE(bodyBytes),
-		Body:         bodyBytes,
-	}
-	datagram, err := proto.Marshal(env)
-	if err != nil {
-		return nil, fmt.Errorf("udprepl: marshal envelope: %w", err)
-	}
-	return datagram, nil
-}
-
-// decode maps one raw datagram onto the port seam, mechanically per D-02:
-// an empty datagram or an envelope that fails to unmarshal classifies
-// Undecodable; envelope fields violating their wire domain — a node_id
-// beyond the 16-bit range, a run_id that is not 16 bytes — classify
-// Undecodable too; a proto_version other than the one this build speaks
-// classifies ProtoVersionMismatch with the envelope fields carried over and
-// NO body decode — the verdict precedes the CRC gate because a foreign
-// version's body need not follow this version's framing contract (D-07); a
-// CRC mismatch classifies BadCRC with the envelope fields carried over and
-// the body NOT unmarshaled; only a passing CRC is the body decoded, and any
-// body fault classifies Undecodable.
-func decode(datagram []byte) port.InboundDatagram {
-	var env replproto.Envelope
-	if len(datagram) == 0 || proto.Unmarshal(datagram, &env) != nil {
-		return port.InboundDatagram{Status: port.Undecodable}
-	}
-	if env.GetNodeId() > maxNodeIDWire || len(env.GetRunId()) != wireIDSize {
-		return port.InboundDatagram{Status: port.Undecodable}
-	}
-	in := port.InboundDatagram{
-		ProtoVersion: env.GetProtoVersion(),
-		NodeID:       uint16(env.GetNodeId()), //nolint:gosec // G115: the maxNodeIDWire check above proved the value fits 16 bits.
-	}
-	copy(in.RunID[:], env.GetRunId())
-	if in.ProtoVersion != repl.SupportedProtoVersion {
-		in.Status = port.ProtoVersionMismatch
-		return in
-	}
-	if crc32.ChecksumIEEE(env.GetBody()) != env.GetCrc32() {
-		in.Status = port.BadCRC
-		return in
-	}
-	var body replproto.Body
-	err := proto.Unmarshal(env.GetBody(), &body)
-	if err != nil {
-		return port.InboundDatagram{Status: port.Undecodable}
-	}
-	msg, ok := portMessage(&body)
-	if !ok {
-		return port.InboundDatagram{Status: port.Undecodable}
-	}
-	in.Status = port.Decoded
-	in.Msg = msg
-	return in
-}
-
-// protoBody maps one port message onto its wire Body oneof — constructed
-// via the generated wrapper types (RESEARCH Pitfall 6). A standalone
-// SyncEntry has no datagram body of its own — it only travels inside
-// DataSync — so it is rejected here.
-func protoBody(msg port.Message) (*replproto.Body, error) {
-	switch m := msg.(type) {
-	case port.Hello:
-		return &replproto.Body{Msg: &replproto.Body_Hello{Hello: &replproto.Hello{}}}, nil
-	case port.DataReplication:
-		return &replproto.Body{Msg: &replproto.Body_DataReplication{DataReplication: &replproto.DataReplication{
-			Key:      m.Key,
-			Version:  m.Record.Version[:],
-			Data:     m.Record.Data,
-			Deleted:  m.Record.Deleted,
-			Checksum: m.Record.Checksum,
-		}}}, nil
-	case port.Ack:
-		return &replproto.Body{Msg: &replproto.Body_Ack{Ack: &replproto.Ack{Key: m.Key, Version: m.Version[:]}}}, nil
-	case port.DataRequest:
-		return &replproto.Body{Msg: &replproto.Body_DataRequest{DataRequest: &replproto.DataRequest{Key: m.Key}}}, nil
-	case port.DataSync:
-		entries := make([]*replproto.SyncEntry, len(m.Entries))
-		for i, entry := range m.Entries {
-			entries[i] = &replproto.SyncEntry{Key: entry.Key, Version: entry.Version[:]}
-		}
-		return &replproto.Body{Msg: &replproto.Body_DataSync{DataSync: &replproto.DataSync{
-			SyncId:     m.SyncID,
-			ChunkIndex: m.ChunkIndex,
-			ChunkCount: m.ChunkCount,
-			Entries:    entries,
-		}}}, nil
-	default:
-		return nil, fmt.Errorf("%w: %T", errNoStandaloneBody, msg)
-	}
-}
-
-// portMessage maps a decoded wire Body onto its port message struct (D-01),
-// reporting false when a field violates its wire domain — a version that is
-// not exactly 16 bytes — which the caller classifies Undecodable.
-func portMessage(body *replproto.Body) (port.Message, bool) {
-	switch msg := body.GetMsg().(type) {
-	case *replproto.Body_Hello:
-		return port.Hello{}, true
-	case *replproto.Body_DataReplication:
-		dr := msg.DataReplication
-		ver, ok := recordVersion(dr.GetVersion())
-		if !ok {
-			return nil, false
-		}
-		return port.DataReplication{
-			Key: dr.GetKey(),
-			Record: storage.Record{
-				Version:  ver,
-				Data:     dr.GetData(),
-				Deleted:  dr.GetDeleted(),
-				Checksum: dr.GetChecksum(),
-			},
-		}, true
-	case *replproto.Body_Ack:
-		ver, ok := recordVersion(msg.Ack.GetVersion())
-		if !ok {
-			return nil, false
-		}
-		return port.Ack{Key: msg.Ack.GetKey(), Version: ver}, true
-	case *replproto.Body_DataRequest:
-		return port.DataRequest{Key: msg.DataRequest.GetKey()}, true
-	case *replproto.Body_DataSync:
-		wire := msg.DataSync.GetEntries()
-		entries := make([]port.SyncEntry, len(wire))
-		for i, entry := range wire {
-			ver, ok := recordVersion(entry.GetVersion())
-			if !ok {
-				return nil, false
-			}
-			entries[i] = port.SyncEntry{Key: entry.GetKey(), Version: ver}
-		}
-		return port.DataSync{
-			SyncID:     msg.DataSync.GetSyncId(),
-			ChunkIndex: msg.DataSync.GetChunkIndex(),
-			ChunkCount: msg.DataSync.GetChunkCount(),
-			Entries:    entries,
-		}, true
-	default:
-		return nil, false
-	}
-}
-
-// recordVersion converts one wire version field into a RecordVersion,
-// reporting false unless it is exactly 16 bytes — RFC 9562's UUID size, the
-// full record-version domain.
-func recordVersion(b []byte) (version.RecordVersion, bool) {
-	var ver version.RecordVersion
-	if len(b) != len(ver) {
-		return version.RecordVersion{}, false
-	}
-	copy(ver[:], b)
-	return ver, true
 }

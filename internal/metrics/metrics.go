@@ -30,7 +30,6 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/port"
-	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
 // FamilyType is a metric family's exposition type — the two kinds the sup-kv
@@ -184,7 +183,7 @@ type Sources struct {
 	Discards      func() repl.DiscardStats
 	KnownPeers    func() uint64
 	Unacked       func() repl.UnackedStats
-	Sent          func() udprepl.SentByType
+	Sent          func() repl.SentByType
 	Retransmitted func() uint64
 	MergeStats    func() repl.MergeStats
 	DumpStats     func() persist.DumpStats
@@ -358,7 +357,7 @@ func pacingFamilies(paced uint64, sendQueue int, egressDropped, readErrors uint6
 // message type and inbound discards by classification (the OBS-02 surface in
 // full) — and always publishes the whole label vocabulary: a zero count is
 // information, not absence.
-func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family {
+func trafficFamilies(disc repl.DiscardStats, sentBy repl.SentByType) []Family {
 	return []Family{
 		{
 			Name: "supkv_replication_datagrams_sent_total", Type: Counter,

@@ -19,7 +19,6 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/metrics"
 	"github.com/Djarvur/sup-kv/internal/port"
-	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
 // renderTo renders families into a string, failing the test on a write
@@ -222,7 +221,7 @@ func zeroSources() metrics.Sources {
 		Discards:      func() repl.DiscardStats { return repl.DiscardStats{} },
 		KnownPeers:    func() uint64 { return 0 },
 		Unacked:       func() repl.UnackedStats { return repl.UnackedStats{} },
-		Sent:          func() udprepl.SentByType { return udprepl.SentByType{} },
+		Sent:          func() repl.SentByType { return repl.SentByType{} },
 		Retransmitted: func() uint64 { return 0 },
 		MergeStats:    func() repl.MergeStats { return repl.MergeStats{} },
 		DumpStats:     func() persist.DumpStats { return persist.DumpStats{} },
