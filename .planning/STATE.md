@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 9
+current_plan: 10
 status: executing
-stopped_at: Completed 06-12-PLAN.md
-last_updated: "2026-11-23T00:54:41.091Z"
+stopped_at: Completed 06-07-PLAN.md
+last_updated: "2026-11-23T01:11:19.309Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: fa89e62eed4d06277c4848cc5bd42ec44649ef2a
+state_head: b50a4a2dc9351658ee96df96ceebfdfe678be95b
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 67
+  completed_plans: 68
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 9
+Current Plan: 10
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
@@ -126,6 +126,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P05 | 817s | 3 tasks | 14 files |
 | Phase 06 P06 | 580s | 1 tasks | 12 files |
 | Phase 06 P12 | 361 | 2 tasks | 7 files |
+| Phase 06 P07 | 522s | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -398,6 +399,9 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-12: the pending bound (watchIngress) is pinned by an observable shed+resubscribe test; the unexported pending slice is unobservable from the external test package, and a snapshot-keyed zero-version flood keeps post-shed residue suppressed.
 - [Phase 06]: 06-12: RED targets are the two missing behaviors (startup suppression, shutdown status); the normal-write, pending-bound and deletion/order tests are regression pins of the 06-06 gate and pass pre-change by design. APIS-04 stays pending on the #2388 shared-ID gate.
 - [Phase 06]: 06-12: no post-load confirmed-watermark initialization was added — with the tap suppressed no loaded event is ever pending, and the first successful dump advances the hub watermark past the loaded generation.
+- [Phase 06]: APIS-05: MaxRecvBytes = storage.MaxKeyBytes + the effective configured value limit + apiEnvelopeOverheadBytes (63 846 at the default, 66 814 at the 64 408 datagram limit), never the default constant; MaxSendBytes = listPageByteBudget + listEnvelopeOverheadBytes, and apiEnvelopeOverheadBytes is an alias of 06-05's listEnvelopeOverheadBytes, not a second definition.
+- [Phase 06]: APIS-05: Server.Shutdown calls the standard health server's one-way Shutdown (never Resume); the binary calls node.api.Shutdown() before apiCancel and no longer flips health directly, so a gate-resolver backstop firing after shutdown began cannot return SERVING (T-06-23, RESEARCH Pitfall 9).
+- [Phase 06]: APIS-05: the transport-limits harness knob is opt-in (nil keeps the plain grpc.NewServer()), the receive-ceiling test proves ResourceExhausted at the transport versus InvalidArgument at the handler, and the one-way test waits for the backstop through a successful Set rather than a sleep; all three tasks carry machine-valid RED records despite their new symbols needing compiling skeletons.
 
 ### Pending Todos
 
@@ -420,7 +424,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T00:54:40.523Z
-Stopped at: Completed 06-12-PLAN.md
+Last session: 2026-11-23T01:11:18.745Z
+Stopped at: Completed 06-07-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
