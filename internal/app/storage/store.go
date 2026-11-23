@@ -245,6 +245,27 @@ func (s *Store) Versions() map[string]version.RecordVersion {
 	return out
 }
 
+// LiveVersions returns a fresh map of every live — non-tombstoned — key to
+// its stored version, copying no Data. The map is caller-owned: mutating it
+// never affects the store, and a consumer that needs the record itself calls
+// Lookup for that key. Liveness is the stored Deleted flag and nothing else:
+// len(Data)==0 is not a tombstone test, so a live record with an empty value
+// is included. This is the List pagination view (D-02, APIS-02) — a
+// tombstone-free key→version snapshot whose cost is the key count, never the
+// store's value bytes.
+func (s *Store) LiveVersions() map[string]version.RecordVersion {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]version.RecordVersion, len(s.records))
+	for key, rec := range s.records {
+		if rec.Deleted {
+			continue
+		}
+		out[key] = rec.Version
+	}
+	return out
+}
+
 // Set stores data under key, replacing any prior record under LWW, and
 // returns the freshly stamped version and the drift signal observed at the
 // clock Tick. Values over Config.ValueMaxBytes are rejected with

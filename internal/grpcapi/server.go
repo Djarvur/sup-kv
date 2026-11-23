@@ -16,8 +16,6 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
-	"slices"
-	"strings"
 	"sync/atomic"
 
 	"google.golang.org/grpc/codes"
@@ -294,32 +292,28 @@ func (s *Server) Delete(ctx context.Context, req *apiproto.DeleteRequest) (*apip
 	return resp, nil
 }
 
-// List returns the sorted live (non-tombstoned) keys under prefix in one
-// response (D-12): the empty prefix matches every key (D-15), tombstones
-// are never listed — List reflects live state, not history (D-14) — and
-// the response carries keys only; values are fetched via Get (D-13). The
-// startup gate is checked first like every other data RPC (API-04, D-01):
-// a closed node answers Unavailable rather than an empty list, which would
-// lie about a state it has not yet learned. The engine's Records() snapshot
-// is tombstone-inclusive by contract, so the Deleted filter here is
-// adapter-side. The scale envelope — tens of thousands of keys — fits the
-// gRPC 4 MiB default send limit (research A6): grpc defaults are kept, and
-// grpc.MaxSendMsgSize is the documented growth knob if key names ever grow
-// the envelope — pagination is deliberately not hand-rolled (D-12).
+// List returns the live keys under prefix in one of two modes (D-02,
+// APIS-02). With page_size unset (0) it keeps the legacy contract: every
+// matching live key in one response, byte-wise ascending, keys only — the
+// frozen R-01 single-call shape the stand poll reads — and it copies no
+// value bytes because it never calls Lookup. With page_size > 0 it returns
+// a bounded keyset page of records: at most the resolved page size entries
+// with values, keys aligned to records, a page_token that resumes strictly
+// after its decoded position, and a non-empty next_page_token unless the
+// listing is exhausted. The empty prefix matches every live key (D-15);
+// tombstones are never listed — List reflects live state, not history
+// (D-14); the legacy response carries keys only, values are fetched via
+// Get (D-13). The startup gate is checked first like every other data RPC
+// (API-04, D-01): a closed node answers Unavailable rather than an empty
+// list, which would lie about a state it has not yet learned. The page
+// walk and the constants live in list.go; the live key→version view
+// (Engine.LiveVersions) is tombstone-free by the stored Deleted flag, so
+// no whole-store record snapshot is ever taken on this path.
 func (s *Server) List(_ context.Context, req *apiproto.ListRequest) (*apiproto.ListResponse, error) {
 	if s.gated() {
 		return nil, gateUnavailable()
 	}
-	records := s.engine.Records()
-	keys := make([]string, 0, len(records))
-	for key, rec := range records {
-		if rec.Deleted || !strings.HasPrefix(key, req.GetPrefix()) {
-			continue
-		}
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return &apiproto.ListResponse{Keys: keys}, nil
+	return listPage(s.engine, req)
 }
 
 // SnapshotCreate forces the current dump to complete — every confirmed

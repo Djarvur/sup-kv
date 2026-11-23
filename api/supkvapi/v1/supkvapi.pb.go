@@ -479,13 +479,17 @@ func (x *DeleteResponse) GetTotalPeers() uint32 {
 	return 0
 }
 
-// ListRequest filters by prefix; the empty prefix means all keys. With
-// page_size unset (0) the server returns every matching key, keys only — the
-// legacy single-response listing. A positive page_size requests a bounded page
-// of records: the server honors at most 256 entries (a larger value is
-// clamped), and next_page_token resumes the listing after the last examined
-// key. The empty page_token starts at the first key; a page token requires a
-// positive page_size.
+// ListRequest filters by prefix; the empty prefix means all keys. Two modes
+// share the request. With page_size unset (0) the server returns every
+// matching live key in one response, keys only — the legacy listing — and a
+// page_token is invalid in that mode. A positive page_size requests a bounded
+// page of records: the server honors at most 256 entries (a larger value is
+// clamped), may return fewer under its serialized-byte budget, and
+// next_page_token resumes the listing after the last examined key. The empty
+// page_token starts at the first key. The token is a position, not a
+// snapshot: keys written or deleted between pages may appear or disappear.
+// Only live (non-tombstoned) keys are listed, ordered byte-wise
+// lexicographic ascending.
 type ListRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Prefix        string                 `protobuf:"bytes,1,opt,name=prefix,proto3" json:"prefix,omitempty"`
@@ -546,7 +550,7 @@ func (x *ListRequest) GetPageToken() string {
 	return ""
 }
 
-// ListResponse carries the sorted live (non-tombstoned) keys under the
+// ListResponse carries one page of the live (non-tombstoned) keys under the
 // request's prefix, in byte-wise lexicographic order. keys is the page's keys
 // and is always filled. Under a positive page_size, records carries the same
 // page's full records in the same order as keys, and next_page_token is the

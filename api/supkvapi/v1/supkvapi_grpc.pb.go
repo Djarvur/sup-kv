@@ -49,7 +49,8 @@ type SupKVServiceClient interface {
 	Set(ctx context.Context, in *SetRequest, opts ...grpc.CallOption) (*SetResponse, error)
 	// Delete writes a fresh-version tombstone for one key.
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
-	// List returns the sorted live records under a prefix.
+	// List returns the live keys under a prefix, optionally as a bounded page
+	// of records.
 	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
 	// Watch streams snapshot-then-live change events.
 	Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchResponse], error)
@@ -159,7 +160,8 @@ type SupKVServiceServer interface {
 	Set(context.Context, *SetRequest) (*SetResponse, error)
 	// Delete writes a fresh-version tombstone for one key.
 	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
-	// List returns the sorted live records under a prefix.
+	// List returns the live keys under a prefix, optionally as a bounded page
+	// of records.
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	// Watch streams snapshot-then-live change events.
 	Watch(*WatchRequest, grpc.ServerStreamingServer[WatchResponse]) error

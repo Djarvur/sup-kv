@@ -213,6 +213,64 @@ func TestStore_versions_snapshot(t *testing.T) {
 	}
 }
 
+// TestStore_liveVersions proves the tombstone-free key→version view the List
+// pagination mode reads (D-02, APIS-02): live keys only — an empty live value
+// included, because liveness is the Deleted flag and never len(Data) — with a
+// caller-owned map and stable repeated calls.
+func TestStore_liveVersions(t *testing.T) {
+	t.Parallel()
+	store := newStore()
+	if got := store.LiveVersions(); len(got) != 0 {
+		t.Fatalf("LiveVersions() = %v on a fresh store, want an empty map", got)
+	}
+	alphaVer, _, err := store.Set("alpha", []byte("a"))
+	if err != nil {
+		t.Fatalf("Set(alpha) error = %v, want nil", err)
+	}
+	emptyVer, _, err := store.Set("empty", nil)
+	if err != nil {
+		t.Fatalf("Set(empty) error = %v, want nil", err)
+	}
+	_, _, err = store.Set("beta", []byte("b"))
+	if err != nil {
+		t.Fatalf("Set(beta) error = %v, want nil", err)
+	}
+	if _, _, err = store.Delete("beta"); err != nil {
+		t.Fatalf("Delete(beta) error = %v, want nil", err)
+	}
+
+	live := store.LiveVersions()
+	if len(live) != 2 {
+		t.Fatalf("LiveVersions() size = %d, want the two live keys (the tombstone is excluded)", len(live))
+	}
+	if got := live["alpha"]; got != alphaVer {
+		t.Errorf("LiveVersions()[alpha] = %x, want %x", got[:], alphaVer[:])
+	}
+	if got := live["empty"]; got != emptyVer {
+		t.Errorf("LiveVersions()[empty] = %x, want the empty-valued live record's version %x", got[:], emptyVer[:])
+	}
+	if _, ok := live["beta"]; ok {
+		t.Error("LiveVersions() includes the tombstoned key beta")
+	}
+	if _, ok := live["missing"]; ok {
+		t.Error("LiveVersions() includes the absent key missing")
+	}
+
+	// The map is caller-owned: mutating it never reaches the store.
+	mutated := maps.Clone(live)
+	mutated["alpha"] = version.RecordVersion{}
+	delete(mutated, "empty")
+	mutated["intruder"] = alphaVer
+	if again := store.LiveVersions(); !maps.Equal(again, live) {
+		t.Errorf("LiveVersions() after mutating a returned map = %v, want %v", again, live)
+	}
+
+	// Repeated calls with no intervening write are equal.
+	if again := store.LiveVersions(); !maps.Equal(again, live) {
+		t.Errorf("repeated LiveVersions() = %v, want the equal map %v", again, live)
+	}
+}
+
 // TestStore_view_concurrentHammer races the write surface (Set, SetIfAbsent,
 // Delete, Merge) against the read view (Version, Lookup, Versions) across
 // goroutines under the race detector. Only per-call validity is asserted —

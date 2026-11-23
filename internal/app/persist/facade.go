@@ -77,6 +77,15 @@ func (e *Engine) Versions() map[string]version.RecordVersion {
 	return e.store.Versions()
 }
 
+// LiveVersions returns the caller-owned key→version snapshot of live,
+// non-tombstoned records only — the List pagination view (D-02, APIS-02).
+// It copies no record data and consults no dump state. Liveness is the
+// stored Deleted flag, never empty data: a live record with an empty value
+// is included.
+func (e *Engine) LiveVersions() map[string]version.RecordVersion {
+	return e.store.LiveVersions()
+}
+
 // Observe absorbs one received version into the store's clock without
 // touching any record: the per-DataSync-part HLC update (PROTO-01). It
 // consults no dump or confirmation state.

@@ -131,6 +131,12 @@ const (
 	emptyDiskSeedRPCTimeout = 30 * time.Second
 	emptyDiskPollEvery      = 500 * time.Millisecond
 
+	// emptyDiskPageSize is the nightly presence probe's page size: the
+	// nightly poll follows next_page_token instead of taking one unpaged
+	// listing, so each response stays bounded by the List page contract
+	// (D-02, APIS-02).
+	emptyDiskPageSize = 256
+
 	// standEmptyKeyFmt derives the seeded keys; standEmptyKeyPrefix scopes
 	// the nightly listing poll; standKeyFromB is the recovered node's own
 	// post-recovery write.
@@ -534,11 +540,28 @@ func emptyDiskRecovered(t *testing.T, client apiproto.SupKVServiceClient, keys [
 		last = time.Now()
 		ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
 		defer cancel()
-		resp, err := client.List(ctx, &apiproto.ListRequest{Prefix: standEmptyKeyPrefix})
-		if err != nil {
-			return false
+		// The nightly presence probe walks the listing page by page: a
+		// page_size > 0 request returns records and a next_page_token, so the
+		// poll follows the token instead of taking one unpaged legacy
+		// listing. The page count is bounded by the expected page count so a
+		// stuck or repeated token fails the poll instead of hanging it.
+		seen := 0
+		token := ""
+		for range len(keys)/emptyDiskPageSize + 2 {
+			resp, err := client.List(ctx, &apiproto.ListRequest{
+				Prefix:    standEmptyKeyPrefix,
+				PageSize:  emptyDiskPageSize,
+				PageToken: token,
+			})
+			if err != nil {
+				return false
+			}
+			seen += len(resp.GetKeys())
+			if token = resp.GetNextPageToken(); token == "" {
+				return seen == len(keys)
+			}
 		}
-		return len(resp.GetKeys()) == len(keys)
+		return false
 	}
 }
 
