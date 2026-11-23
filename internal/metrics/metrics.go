@@ -313,14 +313,14 @@ func replicationFamilies(
 		},
 		{
 			Name: "supkv_merges_conflicts_total", Type: Counter,
-			Help: "Remote merges that displaced a stored record.",
+			Help: "Pending (unacked) local writes displaced by a replicated value.",
 			Samples: []Sample{
 				{Value: float64(merged.Conflicts)},
 			},
 		},
 		{
 			Name: "supkv_clock_drift_warnings_total", Type: Counter,
-			Help: "Remote timestamps absorbed beyond the drift-warn threshold.",
+			Help: "Received records and listing-part versions that lead local wall time by more than drift-warn.",
 			Samples: []Sample{
 				{Value: float64(merged.DriftWarnings)},
 			},
@@ -413,7 +413,7 @@ func trafficFamilies(disc repl.DiscardStats, sentBy repl.SentByType) []Family {
 	return []Family{
 		{
 			Name: "supkv_replication_datagrams_sent_total", Type: Counter,
-			Help: "Replication datagrams sent, by message type.",
+			Help: "Outbound datagrams successfully handed to the socket, by message type.",
 			Samples: []Sample{
 				{Labels: []Label{{Name: labelType, Value: "hello"}}, Value: float64(sentBy.Hello)},
 				{Labels: []Label{{Name: labelType, Value: "data"}}, Value: float64(sentBy.Data)},
@@ -458,7 +458,7 @@ func dumpFamilies(stats persist.DumpStats) []Family {
 	return []Family{
 		{
 			Name: "supkv_dumps_duration_seconds", Type: Gauge,
-			Help: "Duration of the last dump's encode and save in seconds.",
+			Help: "Duration of the last dump attempt's encode and save in seconds.",
 			Samples: []Sample{
 				{Value: stats.DurationSeconds},
 			},
@@ -498,11 +498,14 @@ func dumpFamilies(stats persist.DumpStats) []Family {
 
 // runtimeFamilies reads the go_*/process_* runtime families (06-RESEARCH A2's
 // minimal D-04 enumeration) at scrape time — fresh gauges of the process
-// itself, never cached.
+// itself, never cached. CPU comes from one [processCPU] read; memory from the
+// platform-split [currentRSS] (current on Linux, the documented
+// development-only peak elsewhere).
 func runtimeFamilies() []Family {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	cpu, rss := processUsage()
+	cpu := processCPU()
+	rss := currentRSS()
 	return []Family{
 		{
 			Name: "go_goroutines", Type: Gauge,
@@ -534,7 +537,7 @@ func runtimeFamilies() []Family {
 		},
 		{
 			Name: "process_resident_memory_bytes", Type: Gauge,
-			Help: "Resident memory size in bytes.",
+			Help: "Current resident set size in bytes (Linux); development-only darwin builds report the process peak.",
 			Samples: []Sample{
 				{Value: rss},
 			},
@@ -542,22 +545,20 @@ func runtimeFamilies() []Family {
 	}
 }
 
-// processUsage reads this process's CPU time and resident set size through
-// [syscall.Getrusage] — Linux and darwin both provide it (06-RESEARCH A2's
-// minimal process_* enumeration under D-04). CPU is user+system seconds;
-// ru_maxrss is KiB on Linux and bytes on darwin, normalized here to bytes.
-func processUsage() (cpuSeconds, rssBytes float64) {
+// processCPU reads this process's CPU time through [syscall.Getrusage] —
+// Linux and darwin both provide it (06-RESEARCH A2's minimal process_*
+// enumeration under D-04). CPU is user+system seconds. The resident set is a
+// separate platform-split probe ([currentRSS]): Linux reports the CURRENT
+// size from /proc/self/statm, while the non-Linux fallback is the documented
+// development-only peak, never a substituted current value.
+func processCPU() float64 {
 	var ru syscall.Rusage
 	err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
 	if err != nil {
-		return 0, 0
+		return 0
 	}
 	sec := func(t syscall.Timeval) float64 { return float64(t.Sec) + float64(t.Usec)/1e6 }
-	rss := float64(ru.Maxrss)
-	if rss > 0 && runtime.GOOS != "darwin" {
-		rss *= 1024
-	}
-	return sec(ru.Utime) + sec(ru.Stime), rss
+	return sec(ru.Utime) + sec(ru.Stime)
 }
 
 // NewMux assembles the one listener's whole debug surface (D-03): /metrics
