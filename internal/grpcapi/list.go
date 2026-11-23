@@ -62,7 +62,7 @@ const (
 	repeatedFieldFramingBytes = 8
 
 	// listTokenEncodedBytes is the longest possible next_page_token: the
-	// base64.RawURLEncoding expansion (ceil of 4n/3) of a key at the
+	// [base64.RawURLEncoding] expansion (ceil of 4n/3) of a key at the
 	// storage.MaxKeyBytes ceiling — 1 366 characters for 1 024 bytes.
 	listTokenEncodedBytes = (storage.MaxKeyBytes*base64CharsPerGroup + base64GroupBytes - 1) /
 		base64GroupBytes
@@ -184,7 +184,7 @@ func pagedResponse(lookup func(key string) (storage.Record, bool), keys []string
 	budget := 0
 	lastExamined := -1
 	for i, key := range keys {
-		if len(resp.Keys) >= pageSize {
+		if len(resp.GetKeys()) >= pageSize {
 			break
 		}
 		rec, ok := lookup(key)
@@ -193,7 +193,7 @@ func pagedResponse(lookup func(key string) (storage.Record, bool), keys []string
 			continue
 		}
 		cost := listEntrySerializedBytes(len(key), len(rec.Data))
-		if len(resp.Keys) > 0 && budget+cost > listPageByteBudget {
+		if len(resp.GetKeys()) > 0 && budget+cost > listPageByteBudget {
 			// One more entry would exceed the serialized-page budget: stop
 			// with the token at the last included key, leaving this entry as
 			// the next page's first. The len>0 floor above keeps a page

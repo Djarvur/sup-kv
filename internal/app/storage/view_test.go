@@ -235,7 +235,8 @@ func TestStore_liveVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Set(beta) error = %v, want nil", err)
 	}
-	if _, _, err = store.Delete("beta"); err != nil {
+	_, _, err = store.Delete("beta")
+	if err != nil {
 		t.Fatalf("Delete(beta) error = %v, want nil", err)
 	}
 

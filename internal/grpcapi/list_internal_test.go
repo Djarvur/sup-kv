@@ -81,8 +81,9 @@ func TestListPage_maxKeySerializedBound(t *testing.T) {
 			t.Fatalf("seed key length = %d, want exactly storage.MaxKeyBytes (%d)", got, storage.MaxKeyBytes)
 		}
 		rec := storage.Record{Version: version.PackVersion(int64(i)+1, 0, 7), Data: value}
-		if _, _, err := engine.ApplyRemote(key, rec); err != nil {
-			t.Fatalf("seed ApplyRemote(%q) error = %v, want nil", key, err)
+		_, _, seedErr := engine.ApplyRemote(key, rec)
+		if seedErr != nil {
+			t.Fatalf("seed ApplyRemote(%q) error = %v, want nil", key, seedErr)
 		}
 	}
 
@@ -109,8 +110,9 @@ func TestListPage_maxKeySerializedBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proto.Marshal(ListResponse): want nil error, got %v", err)
 	}
-	if got, max := len(raw), listPageByteBudget+listEnvelopeOverheadBytes; got > max {
-		t.Fatalf("marshaled page = %d bytes, want at most listPageByteBudget+listEnvelopeOverheadBytes (%d)", got, max)
+	if got, ceiling := len(raw), listPageByteBudget+listEnvelopeOverheadBytes; got > ceiling {
+		t.Fatalf("marshaled page = %d bytes, want at most listPageByteBudget+listEnvelopeOverheadBytes (%d)",
+			got, ceiling)
 	}
 }
 

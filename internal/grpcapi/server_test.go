@@ -702,12 +702,14 @@ func TestServer_list(t *testing.T) {
 
 	// Seed keys across two prefixes plus one key that gets tombstoned.
 	for _, key := range []string{"cfg/a", "cfg/b", "svc/a", "svc/b", "tmp/x"} {
-		if _, _, err := ts.engine.Set(key, []byte("v")); err != nil {
-			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		_, _, seedErr := ts.engine.Set(key, []byte("v"))
+		if seedErr != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, seedErr)
 		}
 	}
-	if _, _, err := ts.engine.Delete("tmp/x"); err != nil {
-		t.Fatalf("seed Delete(tmp/x) error = %v, want nil", err)
+	_, _, seedErr := ts.engine.Delete("tmp/x")
+	if seedErr != nil {
+		t.Fatalf("seed Delete(tmp/x) error = %v, want nil", seedErr)
 	}
 
 	cases := []struct {
@@ -775,12 +777,14 @@ func seedPagesFixture(t *testing.T, ts *testHarness) {
 		if key == "b" {
 			value = []byte{}
 		}
-		if _, _, err := ts.engine.Set(key, value); err != nil {
-			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		_, _, seedErr := ts.engine.Set(key, value)
+		if seedErr != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, seedErr)
 		}
 	}
-	if _, _, err := ts.engine.Delete("c"); err != nil {
-		t.Fatalf("seed Delete(c) error = %v, want nil", err)
+	_, _, seedErr := ts.engine.Delete("c")
+	if seedErr != nil {
+		t.Fatalf("seed Delete(c) error = %v, want nil", seedErr)
 	}
 }
 
@@ -814,8 +818,9 @@ func TestServer_listLegacyAll(t *testing.T) {
 	// many that is: 512 live keys come back from one page_size-0 call.
 	for i := range 512 {
 		key := fmt.Sprintf("bulk/%03d", i)
-		if _, _, err := ts.engine.Set(key, []byte("v")); err != nil {
-			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		_, _, seedErr := ts.engine.Set(key, []byte("v"))
+		if seedErr != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, seedErr)
 		}
 	}
 	big, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "bulk/"})
@@ -943,8 +948,9 @@ func seedListKeys(t *testing.T, ts *testHarness, prefix string, count int) []str
 	for i := range count {
 		key := fmt.Sprintf("%s%03d", prefix, i)
 		keys[i] = key
-		if _, _, err := ts.engine.Set(key, []byte("v")); err != nil {
-			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		_, _, seedErr := ts.engine.Set(key, []byte("v"))
+		if seedErr != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, seedErr)
 		}
 	}
 	return keys
@@ -1042,8 +1048,9 @@ func TestServer_listEmpty(t *testing.T) {
 			paged.GetKeys(), len(paged.GetRecords()), paged.GetNextPageToken())
 	}
 
-	if _, _, err := ts.engine.Set("only", []byte("v")); err != nil {
-		t.Fatalf("seed Set(only) error = %v, want nil", err)
+	_, _, seedErr := ts.engine.Set("only", []byte("v"))
+	if seedErr != nil {
+		t.Fatalf("seed Set(only) error = %v, want nil", seedErr)
 	}
 	one, err := ts.client.List(ctx, &apiproto.ListRequest{})
 	if err != nil {
@@ -1116,8 +1123,9 @@ func TestServer_listPrefix(t *testing.T) {
 
 	ts := newTestServer(t)
 	for _, key := range []string{"cfg/a", "cfg/b", "svc/a", "svc/b", "svc/c"} {
-		if _, _, err := ts.engine.Set(key, []byte("v")); err != nil {
-			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		_, _, seedErr := ts.engine.Set(key, []byte("v"))
+		if seedErr != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, seedErr)
 		}
 	}
 	ctx := t.Context()
@@ -1191,8 +1199,9 @@ func seedMaxValueRecords(t *testing.T, ts *testHarness, prefix string, count int
 			Version: version.PackVersion(int64(i)+1, 0, 7),
 			Data:    value,
 		}
-		if _, _, err := ts.engine.ApplyRemote(key, rec); err != nil {
-			t.Fatalf("seed ApplyRemote(%q) error = %v, want nil", key, err)
+		_, _, seedErr := ts.engine.ApplyRemote(key, rec)
+		if seedErr != nil {
+			t.Fatalf("seed ApplyRemote(%q) error = %v, want nil", key, seedErr)
 		}
 	}
 }
@@ -1206,8 +1215,9 @@ func TestServer_listLegacyCostIndependent(t *testing.T) {
 	t.Parallel()
 
 	ts := newProdLimitServer(t)
-	if _, _, err := ts.engine.Set("a", []byte("small")); err != nil {
-		t.Fatalf("seed Set(a) error = %v, want nil", err)
+	_, _, seedErr := ts.engine.Set("a", []byte("small"))
+	if seedErr != nil {
+		t.Fatalf("seed Set(a) error = %v, want nil", seedErr)
 	}
 	seedMaxValueRecords(t, ts, "z/bulk-", 100)
 	ctx := t.Context()
@@ -1229,9 +1239,9 @@ func TestServer_listLegacyCostIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proto.Marshal(ListResponse): want nil error, got %v", err)
 	}
-	if got, max := len(raw), len("a")+listEnvelopeCeiling; got > max {
+	if got, ceiling := len(raw), len("a")+listEnvelopeCeiling; got > ceiling {
 		t.Fatalf("legacy response is %d bytes, want at most %d (the key plus envelope) despite %d off-page maximum-size values",
-			got, max, 100)
+			got, ceiling, 100)
 	}
 }
 
@@ -1243,8 +1253,9 @@ func TestServer_listCostIndependent(t *testing.T) {
 	t.Parallel()
 
 	ts := newProdLimitServer(t)
-	if _, _, err := ts.engine.Set("a", []byte("small")); err != nil {
-		t.Fatalf("seed Set(a) error = %v, want nil", err)
+	_, _, seedErr := ts.engine.Set("a", []byte("small"))
+	if seedErr != nil {
+		t.Fatalf("seed Set(a) error = %v, want nil", seedErr)
 	}
 	seedMaxValueRecords(t, ts, "z/bulk-", 100)
 	ctx := t.Context()
@@ -1260,9 +1271,9 @@ func TestServer_listCostIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proto.Marshal(ListResponse): want nil error, got %v", err)
 	}
-	if got, max := len(raw), storage.ValueMaxBytes+listEnvelopeCeiling; got > max {
+	if got, ceiling := len(raw), storage.ValueMaxBytes+listEnvelopeCeiling; got > ceiling {
 		t.Fatalf("page_size-1 response is %d bytes, want at most %d (one value plus envelope) despite %d off-page values",
-			got, max, 100)
+			got, ceiling, 100)
 	}
 }
 
