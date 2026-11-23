@@ -18,11 +18,12 @@ import (
 // Discard-classification test constants: the adversarial round count of the
 // totality proof (D-02), the second handle a claiming node announces from
 // (REPL-08's two-sources-one-identity signature), and the inbound version
-// bound the model mirrors (the core's 60 s default MaxClockLead).
+// bound the model mirrors (the core's 2 m default MaxClockLead, strictly
+// above the 60 s drift-warn default so the drift window is reachable).
 const (
 	discardRounds       = 500
 	cloneHandle         = "n2-clone"
-	defaultMaxClockLead = 60 * time.Second
+	defaultMaxClockLead = 2 * time.Minute
 	longKeyLen          = storage.MaxKeyBytes + 1
 
 	// tooManySyncChunks is one above the core's maxSyncChunks (65 536), the
@@ -819,7 +820,7 @@ func wireRecord(key string, ver version.RecordVersion, data []byte, deleted bool
 	}
 }
 
-// validWireVersion returns a layout-valid version one second inside the 60 s
+// validWireVersion returns a layout-valid version one second inside the 2 m
 // default lead.
 func validWireVersion(counter uint16) version.RecordVersion {
 	return version.PackVersion(testNowMs+1000, counter, peerID1)

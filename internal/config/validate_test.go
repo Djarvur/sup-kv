@@ -12,9 +12,9 @@ import (
 
 // validConfig returns a fully valid configuration — every rule satisfied — so
 // each subtest mutates exactly the field under test and any other rejection
-// is a test bug, not noise. The values are the shipped defaults except
-// MaxClockLead, which stays at the documented 60 s default here because the
-// drift relation is exercised separately.
+// is a test bug, not noise. Every value is a shipped default, which also pins
+// the "the defaults must validate" contract: the 2 m max-clock-lead default
+// is strictly above the 60 s drift-warn default.
 func validConfig() Config {
 	return Config{
 		NodeID:             1,
@@ -319,6 +319,58 @@ func TestValidate(t *testing.T) {
 		c.MetricsAddr = ""
 		assertValid(t, c)
 	})
+}
+
+// TestRules pins the startup-check catalog: the exact length, names and order,
+// with a non-nil check for every entry. Adding, renaming or reordering a rule
+// therefore fails here first, and the `subtest` column records the TestValidate
+// subtest that owns each rule — a rule cannot be added without one.
+func TestRules(t *testing.T) {
+	t.Parallel()
+
+	want := []struct {
+		name    string
+		subtest string
+	}{
+		{"required-knobs", "required-knobs names every missing knob in one pass"},
+		{"node-id-range", "node-id-range rejects one past the 16-bit space"},
+		{"positive-values", "positive-values rejects every non-positive numeric knob"},
+		{"retransmit-floor", "retransmit-floor rejects 999 microseconds"},
+		{"sync-response-cap", "sync-response-cap rejects one above the cap"},
+		{"sync-chunk-ceiling", "sync-chunk-ceiling rejects one byte over"},
+		{"datagram-ceiling", "datagram-ceiling rejects one byte more"},
+		{"peer-vs-hello", "peer-vs-hello rejects equality"},
+		{"ack-max", "ack-max rejects a greater ack timeout"},
+		{"drift-vs-lead", "drift-vs-lead rejects equality at millisecond resolution"},
+		{"metrics-cert-triple", "metrics-cert-triple rejects a partial set naming all three envs"},
+		{"address-shape", "address-shape rejects a missing port"},
+	}
+	got := rules()
+	if len(got) != len(want) {
+		t.Fatalf("len(rules()) = %d, want %d — a rule needs its TestValidate subtest and this row",
+			len(got), len(want))
+	}
+	for i, r := range got {
+		if r.name != want[i].name {
+			t.Fatalf("rules()[%d].name = %q, want %q", i, r.name, want[i].name)
+		}
+		if r.check == nil {
+			t.Fatalf("rule %q has a nil check", r.name)
+		}
+		if want[i].subtest == "" {
+			t.Fatalf("rule %q has no owning subtest recorded", r.name)
+		}
+	}
+}
+
+// TestMaxSyncResponseRateExport pins the exported core cap to the literal the
+// boundary rows use, so the validation rule and the core's clamp cannot drift.
+func TestMaxSyncResponseRateExport(t *testing.T) {
+	t.Parallel()
+	if repl.MaxSyncResponseRate != fixtureSyncResponseCap {
+		t.Fatalf("repl.MaxSyncResponseRate = %d, want the documented %d/s cap",
+			repl.MaxSyncResponseRate, fixtureSyncResponseCap)
+	}
 }
 
 // fixtureSyncResponseCap is the top of the sync-response-rate domain: one

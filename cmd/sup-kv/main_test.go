@@ -452,7 +452,8 @@ func TestMain_precedence(t *testing.T) {
 
 // TestMain_maxClockLead proves the XPORT-04 knob's flag/env twin at the
 // configuration seam: --help lists the flag with its env twin named and the
-// documented 60 s default; the env twin is read into the flag's default (the
+// documented 2 m default (strictly above the 60 s drift-warn default, so the
+// drift WARN window is reachable); the env twin is read into the flag's default (the
 // help output shows the env-chosen value); a malformed env value aborts
 // through the collected env-error path with exitUsage; and an explicit flag
 // value is the parsed source even when a valid env twin is set (a malformed
@@ -463,13 +464,13 @@ func TestMain_maxClockLead(t *testing.T) {
 	t.Parallel()
 	bin := smokeBinary(t)
 
-	t.Run("help lists the flag, its env twin and the 60s default", func(t *testing.T) {
+	t.Run("help lists the flag, its env twin and the 2m default", func(t *testing.T) {
 		t.Parallel()
 		out, err := runToCompletion(t, bin, nil, "--help")
 		if err != nil {
 			t.Fatalf("--help exited with %v, want the flag package's clean help exit 0", err)
 		}
-		for _, want := range []string{"-max-clock-lead", "env SUPKV_MAX_CLOCK_LEAD", "(default 1m0s)"} {
+		for _, want := range []string{"-max-clock-lead", "env SUPKV_MAX_CLOCK_LEAD", "(default 2m0s)"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("--help does not contain %q — the flag, its env twin or its documented default is missing:\n%s", want, out)
 			}

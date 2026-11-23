@@ -99,10 +99,11 @@ const (
 	defaultSyncInterval     = 30 * time.Second
 	defaultSyncRespRate     = 500
 	// defaultMaxClockLead is the inbound version bound's launch default
-	// (XPORT-04): 60 s, the documented drift tolerance. The core normalizes
-	// a zero or negative value to the same bound; the flag default only
+	// (XPORT-04, D-02 refined): 2 m, strictly greater than the 60 s
+	// drift_warn default so the drift WARN window is reachable. The core
+	// normalizes a zero or negative value to the same bound; the flag default
 	// makes the documented value visible in --help.
-	defaultMaxClockLead = time.Minute
+	defaultMaxClockLead = 2 * time.Minute
 	defaultDumpDebounce = 50 * time.Millisecond
 	defaultDumpMaxWait  = time.Second
 	defaultDriftWarn    = 60 * time.Second

@@ -97,26 +97,28 @@ const (
 	defaultSyncResponseRate   = 500
 
 	// defaultMaxClockLead is the inbound version bound's design default
-	// (XPORT-04, D-06): the documented drift tolerance, equal to
-	// drift_warn's default, so a peer inside the drift window stays
-	// accepted while a crafted far-future version is rejected before any
-	// store or clock call. A Config.MaxClockLead of zero or less is
-	// normalized to this value.
-	defaultMaxClockLead = 60 * time.Second
+	// (XPORT-04, D-06): strictly greater than drift_warn's 60 s default, so
+	// the drift WARN window is reachable — a received version may lead system
+	// time by more than drift_warn and still be accepted, while a crafted
+	// far-future version is rejected before any store or clock call. A
+	// Config.MaxClockLead of zero or less is normalized to this value.
+	defaultMaxClockLead = 2 * time.Minute
 
 	// discardWarnInterval is the per-class rate limit of the validation
 	// WARNs (T-3-25): one WARN per class per this much event-loop time.
 	// Driven by the handler's now, never a wall clock read.
 	discardWarnInterval = 10 * time.Second
 
-	// maxSyncResponseRate is the top of SyncResponseRate's valid domain.
+	// MaxSyncResponseRate is the top of SyncResponseRate's valid domain.
 	// At any rate above it, one second divided by the rate as a
 	// [time.Duration] truncates to a zero interval and silently disables
 	// the egress limiter (D-15 P4-WR-02), so normalized() clamps every
 	// out-of-domain rate — zero, negative or above this cap — to
 	// defaultSyncResponseRate: the floor(1s/rate) spacing stays non-zero
-	// at every configuration, and the limiter is never silently off.
-	maxSyncResponseRate = 1e9
+	// at every configuration, and the limiter is never silently off. The
+	// configuration validation rejects a rate above it before any bind,
+	// reading this constant instead of duplicating the literal.
+	MaxSyncResponseRate int = 1e9
 
 	// maxEgressEntries bounds the reactive-unicast egress queue (XPORT-07,
 	// RESEARCH Pattern 9): twice the documented 20 000-key scale plus
@@ -263,7 +265,7 @@ const (
 // after an idle queue is immediate. Rates outside the domain (0, 1e9] clamp
 // to the 500/s default —
 // above 1e9 the integer division truncates to a zero interval and would
-// silently disable the limiter (D-15 P4-WR-02, the maxSyncResponseRate cap).
+// silently disable the limiter (D-15 P4-WR-02, the MaxSyncResponseRate cap).
 type Config struct {
 	HelloInterval      time.Duration
 	PeerTimeout        time.Duration
@@ -280,10 +282,11 @@ type Config struct {
 	// version beyond now+MaxClockLead is discarded as DiscardBadVersion
 	// before any store or clock call, so a crafted far-future stamp can
 	// never poison the hybrid logical clock. A zero or negative value
-	// normalizes to defaultMaxClockLead (60 s, the documented drift
-	// tolerance) — a scenario that legitimately needs more (a far-ahead
-	// clock under test) sets its own explicit value; the production
-	// default is never widened for tests.
+	// normalizes to defaultMaxClockLead (2 m) — the default is strictly
+	// above drift_warn's 60 s, so the drift WARN window is reachable; a
+	// scenario that legitimately needs more (a far-ahead clock under test)
+	// sets its own explicit value, and the production default is never
+	// widened for tests.
 	MaxClockLead time.Duration
 
 	// OnDiscard is invoked at every HandleDatagram discard site with the
@@ -298,7 +301,7 @@ type Config struct {
 
 // normalized returns cfg with out-of-domain fields replaced by the design
 // defaults — zero or negative everywhere, and SyncResponseRate additionally
-// above maxSyncResponseRate, where the spacing division would truncate to
+// above MaxSyncResponseRate, where the spacing division would truncate to
 // zero (D-15 P4-WR-02) — and a nil Log or OnDiscard replaced by a no-op.
 func (c Config) normalized() Config {
 	if c.HelloInterval <= 0 {
@@ -328,7 +331,7 @@ func (c Config) normalized() Config {
 		// allocation for its whole age (WR-06).
 		c.SyncChunkBytes = MaxSyncChunkBytes
 	}
-	if c.SyncResponseRate <= 0 || c.SyncResponseRate > maxSyncResponseRate {
+	if c.SyncResponseRate <= 0 || c.SyncResponseRate > MaxSyncResponseRate {
 		c.SyncResponseRate = defaultSyncResponseRate
 	}
 	if c.MaxClockLead <= 0 {
