@@ -86,10 +86,33 @@ the two bounds that make that true:
   codec; a `--value-max-bytes` that cannot fit exits with code 2 and an
   error naming the flag, the key limit and the computed size. The default
   61 440 leaves roughly 3 KiB of headroom.
-- **`--max-clock-lead`** (environment twin `SUPKV_MAX_CLOCK_LEAD`, default
-  60s) bounds how far ahead of local time a received record version may
-  be. Keep the same value on every node: a node with a smaller bound
-  discards versions its peers still consider valid.
+- **`--max-clock-lead`** — environment twin `SUPKV_MAX_CLOCK_LEAD`,
+  default 2m — bounds how far ahead of local time a received record version
+  may be. Keep the same value on every node: a node with a smaller bound
+  discards versions its peers still consider valid. Startup requires
+  `drift_warn < max_clock_lead` at the record layout's millisecond
+  resolution — `max_clock_lead` must be at least `drift_warn` plus one
+  millisecond — so the drift warning below is reachable: a leading version
+  is discarded by this bound before the warning could fire.
+
+## Configuration validation
+
+One validation point owns every range and relation. A violation is a
+configuration error: the node exits with code 2 and names the offending
+parameter, and never falls back to a default silently. Zero or negative
+durations and rates are rejected (all offenders in one pass), alongside the
+bounds above. The relations:
+
+- `--retransmit-interval` is at least 1ms — a nanosecond scan period is a
+  busy loop;
+- `--peer-timeout` must exceed `--hello-interval` — a peer evicted at the
+  same instant it greets would never stay discovered;
+- `--ack-timeout` must not exceed `--ack-timeout-max` — the retransmit
+  ladder's ceiling sits at or above its base, and equality is a single rung;
+- `--sync-chunk-bytes` must be within 1..65507 — a chunk budget above the
+  largest IPv4 UDP payload describes a chunk no datagram can carry;
+- `--max-clock-lead` must be at least `--drift-warn` plus 1ms, as stated
+  under the record limits above.
 
 ## Load outcomes
 
@@ -99,8 +122,9 @@ At startup the node walks the fallback chain — the main dump file, then its
 - **Prompt** — neither file exists. A fresh start: no WARN and no ERROR,
   just the normal empty-node startup. The node recovers its state from
   peers;
-- **Main** — the main generation decoded. Nothing is logged about the
-  outcome itself;
+- **Main** — the main generation decoded. One INFO `Dump load` record
+  carries `outcome=main`, the accepted `generation`, the loaded `records`
+  count and the `discarded` census;
 - **Backup** — the main generation was absent or unusable and `.prev`
   decoded. Exactly one WARN names the main path and the cause, so an absent
   main is reported as `fs.ErrNotExist` and an unreadable or undecodable one
@@ -215,20 +239,28 @@ journal and none is needed. The observable is the
 ## Clock drift runbook
 
 **Symptom.** `supkv_clock_drift_warnings_total` rises on one node while its
-peers stay flat. A warning is counted when an absorbed remote timestamp sits
-beyond the `--drift-warn` threshold ahead of the node's own clock (default
-60s; environment twin `SUPKV_DRIFT_WARN`).
+peers stay flat, and one WARN `Clock drift` record appears per peer per
+rate-limit interval. A warning is counted when a received version leads
+local wall time by more than `--drift-warn` (default 60s; environment twin
+`SUPKV_DRIFT_WARN`): the received version's own `unix_ts_ms` reading is
+compared with the local clock, for every received record and for each
+DataSync listing part's maximum entry version. The counter counts every
+offending record; the WARN is rate-limited per (peer, `clock_drift`), so a
+peer flooding leading versions cannot flood the log.
 
-**Cause.** The node's wall clock runs behind (or ahead of) its peers'.
+**Cause.** The warning node's wall clock runs behind the sender's — the
+received version leads local time. Note the direction: a node whose clock
+runs ahead does not warn itself; its peers do, because they receive its
+leading versions.
 
-**Action.** Fix the clock source — NTP or PTP on the host. No sup-kv-side
-repair exists, and none is needed: correctness never depends on wall-clock
-synchronization. Clock skew only affects which simultaneous write wins, and
-it does so deterministically and identically on all replicas. A node whose
-clock runs far ahead will see its writes dominate (win every concurrent
-conflict) until the peers' clocks catch up; once the clock is corrected, new
-writes resume normal ordering. This behavior is proven by the
-failure-scenario suite (simulated far-ahead nodes converge
+**Action.** Fix the clock source — NTP or PTP — on the host that warns. No
+sup-kv-side repair exists, and none is needed: correctness never depends on
+wall-clock synchronization. Clock skew only affects which simultaneous
+write wins, and it does so deterministically and identically on all
+replicas. A node whose clock runs far ahead will see its writes dominate
+(win every concurrent conflict) until the peers' clocks catch up; once the
+clock is corrected, new writes resume normal ordering. This behavior is
+proven by the failure-scenario suite (simulated far-ahead nodes converge
 deterministically).
 
 Do not restart the cluster to "fix" drift: it changes nothing. Record
@@ -241,30 +273,55 @@ The metrics/debug endpoint is opt-in. Pass `--metrics-addr` (environment
 twin `SUPKV_METRICS_ADDR`); when it is unset, no listener exists at all.
 The endpoint serves:
 
-- `/metrics` — Prometheus text format from an in-repo exporter, the
-  `supkv_*` families:
-  `supkv_replication_unacked_records` and
-  `supkv_replication_unacked_oldest_age_seconds` (retransmission backlog),
-  `supkv_replication_peers`, `supkv_replication_datagrams_sent_total` (by
-  message type), `supkv_replication_datagrams_retransmitted_total`,
-  `supkv_datagrams_discarded_total` (by classification; the label set is the
-  complete catalog and every class is published even at zero: `bad_crc`,
-  `undecodable`, `bad_proto_version`, `own_broadcast`, `duplicate_node_id`,
-  `empty_key`, `key_too_long`, `tombstone_with_data`, `bad_checksum`,
-  `bad_version`, `bad_sync_header`), `supkv_merges_conflicts_total`,
-  `supkv_clock_drift_warnings_total`, `supkv_dumps_duration_seconds`,
-  `supkv_dumps_total`, `supkv_dumps_errors_total`,
-  `supkv_dumps_failures_total` (by failure class: `disk_full`,
-  `permission`, `other`), `supkv_dumps_unconfirmed_total` (writes answered
-  before their covering dump completed), `supkv_dump_load_total` (by
-  startup outcome: `prompt`, `main`, `backup`, `unusable`) and
-  `supkv_dump_records_discarded_total` (by load-time class: `checksum`,
-  `version`, `value_limit`, `malformed`) — plus the standard
-  `go_*`/`process_*` runtime families. The complete-catalog rule holds for
-  every labeled family, not only the discard counter: each class and
-  outcome is a fixed label value that renders as a zero-valued sample
-  rather than disappearing, because a zero count is information, not
-  absence;
+- `/metrics` — Prometheus text format from an in-repo exporter: the
+  `supkv_*` families below plus the standard `go_*`/`process_*` runtime
+  families. The complete-catalog rule holds for every labeled family, not
+  only the discard counter: each class and outcome is a fixed label value
+  that renders as a zero-valued sample rather than disappearing, because a
+  zero count is information, not absence.
+  - replication reach and backlog — `supkv_replication_peers`,
+    `supkv_replication_unacked_records` and
+    `supkv_replication_unacked_oldest_age_seconds` (the retransmission
+    backlog), plus `supkv_replication_datagrams_retransmitted_total`;
+  - replication traffic — `supkv_replication_datagrams_sent_total` (by
+    message type). A datagram counts as **sent** only after the socket
+    accepted it: a refused write, an unresolvable unicast handle and an
+    encode failure count nothing, so the counter measures hand-off, not
+    delivery;
+  - the four routed core counters — `supkv_replication_listings_dropped_total`
+    (targeted listing triggers refused by the destination or the chunk cap,
+    retried later), `supkv_replication_sync_streams_dropped_total` (partial
+    DataSync streams evicted by the accumulator bounds),
+    `supkv_replication_listed_keys_evicted_total` (retained listed keys
+    released by whole-peer eviction or expiry) and
+    `supkv_replication_notifications_regressed_total` (local-write
+    notifications ignored because their version was not greater than the
+    tracked one);
+  - discards — `supkv_datagrams_discarded_total` (by classification; the
+    label set is the complete catalog and every class is published even at
+    zero: `bad_crc`, `undecodable`, `bad_proto_version`, `own_broadcast`,
+    `duplicate_node_id`, `unbound_listing`, `empty_key`, `key_too_long`,
+    `tombstone_with_data`, `bad_checksum`, `bad_version`,
+    `bad_sync_header`);
+  - conflicts and drift — `supkv_merges_conflicts_total` counts only a
+    pending (unconfirmed) local write displaced by a replicated value; an
+    overwrite of an already-confirmed record is not a conflict and counts
+    nothing. `supkv_clock_drift_warnings_total` counts received records and
+    DataSync listing-part maxima whose version leads local wall time by
+    more than `--drift-warn` (see the clock-drift runbook);
+  - dumps — `supkv_dumps_duration_seconds` is the last dump attempt's
+    encode and save, `supkv_dumps_total` the attempts,
+    `supkv_dumps_errors_total` the failures, `supkv_dumps_failures_total`
+    the failures by class (`disk_full`, `permission`, `other` — `other` is
+    the clamped residual, so every scrape carries all three),
+    `supkv_dumps_unconfirmed_total` the writes answered before their
+    covering dump completed, `supkv_dump_load_total` the startup outcome
+    (`prompt`, `main`, `backup`, `unusable`) and
+    `supkv_dump_records_discarded_total` the load-time skip class
+    (`checksum`, `version`, `value_limit`, `malformed`);
+  - process — `process_resident_memory_bytes` is the current resident set size
+    in bytes on Linux; development-only darwin builds report the process
+    peak instead;
 - `/debug/vars` (expvar) and `/debug/pprof/*` — runtime introspection.
 
 Because pprof is an arbitrary-cost endpoint, do not expose the metrics
@@ -277,17 +334,65 @@ startup with a usage error).
 Structured logs go to stderr as JSON by default. `SUPKV_LOG_LEVEL` (debug
 through error) and `SUPKV_LOG_FORMAT` (`json` or `text`) tune them.
 
+## Lifecycle logs
+
+Every record below is one structured `slog` record on stderr, JSON by
+default; the message is static and every value is a structured attribute.
+The levels are the operator contract, pinned by `TestCatalogLevels`.
+
+- **INFO `Starting sup-kv`** — once, before any bind or dump load: the
+  build identity (`version`, `commit`, `go_version`), the node identity and
+  every effective configuration value. Certificate and key material never
+  crosses this boundary: only `metrics_addr` and a `metrics_tls` boolean.
+- **INFO `Dump load`** — once per start for a `prompt` or `main` outcome:
+  `outcome`, `generation`, `records` and `discarded`.
+- **WARN `Dump generation fallback`** — a `backup` load: the same four
+  attributes plus `main_path`, `cause` and `preserve_error`.
+- **ERROR `No usable dump generation`** — the `unusable` outcome: the same
+  four attributes plus one `main_*`/`prev_*` attribute group per candidate
+  that actually failed.
+- **INFO `Startup gate opened`** — the gate's one opening event: `reason`
+  is `sync` (a complete listing arrived) or `backstop` (the startup gate
+  elapsed).
+- **INFO `Peer appeared`**, **WARN `Peer restarted`**, **WARN `Peer evicted`**
+  — the peer table's lifecycle transitions, each with `node_id` and
+  `handle`: an appearance and a restart carry the `run_id` (a restart also
+  `previous_run_id`), an eviction its `reason` and `last_seen_age`.
+- **WARN `Clock drift`** — one per peer per rate-limit interval: `node_id`,
+  `handle`, the measured `lead` and the configured `drift_warn` (see the
+  clock-drift runbook).
+- **ERROR `Dump failed`** — one per failed dump attempt: the failure
+  `class` (`disk_full`, `permission`, `other`) and the underlying error as
+  `detail`.
+- **WARN `Replication adapter`** — the core's rate-limited adaptation and
+  discard details as `detail`: a foreign `proto_version`
+  (`class bad_proto_version`), a duplicate `node_id`, an apply failure and
+  the `unbound_listing` drop.
+
 ## Lifecycle and exit codes
 
-`SIGTERM` (or `SIGINT`) triggers the graceful path: the node stops serving
-(health flips to NOT_SERVING), finishes a final confirmed dump, then exits.
-Exit codes:
+The signal handler is armed **before** dump load and bind, so a `SIGTERM`
+(or `SIGINT`) that arrives during startup still takes the graceful path
+instead of the default disposition. The graceful path stops serving (health
+flips to NOT_SERVING), finishes a final confirmed dump, then exits. A
+second signal during the drain is the operator's hurry-up: it forces the
+remaining stop calls without skipping the final flush. Exit codes:
 
 - exit code 0 — clean shutdown; the final dump is confirmed on disk;
-- exit code 1 — the final dump failed (a systemd unit with
-  `Restart=on-failure` reacts to this);
+- exit code 1 — a startup failure (bind, listen, metrics, dump open) or a
+  `Serve` error. A startup failure never runs a final dump (no
+  client-confirmed write exists yet); a `Serve` error still runs the
+  bounded final dump before the code is chosen. A systemd unit with
+  `Restart=on-failure` reacts to this;
 - exit code 2 — malformed configuration: a bad flag value or a malformed
-  `SUPKV_*` environment value.
+  `SUPKV_*` environment value, naming the parameter;
+- exit code 3 — the final dump failed, including on the `Serve`-error path.
+  The failed final dump is the operator's data-loss signal and takes
+  precedence over the `Serve` error's 1.
+
+`--help` lists the five env-only knobs that have no flag: `SUPKV_LOG_LEVEL`,
+`SUPKV_LOG_FORMAT`, `SUPKV_METRICS_CERT`, `SUPKV_METRICS_KEY` and
+`SUPKV_METRICS_CLIENT_CA`.
 
 A failed dump is retried, not fatal. Each failed attempt logs exactly one
 ERROR carrying the failure class and the underlying error, and publishes
@@ -303,7 +408,7 @@ write whose covering dump does not complete within the confirmation timeout
 is answered `Unavailable` (`write not confirmed before the confirmation
 timeout`) and counted in `supkv_dumps_unconfirmed_total`. Shutdown is
 bounded: the final flush waits at most the shutdown grace (a stuck fsync
-answers `Unconfirmed`, which keeps the failed-final-dump exit code 1), and
+answers `Unconfirmed`, and a failed final dump exits with code 3), and
 a dumper goroutine still not stopped at process exit is abandoned with one
 WARN rather than hanging the shutdown.
 
