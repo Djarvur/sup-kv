@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
-current_plan: 8
+current_plan: 5
 status: executing
-stopped_at: Completed 07-03-PLAN.md
-last_updated: "2026-11-23T07:51:32.787Z"
+stopped_at: Completed 07-04-PLAN.md
+last_updated: "2026-11-23T08:11:13.802Z"
 last_activity: 2026-11-23
-last_activity_desc: Phase 6 complete, transitioned to Phase 7
-state_head: b35e6067a33a91e80820cdc2cda33a4bae717c90
+last_activity_desc: Completed 07-04-PLAN.md (exit contract); 7 plans remain in Phase 7
+state_head: be4a68fc3db77ea1d7231dff9bdb3ba32ad4960d
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 75
+  completed_plans: 76
 ---
 
 # Project State
@@ -25,15 +25,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-19)
 
 **Core value:** Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
-**Current focus:** Phase 6 — API and Semantics
+**Current focus:** Phase 7 — Observability and Configuration
 
 ## Current Position
 
-Phase: 7 (Observability and Configuration) — READY TO EXECUTE
-Current Plan: 8
+Phase: 7 (Observability and Configuration) — EXECUTING
+Current Plan: 5
 Total Plans in Phase: 11
-Status: Ready to execute
-Last activity: 2026-11-23 — Phase 6 complete, transitioned to Phase 7
+Status: In Progress
+Last activity: 2026-11-23 — Completed 07-04-PLAN.md; 7 plans remain
 
 Progress: [████░░░░░░] 44%
 
@@ -135,6 +135,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P01 | 567s | 2 tasks | 9 files |
 | Phase 07 P02 | 1324s | 3 tasks | 14 files |
 | Phase 07 P03 | 261 | 2 tasks | 1 files |
+| Phase 07 P04 | 819s | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -434,6 +435,9 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-03: Three named depguard rules (adapters-not-in-core, metrics-no-adapters, grpcapi-no-repl-metrics) enforce cmd -> adapters -> core/ports; adapters are named individually with !$test so port -> app/storage/version and internal/testutil stay legal
 - [Phase 07]: 07-03: The grpcapi -> persistfile / *persist.Engine composition edge is explicitly allowed in .golangci.yml with its written justification (two snapshot sentinels, 12 engine methods, Watch hub Records/Set) rather than hidden behind a //nolint
 - [Phase 07]: 07-03: A depguard rule is proven by a used-import probe under the full config; a blank-import probe is masked by golangci-lint uniq-by-line (revive blank-imports shares the import position) — the Phase 6 WR-03 lesson generalized
+- [Phase 07]: 07-04: run(cfg, rt) int is the injectable lifecycle seam over a runtime of function values; productionRuntime assigns armSignals/signal.Stop/wire/serve/shutdown directly (matching directions), and one switch gives a failed final dump (3) precedence over a Serve error (1) over 0.
+- [Phase 07]: 07-04: startupError carries the replication_bind/grpc_listen/metrics_listen stage and run logs one static Startup-failed ERROR with stage+detail, so a fatal startup survives SUPKV_LOG_LEVEL=error; the stdlib runtime import is aliased goruntime because a package-block type cannot share its name.
+- [Phase 07]: 07-04: the final-dump process test writes against the blocked dump path (Set answers Unavailable, engine stays dirty) because a fresh node's Prompt-load dump succeeds inside the 50 ms debounce and flushDump skips a clean engine; a regular file in place of the directory makes os.CreateTemp fail with ENOTDIR for every uid.
 
 ### Pending Todos
 
@@ -456,7 +460,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T07:51:32.040Z
-Stopped at: Completed 07-03-PLAN.md
+Last session: 2026-11-23T08:11:12.966Z
+Stopped at: Completed 07-04-PLAN.md
 Resume file: None
-Next action: start plan 07-03 (`/gsd:execute-phase 7` continues the phase)
+Next action: start plan 07-05 (`/gsd:execute-phase 7` continues the phase)
