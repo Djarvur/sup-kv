@@ -943,7 +943,13 @@ type Core struct {
 
 	// pendingVisits counts every pending entry the core's whole-set loops
 	// inspect — the deterministic, load-independent measure of the scan
-	// surface the XPORT-02/PERF-05 flatness gates assert. Driver-goroutine-only
+	// surface the XPORT-02/PERF-05 flatness gates assert. The five inspected
+	// loops are trackedVersion and removeSupersededLocal (one entry on a hit,
+	// none on a miss, both through pendingByKey), applyRemote's displacement
+	// (the same), scanRetransmit's due loop (one per due item) and
+	// handleHello's discovery flush (one per pending pair). A new loop over
+	// the pending set MUST increment this counter where it examines an entry,
+	// or the flatness gate stops being a complete measure. Driver-goroutine-only
 	// mutation behind the copying PendingVisits accessor; it is a test seam,
 	// never a published metric.
 	pendingVisits uint64
@@ -1525,7 +1531,10 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 		// peer to the wait-set or the per-peer ledger: the promise is exactly
 		// the write-time capture the entry was created with (A-01, IN-05,
 		// RESEARCH Pitfall 4). A peer discovered after acceptance can be
-		// broadcast to; it can never be awaited.
+		// broadcast to; it can never be awaited. This loop stays deliberately
+		// O(n) — a newly seen peer must receive every pending pair once — and
+		// it prices itself in PendingVisits, so the one-time discovery cost is
+		// visible to the flatness gates and never confused with the hot path.
 		entry.backoff = c.cfg.AckTimeout
 		entry.nextRetry = now.Add(c.cfg.AckTimeout)
 		c.pending[pk] = entry
@@ -2972,7 +2981,9 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 // retry is honored at scan granularity (research A5); with no pending
 // entries this scanner contributes no deadline. Only due heap items are
 // touched — an Advance with nothing due reads the heap root and nothing
-// else, so the scan cost is flat in the pending-set size (XPORT-02). Due
+// else, so the scan cost is flat in the pending-set size (XPORT-02) — and
+// every due item inspected increments PendingVisits, the deterministic seam
+// the flatness gates read. Due
 // emissions are ordered by (key, version) — no map-iteration or heap-order
 // leak reaches an emit path (REPL-02, research Pitfall 1 / probe #9). Every
 // retry emission counts in the retransmissions counter (OBS-01) — the
@@ -3258,7 +3269,10 @@ type PendingInfo struct {
 
 // PendingSnapshot returns a copy of the pending set keyed by key — the
 // observability seam Phase 5's wait_for_replication and Phase 6's OBS-01
-// consume. Keys are iterated sorted and every WaitingOn is sorted ascending:
+// consume. It walks the pending map itself, never pendingByKey, because it
+// reports each whole entry's state; it is a copying test/observability seam,
+// never a hot path. Keys are iterated sorted and every WaitingOn is sorted
+// ascending:
 // no map-iteration order reaches a read path either (probe #9 discipline).
 // Acked is cloned, not aliased — the snapshot shares no backing array with
 // core state (the storage.Records defensive-copy precedent). Two versions
@@ -3337,11 +3351,14 @@ func (c *Core) PacedSends() uint64 {
 }
 
 // PendingVisits returns how many pending entries the core's whole-set loops
-// have inspected since construction — the deterministic cost seam for the
-// XPORT-02/PERF-05 flatness gates. It counts inspections of pending entries,
-// never handler calls or emissions, and it is a test seam: deliberately not a
-// published metric and not mirrored by the adapter. Driver-goroutine-only,
-// like every other core counter.
+// have inspected since construction — the deterministic seam the
+// XPORT-02/PERF-05 flatness gates read: an idle Advance and a fresh-key local
+// write or inbound replication must report zero at any pending-set size. It
+// counts inspections of pending entries, never handler calls or emissions,
+// and it is deliberately not a published metric (no metrics family, no
+// adapter mirror). Adding a loop over the pending set without incrementing it
+// would make the gate an incomplete measure — the field contract states the
+// five sites. Driver-goroutine-only, like every other core counter.
 func (c *Core) PendingVisits() uint64 {
 	return c.pendingVisits
 }
@@ -3441,7 +3458,7 @@ func (c *Core) removePending(pk pendingKey) {
 		return
 	}
 	delete(c.pending, pk)
-	if cur, ok := c.pendingByKey[pk.key]; ok && cur == pk {
+	if cur, indexed := c.pendingByKey[pk.key]; indexed && cur == pk {
 		delete(c.pendingByKey, pk.key)
 	}
 	if entry.elem != nil {
