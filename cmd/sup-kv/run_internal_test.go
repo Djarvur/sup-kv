@@ -25,6 +25,9 @@ var (
 		stage: stageReplicationBind,
 		err:   fmt.Errorf("bind replication socket: %w", errTestBindRefused),
 	}
+	errTestServe     = errors.New("grpc serve failed")
+	errTestDumpCause = errors.New("disk full")
+	errTestDump      = fmt.Errorf("final dump failed: %w", errTestDumpCause)
 )
 
 // runFake is the injectable runtime over an ordered call log: every error
@@ -131,4 +134,46 @@ func TestRun_startupFailureExitsOneNoDump(t *testing.T) {
 		t.Fatalf("stopSignals ran %d times after a startup failure, want 1", fake.stopCalls)
 	}
 	fake.assertCalls(t, "installSignals", "wire", "stopSignals")
+}
+
+// TestRun_serveErrorStillShutsDown pins the Serve-error row: the error is
+// logged, the full D-19 shutdown still runs (the bounded final dump included),
+// and the code is 1 when that dump succeeded.
+func TestRun_serveErrorStillShutsDown(t *testing.T) {
+	t.Parallel()
+	fake := &runFake{serveErr: errTestServe}
+	code := run(config.Config{}, fake.runtime(t))
+	if code != exitStartup {
+		t.Fatalf("run = %d, want %d for a Serve error with a confirmed dump", code, exitStartup)
+	}
+	if fake.shutdownCalls != 1 {
+		t.Fatalf("shutdown ran %d times after a Serve error, want 1", fake.shutdownCalls)
+	}
+	fake.assertCalls(t, "installSignals", "wire", "serve", "shutdown", "stopSignals")
+}
+
+// TestRun_dumpFailureCode pins the failed-final-dump row: a shutdown dump
+// error exits 3, the distinct operator code.
+func TestRun_dumpFailureCode(t *testing.T) {
+	t.Parallel()
+	fake := &runFake{shutdownErr: errTestDump}
+	code := run(config.Config{}, fake.runtime(t))
+	if code != exitDumpFailed {
+		t.Fatalf("run = %d, want %d for a failed final dump", code, exitDumpFailed)
+	}
+	if fake.shutdownCalls != 1 {
+		t.Fatalf("shutdown ran %d times on the dump-failure path, want 1", fake.shutdownCalls)
+	}
+}
+
+// TestRun_serveAndDumpFailure pins the precedence: when the Serve error and
+// the final-dump failure occur on the same path, the dump failure wins.
+func TestRun_serveAndDumpFailure(t *testing.T) {
+	t.Parallel()
+	fake := &runFake{serveErr: errTestServe, shutdownErr: errTestDump}
+	code := run(config.Config{}, fake.runtime(t))
+	if code != exitDumpFailed {
+		t.Fatalf("run = %d with both failures, want %d: the dump failure wins", code, exitDumpFailed)
+	}
+	fake.assertCalls(t, "installSignals", "wire", "serve", "shutdown", "stopSignals")
 }

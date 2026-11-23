@@ -40,8 +40,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	grpcstatus "google.golang.org/grpc/status"
 
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 )
@@ -1108,6 +1110,79 @@ func TestMain_lifecycle(t *testing.T) {
 	}
 	if !strings.Contains(string(dump), smokeKey) {
 		t.Fatalf("the final dump at %s does not contain the committed key %q:\n%s", dumpPath, smokeKey, dump)
+	}
+}
+
+// TestMain_finalDumpFailureExitsThree pins D-06's distinct failed-final-dump
+// code at the binary boundary. The dump directory is replaced by a regular
+// file, so the atomic save's os.CreateTemp fails with ENOTDIR for every uid —
+// unlike chmod 0500, which a root-run CI would bypass — and the bounded final
+// dump cannot land: the process exits 3 with the ERROR record explaining it.
+func TestMain_finalDumpFailureExitsThree(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "dump.json")
+	udpPort := freeUDPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	node := startLoggedNode(t, bin, []string{"SUPKV_LOG_LEVEL=error"},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
+	)
+	awaitServing(t, addr, servingDeadline)
+
+	// Block the dump path: a regular file where the directory was. ensureDir
+	// stats the path and finds something, then os.CreateTemp fails with
+	// ENOTDIR for every uid (RESEARCH D-06's root-proof construction).
+	err := os.RemoveAll(dir)
+	if err != nil {
+		t.Fatalf("remove dump directory %s: %v", dir, err)
+	}
+	err = os.WriteFile(dir, []byte("blocked"), 0o600)
+	if err != nil {
+		t.Fatalf("replace dump directory %s with a regular file: %v", dir, err)
+	}
+
+	// A write whose covering dump cannot land answers Unavailable and leaves
+	// the engine dirty, so shutdown's bounded final dump has one to attempt.
+	client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	t.Cleanup(cancel)
+	_, setErr := client.Set(ctx, &apiproto.SetRequest{Key: smokeKey, Value: []byte(smokeValue)})
+	if grpcstatus.Code(setErr) != codes.Unavailable {
+		t.Fatalf("Set over a blocked dump path = %v, want Unavailable (the setup needs a dirty engine)", setErr)
+	}
+
+	err = node.cmd.Process.Signal(syscall.SIGTERM)
+	if err != nil {
+		t.Fatalf("SIGTERM %d: %v", node.cmd.Process.Pid, err)
+	}
+	var exitErr error
+	waitFor(t, exitDeadline, "process exit after SIGTERM over a blocked dump path", func() bool {
+		select {
+		case exitErr = <-node.exit:
+			return true
+		default:
+			return false
+		}
+	})
+	assertExitCode(t, exitErr, exitDumpFailedCode)
+
+	explained := false
+	for _, record := range parseLogRecords(node.stderr.String()) {
+		if record.Level == "ERROR" && record.Msg == "Final dump failed" {
+			explained = true
+			break
+		}
+	}
+	if !explained {
+		t.Fatalf("the failed-final-dump run left no parsed ERROR %q record:\n%s", "Final dump failed", node.stderr.String())
 	}
 }
 
