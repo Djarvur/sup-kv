@@ -1,6 +1,6 @@
 ---
 phase: 06-api-and-semantics
-verified: 2026-11-23T03:46:24Z
+verified: 2026-11-23T03:54:50Z
 status: passed
 score: 79/79 must-haves verified
 covered_files:
@@ -108,7 +108,7 @@ covered_files:
   - internal/udprepl/scenario_test.go
   - internal/udprepl/smoke_test.go
   - internal/udprepl/three_node_test.go
-covered_digest: "v4:sha256:fdd2555c585bec02ff521aa3d77592328f5f6d6688d5307f4c740cc98a59f050"
+covered_digest: "v4:sha256:813851cec4e21a690ec15e09772203cc5b53b7026752def13e82dada185558ca"
 behavior_unverified: 0
 overrides_applied: 0
 decision_coverage:
@@ -120,9 +120,9 @@ decision_coverage:
 # Phase 6: API and Semantics Verification Report
 
 **Phase Goal:** The gRPC API tells the truth — `wait_for_replication` reports what actually happened, errors are total and path-free, Watch and health behave as documented, and the proto is public so consumers can build against it.
-**Verified:** 2026-11-23T03:46:24Z
+**Verified:** 2026-11-23T03:54:50Z
 **Status:** passed
-**Re-verification:** No — initial verification (no prior `*-VERIFICATION.md` existed)
+**Re-verification:** No — initial-mode re-run on `7c3fcb2` after the docs-only `cb68aa8`; the prior report was `passed` with no gaps
 
 ## Goal Achievement
 
@@ -195,7 +195,7 @@ decision_coverage:
 | T-09.1 | 06-09 | `docs/API.md` exists with the phase-owned contract sections | ✓ VERIFIED | `docs/API.md` (326 lines): Public proto, wait, List, Errors, Watch, Snapshots, Transport and health, Consumer library territory, Phase 9 split |
 | T-09.2 | 06-09 | Wait section states write-time set, zero-peer false, Superseded, caller-bounded, unknown-Ack exclusion | ✓ VERIFIED | `docs/API.md:52-92`; anchors in `TestAPIDoc` |
 | T-09.3 | 06-09 | List section states both modes, ordering, position token, 256 max, 6 MiB budget, live-only, empty-token end | ✓ VERIFIED | `docs/API.md:94-140`; anchors |
-| T-09.4 | 06-09 | Error contract names every mapper code + List constant message, detail logged, no server path | ✓ VERIFIED (see Info finding) | `docs/API.md:142-194`: all 15 mapper rows are in the table; `invalid page size`/`invalid page token` are stated in the List section and pinned by `TestAPIDoc`; logging/path-free rules stated. The exhaustive per-RPC table is Phase 9/DOCS-05. The Errors intro's "covers every error" sentence is broader than the table — recorded as an Info anti-pattern below, not a goal gap. |
+| T-09.4 | 06-09 | Error contract names every mapper code + List constant message, detail logged, no server path | ✓ VERIFIED | `docs/API.md:142-194`: all 15 mapper rows are in the table; the intro now scopes the table to "every mapper code and the List validation constants" and names the List section's `invalid page size`/`invalid page token`; the exhaustive per-RPC table is explicitly Phase 9/DOCS-05; logging and path-free rules stated. `TestAPIDoc` PASS after `cb68aa8`. |
 | T-09.5 | 06-09 | Watch section states after-dump, exactly once, deletions, version order, asymmetry, Unavailable, resubscribe | ✓ VERIFIED | `docs/API.md:196-236`; anchors |
 | T-09.6 | 06-09 | Snapshots section states full rollback, fresh versions, no version burn, broadcast, non-linearizable caveat | ✓ VERIFIED | `docs/API.md:238-279` (plus the CR-01 partial-snapshot refusal) |
 | T-09.7 | 06-09 | Transport section states keepalive, ceilings, one-way NOT_SERVING; consumer zone states ADR 0007/14.7 | ✓ VERIFIED | `docs/API.md:281-316`; values match `LimitsFor` (187 472 / 190 440 / 6 MiB + 125 008) |
@@ -224,12 +224,13 @@ decision_coverage:
 
 ### Deferred Items
 
-No must-have gap was deferred. Two observations are informational only:
+No must-have gap was deferred. One pre-existing flake observation is informational only:
 
 | Item | Owner | Note |
 | ---- | ----- | ---- |
-| `docs/API.md` Errors intro says "The table below covers every error the RPC handlers produce", but the two List validation messages (`invalid page size`, `invalid page token`) are documented in the List section rather than as table rows | Phase 9 / DOCS-05 (full per-RPC failure table) | Both messages are present, client-visible and anchor-pinned; the code is total. See the Info anti-pattern. |
 | Pre-existing cross-package UDP port-contention / lifecycle-readiness flakes recorded during execution | Phase 8 flake owner (per `deferred-items.md`) | Did not fire in this verification; the full suite and red runner were green. |
+
+The two documentation observations from the first pass (the scoped error-table claim and the client receive-limit note) were applied in `cb68aa8` and re-verified; nothing remains deferred from them.
 
 ## Required Artifacts
 
@@ -335,11 +336,11 @@ This phase's rendered values are gRPC responses and streams. Every traced produc
 | Whole-tree build | `go build ./...` | exit 0 | ✓ PASS |
 | Vet (host and darwin) | `go vet ./...`; `GOOS=darwin GOARCH={amd64,arm64} go build ./... && go vet ./...` | all exit 0 | ✓ PASS |
 | Strict lint | `make lint` | config verify + `golangci-lint run ./...` exit 0 | ✓ PASS |
-| Full race suite | `make test` (`go test -race -cover ./...`) | exit 0; app/repl 175.1 s; every package `ok`; no flake fired | ✓ PASS |
+| Full race suite | `make test` (`go test -race -cover ./...`) | exit 0 after `cb68aa8`; cmd/sup-kv reran 6.25 s (TestAPIDoc), app/repl 156.3 s; every package `ok`; no flake fired | ✓ PASS |
 | Proto lint/format/breaking | `make buf-lint`, `go tool buf format --diff --exit-code`, `make buf-breaking` | all exit 0 (breaking against fetched `origin/master`) | ✓ PASS |
 | Client example | `make client-example` | exit 0 (build + vet + tidy no-diff) | ✓ PASS |
 | Root graph excludes nested module | `go list ./...` | 18 packages, zero `examples/client` | ✓ PASS |
-| Red gate | `bash scripts/red-runner` | exit 0; "7 expectation row(s) checked, 0 error(s)"; both mutants killed; evidence `20261123T033923Z` | ✓ PASS |
+| Red gate | `bash scripts/red-runner` | exit 0; "7 expectation row(s) checked, 0 error(s)"; both mutants killed; evidence `20261123T033923Z` (run on the code tree before the docs-only `cb68aa8`; no red-gated package reads `docs/API.md`) | ✓ PASS |
 | Frozen content pin | `git hash-object` on the two red tests + TSV | `519789bd…`, `573fed68…`, `add45b810…` — exact match | ✓ PASS |
 | Focused phase packages | `go test -race -count=1 ./internal/grpcapi ./internal/app/persist ./internal/app/storage ./internal/udprepl ./api/supkvapi/v1 ./cmd/sup-kv` | all `ok` | ✓ PASS |
 | Wait matrix | grpcapi `TestWait_*` (13 tests) | 13/13 PASS | ✓ PASS |
@@ -349,12 +350,12 @@ This phase's rendered values are gRPC responses and streams. Every traced produc
 | Mapper/path matrix | `TestMapError_*`, `TestRPC_statusMessagesPathFree` | 6/6 PASS | ✓ PASS |
 | Rollback matrix | persist `TestEngine_restore*`/`TestOpen_*`, grpcapi `TestServer_snapshotLoadRollback` | all PASS | ✓ PASS |
 | Adapter/core wait matrix | `TestWaitReplicated_*` (12), repl core 4 named tests | all PASS | ✓ PASS |
-| Doc anchors/executable docs | `TestAPIDoc`, `TestExamplesDoc` | both PASS | ✓ PASS |
+| Doc anchors/executable docs | `go test -race -count=1 ./cmd/sup-kv/ -run '^(TestAPIDoc|TestExamplesDoc)$'` | both PASS on the `cb68aa8` doc (5.78 s package) | ✓ PASS |
 | RED evidence records | `check tdd-red-evidence` over 17 JSON records | all `RED_EVIDENCE_OK` (`target_test_failed`) | ✓ PASS |
 
 ## Probe Execution
 
-No `scripts/*/tests/probe-*.sh` exists and no phase plan declares a probe script. The phase's executable acceptance runner is the frozen red gate, re-executed on the current tree (7/7 rows, both mutants killed, evidence `.planning/phases/02-stand-and-simulator-as-tests/red-evidence/20261123T033923Z/`). The earlier committed evidence directories were left untouched.
+No `scripts/*/tests/probe-*.sh` exists and no phase plan declares a probe script. The phase's executable acceptance runner is the frozen red gate, executed on the code tree before the docs-only `cb68aa8` (7/7 rows, both mutants killed, evidence `.planning/phases/02-stand-and-simulator-as-tests/red-evidence/20261123T033923Z/`). The only later change is `docs/API.md`; no red-gated package reads it (`grep` finds only `cmd/sup-kv/api_docs_test.go`, which `TestAPIDoc` re-ran green). The earlier committed evidence directories were left untouched.
 
 ## Test Quality Audit
 
@@ -402,8 +403,7 @@ No ORPHANED requirements: `.planning/REQUIREMENTS.md` maps exactly APIS-01…07 
 | — | — | No `TODO`/`HACK`/`PLACEHOLDER` or "coming soon"/"not yet implemented" markers in production files | — | None |
 | — | — | No empty implementations or placeholder returns on any List/Watch/wait/rollback path | — | None |
 | — | — | No hardcoded empty props/static data on a production path; every response is store- or tracker-derived | — | None |
-| `docs/API.md` | 144-147 | The Errors section says "The table below covers every error the RPC handlers produce", but the two List validation messages are documented in the List section, not as table rows | ℹ️ Info | Both messages are present and client-visible in the same document and anchor-pinned; the code mapping is total. The exhaustive per-RPC table is Phase 9/DOCS-05. Not a goal gap. |
-| `docs/API.md` | 294 | The `MaxSendBytes` row states the server can send a 6 MiB + 125 008-byte page, but does not note that a consumer requesting a maximum page must raise its own gRPC receive limit (the gRPC default is 4 MiB, below this server ceiling) | ℹ️ Info | The server ceiling is honest and pinned; the plan's own harness sets an 8 MiB test client receive limit for this reason (`server_test.go:55-60`). A consumer following only `docs/API.md` could see the client reject a legitimate large page with `ResourceExhausted`; a one-line client-side note would close it. Not a goal gap. |
+| — | — | The first pass's two documentation observations were applied in `cb68aa8`: the Errors intro now scopes its claim to mapper codes + the List validation constants, and the `MaxSendBytes` row names the client-side receive-limit requirement. Both re-verified; no finding remains | — | None |
 | — | — | Nine new `//nolint` directives in the phase diff, all naming a linter and a written reason; no unnamed or blanket suppression | — | None |
 
 ## Decision Coverage
@@ -424,4 +424,4 @@ No gaps. All seven requirements are shipped and wired end to end, all five roadm
 - **WR-03** — `examples/client` is `example.com/sup-kv-client` outside the root prefix; the internal-import compile rejection is documented and the depguard rule remains the enforced boundary.
 - **IN-01…IN-04 and N-1** — the unreachable skip is gone, the `S-ALG-CU-11`/`S-PERS-11`/`S-PERS-12` citations resolve to the current functions, the transport doc now claims only the pinned settings, the largest-value round trip exists, and all citations were re-pointed after the CR-01 insertion.
 
-The frozen contracts are intact: both red-test files and `scripts/red-expectations.tsv` hash exactly to the phase-start pin, the red runner is 7/7 with both mutants killed, and the working tree is clean apart from the runner's new untracked evidence directory. No gate was narrowed or skipped in this verification.
+The frozen contracts are intact: both red-test files and `scripts/red-expectations.tsv` hash exactly to the phase-start pin, the red runner is 7/7 with both mutants killed, and the code tree is clean apart from this regenerated report. The first pass's two documentation observations were applied in `cb68aa8` (`docs/API.md` only, 2 lines); this report was regenerated on `7c3fcb2` with `TestAPIDoc`, `go build ./...`, `make lint` and `make test` re-run green, and the covered-input digest recomputed to `v4:sha256:813851cec4e21a690ec15e09772203cc5b53b7026752def13e82dada185558ca`. No gate was narrowed or skipped in this verification.
