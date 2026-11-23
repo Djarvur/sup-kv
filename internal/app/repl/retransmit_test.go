@@ -103,8 +103,8 @@ func newTestCore() (*repl.Core, *stateStore) {
 
 // newTestCoreWithConfig is newTestCore over an explicit Config: the seam for
 // tests whose own scenario legitimately runs away from a default — the
-// far-ahead drift scenario's widened MaxClockLead — while the production
-// default stays untouched everywhere else.
+// far-ahead drift scenario's 25 h MaxClockLead override — while the
+// production 2 m default stays untouched everywhere else.
 func newTestCoreWithConfig(cfg repl.Config) (*repl.Core, *stateStore) {
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}

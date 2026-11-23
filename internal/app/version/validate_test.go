@@ -10,9 +10,10 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
-// validateLead is the design-default max_clock_lead locked by D-06: 60 s,
-// equal to the documented drift tolerance, so peers inside it stay accepted.
-const validateLead = 60 * time.Second
+// validateLead is the shipped max_clock_lead default (07-02): 2 m, strictly
+// greater than the 60 s drift-warn tolerance so an accepted version can be
+// old enough to warn.
+const validateLead = 2 * time.Minute
 
 // hourMs is one hour in the layout's unix_ts_ms units, used for the accepted
 // past-reading rows.
@@ -224,8 +225,8 @@ func TestValidate_property(t *testing.T) {
 	const (
 		rawDraws     = 2000
 		packedDraws  = 1000
-		windowMs     = int64(61 * 1000) // one second beyond the 60 s lead.
-		nearBoundary = int64(1000)      // readings within a second of the edge.
+		windowMs     = int64(121 * 1000) // one second beyond the 2 m lead.
+		nearBoundary = int64(1000)       // readings within a second of the edge.
 	)
 
 	for range rawDraws {

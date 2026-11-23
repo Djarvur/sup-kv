@@ -22,11 +22,11 @@ const (
 
 	// RandNearVersion's window around the fixed test wall clock, in
 	// milliseconds: one hour behind (a past reading is always accepted —
-	// the hybrid logical clock absorbs it) through 90 s ahead, so the draw
-	// straddles the 60 s default MaxClockLead and produces both accepted
+	// the hybrid logical clock absorbs it) through 150 s ahead, so the draw
+	// straddles the 2 m default MaxClockLead and produces both accepted
 	// and rejected future readings.
 	nearPastMs   = -3600 * 1000
-	nearFutureMs = 90 * 1000
+	nearFutureMs = 150 * 1000
 )
 
 // fixedNow returns a now func parked at the fixed test wall-clock
@@ -75,10 +75,10 @@ func RandKey(rng *rand.Rand) string {
 }
 
 // RandNearVersion packs a valid version whose reading lies near the fixed
-// test wall clock: l drawn uniformly in [testNowMs−1h, testNowMs+90s], with
+// test wall clock: l drawn uniformly in [testNowMs−1h, testNowMs+150s], with
 // the counter and node ID drawn like RandVersion. The window deliberately
-// straddles the inbound 60 s future bound, so a model built on this
-// generator exercises both accepted and rejected version readings.
+// straddles the inbound 2 m future bound, so a model built on this generator
+// exercises both accepted and rejected version readings.
 func RandNearVersion(rng *rand.Rand) version.RecordVersion {
 	span := int64(nearFutureMs - nearPastMs + 1)
 	l := testNowMs + nearPastMs + rng.Int64N(span)

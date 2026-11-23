@@ -132,7 +132,7 @@ func TestScenario_clockJumps(t *testing.T) {
 	sched := simnet.NewScheduler(at(0))
 	// The scenario's intent is HLC absorption of a live jump, not
 	// rejection: the forward jump is up to ~3 h, so the inbound version
-	// bound is widened to 4 h explicitly. The production 60 s default is
+	// bound is widened to 4 h explicitly. The production 2 m default is
 	// not widened for this test's convenience anywhere else.
 	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{MaxClockLead: 4 * time.Hour}, simFixedDelay(nil))
 	quiesceDiscovery(t, sched, cluster)
@@ -213,7 +213,7 @@ func TestScenario_farAhead(t *testing.T) {
 	sched := simnet.NewScheduler(at(0))
 	// The scenario's intent is HLC absorption of a 24 h far-ahead clock,
 	// not rejection: the inbound version bound is widened to 25 h (the
-	// offset plus margin) explicitly. The production 60 s default stays
+	// offset plus margin) explicitly. The production 2 m default stays
 	// untouched.
 	cluster := simnet.NewCluster(sched, rng, 3, repl.Config{MaxClockLead: 25 * time.Hour}, simFixedDelay(nil))
 	cluster.SetClockOffset(1, 24*time.Hour) // before any event: node 1's whole run is a day ahead
@@ -231,10 +231,10 @@ func TestScenario_farAhead(t *testing.T) {
 	cluster.Write(1, "far/only/1", []byte("far-ahead 1"))
 	cluster.Write(1, "far/only/2", []byte("far-ahead 2"))
 
-	// A write from node 2 after the far-ahead stamps have been absorbed
-	// everywhere: its delivery is the post-absorption apply that observes
-	// the absorbed l a warning window past the local wall — the drift
-	// counter's pinned absorb-then-warn sequence (TestMergeStats_counts).
+	// A write from node 2 while the far-ahead stamps travel: the first
+	// delivery of a far-ahead record counts immediately, because the signal
+	// is the received reading's lead against the local wall — the drift
+	// counter's pinned received-lead sequence (TestMergeStats_counts).
 	sched.RunUntil(sched.Now().Add(10 * time.Millisecond))
 	cluster.Write(2, "far/after", []byte("after the absorption"))
 
@@ -254,8 +254,8 @@ func TestScenario_farAhead(t *testing.T) {
 			served, farShared, scnReplay(seed, test))
 	}
 
-	// Drift observability: the behind peers counted warnings on their
-	// post-absorption applies; the far-ahead node counted none.
+	// Drift observability: the behind peers counted warnings on the applies
+	// that received the far-ahead readings; the far-ahead node counted none.
 	for _, i := range []int{0, 2} {
 		if got := cluster.Core(i).MergeStats().DriftWarnings; got == 0 {
 			t.Fatalf("node %d counted %d drift warnings under a 24h peer skew, want >= 1 %s", i, got, scnReplay(seed, test))
