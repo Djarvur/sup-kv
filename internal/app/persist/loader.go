@@ -31,6 +31,12 @@ import (
 // storeCfg.ValueLimit(), the same helper NewStore normalizes with: the bound
 // the decoder applies and the limit the store enforces cannot diverge
 // (PERSIST-01).
+//
+// The startup load fires no change notification: the caller's
+// storage.Config.OnChange tap is wrapped in a synchronous loading guard
+// around mergeRecords (Pitfall 8, APIS-04), so a loaded dump is never
+// announced as a live change, and a nil tap remains a valid caller contract
+// (the wrapper substitutes a no-op).
 func Open(
 	nodeID uint16,
 	now func() time.Time,
@@ -56,8 +62,30 @@ func Open(
 	}
 	initialL, initialC := Watermark(records)
 	clk := clock.NewClock(now, initialL, initialC, driftWarn)
+	// The startup load is not a change feed (Pitfall 8, T-06-20): mergeRecords
+	// installs every loaded record, and an unguarded tap would announce the
+	// whole dump as live changes — on a clean Main load no dump follows to
+	// confirm them, so they would sit in the hub's bounded pending queue until
+	// it shed. Capture the caller's tap, substitute a no-op for a nil one
+	// (storage.Config{} is a documented valid caller shape; NewStore's
+	// normalized makes the same substitution for its own path), and gate it
+	// with a synchronous loading flag: the merge runs on this goroutine, no
+	// tap consumer exists before Open returns, and afterwards the flag is
+	// only read, so a plain bool is race-free.
+	onChange := storeCfg.OnChange
+	if onChange == nil {
+		onChange = func(string, storage.Record, uint64) {}
+	}
+	loading := true
+	storeCfg.OnChange = func(key string, rec storage.Record, gen uint64) {
+		if loading {
+			return
+		}
+		onChange(key, rec, gen)
+	}
 	store := storage.NewStore(nodeID, clk, storeCfg)
 	mergeRecords(store, records)
+	loading = false
 	eng = New(store, dumps, engineCfg)
 	eng.loadStats = LoadStats{
 		Loaded:     true,
