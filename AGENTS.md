@@ -13,7 +13,10 @@
    architecture: `internal/app` (the pure decision core) may not import
    `net`, `os`, `syscall` or `google.golang.org/*` (rule `sup-kv-app-no-io`);
    `internal/port` may import standard library and the own module path only
-   (rule `sup-kv-port-stdlib-only`). Both rules live in `.golangci.yml`. Any
+   (rule `sup-kv-port-stdlib-only`); and `api/**` may not import
+   `github.com/Djarvur/sup-kv/internal` (rule
+   `sup-kv-public-api-no-internal`), so the published client package stays
+   importable from another module. These rules live in `.golangci.yml`. Any
    change to the boundary is a visible `.golangci.yml` diff, never a quiet
    code-side workaround.
 2. **Vendored lint config provenance.** `.golangci.yml` is the
@@ -55,7 +58,9 @@
 
 - The shipped runtime graph is intentionally minimal: Phase 1 carries **zero
   direct runtime requires**. gRPC and protobuf enter `go.mod` in the phases
-  that first use them.
+  that first use them. The client-facing API schema under `api/` is public —
+  its generated Go package is the supported client entry point — while the
+  replication proto under `internal/udprepl/replproto/` stays internal.
 - The `tool` directives (golangci-lint v2.15.0, govulncheck v1.9.0) drag
   ~200 `// indirect` requires into `go.mod`/`go.sum`. This is the accepted
   reading of "zero-dependency" (D-03): it binds **direct runtime requires**

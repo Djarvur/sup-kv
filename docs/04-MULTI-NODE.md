@@ -92,27 +92,31 @@ These are the bounds the tests establish; none is a new rule.
 ## wait_for_replication at N > 2
 
 `wait_for_replication` is the optional write-time wait for peer
-acknowledgements (`internal/grpcapi/wait.go`; the
-`ServerOptions.WaitReplicated`/`KnownPeers` seams in
-`internal/grpcapi/gate.go`). At N > 2 its report is:
+acknowledgements (`internal/grpcapi/wait.go`). The awaited set is captured
+by the `ServerOptions.WritePeers` seam in `internal/grpcapi/gate.go`, which
+reports the sorted peer ids known when the write is accepted. At N > 2 its
+report is:
 
-- `total` is the peer count captured exactly once at write time
-  (`KnownPeers`, before any waiting), not a live count: a peer discovered
+- `total` is the write-time peer set captured exactly once by `WritePeers`
+  immediately before the engine write, not a live count: a peer discovered
   during the wait never extends the awaited set.
 - `acked=true` requires every one of those write-time peers to Ack the
   version. One unreachable peer therefore yields `acked=false` at the
   timeout even when the other N−1 peers Acked.
-- An Ack from a peer unknown at write time still counts in the core's
-  acknowledged set, but the reported count is clamped to `total`
-  (`wait.go`, the WR-01 clamp), so the report can never claim more coverage
-  than exists.
+- An Ack from a peer outside the captured set is inert: the adapter's
+  tracker requires an Ack from every captured peer and reports the acked
+  count clamped to `total` (`wait.go`, the WR-01 clamp), so the report can
+  never claim more coverage than exists.
+- Zero known peers answers immediately: `acked=false` with `acked_count=0`
+  and `total_peers=0`. Nothing was awaited and nothing was acknowledged, so
+  the honest answer is a false; the write itself is unaffected.
 
-Known limitation IN-05: a peer discovered after the write-time snapshot but
-before the core processes the notification joins the core wait set without
-joining `total`, so a write fully covered by the write-time peers can still
-report `false` at the timeout. This is the safe direction — the report
-understates, never overstates, coverage. Phase 6 (APIS-01) owns any
-tightening of this rule and the final `docs/API.md` wording.
+IN-05 is closed in v1.1 (APIS-01). The discovery flush — the broadcast that
+answers a first-seen or restarted peer — still broadcasts and re-arms the
+retransmission ladder, but it no longer grows the awaited set: the peer it
+discovers is not inserted into any wait set or per-peer ledger, so a
+notification can no longer widen the set after `WritePeers` captured it.
+`docs/API.md` states the client-visible contract.
 
 ## Protocol bounds
 
@@ -227,8 +231,9 @@ its owner.
 
 ## Handoffs
 
-- **Phase 6 (APIS-01/DOCS-05)** owns the final `docs/API.md` wording for
-  `wait_for_replication`, including the IN-05 limitation described above.
+- **Phase 9 (DOCS-05)** owns the surrounding documentation completion;
+  `docs/API.md` (this phase) already states the `wait_for_replication`
+  contract, and IN-05 is closed above.
 - **Phase 9** owns the node-replacement runbook text, including what happens
   when the neighbour never appears: an empty-disk node waits
   `--startup-gate-empty` (default 60 s) before opening.

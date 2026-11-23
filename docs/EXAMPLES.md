@@ -210,33 +210,76 @@ from a real run):
 ```
 
 `ackedCount` counts the peers that Acked within the timeout; `totalPeers`
-is the peers the writing node knew when the write landed. A `false` acked
-means a peer did not confirm in time — the write still stands on the writer
-and keeps retransmitting.
+is the peer set captured once at write acceptance — a peer discovered
+during the wait never joins it. A `false` acked means a peer did not confirm
+in time — the write still stands on the writer and keeps retransmitting.
+With zero known peers at write time the answer is immediate: `acked=false`
+with `ackedCount` and `totalPeers` at zero (both omitted by grpcurl),
+because nothing was awaited and nothing was acknowledged.
 
 ### Delete and list
 
 <!-- examples-verify -->
 ```bash
+# List is one method with two modes. page_size > 0 asks for a bounded page
+# of records: the page's keys plus the same entries with their values, and
+# nextPageToken naming the last examined key while the listing continues.
+# Page 1 (page_size 1) over the two live demo/ keys stops at demo/hello.
+grpcurl -plaintext -d '{"prefix":"demo/","page_size":1}' 127.0.0.1:28011 \
+  supkvapi.v1.SupKVService/List >page1.out
+grep -q demo/hello page1.out && grep -q nextPageToken page1.out
+# Resume strictly after that position (the token is the raw-URL base64 of
+# demo/hello): page 2 carries the last key and an empty nextPageToken — the
+# end signal, which grpcurl omits.
+grpcurl -plaintext -d '{"prefix":"demo/","page_size":1,"page_token":"ZGVtby9oZWxsbw"}' \
+  127.0.0.1:28011 supkvapi.v1.SupKVService/List >page2.out
+grep -q demo/wait page2.out && ! grep -q nextPageToken page2.out
 # Delete demo/hello — a delete is a write: fresh version, replicates like
 # one, and leaves a tombstone.
 grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:28011 \
   supkvapi.v1.SupKVService/Delete
-# List every live key under the prefix — demo/hello is gone (tombstoned),
-# demo/wait remains. The final line proves both: the first grep demands
-# demo/wait, the inverted grep demands demo/hello absent, then the listing
-# prints.
+# An unset page_size keeps the legacy all-keys listing: every live key in
+# one response, keys only — no records, no token. demo/hello is gone
+# (tombstoned), demo/wait remains.
 grpcurl -plaintext -d '{"prefix":"demo/"}' 127.0.0.1:28011 \
   supkvapi.v1.SupKVService/List >list.out
-grep -q demo/wait list.out && ! grep -q '"demo/hello"' list.out && cat list.out
+grep -q demo/wait list.out && ! grep -q '"demo/hello"' list.out && \
+  cat page1.out page2.out list.out
 ```
 
-The delete answers with the tombstone's version; the listing carries the
-one live key (output from a real run):
+Page 1 carries `demo/hello` as a record with its value and the position
+token naming the key after it; the resumed page carries `demo/wait` with an
+empty token, the end of the listing. The delete answers with the tombstone's
+version, and the legacy listing carries keys only (output from a real run):
 
 ```
 {
   "version": "AaHppjFfcACAAEAAAAAAAA=="
+}
+{
+  "keys": [
+    "demo/hello"
+  ],
+  "records": [
+    {
+      "key": "demo/hello",
+      "version": "AaHppeNZcACAAEAAAAAAAA==",
+      "value": "c3VwLWt2"
+    }
+  ],
+  "nextPageToken": "ZGVtby9oZWxsbw"
+}
+{
+  "keys": [
+    "demo/wait"
+  ],
+  "records": [
+    {
+      "key": "demo/wait",
+      "version": "AaHppi5DcACAAEAAAAAAAA==",
+      "value": "c3VwLWt2"
+    }
+  ]
 }
 {
   "keys": [
@@ -318,9 +361,11 @@ grpcurl -plaintext -d '{}' 127.0.0.1:28011 grpc.health.v1.Health/Check
 Snapshots are named copies of a node's confirmed dump — a recovery point
 you can restore by name. `SnapshotCreate` copies the current confirmed dump
 under a name (it lands next to the dump file, in `supkv-ex-a.json.snapshots/`);
-`SnapshotLoad` replays the named snapshot as ordinary writes with fresh
-versions, so the restore replicates to peers and wins by normal
-last-write-wins. Both are gated like writes.
+`SnapshotLoad` is a **full rollback**, not an additive replay: it replays the
+named snapshot with fresh versions, deletes the live keys absent from the snapshot
+with fresh tombstones, and those rollback tombstones replicate to
+peers like any write, so the restored state wins by normal last-write-wins.
+Both are gated like writes.
 
 <!-- examples-verify -->
 ```bash
