@@ -1019,7 +1019,8 @@ func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 // BadCRC (the adapter never decoded the body); Undecodable counts
 // Undecodable; a ProtoVersionMismatch verdict — or a Decoded verdict whose
 // ProtoVersion field differs, the defence-in-depth check for direct inputs —
-// counts BadProtoVersion without any body; a datagram
+// counts BadProtoVersion and WARNs through the shared limiter, without any
+// body; a datagram
 // carrying our own node_id counts OwnEcho when its run_id equals ours (an
 // impostor cannot guess a 16-byte random run_id, so run_id equality is the
 // robust own-echo test — the sender's own broadcast really does loop back)
@@ -1091,8 +1092,14 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		return
 	}
 	if in.ProtoVersion != SupportedProtoVersion {
+		// The defence-in-depth twin of the adapter's ProtoVersionMismatch
+		// branch: a Decoded verdict whose envelope field still differs gets
+		// the identical counted, attributed and rate-limited WARN, so a
+		// foreign proto_version is never silent on either path (OBSV-06,
+		// S-FAIL-17, T-07-24).
 		c.discards.BadProtoVersion++
 		c.cfg.OnDiscard(DiscardBadProtoVersion, in.Source)
+		c.warnDiscard(now, in.NodeID, DiscardBadProtoVersion)
 		return
 	}
 	if in.NodeID == c.nodeID {

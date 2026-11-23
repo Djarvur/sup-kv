@@ -96,7 +96,7 @@ func TestDiscard_classes(t *testing.T) {
 			want: repl.DiscardStats{BadCRC: 1},
 		},
 		{
-			name: "proto version supported+1 classifies BadProtoVersion",
+			name: "proto version supported+1 classifies BadProtoVersion and warns",
 			in: port.InboundDatagram{
 				Status:       port.Decoded,
 				ProtoVersion: repl.SupportedProtoVersion + 1,
@@ -104,7 +104,8 @@ func TestDiscard_classes(t *testing.T) {
 				RunID:        testRunID(peerID1),
 				Msg:          port.Hello{},
 			},
-			want: repl.DiscardStats{BadProtoVersion: 1},
+			want:     repl.DiscardStats{BadProtoVersion: 1},
+			wantWarn: repl.DiscardBadProtoVersion,
 		},
 		{
 			name:     "data sync with chunk_count 0 classifies BadSyncHeader",
@@ -1569,5 +1570,103 @@ func TestDiscard_warnRateLimited(t *testing.T) {
 	}
 	if clk.ticks != 0 || clk.updates != 0 {
 		t.Errorf("clock calls (Tick %d, Update %d) for discarded datagrams, want zero of each", clk.ticks, clk.updates)
+	}
+}
+
+// TestProtoVersionWarns pins the two foreign-proto_version branches as one
+// behaviour (OBSV-06, S-FAIL-17, T-07-24): the adapter's ProtoVersionMismatch
+// verdict and the defence-in-depth Decoded verdict whose envelope field
+// differs each count one BadProtoVersion, fire OnDiscard with the stable
+// class and emit exactly one rate-limited WARN — a foreign version is never
+// silent on either path. A repeat inside the interval raises the counter and
+// stays silent, so the WARN belongs to the limiter, never a per-datagram
+// flood.
+func TestProtoVersionWarns(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	var (
+		logs   []string
+		events []discardEvent
+	)
+	core, _ := newTestCoreWithConfig(repl.Config{
+		Log: func(msg string) { logs = append(logs, msg) },
+		OnDiscard: func(class, detail string) {
+			events = append(events, discardEvent{class: class, detail: detail})
+		},
+	})
+	var out port.Outbox
+
+	feedVerdict := func(peer uint16) {
+		t.Helper()
+		core.HandleDatagram(now, port.InboundDatagram{
+			Source:       handleFor(peer),
+			Status:       port.ProtoVersionMismatch,
+			ProtoVersion: repl.SupportedProtoVersion + 1,
+			NodeID:       peer,
+			RunID:        testRunID(peer),
+		}, &out)
+		out.Drain()
+	}
+	feedDecoded := func(peer uint16) {
+		t.Helper()
+		core.HandleDatagram(now, port.InboundDatagram{
+			Source:       handleFor(peer),
+			Status:       port.Decoded,
+			ProtoVersion: repl.SupportedProtoVersion + 1,
+			NodeID:       peer,
+			RunID:        testRunID(peer),
+			Msg:          port.Hello{},
+		}, &out)
+		out.Drain()
+	}
+	warnsFor := func(peer uint16) int {
+		want := fmt.Sprintf("class %s from node %d", repl.DiscardBadProtoVersion, peer)
+		n := 0
+		for _, line := range logs {
+			if strings.Contains(line, want) {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Branch one: the adapter's framing verdict.
+	feedVerdict(peerID1)
+	if got := core.Discards().BadProtoVersion; got != 1 {
+		t.Fatalf("BadProtoVersion after the ProtoVersionMismatch verdict = %d, want 1", got)
+	}
+	if got := warnsFor(peerID1); got != 1 {
+		t.Fatalf("the ProtoVersionMismatch branch emitted %d WARN(s), want exactly 1: %v", got, logs)
+	}
+
+	// Branch two: a decoded envelope whose field still differs — the branch
+	// that used to count silently.
+	feedDecoded(peerID2)
+	if got := core.Discards().BadProtoVersion; got != 2 {
+		t.Fatalf("BadProtoVersion after the Decoded mismatch = %d, want 2 — the second branch must count", got)
+	}
+	if got := warnsFor(peerID2); got != 1 {
+		t.Fatalf("the Decoded-mismatch branch emitted %d WARN(s), want exactly 1: %v", got, logs)
+	}
+	if got := len(logs); got != 2 {
+		t.Fatalf("Config.Log fired %d time(s) for one datagram per branch, want 2: %v", got, logs)
+	}
+
+	// The shared limiter keys the repeats: the counter keeps moving, the log
+	// does not.
+	feedVerdict(peerID1)
+	if got := core.Discards().BadProtoVersion; got != 3 {
+		t.Fatalf("BadProtoVersion after a repeat inside the interval = %d, want 3 — the limiter never suppresses the counter", got)
+	}
+	if got := len(logs); got != 2 {
+		t.Fatalf("Config.Log fired %d time(s) after the repeat, want still 2: %v", got, logs)
+	}
+	if got := len(events); got != 3 {
+		t.Fatalf("OnDiscard fired %d time(s), want 3 — the seam stays per datagram", got)
+	}
+	for _, ev := range events {
+		if ev.class != repl.DiscardBadProtoVersion {
+			t.Fatalf("OnDiscard class = %q, want %q", ev.class, repl.DiscardBadProtoVersion)
+		}
 	}
 }

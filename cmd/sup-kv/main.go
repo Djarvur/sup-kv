@@ -406,6 +406,24 @@ func hexRunID(run [16]byte) string {
 	return hex.EncodeToString(run[:])
 }
 
+// logAdapterWarn renders one adapter WARN detail string (D-08): the core's
+// prebuilt metadata strings (REPL-08 configuration errors, apply failures,
+// the CR-01 unbound-listing drop and the foreign proto_version discard) ride
+// as the detail attribute under a static capitalized msg — the sloglint
+// static-msg discipline; a dynamic string never becomes the msg. It is the
+// named Log seam the catalog level matrix asserts.
+func logAdapterWarn(detail string) {
+	slog.Warn("Replication adapter", "detail", detail)
+}
+
+// logDumpFailure renders the engine's one-ERROR-per-failed-attempt callback
+// (D-05, PERSIST-05): a static message carrying the failure class label the
+// metric uses and the error text as detail. The engine's dumper goroutine
+// only formats and logs — it never renders.
+func logDumpFailure(err error, class port.FailureClass) {
+	slog.Error("Dump failed", "class", class.String(), "detail", err.Error())
+}
+
 // startEngine opens the real dump store at the configured path, resolves
 // the engine over it with the hub's change tap threaded through
 // storage.Config and the hub's durability watermark through
@@ -426,9 +444,7 @@ func startEngine(cfg config.Config, hub *grpcapi.WatchHub) (*persist.Engine, con
 		// One ERROR per failed attempt with the class label the metric uses
 		// (D-05, PERSIST-05): a static message plus attributes, never dynamic
 		// text, and the engine's dumper goroutine only formats and logs.
-		OnDumpFailure: func(err error, class port.FailureClass) {
-			slog.Error("Dump failed", "class", class.String(), "detail", err.Error())
-		},
+		OnDumpFailure: logDumpFailure,
 	})
 	stats := engine.LoadStats()
 	logLoadStats(stats, engine.KeyCount())
@@ -523,7 +539,7 @@ func loadGenerationName(stats persist.LoadStats) string {
 // logBackupFallback emits the one WARN for a .prev fallback, carrying the
 // catalog's load attributes beside the cause. The main candidate is found by
 // scanning Failures by Candidate — never by slice index — so an absent main's
-// recorded fs.ErrNotExist cause is what the line names, and a
+// recorded not-exist cause is what the line names, and a
 // contract-violating empty list degrades to a path-less WARN instead of an
 // index panic.
 func logBackupFallback(stats persist.LoadStats, loadAttrs []any) {
@@ -694,7 +710,7 @@ func newReplicationAdapter(cfg config.Config, engine *persist.Engine) (*udprepl.
 		// errors, apply failures) ride as the detail attr under a static
 		// capitalized msg — the sloglint static-msg discipline (D-08); a
 		// dynamic string never becomes the msg.
-		Log: func(msg string) { slog.Warn("Replication adapter", "detail", msg) },
+		Log: logAdapterWarn,
 		// The typed lifecycle seams render once here (D-01): the peer table's
 		// transitions and the drift warning the core's shared limiter already
 		// admitted.

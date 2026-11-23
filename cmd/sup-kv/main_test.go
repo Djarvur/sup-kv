@@ -1805,6 +1805,12 @@ func TestLog_jsonDefault(t *testing.T) {
 		}
 		if rec.Msg == "Replication adapter" && strings.Contains(rec.Detail, "configuration error") {
 			sawDetailEvent = true
+			// The level is part of the pinned catalog contract: the adapter
+			// tap renders the Spec-mandated duplicate-node-id entry at WARN,
+			// so a demoted tap fails here as well as in the level matrix.
+			if rec.Level != "WARN" {
+				t.Fatalf("the driven adapter record level = %q, want WARN: %+v", rec.Level, rec)
+			}
 			if !strings.Contains(rec.Detail, "node_id 1") {
 				t.Fatalf("the driven event's detail %q does not name node_id 1", rec.Detail)
 			}
