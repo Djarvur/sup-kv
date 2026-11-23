@@ -236,6 +236,84 @@ func TestEngine_openEmptyStart(t *testing.T) {
 	}
 }
 
+// loadFixtureStore is the startup-load port.DumpStore fake: Load feeds one
+// pre-encoded generation through the caller's parse oracle exactly as the
+// file adapter does, so Open sees the records the fixture carries. The other
+// seam methods are never exercised by the load test.
+type loadFixtureStore struct {
+	dump []byte
+}
+
+// SaveStream is never called by the startup-load test; it reports success so
+// the fake stays a total DumpStore.
+func (*loadFixtureStore) SaveStream(_ func(io.Writer) error) error { return nil }
+
+// Load accepts the fixture when parse decodes it and reports the main
+// outcome; a fixture the oracle rejects is an unusable start, as the file
+// adapter reports.
+func (s *loadFixtureStore) Load(_ time.Time, parse func([]byte) error) port.LoadResult {
+	err := parse(s.dump)
+	if err != nil {
+		return port.LoadResult{
+			Outcome:    port.LoadUnusable,
+			Generation: port.GenMain,
+			Failures:   []port.GenerationFailure{{Candidate: port.GenMain, Cause: err}},
+		}
+	}
+	return port.LoadResult{Dump: s.dump, Outcome: port.LoadMain, Generation: port.GenMain}
+}
+
+// CreateSnapshot is never called by the startup-load test.
+func (*loadFixtureStore) CreateSnapshot(_ string) error { return errFakeSave }
+
+// ReadSnapshot is never called by the startup-load test.
+func (*loadFixtureStore) ReadSnapshot(_ string) ([]byte, error) { return nil, errFakeSave }
+
+// TestOpen_loadDoesNotFireTap proves the startup load is not a change feed
+// (Pitfall 8, T-06-20): Open merges every loaded record through the store,
+// and without the loading guard each merge fires the caller's OnChange tap —
+// with the Watch hub wired, the whole dump would be announced as live
+// changes and, on a clean Main load, never confirmed. The fixture is a real
+// encoded generation, so Open takes the production decode-and-merge path.
+func TestOpen_loadDoesNotFireTap(t *testing.T) {
+	t.Parallel()
+	nowMs := time.Now().UnixMilli()
+	verA := version.PackVersion(nowMs, 0, tracerNodeID)
+	verB := version.PackVersion(nowMs+1, 0, tracerNodeID)
+	dataA, dataB := []byte("a"), []byte("b")
+	records := map[string]storage.Record{
+		"loaded/a": {Version: verA, Data: dataA, Checksum: storage.RecordChecksum("loaded/a", verA, dataA, false)},
+		"loaded/b": {Version: verB, Data: dataB, Checksum: storage.RecordChecksum("loaded/b", verB, dataB, false)},
+	}
+	dump, err := persist.Encode(records, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Encode fixture: want nil, got error: %v", err)
+	}
+	var taps int
+	eng, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		&loadFixtureStore{dump: dump},
+		storage.Config{OnChange: func(string, storage.Record, uint64) { taps++ }},
+		persist.Config{},
+	)
+	if discarded != 0 {
+		t.Errorf("Open() discarded = %d, want 0", discarded)
+	}
+	if taps != 0 {
+		t.Fatalf("Open fired OnChange %d times, want 0 (the startup load is not a change feed)", taps)
+	}
+	loaded := eng.Records()
+	if len(loaded) != len(records) {
+		t.Fatalf("Open loaded %d records, want %d", len(loaded), len(records))
+	}
+	for key := range records {
+		_, getErr := eng.Get(key)
+		if getErr != nil {
+			t.Errorf("Get(%s) after Open error = %v, want nil", key, getErr)
+		}
+	}
+}
+
 // Synctest-suite constants: the engine timing under test (the design
 // defaults, D-04), the fake port's node identity and the flush-race width.
 const (

@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/app/persist/ -run '^TestOpen_(loadDoesNotFireTap|nilTapStaysWritable)$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestOpen_nilTapStaysWritable\n=== PAUSE TestOpen_nilTapStaysWritable\n=== RUN   TestOpen_loadDoesNotFireTap\n=== PAUSE TestOpen_loadDoesNotFireTap\n=== CONT  TestOpen_nilTapStaysWritable\n=== CONT  TestOpen_loadDoesNotFireTap\n    engine_test.go:303: Open fired OnChange 2 times, want 0 (the startup load is not a change feed)\n--- FAIL: TestOpen_loadDoesNotFireTap (0.00s)\n--- PASS: TestOpen_nilTapStaysWritable (0.05s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/app/persist\t0.059s\nFAIL\n",
+  "targetTest": "TestOpen_loadDoesNotFireTap",
+  "targetFile": "internal/app/persist/engine_test.go",
+  "expected": "persist.Open over a dump containing records fires zero OnChange calls while loading, and the engine exposes every loaded record afterwards.",
+  "actual": "Open fired OnChange twice during the merge (once per loaded record), so the loaded dump was announced as live changes.",
+  "semanticAssessment": "The target test TestOpen_loadDoesNotFireTap compiled and executed and failed on its planned assertion (engine_test.go:303: Open fired OnChange 2 times, want 0). The fixture decoded cleanly (discarded = 0, both keys present via Get), so the failure is the missing startup-loading guard, not a fixture or discovery fault. The paired TestOpen_nilTapStaysWritable and the grpcapi pins pass on the pre-change tree by design: they pin existing behavior the change must preserve (the nil-callback contract and the already-landed 06-06 durability gate), so they are regression pins, not RED targets. The grpcapi command therefore exits 0 and contributes no RED record."
+}

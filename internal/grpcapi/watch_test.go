@@ -3,7 +3,6 @@ package grpcapi_test
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -12,6 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/app/persist"
@@ -632,12 +632,46 @@ func TestWatch_unconfirmedNotAnnounced(t *testing.T) {
 	recvNone(t, stream) // exactly once: the final assertion.
 }
 
+// TestWatch_confirmedExactlyOnce pins the ordinary write's event count
+// (APIS-04, D-04): one confirmed write yields exactly one live event — the
+// debounce/dump cycle behind the write must not duplicate it. The seed
+// snapshot proves the subscription is registered before the observed write.
+func TestWatch_confirmedExactlyOnce(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "once/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set once/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "once/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "once/seed" {
+		t.Fatalf("snapshot event = %s, want once/seed", snap.GetRecord().GetKey())
+	}
+
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "once/a", Value: []byte("v1")})
+	if err != nil {
+		t.Fatalf("Set once/a: want OK, got error: %v", err)
+	}
+	live := recvEvent(t, stream)
+	rec := live.GetRecord()
+	if rec.GetKey() != "once/a" || rec.GetDeleted() || !bytes.Equal(rec.GetValue(), []byte("v1")) {
+		t.Fatalf("live event = (%s, deleted=%t, %q), want (once/a, false, v1)",
+			rec.GetKey(), rec.GetDeleted(), rec.GetValue())
+	}
+	recvNone(t, stream) // exactly once: the final assertion.
+}
+
 // TestWatch_dumpFailedThenConfirmed proves the gate's hardest case (D-04,
-// T-06-17): a write whose dump failed stays unannounced even though it is
-// installed and its API answer is ErrDumpFailed, and the later successful
-// dump — whose snapshot covers the record — releases it exactly once. A
-// handler-side "notify after Set" would have announced it before the only
-// dump that made it durable.
+// T-06-17) through the API surface: a write whose dump failed answers
+// Unavailable and stays unannounced, and a later successful dump — forced by
+// a second write — releases both installs exactly once, in install order. A
+// handler-side "notify after Set" would have announced the first write
+// before the only dump that made it durable.
 func TestWatch_dumpFailedThenConfirmed(t *testing.T) {
 	t.Parallel()
 	ts := newTestServer(t)
@@ -664,9 +698,12 @@ func TestWatch_dumpFailedThenConfirmed(t *testing.T) {
 	ts.dumps.mu.Lock()
 	ts.dumps.failSave = true
 	ts.dumps.mu.Unlock()
-	_, _, setErr := ts.engine.Set("gatefail/a", []byte("unconfirmed"))
-	if !errors.Is(setErr, persist.ErrDumpFailed) {
-		t.Fatalf("engine.Set during the failed dump = %v, want ErrDumpFailed", setErr)
+	_, setErr := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gatefail/a", Value: []byte("unconfirmed")})
+	if status.Code(setErr) != codes.Unavailable {
+		t.Fatalf("Set during the failed dump = %v, want codes.Unavailable", setErr)
+	}
+	if got := status.Convert(setErr).Message(); got != persist.ErrDumpFailed.Error() {
+		t.Fatalf("Set during the failed dump message = %q, want %q", got, persist.ErrDumpFailed.Error())
 	}
 	select {
 	case got := <-pending:
@@ -677,25 +714,34 @@ func TestWatch_dumpFailedThenConfirmed(t *testing.T) {
 	ts.dumps.mu.Lock()
 	ts.dumps.failSave = false
 	ts.dumps.mu.Unlock()
-	flushErr := ts.engine.Flush()
-	if flushErr != nil {
-		t.Fatalf("Flush after healing the dump: want nil, got error: %v", flushErr)
+	// The second write forces a covering dump that includes the first key, so
+	// the failed-then-confirmed install becomes durable and is released.
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "gatefail/b", Value: []byte("second")})
+	if err != nil {
+		t.Fatalf("Set gatefail/b after healing the dump: want OK, got error: %v", err)
 	}
-	var live *apiproto.WatchResponse
+
+	var firstEvent *apiproto.WatchResponse
 	select {
 	case got := <-pending:
 		if got.err != nil {
-			t.Fatalf("Recv: want the released event, got error: %v", got.err)
+			t.Fatalf("Recv: want the first released event, got error: %v", got.err)
 		}
-		live = got.ev
+		firstEvent = got.ev
 	case <-time.After(watchTestTimeout):
-		t.Fatal("the released event did not arrive within the deadline after the covering dump")
+		t.Fatal("the first released event did not arrive within the deadline after the covering dump")
 	}
-	rec := live.GetRecord()
-	if rec.GetKey() != "gatefail/a" || !bytes.Equal(rec.GetValue(), []byte("unconfirmed")) {
-		t.Fatalf("released event = (%s, %q), want (gatefail/a, unconfirmed)", rec.GetKey(), rec.GetValue())
+	first := firstEvent.GetRecord()
+	if first.GetKey() != "gatefail/a" || !bytes.Equal(first.GetValue(), []byte("unconfirmed")) {
+		t.Fatalf("first released event = (%s, %q), want (gatefail/a, unconfirmed) — install order",
+			first.GetKey(), first.GetValue())
 	}
-	recvNone(t, stream) // exactly once: the final assertion.
+	second := recvEvent(t, stream).GetRecord()
+	if second.GetKey() != "gatefail/b" || !bytes.Equal(second.GetValue(), []byte("second")) {
+		t.Fatalf("second released event = (%s, %q), want (gatefail/b, second)",
+			second.GetKey(), second.GetValue())
+	}
+	recvNone(t, stream) // exactly once per key: the final assertion.
 }
 
 // TestWatchHub_confirmGate pins the hub's durability gate deterministically
