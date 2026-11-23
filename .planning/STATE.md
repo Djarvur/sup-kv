@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
-current_plan: 8
+current_plan: 9
 status: executing
-stopped_at: Completed 07-07-PLAN.md
-last_updated: "2026-11-23T10:19:05.547Z"
+stopped_at: Completed 07-08-PLAN.md
+last_updated: "2026-11-23T10:55:19.288Z"
 last_activity: 2026-11-23
 last_activity_desc: Completed 07-06-PLAN.md (pending-displacement conflict counter); 5 plans remain in Phase 7
-state_head: 0f68776e69da86175a2d7a220d5feb27be4a7591
+state_head: 43f11c18e92d94f083906a1fdbe5bae7bbc265c0
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 79
+  completed_plans: 80
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 7 (Observability and Configuration) — EXECUTING
-Current Plan: 8
+Current Plan: 9
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Completed 07-06-PLAN.md; 5 plans remain
@@ -139,6 +139,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P05 | 1154 | 2 tasks | 10 files |
 | Phase 07 P06 | 27min | 2 tasks | 8 files |
 | Phase 07 P07 | 24min | 3 tasks | 9 files |
+| Phase 07 P08 | 1214s | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -454,6 +455,9 @@ Recent decisions affecting current work:
 - [Phase 07]: Peer lifecycle and drift cross the core boundary as typed events (PeerEvent/DriftEvent); only cmd renders them, so internal/app stays slog-free and the transition matrix is unit-testable.
 - [Phase 07]: Drift rides the shared allowWarn slot keyed (node_id, clock_drift) while MergeStats.DriftWarnings stays per record; nil OnDrift falls back to the prebuilt Log string. The log key is handle because sloglint forbids source.
 - [Phase 07]: A start logs exactly one load-outcome record: INFO Dump load for prompt/main and the existing Backup WARN/Unusable ERROR with the same outcome/generation/records/discarded attributes; generation none is derived from the outcome, never the zero enum.
+- [Phase 07]: 07-08: unbound_listing is its own discard class (counter, rate-limited WARN without 'configuration error', metric label); the own-node-id, second-handle and alternation paths keep duplicate_node_id
+- [Phase 07]: 07-08: the decoded ProtoVersion-mismatch branch now WARNs through the shared limiter like the adapter verdict; the catalog level matrix calls the named renderers (logAdapterWarn, logDumpFailure extracted for the Log and OnDumpFailure seams) and asserts level+msg
+- [Phase 07]: 07-08: docs/04-MULTI-NODE.md's CR-01 paragraph was corrected to unbound_listing (no phase-7 plan owned the file); docs/OPERATIONS.md's label catalog stays with 07-10's explicit action item
 
 ### Pending Todos
 
@@ -476,7 +480,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T10:19:04.636Z
-Stopped at: Completed 07-07-PLAN.md
+Last session: 2026-11-23T10:55:15.780Z
+Stopped at: Completed 07-08-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
