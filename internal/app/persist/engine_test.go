@@ -1179,19 +1179,19 @@ func TestEngine_restartDiscardsTornRecord(t *testing.T) {
 	}
 }
 
-// TestEngine_snapshotCreateLoadRestore is plan 03-02's tracer (PERS-05): a
-// named snapshot is a byte-exact copy of the confirmed on-disk main dump
-// (D-10), and Restore replays exactly the snapshot's keys through the
-// store's ordinary write path with fresh dominating versions — a
-// snapshot-live value beats a current tombstone, a snapshot tombstone beats
-// a current live value, and a key absent from the snapshot keeps its state
-// untouched (D-09) — while a fresh engine with only the carried-over
-// snapshot directory restores every snapshot key (recovery from scratch).
-//
-// Decision 14.1 (ADR 0001): the snapshot family rides the accepted rule that
-// a snapshot load is a full rollback, so the named snapshot is an exact copy
-// of the current confirmed state and Restore replays its keys under the same
-// install discipline — never a partial merge into whatever the target holds.
+// TestEngine_snapshotCreateLoadRestore is plan 03-02's tracer (PERS-05),
+// rewritten for decision 14.1 / ADR 0001: a named snapshot is a byte-exact
+// copy of the confirmed on-disk main dump (D-10), and Restore is a FULL
+// ROLLBACK — the snapshot IS the restored state, never a partial merge into
+// whatever the target holds. Every snapshot record replays through the
+// store's ordinary write path with a fresh dominating version (D-09): a
+// snapshot-live value beats a current tombstone and a snapshot tombstone
+// beats a current live value. Every current LIVE key absent from the
+// snapshot is deleted with a fresh tombstone and returned in the replay
+// report, while a key already tombstoned locally stays untouched — no
+// version burned, no redundant record. A fresh engine with only the
+// carried-over snapshot directory restores every snapshot key (recovery
+// from scratch).
 func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	t.Parallel()
 	dumpPath := filepath.Join(t.TempDir(), "dump.json")
@@ -1260,28 +1260,33 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	}
 
 	preRestore := eng.Records()
-	_, err = eng.Restore("pre")
+	restored, err := eng.Restore("pre")
 	if err != nil {
 		t.Fatalf("Restore(pre) error = %v, want nil", err)
 	}
-	restored := eng.Records()
+	after := eng.Records()
+	replayed := make(map[string]persist.RestoredRecord, len(restored))
+	for _, rec := range restored {
+		replayed[rec.Key] = rec
+	}
 
-	// Fresh-version dominance: every replayed record beats every
-	// pre-restore version, so the restore replicates and wins by normal
-	// LWW like any write (D-09).
+	// Fresh-version dominance: every record the restore installed — the
+	// replayed snapshot records and the rollback tombstone alike — beats
+	// every pre-restore version, so the restore replicates and wins by
+	// normal LWW like any write (D-09).
 	var maxPre version.RecordVersion
 	for _, rec := range preRestore {
 		if rec.Version.Compare(maxPre) > 0 {
 			maxPre = rec.Version
 		}
 	}
-	for _, key := range []string{"keep-a", "keep-b", "resurrect", "re-tomb"} {
-		rec, ok := restored[key]
+	for _, key := range []string{"keep-a", "keep-b", "resurrect", "re-tomb", "post-key"} {
+		rec, ok := after[key]
 		if !ok {
-			t.Fatalf("restored records lack %s", key)
+			t.Fatalf("post-restore records lack %s", key)
 		}
 		if rec.Version.Compare(maxPre) != 1 {
-			t.Errorf("restored %s version %x does not dominate every pre-restore version (max %x)",
+			t.Errorf("post-restore %s version %x does not dominate every pre-restore version (max %x)",
 				key, rec.Version[:], maxPre[:])
 		}
 	}
@@ -1302,24 +1307,38 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	if !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("post-restore Get(re-tomb) error = %v, want ErrNotFound (the snapshot tombstone wins)", err)
 	}
-	if rec := restored["re-tomb"]; !rec.Deleted {
+	if rec := replayed["re-tomb"]; !rec.Deleted {
 		t.Error("restored re-tomb is live, want the snapshot's tombstone")
 	}
 	// gone: the snapshot holds it deleted and it stayed tombstoned — the
-	// replay Delete is the store's ErrNotFound no-op: no version burned.
-	if got, want := restored["gone"].Version, preRestore["gone"].Version; got != want {
-		t.Errorf("restored gone version %x differs from pre-restore %x, want identical (no version burned on the no-op Delete)",
+	// replay Delete is the store's ErrNotFound no-op: no version burned and
+	// no record produced.
+	if _, ok := replayed["gone"]; ok {
+		t.Error("the restore report names gone, want the already-tombstoned key absent (no version burned)")
+	}
+	if got, want := after["gone"].Version, preRestore["gone"].Version; got != want {
+		t.Errorf("gone version %x differs from pre-restore %x, want identical (no version burned on the no-op Delete)",
 			got[:], want[:])
 	}
-	// post-key: absent from the snapshot — its post-snapshot state stands.
-	rec, err := eng.Get("post-key")
-	if err != nil || string(rec.Data) != "post-value" {
-		t.Errorf("post-restore Get(post-key) = (%q, %v), want the untouched post-snapshot value",
-			rec.Data, err)
+	// post-key: live locally and absent from the snapshot — the full
+	// rollback deletes it with a fresh tombstone and reports that tombstone,
+	// so the snapshot load broadcasts the rollback (PROTO-08).
+	rollback, ok := replayed["post-key"]
+	if !ok {
+		t.Fatalf("Restore(pre) report lacks the post-key rollback tombstone; got %+v", restored)
 	}
-	if got, want := restored["post-key"].Version, preRestore["post-key"].Version; got != want {
-		t.Errorf("post-key version moved across the restore: %x then %x, want identical (absent keys untouched)",
-			want[:], got[:])
+	if !rollback.Deleted {
+		t.Error("the reported post-key rollback record is live, want Deleted=true")
+	}
+	if len(rollback.Data) != 0 {
+		t.Errorf("the reported post-key rollback record carries %d data bytes, want none", len(rollback.Data))
+	}
+	if !after["post-key"].Deleted {
+		t.Error("post-restore records keep post-key live, want the rollback tombstone")
+	}
+	_, err = eng.Get("post-key")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("post-restore Get(post-key) error = %v, want ErrNotFound (the rollback tombstone wins)", err)
 	}
 
 	// Recovery from scratch: a fresh engine — empty store, fresh disk, only
