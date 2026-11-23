@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./cmd/sup-kv/ -run '^TestAPIDoc$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestAPIDoc\n=== PAUSE TestAPIDoc\n=== CONT  TestAPIDoc\n    api_docs_test.go:145: ../../docs/API.md does not contain \"## Errors\" — the error-table section heading\n--- FAIL: TestAPIDoc (0.00s)\nFAIL\nsup-kv smoke: tests failed with code 1\nFAIL\tgithub.com/Djarvur/sup-kv/cmd/sup-kv\t0.689s\nFAIL\n",
+  "targetTest": "TestAPIDoc",
+  "targetFile": "cmd/sup-kv/api_docs_test.go",
+  "expected": "docs/API.md carries the Task 2 sections and their anchors: the error table (one literal per mapper and List constant), the Watch durability contract, the snapshot full rollback, the transport/health envelope and the consumer-library boundary, with the Phase 9 split stated explicitly.",
+  "actual": "The extended anchor table compiled and ran, and TestAPIDoc failed at api_docs_test.go:145 reporting that ../../docs/API.md does not contain \"## Errors\" — none of the Task 2 sections exist yet.",
+  "semanticAssessment": "The target test compiled cleanly and failed on the planned missing section (the first new anchor, the error-table heading). No fixture, discovery, build or unrelated failure is present, so the run is a valid RED for the Task 2 deliverable (the remaining phase-owned contract sections and their anchors)."
+}

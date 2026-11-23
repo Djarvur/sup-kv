@@ -135,3 +135,174 @@ leaves it as the next page's first entry; the first entry is always included,
 so a non-terminal page is never empty and the walk always progresses. The
 budget is an upper bound on the serialized entries, which is what lets the
 transport send ceiling cover any page the server produces.
+
+## Errors
+
+The table below covers every error the RPC handlers produce. The mapper is
+total: an error that matches no row still answers a fixed status, so no
+internal detail can escape through the response path. The table is the
+contract, and the row order is part of it — the first match wins.
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `NotFound` | `key not found` | a `Get` of an absent or tombstoned key, or a `Delete` with no live record |
+| `AlreadyExists` | `key already exists` | `create_if_absent` for any existing record, tombstone included, or for a key a peer's complete listing named |
+| `InvalidArgument` | `value exceeds the maximum allowed size` | a write value over the effective `--value-max-bytes` limit |
+| `Unavailable` | `dump failed; write not confirmed` | the engine installed the write but its covering dump failed |
+| `ResourceExhausted` | `disk full` | a dump failure classified as disk-full (a snapshot create surfaces the class directly) |
+| `PermissionDenied` | `permission denied` | a dump failure classified as permission, or `fs.ErrPermission` from the filesystem |
+| `Unavailable` | `write not confirmed before the confirmation timeout` | the covering dump outlived the confirmation timeout |
+| `Unavailable` | `persist engine closed` | the engine is closed (process shutdown) |
+| `InvalidArgument` | `invalid snapshot name` | a snapshot name outside the adapter's closed charset |
+| `FailedPrecondition` | `no dump on disk to snapshot` | a snapshot operation needs a dump that does not exist |
+| `NotFound` | `snapshot not found` | the named snapshot is absent from disk |
+| `Canceled` | `context canceled` | the caller cancelled the RPC |
+| `DeadlineExceeded` | `context deadline exceeded` | the caller's deadline expired |
+| `Internal` | `internal error` | the totality fallback: anything unclassified |
+
+The ordering rules that make the table total and honest:
+
+- a pre-built status error passes through unchanged, so a handler's own
+  validation status is never re-mapped;
+- the dump-failure row precedes the port failure classes: a write whose dump
+  failed answers `Unavailable` with that constant, while `SnapshotCreate`
+  surfaces the adapter's own class as `ResourceExhausted` or `PermissionDenied`;
+- the no-dump row precedes the filesystem rows, so the adapter's sentinel
+  survives instead of collapsing into `fs.ErrNotExist`;
+- `context.Canceled` and `context.DeadlineExceeded` are matched through their
+  sentinels and answered via `status.FromContextError`, so a wrapped
+  cancellation still reports `Canceled`, never `Unknown`;
+- every other error takes the fallback: the internal detail is logged exactly
+  once as a static error line with the cause as an attribute, and the response
+  carries the constant `internal error`. Internal detail is logged and never
+  returned; no server path, errno or configured filename crosses the wire.
+
+Handler validation adds these constant messages to the same codes (they are
+not mapper rows, but they are part of the client-visible contract):
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `InvalidArgument` | `key must not be empty` | `Get`, `Set` or `Delete` with an empty key |
+| `InvalidArgument` | `key length N exceeds the maximum of 1024 bytes (the limit is measured in bytes)` | a write key over the 1 024-byte ceiling |
+| `Unavailable` | `startup gate: waiting for first sync round or startup_gate` | any data RPC while the startup gate is closed |
+| `Unavailable` | `startup gate: key is listed by a peer but its value has not arrived` | a `Get` of a listed-but-unarrived key (rule 14.5(6)) |
+| `ResourceExhausted` | `watch subscriber overwhelmed; resubscribe` | a slow Watch subscriber is shed |
+| `Unimplemented` | `watch requires a hub; construct the server through NewServer` | a server constructed without a Watch hub |
+
+## Watch
+
+`Watch` subscribes to changes under a prefix (the empty prefix matches every
+key) and is the only server-streaming RPC. The stream is the snapshot followed
+by the live change feed, with these pinned semantics:
+
+- **The snapshot is the current in-memory state** at subscribe time — what
+  `Get` sees — delivered in sorted key order with tombstones included as
+  `deleted=true`.
+- **The live feed is the durable change feed.** A change is released to
+  subscribers only after the dump confirmation that made it durable. A write
+  whose covering dump failed stays pending; the next successful dump covering
+  its install generation releases it.
+- **Delivery is exactly once.** A released event leaves the pending queue, and
+  a repeated or lower confirmation delivers nothing, so one confirmed write
+  yields one event.
+- **Deletions are events.** A tombstone arrives as a record with
+  `deleted=true`, in the same shape as any other change.
+- **Ordering is install order, which is version order per key.** A key's events
+  arrive in non-decreasing version order: a strictly greater version installs
+  normally, and an equal-version tie-break winner can install once. An event
+  already contained in the subscriber's snapshot is suppressed.
+- **The snapshot and the live feed have deliberately different durability.**
+  The snapshot is current memory and may include a write whose dump has not
+  confirmed yet; the live feed never does. That asymmetry is the contract, not
+  a defect: it is what makes the snapshot cheap and the change feed honest.
+- **The stream carries no origin field.** Local and replicated changes are
+  indistinguishable.
+- **A slow subscriber is disconnected, never silently dropped.** Each
+  subscriber buffers 256 undelivered events; a full buffer ends that stream
+  with `ResourceExhausted` (`watch subscriber overwhelmed; resubscribe`). A hub
+  queue at its 4 096-event bound sheds every subscriber the same way. In both
+  cases the client resubscribes and re-snapshots, losing nothing.
+- **Shutdown ends every stream with `Unavailable`.** The status message is
+  `watch hub is shutting down` — never `OK` — and a subscriber that arrives
+  after shutdown began gets the same status.
+- **Watch is gated like every read.** While the startup gate is closed, the
+  stream is refused with `Unavailable`.
+
+## Snapshots
+
+`SnapshotCreate` forces the current dump to complete — every confirmed write is
+on disk — then byte-copies that finished dump under the requested name. The
+copy is byte-identical to the main dump at creation time and lands in the
+snapshot directory beside the dump. A flush failure aborts with nothing
+copied: state that is not confirmed on disk must never become a recovery point.
+The name is validated against a closed charset before any filesystem touch; an
+invalid name is `InvalidArgument`. A create is a write and is gated like one.
+
+`SnapshotLoad` is a full rollback (decision 14.1, ADR 0001), not a merge:
+
+- The snapshot's keys replay as ordinary writes with a **fresh version**: a
+  live snapshot record becomes a fresh `Set` that beats any current tombstone,
+  and a snapshot tombstone becomes a fresh `Delete` that beats any current live
+  value. The snapshot's own versions are never re-installed; fresh versions are
+  what make the load replicate and win by normal last-write-wins.
+- Every current live key **absent from the snapshot** is deleted with a fresh
+  tombstone, so the snapshot's key set becomes the store's key set and the
+  rollback tombstones join the result.
+- A key already tombstoned locally and absent from the snapshot is already
+  rolled back: **no version is burned** on it and no record is produced.
+- The replay and the rollback walk one deterministic sorted-key order, and the
+  call returns only after one final dump covering the whole replay.
+- **The result is broadcast.** Every record the replay installed — rollback
+  tombstones included — reaches peers through the ordinary paced replication
+  path, and Watch subscribers see the same installs as a write burst. The
+  broadcast happens even when the final confirming dump failed (the replayed
+  state is in memory), but never on a closed engine.
+- **The rollback is not linearizable against concurrent writes.** A write that
+  lands after the rollback set is computed is ordinary last-write-wins: it is
+  neither suppressed nor rolled back. `SnapshotLoad` is a full rollback, not
+  snapshot isolation.
+
+## Transport and health
+
+Every gRPC server setting is explicit; no message size or keepalive cadence is
+inherited from a gRPC default.
+
+| Setting | Value | Contract |
+|---------|-------|----------|
+| Server keepalive ping | 2 m idle | notice a dead consumer quickly on a LAN without background chatter |
+| Keepalive answer timeout | 20 s | a silent peer is closed instead of holding a stream indefinitely |
+| Minimum client ping interval | 30 s | a consumer library may run its own 30 s client keepalive without tripping enforcement |
+| Permit without stream | `true` | a consumer may hold an idle connection between writes |
+| `MaxRecvBytes` | 1 024-byte key ceiling + the effective value limit + 1 382-byte envelope — 63 846 bytes at the default limit (66 814 at the 64 408-byte datagram ceiling) | covers the largest valid `SetRequest`; an over-limit request is rejected at the transport with `ResourceExhausted`, before allocation-heavy handling |
+| `MaxSendBytes` | 6 MiB page budget + 1 382-byte envelope | covers any `List` page the server can produce, as well as every smaller unary response |
+
+An over-limit request is a transport verdict (`ResourceExhausted`), a different
+answer from the handler's `InvalidArgument` value-limit rejection: the layer
+that spoke is visible in the code.
+
+Health uses the standard `grpc.health.v1.Health` endpoint and is bound 1:1 to
+the startup gate. It reports `NOT_SERVING` for the empty (whole-server) service
+name from construction until the startup gate opens, then `SERVING`. Every data
+RPC answers `Unavailable` while the gate is closed. When shutdown begins the
+status flips to `NOT_SERVING` and never returns to SERVING: the transition is
+one-way (the standard health server's `Shutdown` is called; `Resume` never is),
+so a late gate resolver cannot resurrect a serving verdict.
+
+## Consumer library territory: last-read-value
+
+The "last read value" file/cache pattern — a consumer keeps a local fallback
+copy of the last value it read, so its own service keeps answering through a
+sup-kv outage — is consumer-library territory. It is not a server feature and
+this binary does not ship it: no node writes a client-side cache and no RPC
+promises one. This is the accepted placement of ADR 0007 (review decision
+14.7); the pattern is documented here and implemented with the consumer's
+library, not in sup-kv.
+
+## What Phase 9 adds
+
+This page is the phase-owned half of the API contract. The rest belongs to
+Phase 9's DOCS-05 work and is deliberately not claimed complete here: the full
+per-RPC failure table (every RPC against every error, rather than this page's
+mapper-level table), the write-latency model, and the key-prefix convention.
+Treat those sections as pending until Phase 9 lands them; this document claims
+only the sections it states.

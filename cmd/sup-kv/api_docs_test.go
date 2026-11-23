@@ -61,6 +61,73 @@ var apiDocAnchors = []struct {
 	{"256", "the maximum page size"},
 	{"6 MiB", "the per-page serialized-byte budget"},
 	{"empty token", "the end-of-list signal"},
+
+	// The total, path-free error table (APIS-03, D-03): one literal per
+	// mapper constant plus every List constant message.
+	{"## Errors", "the error-table section heading"},
+	{"key not found", "storage.ErrNotFound — an absent or tombstoned key"},
+	{"snapshot not found", "fs.ErrNotExist on a snapshot read"},
+	{"key already exists", "storage.ErrAlreadyExists"},
+	{"value exceeds the maximum allowed size", "storage.ErrValueTooLarge"},
+	{"invalid snapshot name", "persistfile.ErrInvalidSnapshotName"},
+	{"invalid page size", "the List page_size rejection"},
+	{"invalid page token", "the List page_token rejection"},
+	{"no dump on disk to snapshot", "persistfile.ErrNoDump — FailedPrecondition"},
+	{"dump failed; write not confirmed", "persist.ErrDumpFailed"},
+	{"write not confirmed before the confirmation timeout", "persist.ErrUnconfirmed"},
+	{"persist engine closed", "persist.ErrClosed"},
+	{"watch hub is shutting down", "the Watch shutdown status"},
+	{"disk full", "port.FailureDiskFull"},
+	{"permission denied", "port.FailurePermission and fs.ErrPermission"},
+	{"Canceled", "context.Canceled through status.FromContextError"},
+	{"DeadlineExceeded", "context.DeadlineExceeded through status.FromContextError"},
+	{"internal error", "the totality fallback's constant"},
+	{"detail is logged", "internal detail goes to the log, never the response"},
+	{"no server path", "no message carries a server filesystem path"},
+
+	// The Watch durability contract (APIS-04, D-04).
+	{"## Watch", "the Watch section heading"},
+	{"after the dump confirmation", "live events are released only once durable"},
+	{"exactly once", "one confirmed write yields one event"},
+	{"Deletions are events", "a tombstone is a change event, not a silent removal"},
+	{"version order", "per-key events arrive in increasing version order"},
+	{"resubscribe", "the slow-subscriber recovery path"},
+	{"current in-memory state", "the snapshot half is current memory, not a durable view"},
+
+	// The snapshot full rollback (APIS-07, D-07).
+	{"## Snapshots", "the snapshots section heading"},
+	{"full rollback", "a load makes the snapshot the store's state, not a merge"},
+	{"absent from the snapshot", "live keys the snapshot does not name are deleted"},
+	{"fresh version", "replayed records carry new versions, never the snapshot's"},
+	{"no version is burned", "an already-tombstoned absent key is untouched"},
+	{"broadcast", "the rollback result replicates"},
+	{"not linearizable", "the honest limit on concurrent-write ordering"},
+
+	// The explicit transport/health envelope (APIS-05, D-05).
+	{"## Transport and health", "the transport section heading"},
+	{"2 m", "the server keepalive idle ping period"},
+	{"20 s", "the keepalive answer timeout"},
+	{"30 s", "the minimum client ping interval"},
+	{"MaxRecvBytes", "the explicit receive ceiling"},
+	{"MaxSendBytes", "the explicit send ceiling"},
+	{"63 846", "the default-value-limit receive ceiling"},
+	{"ResourceExhausted", "an over-limit request is rejected at the transport"},
+	{"NOT_SERVING", "the health state while the gate is closed and after shutdown begins"},
+	{"never returns to SERVING", "the one-way health rule"},
+
+	// The consumer-zone boundary (APIS-06, ADR 0007 / 14.7).
+	{"## Consumer library territory", "the consumer-zone section heading"},
+	{"consumer-library territory", "the last-read-value pattern belongs to the consumer's library"},
+	{"ADR 0007", "the accepted placement decision"},
+	{"14.7", "the owner decision that settled it"},
+	{"not a server feature", "the binary ships no last-read-value cache"},
+
+	// The explicit Phase 9 split (never claimed complete here).
+	{"## What Phase 9 adds", "the Phase 9 remainder section heading"},
+	{"DOCS-05", "the requirement that owns the remainder"},
+	{"per-RPC failure table", "Phase 9's full failure table"},
+	{"write-latency model", "Phase 9's latency model"},
+	{"key-prefix convention", "Phase 9's prefix convention"},
 }
 
 // TestAPIDoc fails when docs/API.md is absent or loses any mandated anchor:
