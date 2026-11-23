@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
-current_plan: 10
+current_plan: 11
 status: executing
-stopped_at: Completed 07-09-PLAN.md
-last_updated: "2026-11-23T11:19:35.384Z"
+stopped_at: Completed 07-10-PLAN.md
+last_updated: "2026-11-23T11:33:03.613Z"
 last_activity: 2026-11-23
 last_activity_desc: Completed 07-06-PLAN.md (pending-displacement conflict counter); 5 plans remain in Phase 7
-state_head: 812896951f428cba2530cf11134e5196705c5089
+state_head: 032959b46e56d05a0bef86e03ed95ab02657095b
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 81
+  completed_plans: 82
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 7 (Observability and Configuration) — EXECUTING
-Current Plan: 10
+Current Plan: 11
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Completed 07-06-PLAN.md; 5 plans remain
@@ -141,6 +141,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P07 | 24min | 3 tasks | 9 files |
 | Phase 07 P08 | 1214s | 2 tasks | 13 files |
 | Phase 07 P09 | 921s | 3 tasks | 12 files |
+| Phase 07 P10 | 281s | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -462,6 +463,10 @@ Recent decisions affecting current work:
 - [Phase 07]: Sent accounting counts a datagram only after WriteToUDP accepts it; encode, resolve and write failures count nothing
 - [Phase 07]: The four routed Phase-4 counters are unlabeled, mirrored post-event and rendered at zero when unseen
 - [Phase 07]: Linux RSS reads /proc/self/statm field 2 x page size; the !linux file reports ru_maxrss as the documented development-only peak
+- [Phase 07]: 07-10: the drift runbook states only the shipped received-lead direction; the anchor plus the 2 m max_clock_lead default and the drift_warn < max_clock_lead rule keep the WARN reachable
+- [Phase 07]: 07-10: operationsForbidden matches whitespace-normalized text on both sides, so a reflowed stale claim (the Main load no-log sentence) cannot survive
+- [Phase 07]: 07-10: S-SEM-07 keeps superseded-by-amendment and S-IMP-08 keeps accepted-deviation(ADR 0008); only their notes/evidence changed (pending-local displacement; honest conflict and drift counters)
+- [Phase 07]: 07-10: AGENTS names internal/config as composition-level outside the app no-I/O rule and lists the three additive depguard rules plus the written grpcapi composition exception
 
 ### Pending Todos
 
@@ -484,7 +489,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T11:19:34.559Z
-Stopped at: Completed 07-09-PLAN.md
+Last session: 2026-11-23T11:33:01.806Z
+Stopped at: Completed 07-10-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
