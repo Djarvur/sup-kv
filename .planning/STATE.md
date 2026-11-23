@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 6
+current_plan: 7
 status: executing
-stopped_at: Completed 06-11-PLAN.md
-last_updated: "2026-11-22T23:53:40.700Z"
+stopped_at: Completed 06-05-PLAN.md
+last_updated: "2026-11-23T00:15:40.512Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: 034814e6f27e813fa65125a150eef11c93bab6bb
+state_head: 14b8a9179edff1de6d2670f393876e916434f29b
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 64
+  completed_plans: 65
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 6
+Current Plan: 7
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
@@ -123,6 +123,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P03 | 7min | 3 tasks | 7 files |
 | Phase 06 P04 | 7min | 3 tasks | 6 files |
 | Phase 06 P11 | 30min | 2 tasks | 11 files |
+| Phase 06 P05 | 817s | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -379,6 +380,12 @@ Recent decisions affecting current work:
 - [Phase 06]: APIS-01: the discovery flush is broadcast-only — it re-arms the ladder and queues the record send but never inserts the discovered peer into a wait-set or the per-peer ledger (IN-05 closes).
 - [Phase 06]: APIS-01: the 20 ms displacement target is proven structurally by the displacing handler call's ResultSuperseded Outbox event; the real-socket regression keeps a generous 250 ms CI-safe bound (RESEARCH Pitfall 2).
 - [Phase 06]: APIS-01: plan 06-11 Task 2 is regression pinning — its tests pass on the Task 1 tree, so no second RED commit exists; the behavior change and its RED evidence live in Task 1 (plan frontmatter is type: execute).
+- [Phase 06]: 06-05: the two List modes share one LiveVersions call; Lookup is called only for entries the page returns, so the page_size-0 legacy listing copies no value bytes at all
+- [Phase 06]: 06-05: the page token is the RawURL base64 of the last examined key — a strict-greater position, never an index or snapshot; a token over storage.MaxKeyBytes or undecodable is InvalidArgument, a token without a positive page_size is InvalidArgument
+- [Phase 06]: 06-05: listEnvelopeOverheadBytes 1382 is derived term by term (1366-char token ceiling + tag/length 3 + gRPC prefix 5 + repeated-field framing 8); plan 06-07 adds it to listPageByteBudget 6 MiB for MaxSendBytes and must not redefine either
+- [Phase 06]: 06-05: the byte budget stops before an over-budget entry and leaves it as the next page's first, while the first entry is always included, so a page is never empty non-terminal and progress is structural
+- [Phase 06]: 06-05: the page walk takes a lookup function so the view-to-lookup race (tombstone or vanished key) is pinned deterministically in list_internal_test.go instead of raced through the RPC surface
+- [Phase 06]: 06-05: APIS-02's checkbox stays pending because requirements ready-ids reports it blocked (the #2388 shared-ID gate among 06-01/06-05/06-07)
 
 ### Pending Todos
 
@@ -401,7 +408,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-22T23:53:40.067Z
-Stopped at: Completed 06-11-PLAN.md
+Last session: 2026-11-23T00:15:39.941Z
+Stopped at: Completed 06-05-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
