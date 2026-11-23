@@ -207,7 +207,7 @@ its owner.
   specifies reads only (research A7); Phase 6 owns any API-wording change.
 - **Listing trust binding (CR-01).** A received complete listing is trusted
   only from a `(node_id, run_id)` row the peer table holds: an unbound identity
-  or a forged `run_id` is discarded as `duplicate_node_id` (counted, WARNed
+  or a forged `run_id` is discarded as `unbound_listing` (counted, WARNed
   through the per-peer rate limiter, never retained), and a retained set
   nobody republishes for two `sync_interval`s leaves the union
   (`Core.listingBound`, `Core.expireListedKeys`). Two consequences are
