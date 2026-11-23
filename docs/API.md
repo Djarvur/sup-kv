@@ -122,11 +122,14 @@ the last examined key; send it back as `page_token` to resume strictly after
 that position. It is a position, not a snapshot: keys added or deleted between
 pages may appear or disappear, no page is an isolated view, and a resumed walk
 neither replays nor skips a key by construction. An undecodable token, or one
-whose decoded key exceeds the 1 024-byte key ceiling, is rejected with
-`InvalidArgument` (`invalid page token`). An **empty token** is the end signal:
-it means no matching key follows the last examined one, and it is the only
-end-of-list signal (an empty final page is legal). The empty `page_token`
-starts at the first key.
+whose decoded key exceeds the dump format's maximum record line — the largest
+key a readable dump can carry — is rejected with `InvalidArgument`
+(`invalid page token`). A key above the 1 024-byte write ceiling is a legal
+position: the store keeps serving pre-upgrade records under longer keys, so
+the token domain is the format's, not the write ceiling, and the walk resumes
+past such a key. An **empty token** is the end signal: it means no matching
+key follows the last examined one, and it is the only end-of-list signal (an
+empty final page is legal). The empty `page_token` starts at the first key.
 
 **The 6 MiB byte budget.** One page's summed serialized entries stay at or
 below a 6 MiB budget, so a page's cost does not grow with the store's total
@@ -283,8 +286,8 @@ inherited from a gRPC default.
 | Keepalive answer timeout | 20 s | a silent peer is closed instead of holding a stream indefinitely |
 | Minimum client ping interval | 30 s | a consumer library may run its own 30 s client keepalive without tripping enforcement |
 | Permit without stream | `true` | a consumer may hold an idle connection between writes |
-| `MaxRecvBytes` | 1 024-byte key ceiling + the effective value limit + 1 382-byte envelope — 63 846 bytes at the default limit (66 814 at the 64 408-byte datagram ceiling) | covers the largest valid `SetRequest`; an over-limit request is rejected at the transport with `ResourceExhausted`, before allocation-heavy handling |
-| `MaxSendBytes` | 6 MiB page budget + 1 382-byte envelope | covers any `List` page the server can produce, as well as every smaller unary response |
+| `MaxRecvBytes` | the envelope ceiling (maximum page token plus field framing) + a 1 024-byte key + the effective value limit — 187 472 bytes at the default limit (190 440 at the 64 408-byte datagram ceiling) | covers the largest valid request of either shape: a maximum `SetRequest`, or a `ListRequest` carrying a maximum page token (the token domain is the dump format's line ceiling, so a pre-upgrade longer key stays walkable); a request above the ceiling is rejected at the transport with `ResourceExhausted`, before allocation-heavy handling |
+| `MaxSendBytes` | 6 MiB page budget + 125 008-byte envelope | covers any `List` page the server can produce — maximum-length page token included — as well as every smaller unary response |
 
 An over-limit request is a transport verdict (`ResourceExhausted`), a different
 answer from the handler's `InvalidArgument` value-limit rejection: the layer

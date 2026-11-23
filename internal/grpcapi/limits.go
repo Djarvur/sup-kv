@@ -35,11 +35,13 @@ const (
 )
 
 // apiEnvelopeOverheadBytes bounds the bytes one API request or response
-// carries besides its entries: the key/value field framing and the base64
-// next_page_token. It is plan 06-05's listEnvelopeOverheadBytes consumed
-// here — the per-entry key, version and record framing already sit inside
-// listPageByteBudget, and list.go owns both List constants, so this file
-// never restates either (APIS-05, T-06-24).
+// carries besides its entries: the field framing and the encoded
+// next_page_token at the dump format's line ceiling. It is plan 06-05's
+// listEnvelopeOverheadBytes consumed here — the per-entry key, version and
+// record framing already sit inside listPageByteBudget, and list.go owns both
+// List constants, so this file never restates either (APIS-05, T-06-24). The
+// receive side needs the token component too: the follow-up request that
+// carries a maximum page token must fit the receive ceiling (WR-01).
 const apiEnvelopeOverheadBytes = listEnvelopeOverheadBytes
 
 // TransportLimits is the explicit gRPC transport envelope (D-05, APIS-05):
@@ -48,21 +50,25 @@ const apiEnvelopeOverheadBytes = listEnvelopeOverheadBytes
 // node-size change can never leave a limit behind.
 type TransportLimits struct {
 	// MaxRecvBytes bounds one inbound message. It covers the largest valid
-	// SetRequest: a key at storage.MaxKeyBytes, a value at the EFFECTIVE
-	// configured limit and apiEnvelopeOverheadBytes of framing. A request
-	// above it is rejected at the transport with ResourceExhausted — before
-	// any allocation-heavy handling — which is a different verdict from the
+	// request of either shape: a SetRequest with a key at storage.MaxKeyBytes
+	// and a value at the EFFECTIVE configured limit, or a ListRequest carrying
+	// a next_page_token at the dump format's line ceiling — a pre-upgrade key
+	// above storage.MaxKeyBytes is a legal position, so the token domain is
+	// the format's, not the write ceiling (WR-01). apiEnvelopeOverheadBytes
+	// includes the token's encoded ceiling. A request above MaxRecvBytes is
+	// rejected at the transport with ResourceExhausted — before any
+	// allocation-heavy handling — which is a different verdict from the
 	// handler's InvalidArgument value limit (T-06-21).
 	MaxRecvBytes int
 
 	// MaxSendBytes bounds one outbound message. It covers a maximum List
 	// page: listPageByteBudget of serialized entries plus
-	// listEnvelopeOverheadBytes of envelope (the token, the repeated-field
-	// tags and the gRPC prefix), as well as every single-record response,
-	// which is far smaller. The ceiling is provable only because the page
-	// budget counts full serialized entries — the key twice, the version,
-	// the value and the fixed framing — so a page the 06-05 walk returns
-	// cannot marshal past it.
+	// listEnvelopeOverheadBytes of envelope (the token at the format ceiling,
+	// the repeated-field tags and the gRPC prefix), as well as every
+	// single-record response, which is far smaller. The ceiling is provable
+	// only because the page budget counts full serialized entries — the key
+	// twice, the version, the value and the fixed framing — so a page the
+	// 06-05 walk returns cannot marshal past it.
 	MaxSendBytes int
 
 	// KeepaliveTime is the server's idle ping period.
@@ -82,7 +88,8 @@ type TransportLimits struct {
 // (64 408) must accept its own maximum-size writes at the transport, while a
 // non-positive input normalizes to storage.ValueMaxBytes exactly as the store
 // does (RESEARCH Pitfall 11, T-06-24). The send ceiling does not depend on
-// the value limit: it is the List page budget plus the envelope ceiling.
+// the value limit: it is the List page budget plus the envelope ceiling,
+// whose token component is the dump format's line ceiling (WR-01).
 func LimitsFor(valueMaxBytes int) TransportLimits {
 	if valueMaxBytes <= 0 {
 		valueMaxBytes = storage.ValueMaxBytes

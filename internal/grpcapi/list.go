@@ -61,17 +61,27 @@ const (
 	// length varint each (three bytes at this budget), rounded up.
 	repeatedFieldFramingBytes = 8
 
+	// listTokenKeyBytes is the largest raw key a next_page_token may name: the
+	// dump format's maximum record line (persist.MaxDumpLineBytes). A key
+	// rides inside one record line, so no readable dump can name a longer
+	// key, and the store keeps serving pre-upgrade keys above
+	// storage.MaxKeyBytes (validation is write-side only). The bound is
+	// deliberately the format's, never storage.MaxKeyBytes: a token naming a
+	// longer pre-upgrade key must still resume the walk (WR-01).
+	listTokenKeyBytes = persist.MaxDumpLineBytes
+
 	// listTokenEncodedBytes is the longest possible next_page_token: the
-	// [base64.RawURLEncoding] expansion (ceil of 4n/3) of a key at the
-	// storage.MaxKeyBytes ceiling — 1 366 characters for 1 024 bytes.
-	listTokenEncodedBytes = (storage.MaxKeyBytes*base64CharsPerGroup + base64GroupBytes - 1) /
+	// [base64.RawURLEncoding] expansion (ceil of 4n/3) of a key at the dump
+	// format's line ceiling — 124 992 characters at the format maximum.
+	listTokenEncodedBytes = (listTokenKeyBytes*base64CharsPerGroup + base64GroupBytes - 1) /
 		base64GroupBytes
 
 	// listEnvelopeOverheadBytes bounds everything a ListResponse carries
 	// besides its entries: the next_page_token (its tag, length varint and
 	// encoded ceiling), the response's two repeated-field tags and the
 	// gRPC message prefix. plan 06-07 adds it to listPageByteBudget for
-	// MaxSendBytes.
+	// MaxSendBytes, and apiEnvelopeOverheadBytes reuses it for the receive
+	// ceiling, which must admit a follow-up ListRequest carrying that token.
 	listEnvelopeOverheadBytes = listTokenEncodedBytes + tokenFieldTagBytes +
 		grpcMessagePrefixBytes + repeatedFieldFramingBytes
 )
@@ -85,8 +95,10 @@ const (
 	invalidPageSizeMessage = "invalid page size"
 
 	// invalidPageTokenMessage answers an undecodable token and one whose
-	// decoded key exceeds storage.MaxKeyBytes: a token names a position,
-	// and an out-of-domain position is client error, never a seek.
+	// decoded key exceeds the dump format's record-line ceiling: a token names
+	// a position, and a position no readable dump can carry is client error,
+	// never a seek. A key above storage.MaxKeyBytes is a legal position — the
+	// store serves pre-upgrade keys under longer keys (WR-01).
 	invalidPageTokenMessage = "invalid page token"
 )
 
@@ -228,13 +240,16 @@ func encodeListToken(key string) string {
 }
 
 // decodeListToken reads one opaque page_token back into its position. A
-// RawURLEncoding decode failure and a decoded key longer than
-// storage.MaxKeyBytes are both client error with the constant message: the
-// token crosses from an untrusted client into the page seek, so an
-// out-of-domain token is rejected, never interpreted (T-06-15).
+// RawURLEncoding decode failure and a decoded key longer than the dump
+// format's record-line ceiling are both client error with the constant
+// message: the token crosses from an untrusted client into the page seek, so
+// an out-of-domain token is rejected, never interpreted (T-06-15). The bound
+// is the format's, not storage.MaxKeyBytes: validation is write-side only,
+// so a token naming a pre-upgrade longer key must still resume the walk
+// (WR-01).
 func decodeListToken(token string) (string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil || len(raw) > storage.MaxKeyBytes {
+	if err != nil || len(raw) > listTokenKeyBytes {
 		return "", status.Error(codes.InvalidArgument, invalidPageTokenMessage)
 	}
 	return string(raw), nil

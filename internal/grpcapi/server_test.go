@@ -1102,9 +1102,11 @@ func TestServer_listEmpty(t *testing.T) {
 }
 
 // TestServer_listToken pins the page-token contract: an undecodable token
-// and one whose decoded key exceeds storage.MaxKeyBytes are InvalidArgument
-// with the constant message, while a well-formed token past the last key is
-// a legal empty terminal page.
+// and one whose decoded key exceeds the dump format's record-line ceiling are
+// InvalidArgument with the constant message, while a well-formed token past
+// the last key is a legal empty terminal page. A key above the 1 024-byte
+// write ceiling is NOT out of domain (the store serves pre-upgrade longer
+// keys), which TestServer_listTokenAboveWriteCeiling proves end-to-end.
 func TestServer_listToken(t *testing.T) {
 	t.Parallel()
 
@@ -1120,11 +1122,11 @@ func TestServer_listToken(t *testing.T) {
 		}
 	}
 
-	oversized := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte("k"), storage.MaxKeyBytes+1))
+	oversized := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte("k"), persist.MaxDumpLineBytes+1))
 	_, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2, PageToken: oversized})
-	assertCode(t, "List an oversized token", err, codes.InvalidArgument)
+	assertCode(t, "List an out-of-format token", err, codes.InvalidArgument)
 	if got := status.Convert(err).Message(); got != "invalid page token" {
-		t.Fatalf("List an oversized token: want the constant %q, got %q", "invalid page token", got)
+		t.Fatalf("List an out-of-format token: want the constant %q, got %q", "invalid page token", got)
 	}
 
 	pastEnd := base64.RawURLEncoding.EncodeToString([]byte("zzz"))
@@ -1135,6 +1137,52 @@ func TestServer_listToken(t *testing.T) {
 	if len(resp.GetKeys()) != 0 || len(resp.GetRecords()) != 0 || resp.GetNextPageToken() != "" {
 		t.Fatalf("List a token past the last key: want an empty terminal page, got keys=%v records=%d token=%q",
 			resp.GetKeys(), len(resp.GetRecords()), resp.GetNextPageToken())
+	}
+}
+
+// TestServer_listTokenAboveWriteCeiling is the WR-01 regression: the store
+// keeps serving pre-upgrade keys longer than storage.MaxKeyBytes, so a paged
+// List emits one and the follow-up request carries its encoded position. For
+// a 1 124-byte key (storage.MaxKeyBytes+100) that token is 1 499
+// RawURLEncoding characters; the second page must succeed and return the
+// following key instead of failing InvalidArgument. Seeding goes through the
+// engine, not the RPC, because the write path legitimately enforces the
+// 1 024-byte ceiling — exactly the asymmetry the token domain must respect.
+func TestServer_listTokenAboveWriteCeiling(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	longKey := strings.Repeat("k", storage.MaxKeyBytes+100)
+	for _, key := range []string{"0first", longKey, "z"} {
+		_, _, seedErr := ts.engine.Set(key, []byte("v"))
+		if seedErr != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, seedErr)
+		}
+	}
+	ctx := t.Context()
+
+	first, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2})
+	if err != nil {
+		t.Fatalf("List page 1: want OK, got error: %v", err)
+	}
+	if got, want := first.GetKeys(), []string{"0first", longKey}; !slices.Equal(got, want) {
+		t.Fatalf("List page 1 keys = %v, want %v (the long pre-upgrade key is listed)", got, want)
+	}
+	token := first.GetNextPageToken()
+	if got, want := len(token), 1499; got != want {
+		t.Fatalf("next_page_token length = %d, want %d (RawURLEncoding of %d bytes)",
+			got, want, len(longKey))
+	}
+
+	second, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2, PageToken: token})
+	if err != nil {
+		t.Fatalf("List page 2 with the %d-byte token: want OK, got error: %v", len(token), err)
+	}
+	if got, want := second.GetKeys(), []string{"z"}; !slices.Equal(got, want) {
+		t.Fatalf("List page 2 keys = %v, want %v (the walk resumes past the long key)", got, want)
+	}
+	if got := second.GetNextPageToken(); got != "" {
+		t.Fatalf("List page 2 next_page_token = %q, want the empty end-of-list token", got)
 	}
 }
 
@@ -1188,10 +1236,10 @@ func TestServer_listPrefix(t *testing.T) {
 }
 
 // listEnvelopeCeiling bounds a ListResponse's serialized bytes beyond its
-// entries: the 1 366-character base64 token ceiling, its field framing and
-// the gRPC message prefix. It restates the package's
-// listEnvelopeOverheadBytes (1 382) with slack because this external test
-// cannot see the unexported constant.
+// entries for these short-key fixtures: their tokens are a few characters,
+// while the package's listEnvelopeOverheadBytes covers the format-maximum
+// token. It is a loose ceiling here because this external test cannot see the
+// unexported constant.
 const listEnvelopeCeiling = 2048
 
 // newProdLimitServer builds the open-gate harness at the production value

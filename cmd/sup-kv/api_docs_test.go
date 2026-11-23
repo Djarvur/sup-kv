@@ -110,7 +110,7 @@ var apiDocAnchors = []struct {
 	{"30 s", "the minimum client ping interval"},
 	{"MaxRecvBytes", "the explicit receive ceiling"},
 	{"MaxSendBytes", "the explicit send ceiling"},
-	{"63 846", "the default-value-limit receive ceiling"},
+	{"187 472", "the default-value-limit receive ceiling"},
 	{"ResourceExhausted", "an over-limit request is rejected at the transport"},
 	{"NOT_SERVING", "the health state while the gate is closed and after shutdown begins"},
 	{"never returns to SERVING", "the one-way health rule"},

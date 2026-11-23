@@ -47,7 +47,7 @@ const (
 	dumpLineDelimiterBytes = 1
 )
 
-// maxDumpLineBytes returns the longest record line the format can carry — a
+// MaxDumpLineBytes is the longest record line the dump format can carry — a
 // property of the format, never of the current valueMaxBytes configuration.
 // It is the datagram ceiling's base64 expansion plus the worst-case JSON
 // escaping of a storage.MaxKeyBytes key plus fixed overhead: no supported
@@ -56,10 +56,17 @@ const (
 // inside a readable line is a ValueLimit discard. Because the bound takes no
 // configuration input, a dump written at the default limit still reads under
 // a tiny new limit (T-5-03).
-func maxDumpLineBytes() int {
-	encodedValue := (maxDumpValueBytes + base64PaddingBytes) / base64GroupBytes * base64SymbolBytes
-	return encodedValue + jsonEscapeExpansion*storage.MaxKeyBytes + dumpLineOverheadBytes
-}
+//
+// It is also the page-token cursor domain (WR-01): a key rides inside one
+// record line, so no readable dump can name a longer key, and the store
+// keeps serving pre-upgrade keys above storage.MaxKeyBytes (validation is
+// write-side only). A transport that validates a page token against a key
+// bound must therefore use this format bound, not the write ceiling.
+const MaxDumpLineBytes = (maxDumpValueBytes+base64PaddingBytes)/base64GroupBytes*base64SymbolBytes +
+	jsonEscapeExpansion*storage.MaxKeyBytes + dumpLineOverheadBytes
+
+// maxDumpLineBytes returns MaxDumpLineBytes for the reader's buffer size.
+func maxDumpLineBytes() int { return MaxDumpLineBytes }
 
 // errUnsupportedFormat is the generation-level fault for a dump announcing
 // a format version this codec does not read: the fallback chain advances

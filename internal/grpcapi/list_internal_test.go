@@ -116,6 +116,64 @@ func TestListPage_maxKeySerializedBound(t *testing.T) {
 	}
 }
 
+// TestListPage_tokenAboveWriteCeiling proves the token domain is the dump
+// format's record line, never the 1 024-byte write ceiling (WR-01): the store
+// keeps serving pre-upgrade keys above storage.MaxKeyBytes, so the paged walk
+// emits one as a position and the next request must be able to decode it. The
+// 1 124-byte key encodes to a 1 499-character token; the page that stops on
+// it still marshals within listPageByteBudget plus listEnvelopeOverheadBytes,
+// and the follow-up page resumes with the next key.
+func TestListPage_tokenAboveWriteCeiling(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewStore(
+		7,
+		clock.NewClock(time.Now, 0, 0, time.Minute),
+		storage.Config{ValueMaxBytes: storage.ValueMaxBytes},
+	)
+	engine := persist.New(store, discardDumps{}, persist.Config{})
+
+	longKey := strings.Repeat("k", storage.MaxKeyBytes+100)
+	for i, key := range []string{"0first", longKey, "z"} {
+		rec := storage.Record{Version: version.PackVersion(int64(i)+1, 0, 7), Data: []byte("v")}
+		_, _, seedErr := engine.ApplyRemote(key, rec)
+		if seedErr != nil {
+			t.Fatalf("seed ApplyRemote(%q) error = %v, want nil", key, seedErr)
+		}
+	}
+
+	first, err := listPage(engine, &apiproto.ListRequest{PageSize: 2})
+	if err != nil {
+		t.Fatalf("listPage page 1: want nil error, got %v", err)
+	}
+	if got, want := first.GetKeys(), []string{"0first", longKey}; !slices.Equal(got, want) {
+		t.Fatalf("listPage page 1 keys = %v, want %v", got, want)
+	}
+	token := first.GetNextPageToken()
+	if got, want := len(token), 1499; got != want {
+		t.Fatalf("next_page_token length = %d, want %d for the %d-byte key", got, want, len(longKey))
+	}
+	if _, decodeErr := decodeListToken(token); decodeErr != nil {
+		t.Fatalf("decodeListToken(pre-upgrade long key token) error = %v, want nil", decodeErr)
+	}
+	raw, err := proto.Marshal(first)
+	if err != nil {
+		t.Fatalf("proto.Marshal(ListResponse): want nil error, got %v", err)
+	}
+	if got, ceiling := len(raw), listPageByteBudget+listEnvelopeOverheadBytes; got > ceiling {
+		t.Fatalf("marshaled page = %d bytes, want at most %d (the envelope covers the long token)",
+			got, ceiling)
+	}
+
+	second, err := listPage(engine, &apiproto.ListRequest{PageSize: 2, PageToken: token})
+	if err != nil {
+		t.Fatalf("listPage page 2 with the long token: want nil error, got %v", err)
+	}
+	if got, want := second.GetKeys(), []string{"z"}; !slices.Equal(got, want) {
+		t.Fatalf("listPage page 2 keys = %v, want %v (the walk resumes past the long key)", got, want)
+	}
+}
+
 // TestServer_listRace pins the view→lookup window: a key the live view
 // named can race into a tombstone or disappear entirely before the page
 // walk reads it. The walk must skip it, keep keys and records aligned, and
