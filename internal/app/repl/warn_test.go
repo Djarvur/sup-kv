@@ -120,6 +120,28 @@ func TestDiscard_warnLimiterKeyedByNodeAndClass(t *testing.T) {
 	if got := core.Discards().BadSyncHeader; got != 3 {
 		t.Fatalf("BadSyncHeader = %d, want 3 — the limiter suppresses the WARN, never the counter", got)
 	}
+
+	// The clock_drift class rides the same limiter with its own slot: even
+	// though this peer already warned for the discard classes in this
+	// interval, one leading record still logs its fallback WARN, and a second
+	// inside the interval stays silent while the counter moves per record.
+	aheadMs := testNowMs + int64(testDriftWarn/time.Millisecond) + 10_000
+	core.HandleDatagram(now, replFrom(peerID1, keyAlpha, remoteRecord(aheadMs, peerID1, "ahead-a")), &out)
+	out.Drain()
+	core.HandleDatagram(now.Add(time.Second), replFrom(peerID1, keyBeta, remoteRecord(aheadMs, peerID1, "ahead-b")), &out)
+	out.Drain()
+	driftWarns := 0
+	for _, line := range logs {
+		if strings.Contains(line, "clock drift") {
+			driftWarns++
+		}
+	}
+	if driftWarns != 1 {
+		t.Fatalf("clock_drift WARNs = %d for two leading records in one interval, want 1 — the class has its own slot: %v", driftWarns, logs)
+	}
+	if got := core.MergeStats().DriftWarnings; got != 2 {
+		t.Fatalf("DriftWarnings = %d after two leading records, want 2 — the limiter suppresses the WARN, never the counter", got)
+	}
 }
 
 // TestApplyFailure_warnLimiterKeyedByNodeAndClass pins the apply-failure

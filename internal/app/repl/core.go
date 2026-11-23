@@ -304,6 +304,22 @@ type Config struct {
 	// adapter or main side may bridge into structured logging or counters;
 	// the class is a first-class value, never a message prefix to parse.
 	OnDiscard func(class, detail string)
+
+	// OnPeerEvent receives every peer-table lifecycle transition (D-01,
+	// OBSV-01) — appear, restart and eviction — as one typed [PeerEvent].
+	// The callback runs on the single driver goroutine and must return
+	// immediately. Nil is valid: no event is emitted and the peer table
+	// behaves identically, so tests and single-purpose harnesses need no
+	// renderer.
+	OnPeerEvent func(PeerEvent)
+
+	// OnDrift receives clock-drift warnings (D-01, D-02, OBSV-05) once the
+	// shared per-(node_id, clock_drift) limiter has admitted the warning:
+	// the MergeStats counter stays per offending record while repeated
+	// warnings inside the interval are suppressed (T-07-22). Nil falls back
+	// to the prebuilt Log string, so a harness that captures only Log keeps
+	// observing drift without wiring this seam.
+	OnDrift func(DriftEvent)
 }
 
 // normalized returns cfg with out-of-domain fields replaced by the design
