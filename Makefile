@@ -1,4 +1,4 @@
-.PHONY: lint test bench bench-smoke race-soak red-run generate build client-example proto buf-lint buf-format buf-breaking release release-snapshot
+.PHONY: lint test bench bench-smoke perf race-soak red-run generate build client-example proto buf-lint buf-format buf-breaking release release-snapshot
 
 # Version stamping for the build target (D-18): version from git describe,
 # commit from the short sha, "dev" when git is unavailable.
@@ -39,6 +39,26 @@ bench:
 ## invokes this target, so the command has exactly one definition.
 bench-smoke:
 	go test -run '^$$' -bench . -benchtime=1x ./internal/app/persist/ ./internal/udprepl/ ./internal/grpcapi/
+
+## perf: the operator-facing threshold run (D-06, PERF-06): the perf ROWS
+## over the real-binary stand harness with the thresholds from
+## internal/testutil/perf.go applied, then the ordinary stand suite once more
+## with no thresholds (PERF-06's literal "runs the stand suite"). Linux only
+## (the stand harness is linux-only); no -race (the numbers are the
+## product's, not the race build's); -p 1 serializes the packages so one
+## measurement cannot contaminate the next. Every perf row logs the one-line
+## hardware block. Dumps land in $(CURDIR)/.tmp/perf (gitignored) rather than
+## a memory-backed /tmp, and the per-test subdirectory carries its filesystem
+## type. CI deliberately keeps the threshold-free `make bench-smoke`
+## (D-13/D-14); this target is manual only.
+perf:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		echo "perf: Linux only (the stand harness is linux-only)" >&2; \
+		exit 1; \
+	fi
+	mkdir -p .tmp/perf
+	SUPKV_PERF=1 SUPKV_PERF_DUMP_DIR=$(CURDIR)/.tmp/perf go test -count=1 -p 1 -timeout 30m -v -run '^TestPerf' ./internal/stand/ ./internal/app/repl/ ./internal/grpcapi/
+	env -u SUPKV_PERF -u SUPKV_PERF_DUMP_DIR go test -count=1 -p 1 -timeout 10m ./internal/stand/
 
 ## race-soak: TEST-11's flake command — the affected set under the race
 ## detector for COUNT repetitions (default 20, the command D-09 names;
