@@ -3,6 +3,7 @@ package grpcapi_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -657,10 +658,11 @@ func TestServer_keyLimit(t *testing.T) {
 	assertCode(t, "Get the deleted boundary key", err, codes.NotFound)
 }
 
-// TestServer_list proves D-12..D-15: List returns the sorted live keys
-// under any prefix in one response, tombstoned keys never appear, a prefix
-// yields exactly its subset, and the empty prefix enumerates the whole
-// live state. slices.Equal is order-sensitive, so the want-list comparison
+// TestServer_list is the table-driven List contract: the legacy
+// page_size-unset listing (D-12..D-15) covers every live key under a
+// prefix, tombstoned keys never appear, an unmatched prefix lists nothing,
+// and the paged mode returns the same head of the listing as aligned
+// records. slices.Equal is order-sensitive, so the want-list comparison
 // pins the strict ascending order.
 func TestServer_list(t *testing.T) {
 	t.Parallel()
@@ -670,43 +672,64 @@ func TestServer_list(t *testing.T) {
 
 	// Seed keys across two prefixes plus one key that gets tombstoned.
 	for _, key := range []string{"cfg/a", "cfg/b", "svc/a", "svc/b", "tmp/x"} {
-		_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: key, Value: []byte("v")})
-		if err != nil {
-			t.Fatalf("Set %s: want OK, got error: %v", key, err)
+		if _, _, err := ts.engine.Set(key, []byte("v")); err != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
 		}
 	}
-	_, err := ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "tmp/x"})
-	if err != nil {
-		t.Fatalf("Delete tmp/x: want OK, got error: %v", err)
+	if _, _, err := ts.engine.Delete("tmp/x"); err != nil {
+		t.Fatalf("seed Delete(tmp/x) error = %v, want nil", err)
 	}
 
-	// Empty prefix returns every live key (D-15): strictly ascending,
-	// tombstone absent (D-14), keys only (D-13), single response (D-12).
-	all, err := ts.client.List(ctx, &apiproto.ListRequest{})
-	if err != nil {
-		t.Fatalf("List empty prefix: want OK, got error: %v", err)
+	cases := []struct {
+		name string
+		req  *apiproto.ListRequest
+		want []string
+	}{
+		{
+			name: "empty prefix lists every live key",
+			req:  &apiproto.ListRequest{},
+			want: []string{"cfg/a", "cfg/b", "svc/a", "svc/b"},
+		},
+		{
+			name: "a prefix lists its live subset",
+			req:  &apiproto.ListRequest{Prefix: "cfg/"},
+			want: []string{"cfg/a", "cfg/b"},
+		},
+		{
+			name: "an unmatched prefix lists nothing",
+			req:  &apiproto.ListRequest{Prefix: "zzz/"},
+			want: nil,
+		},
+		{
+			name: "a page carries the head as records",
+			req:  &apiproto.ListRequest{PageSize: 2},
+			want: []string{"cfg/a", "cfg/b"},
+		},
 	}
-	wantAll := []string{"cfg/a", "cfg/b", "svc/a", "svc/b"}
-	if got := all.GetKeys(); !slices.Equal(got, wantAll) {
-		t.Fatalf("List empty prefix: want %v sorted and tombstone-free, got %v", wantAll, got)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// A prefix returns exactly its live subset.
-	cfg, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "cfg/"})
-	if err != nil {
-		t.Fatalf("List cfg/ prefix: want OK, got error: %v", err)
-	}
-	if got := cfg.GetKeys(); !slices.Equal(got, []string{"cfg/a", "cfg/b"}) {
-		t.Fatalf("List cfg/ prefix: want [cfg/a cfg/b], got %v", got)
-	}
-
-	// A prefix matching nothing returns an empty list, not an error.
-	none, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "zzz/"})
-	if err != nil {
-		t.Fatalf("List unmatched prefix: want OK, got error: %v", err)
-	}
-	if got := none.GetKeys(); len(got) != 0 {
-		t.Fatalf("List unmatched prefix: want 0 keys, got %v", got)
+			resp, err := ts.client.List(ctx, tc.req)
+			if err != nil {
+				t.Fatalf("List %+v: want OK, got error: %v", tc.req, err)
+			}
+			if got := resp.GetKeys(); !slices.Equal(got, tc.want) {
+				t.Fatalf("List %+v: want keys %v, got %v", tc.req, tc.want, got)
+			}
+			if tc.req.GetPageSize() > 0 {
+				if got := len(resp.GetRecords()); got != len(tc.want) {
+					t.Fatalf("List %+v: want %d aligned records, got %d", tc.req, len(tc.want), got)
+				}
+				return
+			}
+			if got := len(resp.GetRecords()); got != 0 {
+				t.Fatalf("List %+v: want 0 records in the legacy mode, got %d", tc.req, got)
+			}
+			if got := resp.GetNextPageToken(); got != "" {
+				t.Fatalf("List %+v: want an empty next_page_token in the legacy mode, got %q", tc.req, got)
+			}
+		})
 	}
 }
 
@@ -877,6 +900,229 @@ func TestServer_listPageContinuation(t *testing.T) {
 	}
 	if got := slices.Compact(slices.Clone(walked)); len(got) != len(walked) {
 		t.Fatalf("the page walk repeats a key: %v", walked)
+	}
+}
+
+// seedListKeys seeds count live keys under prefix directly through the
+// engine and returns them in ascending order. The pagination boundary tests
+// need hundreds of live keys; the read path is what they exercise, so the
+// expensive confirmed-RPC write path is bypassed.
+func seedListKeys(t *testing.T, ts *testHarness, prefix string, count int) []string {
+	t.Helper()
+	keys := make([]string, count)
+	for i := range count {
+		key := fmt.Sprintf("%s%03d", prefix, i)
+		keys[i] = key
+		if _, _, err := ts.engine.Set(key, []byte("v")); err != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		}
+	}
+	return keys
+}
+
+// TestServer_listBoundaries pins the page-size contract: a negative page
+// size and a page_token without a positive page_size are InvalidArgument
+// with the constant message, page_size 0 still returns every matching live
+// key with no records, and a page size above the maximum clamps to it.
+func TestServer_listBoundaries(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	bulk := seedListKeys(t, ts, "bulk/", 100)
+	seedListKeys(t, ts, "more/", 200)
+	ctx := t.Context()
+
+	// A page_token with page_size 0 cannot continue the legacy listing:
+	// there is no page.
+	tokenAtBulk0 := base64.RawURLEncoding.EncodeToString([]byte(bulk[0]))
+	invalid := []struct {
+		name string
+		req  *apiproto.ListRequest
+	}{
+		{"negative page size", &apiproto.ListRequest{PageSize: -1}},
+		{"page token without a page size", &apiproto.ListRequest{PageToken: tokenAtBulk0}},
+	}
+	for _, tc := range invalid {
+		_, err := ts.client.List(ctx, tc.req)
+		assertCode(t, tc.name, err, codes.InvalidArgument)
+		if got := status.Convert(err).Message(); got != "invalid page size" {
+			t.Fatalf("%s: want the constant %q, got %q", tc.name, "invalid page size", got)
+		}
+	}
+
+	// page_size 0 with no token keeps the legacy shape: every matching key
+	// in one response, no records, no token.
+	all, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "bulk/", PageSize: 0})
+	if err != nil {
+		t.Fatalf("List bulk/ with page_size 0: want OK, got error: %v", err)
+	}
+	if got := all.GetKeys(); !slices.Equal(got, bulk) {
+		t.Fatalf("List bulk/ with page_size 0: want the %d seeded keys, got %d keys", len(bulk), len(got))
+	}
+	if got := len(all.GetRecords()); got != 0 {
+		t.Fatalf("List bulk/ with page_size 0: want 0 records, got %d", got)
+	}
+	if got := all.GetNextPageToken(); got != "" {
+		t.Fatalf("List bulk/ with page_size 0: want an empty next_page_token, got %q", got)
+	}
+
+	// A page size above the maximum clamps to 256: 300 live keys yield 256
+	// keys and records, and a token for the rest.
+	clamped, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 257})
+	if err != nil {
+		t.Fatalf("List page_size 257: want OK, got error: %v", err)
+	}
+	if got := len(clamped.GetKeys()); got != 256 {
+		t.Fatalf("List page_size 257: want the clamped 256 keys, got %d", got)
+	}
+	if got := len(clamped.GetRecords()); got != 256 {
+		t.Fatalf("List page_size 257: want 256 aligned records, got %d", got)
+	}
+	if !slices.IsSorted(clamped.GetKeys()) {
+		t.Fatal("List page_size 257: keys are not byte-wise ascending")
+	}
+	if got := clamped.GetNextPageToken(); got == "" {
+		t.Fatal("List page_size 257: want a non-empty token for the remaining keys, got empty")
+	}
+}
+
+// TestServer_listEmpty pins the empty and single-key corners in both modes:
+// an empty store lists nothing and ends immediately, and one live key comes
+// back as one key (legacy) or one keyed record (paged) with an empty token.
+func TestServer_listEmpty(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	legacy, err := ts.client.List(ctx, &apiproto.ListRequest{})
+	if err != nil {
+		t.Fatalf("List an empty store with no page size: want OK, got error: %v", err)
+	}
+	if len(legacy.GetKeys()) != 0 || len(legacy.GetRecords()) != 0 || legacy.GetNextPageToken() != "" {
+		t.Fatalf("List an empty store with no page size: want an empty response, got keys=%v records=%d token=%q",
+			legacy.GetKeys(), len(legacy.GetRecords()), legacy.GetNextPageToken())
+	}
+	paged, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2})
+	if err != nil {
+		t.Fatalf("List an empty store with page_size 2: want OK, got error: %v", err)
+	}
+	if len(paged.GetKeys()) != 0 || len(paged.GetRecords()) != 0 || paged.GetNextPageToken() != "" {
+		t.Fatalf("List an empty store with page_size 2: want an empty terminal page, got keys=%v records=%d token=%q",
+			paged.GetKeys(), len(paged.GetRecords()), paged.GetNextPageToken())
+	}
+
+	if _, _, err := ts.engine.Set("only", []byte("v")); err != nil {
+		t.Fatalf("seed Set(only) error = %v, want nil", err)
+	}
+	one, err := ts.client.List(ctx, &apiproto.ListRequest{})
+	if err != nil {
+		t.Fatalf("List one key with no page size: want OK, got error: %v", err)
+	}
+	if got := one.GetKeys(); !slices.Equal(got, []string{"only"}) {
+		t.Fatalf("List one key with no page size: want [only], got %v", got)
+	}
+	if len(one.GetRecords()) != 0 || one.GetNextPageToken() != "" {
+		t.Fatalf("List one key with no page size: want no records and an empty token, got %d records, token %q",
+			len(one.GetRecords()), one.GetNextPageToken())
+	}
+	onePaged, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2})
+	if err != nil {
+		t.Fatalf("List one key with page_size 2: want OK, got error: %v", err)
+	}
+	if got := onePaged.GetKeys(); !slices.Equal(got, []string{"only"}) {
+		t.Fatalf("List one key with page_size 2: want [only], got %v", got)
+	}
+	if got := len(onePaged.GetRecords()); got != 1 {
+		t.Fatalf("List one key with page_size 2: want 1 record, got %d", got)
+	}
+	if got := onePaged.GetNextPageToken(); got != "" {
+		t.Fatalf("List one key with page_size 2: want the empty end-of-list token, got %q", got)
+	}
+}
+
+// TestServer_listToken pins the page-token contract: an undecodable token
+// and one whose decoded key exceeds storage.MaxKeyBytes are InvalidArgument
+// with the constant message, while a well-formed token past the last key is
+// a legal empty terminal page.
+func TestServer_listToken(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	seedPagesFixture(t, ts)
+	ctx := t.Context()
+
+	for _, token := range []string{"!!!!", "a"} {
+		_, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2, PageToken: token})
+		assertCode(t, "List malformed token "+token, err, codes.InvalidArgument)
+		if got := status.Convert(err).Message(); got != "invalid page token" {
+			t.Fatalf("List malformed token %q: want the constant %q, got %q", token, "invalid page token", got)
+		}
+	}
+
+	oversized := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte("k"), storage.MaxKeyBytes+1))
+	_, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2, PageToken: oversized})
+	assertCode(t, "List an oversized token", err, codes.InvalidArgument)
+	if got := status.Convert(err).Message(); got != "invalid page token" {
+		t.Fatalf("List an oversized token: want the constant %q, got %q", "invalid page token", got)
+	}
+
+	pastEnd := base64.RawURLEncoding.EncodeToString([]byte("zzz"))
+	resp, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2, PageToken: pastEnd})
+	if err != nil {
+		t.Fatalf("List a token past the last key: want OK, got error: %v", err)
+	}
+	if len(resp.GetKeys()) != 0 || len(resp.GetRecords()) != 0 || resp.GetNextPageToken() != "" {
+		t.Fatalf("List a token past the last key: want an empty terminal page, got keys=%v records=%d token=%q",
+			resp.GetKeys(), len(resp.GetRecords()), resp.GetNextPageToken())
+	}
+}
+
+// TestServer_listPrefix pins prefix filtering before pagination in both
+// modes: a prefix selects exactly its live subset, and the page size counts
+// only matching keys, so no out-of-prefix key ever appears on a page.
+func TestServer_listPrefix(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	for _, key := range []string{"cfg/a", "cfg/b", "svc/a", "svc/b", "svc/c"} {
+		if _, _, err := ts.engine.Set(key, []byte("v")); err != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		}
+	}
+	ctx := t.Context()
+
+	legacy, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "svc/"})
+	if err != nil {
+		t.Fatalf("List svc/ with no page size: want OK, got error: %v", err)
+	}
+	if got, want := legacy.GetKeys(), []string{"svc/a", "svc/b", "svc/c"}; !slices.Equal(got, want) {
+		t.Fatalf("List svc/ with no page size: want %v, got %v", want, got)
+	}
+	if len(legacy.GetRecords()) != 0 || legacy.GetNextPageToken() != "" {
+		t.Fatalf("List svc/ with no page size: want no records and an empty token, got %d records, token %q",
+			len(legacy.GetRecords()), legacy.GetNextPageToken())
+	}
+
+	first, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "svc/", PageSize: 2})
+	if err != nil {
+		t.Fatalf("List svc/ page_size 2: want OK, got error: %v", err)
+	}
+	if got, want := first.GetKeys(), []string{"svc/a", "svc/b"}; !slices.Equal(got, want) {
+		t.Fatalf("List svc/ page_size 2: want the prefixed first page %v, got %v", want, got)
+	}
+	if got := first.GetNextPageToken(); got == "" {
+		t.Fatal("List svc/ page_size 2: want a non-empty token for the remaining prefixed key, got empty")
+	}
+	second, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "svc/", PageSize: 2, PageToken: first.GetNextPageToken()})
+	if err != nil {
+		t.Fatalf("List svc/ page 2: want OK, got error: %v", err)
+	}
+	if got, want := second.GetKeys(), []string{"svc/c"}; !slices.Equal(got, want) {
+		t.Fatalf("List svc/ page 2: want the remaining prefixed key %v, got %v", want, got)
+	}
+	if got := second.GetNextPageToken(); got != "" {
+		t.Fatalf("List svc/ page 2: want the empty end-of-list token, got %q", got)
 	}
 }
 
