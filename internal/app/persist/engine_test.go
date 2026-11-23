@@ -1632,10 +1632,12 @@ func snapshotFixture(t *testing.T, records map[string]storage.Record) []byte {
 }
 
 // TestEngine_restoreReturnsReplayed proves the replay report PROTO-08's
-// snapshot-load notify consumes: a restore that changes the store returns
-// every snapshot record it replayed — sorted by key, each carrying the
-// store's freshly stamped version, the snapshot's data and tombstone flag —
-// while keys the snapshot never named keep their state untouched.
+// snapshot-load notify consumes under full-rollback semantics (decision
+// 14.1, ADR 0001): a restore that changes the store returns every record it
+// installed — sorted by key, each carrying the store's freshly stamped
+// version, the snapshot's data and tombstone flag — and, for a current LIVE
+// key the snapshot does not name, the ROLLBACK tombstone that deleted it
+// (fresh version, no data), so the notify list covers the whole rollback.
 func TestEngine_restoreReturnsReplayed(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -1660,6 +1662,7 @@ func TestEngine_restoreReturnsReplayed(t *testing.T) {
 			"delta": {Version: snapVersion, Data: []byte("snap-delta")},
 		}))
 
+		preRestore := eng.Records()
 		restored, err := eng.Restore("snap")
 		if err != nil {
 			t.Fatalf("Restore(snap) error = %v, want nil", err)
@@ -1668,8 +1671,11 @@ func TestEngine_restoreReturnsReplayed(t *testing.T) {
 		for i, rec := range restored {
 			keys[i] = rec.Key
 		}
-		if want := []string{"alpha", "beta", "delta"}; !slices.Equal(keys, want) {
-			t.Fatalf("Restore(snap) keys = %v, want %v (sorted, skipped records absent)", keys, want)
+		// gamma is absent from the snapshot and live locally: the full
+		// rollback deletes it and reports the tombstone, so the sorted union
+		// carries it after the snapshot's own keys.
+		if want := []string{"alpha", "beta", "delta", "gamma"}; !slices.Equal(keys, want) {
+			t.Fatalf("Restore(snap) keys = %v, want %v (the sorted union of snapshot keys and rollback tombstones)", keys, want)
 		}
 		for _, rec := range restored {
 			if rec.Version == (version.RecordVersion{}) {
@@ -1693,10 +1699,21 @@ func TestEngine_restoreReturnsReplayed(t *testing.T) {
 		if rec := byKey["delta"]; rec.Deleted || string(rec.Data) != "snap-delta" {
 			t.Errorf("restored delta = (%q, deleted=%t), want the snapshot's live value", rec.Data, rec.Deleted)
 		}
-		// gamma is absent from the snapshot: its current state stands.
-		rec, getErr := eng.Get("gamma")
-		if getErr != nil || string(rec.Data) != "gamma-value" {
-			t.Errorf("post-restore Get(gamma) = (%q, %v), want the untouched value", rec.Data, getErr)
+		// gamma: the rollback record is a tombstone with no data, its fresh
+		// version beats the pre-restore record, and the store agrees.
+		rollback := byKey["gamma"]
+		if !rollback.Deleted {
+			t.Error("restored gamma is live, want the rollback tombstone")
+		}
+		if len(rollback.Data) != 0 {
+			t.Errorf("the gamma rollback record carries %d data bytes, want none", len(rollback.Data))
+		}
+		if prior := preRestore["gamma"].Version; rollback.Version.Compare(prior) != 1 {
+			t.Errorf("gamma rollback version %x does not dominate its pre-restore version %x",
+				rollback.Version[:], prior[:])
+		}
+		if _, getErr := eng.Get("gamma"); !errors.Is(getErr, storage.ErrNotFound) {
+			t.Errorf("post-restore Get(gamma) error = %v, want ErrNotFound (the rollback tombstone wins)", getErr)
 		}
 	})
 }
@@ -1730,6 +1747,74 @@ func TestEngine_restoreNoOpReturnsEmpty(t *testing.T) {
 		}
 		if got := dumps.saveCount(); got != saves {
 			t.Errorf("completed saves after the no-op restore = %d, want the unchanged %d", got, saves)
+		}
+	})
+}
+
+// TestEngine_restoreExtraLiveKeyIsNotNoOp pins the rollback half of the
+// no-op boundary (RESEARCH Pitfall 13): a snapshot whose records already
+// match the store is still a change when one current LIVE key is absent
+// from it, because the load must delete that key. The restore reports the
+// extra key's rollback tombstone — alongside the re-stamped snapshot
+// records, since any change replays in full (D-07 step 3) — deletes it and
+// performs the final dump. The matching snapshot with no extra live key
+// stays the empty-list, no-dump no-op
+// (TestEngine_restoreNoOpReturnsEmpty).
+func TestEngine_restoreExtraLiveKeyIsNotNoOp(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		for key, value := range map[string]string{
+			"keep-a": "keep-a-value",
+			"keep-b": "keep-b-value",
+		} {
+			_, _, err := eng.Set(key, []byte(value))
+			if err != nil {
+				t.Fatalf("seed Set(%s) error = %v, want nil", key, err)
+			}
+		}
+		err := dumps.CreateSnapshot("same")
+		if err != nil {
+			t.Fatalf("CreateSnapshot(same) error = %v, want nil", err)
+		}
+		// Post-snapshot live key: the snapshot equals the current state for
+		// every key it names, so only this extra key makes the load a change.
+		_, _, err = eng.Set("extra", []byte("extra-value"))
+		if err != nil {
+			t.Fatalf("post-snapshot Set(extra) error = %v, want nil", err)
+		}
+		preRestore := eng.Records()
+		saves := dumps.saveCount()
+
+		restored, err := eng.Restore("same")
+		if err != nil {
+			t.Fatalf("Restore(same) error = %v, want nil", err)
+		}
+		byKey := make(map[string]persist.RestoredRecord, len(restored))
+		for _, rec := range restored {
+			byKey[rec.Key] = rec
+		}
+		rollback, ok := byKey["extra"]
+		if !ok {
+			t.Fatalf("Restore(same) report lacks the extra-key rollback tombstone; got %+v", restored)
+		}
+		if !rollback.Deleted {
+			t.Error("the reported extra rollback record is live, want Deleted=true")
+		}
+		if len(rollback.Data) != 0 {
+			t.Errorf("the extra rollback record carries %d data bytes, want none", len(rollback.Data))
+		}
+		if prior := preRestore["extra"].Version; rollback.Version.Compare(prior) != 1 {
+			t.Errorf("extra rollback version %x does not dominate its pre-restore version %x",
+				rollback.Version[:], prior[:])
+		}
+		if _, getErr := eng.Get("extra"); !errors.Is(getErr, storage.ErrNotFound) {
+			t.Errorf("post-restore Get(extra) error = %v, want ErrNotFound (the rollback tombstone wins)", getErr)
+		}
+		if got := dumps.saveCount(); got != saves+1 {
+			t.Errorf("completed saves after the rollback = %d, want the final dump (%d+1)", got, saves)
 		}
 	})
 }
