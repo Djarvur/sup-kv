@@ -711,6 +711,80 @@ func TestMain_syncChunkBytesCeiling(t *testing.T) {
 	}
 }
 
+// TestMain_validationRelations pins the one-point validation contract at the
+// binary boundary (OBSV-02, D-03): each relation and positivity violation
+// exits 2 before any bind with an error naming the offending parameter, and a
+// trailing positional argument is rejected by name — never silently ignored.
+// The configuration error fires before the socket work, so the addresses are
+// placeholders; the context bound only stops a RED-state binary, which would
+// start and serve, from hanging the test.
+func TestMain_validationRelations(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	rows := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "a zero sync chunk budget exits 2",
+			args: []string{"--sync-chunk-bytes=0"},
+			want: []string{"--sync-chunk-bytes=0"},
+		},
+		{
+			name: "an over-cap sync response rate exits 2",
+			args: []string{"--sync-response-rate=1000000001"},
+			want: []string{"--sync-response-rate=1000000001"},
+		},
+		{
+			name: "a one-nanosecond retransmit interval exits 2",
+			args: []string{"--retransmit-interval=1ns"},
+			want: []string{"--retransmit-interval=1ns"},
+		},
+		{
+			name: "a peer timeout equal to the hello interval exits 2",
+			args: []string{"--peer-timeout=1s", "--hello-interval=1s"},
+			want: []string{"--peer-timeout=1s", "--hello-interval=1s"},
+		},
+		{
+			name: "an ack timeout above its ceiling exits 2",
+			args: []string{"--ack-timeout=6s", "--ack-timeout-max=5s"},
+			want: []string{"--ack-timeout=6s", "--ack-timeout-max=5s"},
+		},
+		{
+			name: "a max clock lead equal to the drift warn exits 2",
+			args: []string{"--drift-warn=2m", "--max-clock-lead=2m"},
+			want: []string{"--drift-warn=2m", "--max-clock-lead=2m"},
+		},
+		{
+			name: "a trailing positional argument exits 2 naming it",
+			args: []string{"stray-operand"},
+			want: []string{"stray-operand"},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), validationRelationProbe)
+			defer cancel()
+			args := append([]string{
+				"--node-id=1",
+				"--bind-addr=127.0.0.1:9",
+				"--broadcast-addr=127.255.255.255:9",
+				"--dump-path=" + filepath.Join(t.TempDir(), "dump.json"),
+			}, row.args...)
+			out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
+			assertExitCode(t, err, exitUsageCode)
+			for _, want := range row.want {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("the invalid-configuration run's output does not contain %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
 // TestMain_startupGateEmptySelection pins the D-02 empty-vs-data selection end
 // to end through health timing only: a node that loaded no records waits the
 // empty backstop — still NOT_SERVING after the normal gate would have opened,
@@ -1184,6 +1258,12 @@ const (
 	// same reason: the validation rejects before any bind, and the bound only
 	// stops a RED-state binary from serving until the runner's kill.
 	valueMaxRangeProbe = 3 * time.Second
+
+	// validationRelationProbe bounds the relation/positivity process rows for
+	// the same reason: every one of them must exit 2 before any bind, so the
+	// bound only stops a RED-state binary (which would start and serve) from
+	// hanging the test.
+	validationRelationProbe = 3 * time.Second
 
 	// The empty-vs-data selection bounds: the empty node must still be closed
 	// this far past a 50 ms normal gate, and the seeded node must open inside
