@@ -484,3 +484,185 @@ func TestCore_pendingIndexDifferential(t *testing.T) {
 		}
 	}
 }
+
+// assertPendingResults pins one step's exact result stream, so a dropped,
+// duplicated or renamed emission fails by name rather than only in aggregate.
+func assertPendingResults(t *testing.T, step string, got []port.Result, want ...port.Result) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: result stream = %+v, want %+v", step, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s: result %d = %+v, want %+v (full stream %+v)", step, i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestCore_pendingIndexProductionPaths drives the whole pending lifecycle
+// through the production driver seams — HandleDatagram, NotifyLocalWrite and
+// Advance — and never calls an unexported helper to mutate state. It asserts
+// the full index/ledger invariant after every step and pins the exact
+// Superseded/Drained/WaitSetEmpty/Ack sequence, so the index cannot silently
+// change an XPORT-12 emission while staying internally consistent.
+func TestCore_pendingIndexProductionPaths(t *testing.T) {
+	t.Parallel()
+	f := newPendingIndexFixture()
+	key := "prod/key"
+	peer := listedTestPeer
+	runID := pendingIndexRunID(peer)
+	v0 := version.PackVersion(listedTestNowMs, 0, listedTestLocal)
+	v1 := version.PackVersion(listedTestNowMs+1, 0, listedTestLocal)
+	v2 := version.PackVersion(listedTestNowMs+2, 0, listedTestLocal)
+
+	// (a) A local write whose captured snapshot names a peer the table does
+	// not hold yet: the promise is the write-time capture, so the waiter
+	// learns the honest false immediately (A-01) and the entry is retained.
+	rec1 := pendingIndexRecord(key, v1, []byte("v1"))
+	if _, _, err := f.store.Merge(key, rec1); err != nil {
+		t.Fatalf("(a): store.Merge(%q): %v", key, err)
+	}
+	var out port.Outbox
+	f.core.NotifyLocalWrite(f.now, key, rec1, []uint16{peer}, &out)
+	out.Drain()
+	assertPendingResults(t, "a: write with an absent captured peer", out.DrainResults(), port.Result{
+		Kind: port.ResultWaitSetEmpty, Key: key, Version: v1,
+	})
+	pk1 := pendingKey{key: key, version: v1}
+	if entry, ok := f.core.pending[pk1]; !ok || len(entry.waitSet) != 0 {
+		t.Fatalf("after (a): pending[pk1] present=%v wait-set=%v, want a retained entry with an empty wait-set", ok, entry.waitSet)
+	}
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (b) The Hello discovers the peer and flushes the pending set: the pair
+	// is re-armed and queued, but the wait-set and the ledger stay untouched.
+	before := f.core.PendingVisits()
+	assertPendingResults(t, "b: discovery Hello", f.handle(peer, runID, port.Hello{}))
+	if got := f.core.PendingVisits() - before; got != 1 {
+		t.Fatalf("after (b): the discovery flush inspected %d pending entries, want 1", got)
+	}
+	if len(f.core.recordQueue) != 1 || f.core.recordQueue[0].pk != pk1 {
+		t.Fatalf("after (b): recordQueue = %+v, want exactly the pk1 record send", f.core.recordQueue)
+	}
+	if entry := f.core.pending[pk1]; len(entry.waitSet) != 0 {
+		t.Fatalf("after (b): the flush extended the wait-set to %v — a discovered peer is broadcast to, never awaited", entry.waitSet)
+	}
+	if len(f.core.peerUnacked[peer]) != 0 {
+		t.Fatalf("after (b): the flush extended ledger[%d] to %v", peer, f.core.peerUnacked[peer])
+	}
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (c) A newer local write under the same key supersedes the tracked pair
+	// once, naming the older TRACKED version, and installs the new promise.
+	assertPendingResults(t, "c: newer local write", f.write(t, key, v2, []byte("v2")), port.Result{
+		Kind: port.ResultSuperseded, Key: key, Version: v1,
+	})
+	pk2 := pendingKey{key: key, version: v2}
+	if _, ok := f.core.pending[pk1]; ok {
+		t.Fatal("after (c): the superseded pair is still tracked")
+	}
+	if indexed, ok := f.core.pendingByKey[key]; !ok || indexed != pk2 {
+		t.Fatalf("after (c): pendingByKey[%q] = (%v, %v), want pk2", key, indexed, ok)
+	}
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (d) An equal duplicate notification counts and changes nothing.
+	regressed := f.core.NotificationsRegressed()
+	assertPendingResults(t, "d: equal duplicate notification", f.notify(t, key, v2))
+	if got := f.core.NotificationsRegressed() - regressed; got != 1 {
+		t.Fatalf("after (d): NotificationsRegressed delta = %d, want 1", got)
+	}
+	if indexed := f.core.pendingByKey[key]; indexed != pk2 {
+		t.Fatalf("after (d): pendingByKey[%q] = %v, want pk2 unchanged", key, indexed)
+	}
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (e) A strictly older notification supersedes its own waiter and leaves
+	// the tracked pair in place.
+	regressed = f.core.NotificationsRegressed()
+	assertPendingResults(t, "e: older notification", f.notify(t, key, v0), port.Result{
+		Kind: port.ResultSuperseded, Key: key, Version: v0,
+	})
+	if got := f.core.NotificationsRegressed() - regressed; got != 1 {
+		t.Fatalf("after (e): NotificationsRegressed delta = %d, want 1", got)
+	}
+	if indexed := f.core.pendingByKey[key]; indexed != pk2 {
+		t.Fatalf("after (e): pendingByKey[%q] = %v, want pk2 unchanged", key, indexed)
+	}
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (f) An inbound replication above the tracked version displaces it: one
+	// Conflicts, one Superseded with the TRACKED version, index entry gone.
+	v3 := version.PackVersion(listedTestNowMs+10, 0, peer)
+	conflicts := f.core.MergeStats().Conflicts
+	rec := pendingIndexRecord(key, v3, []byte("remote"))
+	assertPendingResults(t, "f: displacing replication",
+		f.handle(peer, runID, port.DataReplication{Key: key, Record: rec}),
+		port.Result{Kind: port.ResultSuperseded, Key: key, Version: v2})
+	if got := f.core.MergeStats().Conflicts - conflicts; got != 1 {
+		t.Fatalf("after (f): MergeStats.Conflicts delta = %d, want 1", got)
+	}
+	if _, indexed := f.core.pendingByKey[key]; indexed {
+		t.Fatalf("after (f): pendingByKey[%q] still present after displacement", key)
+	}
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (g) A write drained by an Ack from the only peer: Ack then Drained.
+	ackKey := "prod/ack"
+	v4 := version.PackVersion(listedTestNowMs+3, 0, listedTestLocal)
+	assertPendingResults(t, "g: write", f.write(t, ackKey, v4, []byte("v4")))
+	assertPendingResults(t, "g: Ack drains", f.handle(peer, runID, port.Ack{Key: ackKey, Version: v4}),
+		port.Result{Kind: port.ResultAck, Key: ackKey, Version: v4, Peer: peer},
+		port.Result{Kind: port.ResultDrained, Key: ackKey, Version: v4})
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (h) The only peer expires: WaitSetEmpty, the entry suspends, the index
+	// keeps it (eviction never drains and never touches acked).
+	suspendKey := "prod/suspend"
+	v5 := version.PackVersion(listedTestNowMs+4, 0, listedTestLocal)
+	assertPendingResults(t, "h: write", f.write(t, suspendKey, v5, []byte("v5")))
+	pk5 := pendingKey{key: suspendKey, version: v5}
+	f.now = f.now.Add(f.core.cfg.PeerTimeout)
+	f.core.Advance(f.now, &out)
+	out.Drain()
+	assertPendingResults(t, "h: peer-timeout eviction", out.DrainResults(), port.Result{
+		Kind: port.ResultWaitSetEmpty, Key: suspendKey, Version: v5,
+	})
+	if entry, ok := f.core.pending[pk5]; !ok || len(entry.waitSet) != 0 {
+		t.Fatalf("after (h): the suspended entry is present=%v with wait-set %v, want retained with an empty wait-set", ok, entry.waitSet)
+	}
+	if len(f.core.peerUnacked[peer]) != 0 {
+		t.Fatalf("after (h): ledger[%d] = %v, want it emptied by eviction", peer, f.core.peerUnacked[peer])
+	}
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (i) The peer returns and Acks the suspended pair: the re-learn flush
+	// re-arms but never re-seeds the promise, then the Ack drains it.
+	assertPendingResults(t, "i: re-learn Hello", f.handle(peer, runID, port.Hello{}))
+	if len(f.core.peerUnacked[peer]) != 0 {
+		t.Fatalf("after (i): the re-learn flush extended ledger[%d] to %v", peer, f.core.peerUnacked[peer])
+	}
+	assertPendingResults(t, "i: Ack of the suspended pair", f.handle(peer, runID, port.Ack{Key: suspendKey, Version: v5}),
+		port.Result{Kind: port.ResultAck, Key: suspendKey, Version: v5, Peer: peer},
+		port.Result{Kind: port.ResultDrained, Key: suspendKey, Version: v5})
+	assertPendingIndexInvariant(t, f.core, f.now)
+
+	// (j) The stored version moves under a tracked pair; the next retry finds
+	// the stale record and removes the pair through the third removePending
+	// caller (emitRecordSend), emitting nothing.
+	staleKey := "prod/stale"
+	v6 := version.PackVersion(listedTestNowMs+5, 0, listedTestLocal)
+	assertPendingResults(t, "j: write", f.write(t, staleKey, v6, []byte("v6")))
+	v7 := version.PackVersion(listedTestNowMs+6, 0, peer)
+	if _, _, err := f.store.Merge(staleKey, pendingIndexRecord(staleKey, v7, []byte("changed"))); err != nil {
+		t.Fatalf("j: store.Merge(%q): %v", staleKey, err)
+	}
+	f.now = f.now.Add(defaultAckTimeout)
+	f.core.Advance(f.now, &out)
+	out.Drain()
+	assertPendingResults(t, "j: stale-record retry", out.DrainResults())
+	if _, ok := f.core.pendingByKey[staleKey]; ok {
+		t.Fatalf("after (j): pendingByKey[%q] still present after the stale-record removal", staleKey)
+	}
+	assertPendingIndexInvariant(t, f.core, f.now)
+}
