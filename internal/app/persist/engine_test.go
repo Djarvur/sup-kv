@@ -1712,7 +1712,8 @@ func TestEngine_restoreReturnsReplayed(t *testing.T) {
 			t.Errorf("gamma rollback version %x does not dominate its pre-restore version %x",
 				rollback.Version[:], prior[:])
 		}
-		if _, getErr := eng.Get("gamma"); !errors.Is(getErr, storage.ErrNotFound) {
+		_, getErr := eng.Get("gamma")
+		if !errors.Is(getErr, storage.ErrNotFound) {
 			t.Errorf("post-restore Get(gamma) error = %v, want ErrNotFound (the rollback tombstone wins)", getErr)
 		}
 	})
@@ -1810,7 +1811,8 @@ func TestEngine_restoreExtraLiveKeyIsNotNoOp(t *testing.T) {
 			t.Errorf("extra rollback version %x does not dominate its pre-restore version %x",
 				rollback.Version[:], prior[:])
 		}
-		if _, getErr := eng.Get("extra"); !errors.Is(getErr, storage.ErrNotFound) {
+		_, getErr := eng.Get("extra")
+		if !errors.Is(getErr, storage.ErrNotFound) {
 			t.Errorf("post-restore Get(extra) error = %v, want ErrNotFound (the rollback tombstone wins)", getErr)
 		}
 		if got := dumps.saveCount(); got != saves+1 {

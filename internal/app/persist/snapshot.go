@@ -148,44 +148,17 @@ func (e *Engine) replaySnapshot(records map[string]storage.Record) ([]RestoredRe
 	if !restoreChanges(current, records) {
 		return restored, nil
 	}
-	union := make(map[string]struct{}, len(records)+len(current))
-	for key := range records {
-		union[key] = struct{}{}
-	}
-	for key, rec := range current {
-		if rec.Deleted {
-			// Already rolled back: absent from the snapshot and tombstoned
-			// locally is exactly the state the rollback wants.
-			continue
-		}
-		union[key] = struct{}{}
-	}
-	for _, key := range slices.Sorted(maps.Keys(union)) {
+	for _, key := range replayKeys(records, current) {
 		snapRec, inSnapshot := records[key]
+		var (
+			rec       RestoredRecord
+			installed bool
+			err       error
+		)
 		if inSnapshot {
-			ver, replayed, err := replayRecord(e.store, key, snapRec)
-			if err != nil {
-				if len(restored) > 0 {
-					e.markDirty()
-				}
-				return restored, err
-			}
-			if !replayed {
-				continue
-			}
-			restored = append(restored, RestoredRecord{
-				Key:     key,
-				Version: ver,
-				Data:    bytes.Clone(snapRec.Data),
-				Deleted: snapRec.Deleted,
-			})
-			continue
-		}
-		ver, _, err := e.store.Delete(key)
-		if errors.Is(err, storage.ErrNotFound) {
-			// A concurrent writer tombstoned the key first: the rollback
-			// outcome already holds, and Delete burned no version.
-			continue
+			rec, installed, err = e.replaySnapshotKey(key, snapRec)
+		} else {
+			rec, installed, err = e.rollbackKey(key)
 		}
 		if err != nil {
 			if len(restored) > 0 {
@@ -193,14 +166,67 @@ func (e *Engine) replaySnapshot(records map[string]storage.Record) ([]RestoredRe
 			}
 			return restored, err
 		}
-		restored = append(restored, RestoredRecord{
-			Key:     key,
-			Version: ver,
-			Deleted: true,
-		})
+		if installed {
+			restored = append(restored, rec)
+		}
 	}
 	e.markDirty()
 	return restored, nil
+}
+
+// replayKeys returns the deterministic sorted union of the snapshot's keys
+// and the current LIVE keys the snapshot does not name: the replay set and
+// the rollback set of one full-restore pass. An extra current tombstone is
+// excluded — it is already rolled back and the pass must not burn a version
+// on it.
+func replayKeys(snap, current map[string]storage.Record) []string {
+	union := make(map[string]struct{}, len(snap)+len(current))
+	for key := range snap {
+		union[key] = struct{}{}
+	}
+	for key, rec := range current {
+		if !rec.Deleted {
+			union[key] = struct{}{}
+		}
+	}
+	return slices.Sorted(maps.Keys(union))
+}
+
+// replaySnapshotKey installs one snapshot record through replayRecord's
+// ordinary Set/Delete rules and reports the record the store installed: a
+// fresh Set carrying the snapshot's data, or a fresh tombstone. Skipped
+// records (a tombstone with nothing to beat, an over-limit value) install
+// nothing and are absent from the report.
+func (e *Engine) replaySnapshotKey(key string, snapRec storage.Record) (RestoredRecord, bool, error) {
+	ver, replayed, err := replayRecord(e.store, key, snapRec)
+	if err != nil || !replayed {
+		return RestoredRecord{}, false, err
+	}
+	return RestoredRecord{
+		Key:     key,
+		Version: ver,
+		Data:    bytes.Clone(snapRec.Data),
+		Deleted: snapRec.Deleted,
+	}, true, nil
+}
+
+// rollbackKey deletes one current live key the snapshot does not name and
+// reports the fresh tombstone it installed. A concurrent ErrNotFound means
+// another writer tombstoned the key first: the rollback outcome already
+// holds, Delete burned no version, and nothing is installed.
+func (e *Engine) rollbackKey(key string) (RestoredRecord, bool, error) {
+	ver, _, err := e.store.Delete(key)
+	if errors.Is(err, storage.ErrNotFound) {
+		return RestoredRecord{}, false, nil
+	}
+	if err != nil {
+		return RestoredRecord{}, false, err
+	}
+	return RestoredRecord{
+		Key:     key,
+		Version: ver,
+		Deleted: true,
+	}, true, nil
 }
 
 // restoreChanges reports whether a full rollback of the snapshot would
