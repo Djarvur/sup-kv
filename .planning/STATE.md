@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 07-04-PLAN.md
-last_updated: "2026-11-23T08:11:13.802Z"
+stopped_at: Completed 07-05-PLAN.md
+last_updated: "2026-11-23T08:37:34.662Z"
 last_activity: 2026-11-23
-last_activity_desc: Completed 07-04-PLAN.md (exit contract); 7 plans remain in Phase 7
-state_head: be4a68fc3db77ea1d7231dff9bdb3ba32ad4960d
+last_activity_desc: Completed 07-05-PLAN.md (received-lead drift); 6 plans remain in Phase 7
+state_head: 4a6ff542590af81bec2639490d409e67972619f1
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 76
+  completed_plans: 77
 ---
 
 # Project State
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 7 (Observability and Configuration) — EXECUTING
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 11
-Status: In Progress
-Last activity: 2026-11-23 — Completed 07-04-PLAN.md; 7 plans remain
+Status: Ready to execute
+Last activity: 2026-11-23 — Completed 07-05-PLAN.md; 6 plans remain
 
 Progress: [████░░░░░░] 44%
 
@@ -136,6 +136,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P02 | 1324s | 3 tasks | 14 files |
 | Phase 07 P03 | 261 | 2 tasks | 1 files |
 | Phase 07 P04 | 819s | 2 tasks | 3 files |
+| Phase 07 P05 | 1154 | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -438,6 +439,9 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-04: run(cfg, rt) int is the injectable lifecycle seam over a runtime of function values; productionRuntime assigns armSignals/signal.Stop/wire/serve/shutdown directly (matching directions), and one switch gives a failed final dump (3) precedence over a Serve error (1) over 0.
 - [Phase 07]: 07-04: startupError carries the replication_bind/grpc_listen/metrics_listen stage and run logs one static Startup-failed ERROR with stage+detail, so a fatal startup survives SUPKV_LOG_LEVEL=error; the stdlib runtime import is aliased goruntime because a package-block type cannot share its name.
 - [Phase 07]: 07-04: the final-dump process test writes against the blocked dump path (Set answers Unavailable, engine stays dirty) because a fresh node's Prompt-load dump succeeds inside the 50 ms debounce and flushDump skips a clean engine; a regular file in place of the directory makes os.CreateTemp fail with ENOTDIR for every uid.
+- [Phase 07]: 07-05: the drift signal is the received reading's lead — Clock.Update compares remoteL with the wall clock, Tick keeps the local-versus-wall diagnostic, and the core counts only drift > 0.
+- [Phase 07]: 07-05: a DataSync part counts one drift warning from maxEntryVersion, never per entry, so a listing cannot inflate the counter (T-07-16).
+- [Phase 07]: 07-05: the drift rows are seeded through localWrite and the tie-break row asserts only drift, leaving 07-06's pending-only conflict definition unconstrained.
 
 ### Pending Todos
 
@@ -460,7 +464,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T08:11:12.966Z
-Stopped at: Completed 07-04-PLAN.md
+Last session: 2026-11-23T08:37:32.678Z
+Stopped at: Completed 07-05-PLAN.md
 Resume file: None
 Next action: start plan 07-05 (`/gsd:execute-phase 7` continues the phase)
