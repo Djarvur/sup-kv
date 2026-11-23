@@ -197,6 +197,10 @@ var families = []struct {
 	{"supkv_replication_send_queue", "gauge"},
 	{"supkv_replication_egress_dropped_total", "counter"},
 	{"supkv_replication_read_errors_total", "counter"},
+	{"supkv_replication_listings_dropped_total", "counter"},
+	{"supkv_replication_sync_streams_dropped_total", "counter"},
+	{"supkv_replication_listed_keys_evicted_total", "counter"},
+	{"supkv_replication_notifications_regressed_total", "counter"},
 	{"supkv_datagrams_discarded_total", "counter"},
 	{"supkv_merges_conflicts_total", "counter"},
 	{"supkv_clock_drift_warnings_total", "counter"},
@@ -230,6 +234,11 @@ func zeroSources() metrics.Sources {
 		SendQueue:     func() int { return 0 },
 		EgressDropped: func() uint64 { return 0 },
 		ReadErrors:    func() uint64 { return 0 },
+
+		ListingDropped:         func() uint64 { return 0 },
+		SyncStreamDropped:      func() uint64 { return 0 },
+		ListedKeysEvicted:      func() uint64 { return 0 },
+		NotificationsRegressed: func() uint64 { return 0 },
 	}
 }
 
@@ -259,6 +268,10 @@ func TestMetrics_families(t *testing.T) {
 		"supkv_replication_send_queue 0\n",
 		"supkv_replication_egress_dropped_total 0\n",
 		"supkv_replication_read_errors_total 0\n",
+		"supkv_replication_listings_dropped_total 0\n",
+		"supkv_replication_sync_streams_dropped_total 0\n",
+		"supkv_replication_listed_keys_evicted_total 0\n",
+		"supkv_replication_notifications_regressed_total 0\n",
 		"supkv_merges_conflicts_total 0\n",
 		"supkv_clock_drift_warnings_total 0\n",
 		"supkv_dumps_duration_seconds 0\n",
@@ -355,10 +368,10 @@ func TestMetrics_dumpOtherMonotone(t *testing.T) {
 
 // TestMetrics_values pins the by-effect half of the metrics surface: Sources
 // carrying nonzero readings render those exact values — the four XPORT-07
-// emission families and the five wire-validation discard classes. A wiring
-// mistake that swapped two accessors, or a family still rendering a constant
-// zero, fails here even though TestMetrics_families (the zero-state contract)
-// would pass.
+// emission families, the four routed Phase-4 counters and the five
+// wire-validation discard classes. A wiring mistake that swapped two
+// accessors, or a family still rendering a constant zero, fails here even
+// though TestMetrics_families (the zero-state contract) would pass.
 func TestMetrics_values(t *testing.T) {
 	t.Parallel()
 	src := zeroSources()
@@ -377,6 +390,10 @@ func TestMetrics_values(t *testing.T) {
 	src.SendQueue = func() int { return 23 }
 	src.EgressDropped = func() uint64 { return 3 }
 	src.ReadErrors = func() uint64 { return 5 }
+	src.ListingDropped = func() uint64 { return 18 }
+	src.SyncStreamDropped = func() uint64 { return 19 }
+	src.ListedKeysEvicted = func() uint64 { return 20 }
+	src.NotificationsRegressed = func() uint64 { return 21 }
 	src.DumpStats = func() persist.DumpStats {
 		return persist.DumpStats{Errors: 6, DiskFull: 2, Permission: 3, Other: 1, Unconfirmed: 4}
 	}
@@ -393,6 +410,10 @@ func TestMetrics_values(t *testing.T) {
 		"supkv_replication_send_queue 23\n",
 		"supkv_replication_egress_dropped_total 3\n",
 		"supkv_replication_read_errors_total 5\n",
+		"supkv_replication_listings_dropped_total 18\n",
+		"supkv_replication_sync_streams_dropped_total 19\n",
+		"supkv_replication_listed_keys_evicted_total 20\n",
+		"supkv_replication_notifications_regressed_total 21\n",
 		"supkv_dumps_failures_total{class=\"disk_full\"} 2\n",
 		"supkv_dumps_failures_total{class=\"permission\"} 3\n",
 		"supkv_dumps_failures_total{class=\"other\"} 1\n",

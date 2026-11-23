@@ -96,6 +96,18 @@ type Adapter struct {
 	sentDataRequest   atomic.Uint64
 	sentSync          atomic.Uint64
 
+	// The four routed Phase-4 counters (OBSV-03, D-05/14.4): targeted
+	// listing triggers refused by the destination or chunk cap, partial
+	// DataSync streams evicted by the accumulator bounds, retained listed
+	// keys released by whole-peer eviction or expiry, and local-write
+	// notifications ignored by the not-greater-than-tracked guard — core
+	// counters mirrored after every loop event like the discard counters,
+	// with their accessors in mirror.go.
+	listingDropped         atomic.Uint64
+	syncStreamDropped      atomic.Uint64
+	listedKeysEvicted      atomic.Uint64
+	notificationsRegressed atomic.Uint64
+
 	// The XPORT-07 emission set: the total datagram-queue depth (listing
 	// chunks, record sends and egress responses), the egress overflow drops
 	// and the paced emission count — core gauges/counters mirrored after

@@ -13,7 +13,12 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/Djarvur/sup-kv/internal/app/clock"
+	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -221,4 +226,90 @@ func TestFlush_countsOnlySuccessfulWrites(t *testing.T) {
 			t.Fatalf("SentByType() = %+v, want only Ack set to 1", got)
 		}
 	})
+}
+
+// TestMirror_listingCounters proves the four routed Phase-4 counters reach
+// the adapter mirror with the core's values (OBSV-03, D-05/14.4). The
+// regression counter is driven by an equal duplicate of one tracked
+// notification; the listed-key eviction counter by a retained listing whose
+// two-sync-interval lifetime expires. The remaining two are asserted against
+// the core after the same mirror pass, so a missing or swapped mirror store
+// cannot pass.
+func TestMirror_listingCounters(t *testing.T) {
+	t.Parallel()
+	const (
+		localNode = uint16(21)
+		peerNode  = uint16(22)
+		key       = "mirror/listed"
+		syncEvery = time.Second
+	)
+	fixedNow := func() time.Time { return time.UnixMilli(1730000000000) }
+	now := fixedNow()
+	st := storage.NewStore(localNode, clock.NewClock(fixedNow, 0, 0, 0), storage.Config{})
+	core := repl.New(localNode, [16]byte{1}, trackerStore{store: st}, repl.Config{SyncInterval: syncEvery})
+	adapter := &Adapter{core: core, log: func(string) {}}
+	var out port.Outbox
+
+	// A Hello binds the peer identity, then a complete one-part listing
+	// retains one key — the state the expiry releases.
+	core.HandleDatagram(now, port.InboundDatagram{
+		Source:       "n22",
+		Status:       port.Decoded,
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeID:       peerNode,
+		RunID:        [16]byte{byte(peerNode)},
+		Msg:          port.Hello{},
+	}, &out)
+	core.HandleDatagram(now, port.InboundDatagram{
+		Source:       "n22",
+		Status:       port.Decoded,
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeID:       peerNode,
+		RunID:        [16]byte{byte(peerNode)},
+		Msg: port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: []port.SyncEntry{{
+			Key:     key,
+			Version: version.PackVersion(now.UnixMilli(), 1, peerNode),
+		}}},
+	}, &out)
+	out.Drain()
+
+	// Nothing republishes: past two sync intervals the retained key leaves
+	// the union and the counter records the release.
+	core.Advance(now.Add(2*syncEvery+time.Millisecond), &out)
+	out.Drain()
+	if got := core.ListedKeysEvicted(); got != 1 {
+		t.Fatalf("core.ListedKeysEvicted() = %d after the retention expiry, want 1", got)
+	}
+
+	// Two equal notifications of one tracked write: the second is the
+	// not-greater-than-tracked regression the counter names.
+	rec := storage.Record{Version: version.PackVersion(now.UnixMilli(), 5, localNode), Data: []byte("v5")}
+	core.NotifyLocalWrite(now, key, rec, nil, &out)
+	core.NotifyLocalWrite(now, key, rec, nil, &out)
+	out.Drain()
+	if got := core.NotificationsRegressed(); got != 1 {
+		t.Fatalf("core.NotificationsRegressed() = %d after one equal duplicate, want 1", got)
+	}
+
+	adapter.mirrorStats()
+	for _, tc := range []struct {
+		name     string
+		mirrored uint64
+		core     uint64
+	}{
+		{"NotificationsRegressed", adapter.NotificationsRegressed(), core.NotificationsRegressed()},
+		{"ListedKeysEvicted", adapter.ListedKeysEvicted(), core.ListedKeysEvicted()},
+		{"ListingDropped", adapter.ListingDropped(), core.ListingDropped()},
+		{"SyncStreamDropped", adapter.SyncStreamDropped(), core.SyncStreamDropped()},
+	} {
+		if tc.mirrored != tc.core {
+			t.Errorf("%s() = %d, want the core's %d", tc.name, tc.mirrored, tc.core)
+		}
+	}
+	if got := adapter.NotificationsRegressed(); got != 1 {
+		t.Fatalf("NotificationsRegressed() = %d after the mirror pass, want 1", got)
+	}
+	if got := adapter.ListedKeysEvicted(); got != 1 {
+		t.Fatalf("ListedKeysEvicted() = %d after the mirror pass, want 1", got)
+	}
 }

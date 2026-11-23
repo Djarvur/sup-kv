@@ -105,6 +105,38 @@ func (a *Adapter) EgressDropped() uint64 {
 	return a.egressDropped.Load()
 }
 
+// ListingDropped returns the targeted listing triggers a cap refused,
+// mirrored from the core after the latest event-loop iteration (OBSV-03) —
+// a refused trigger is re-armed for a later Advance, so the count measures
+// back-pressure rather than permanent loss. Safe from any goroutine.
+func (a *Adapter) ListingDropped() uint64 {
+	return a.listingDropped.Load()
+}
+
+// SyncStreamDropped returns the partial-listing streams the accumulator
+// bounds evicted, mirrored from the core after the latest event-loop
+// iteration (OBSV-03) — a growing value means a peer is flooding distinct
+// sync_ids with missing chunks. Safe from any goroutine.
+func (a *Adapter) SyncStreamDropped() uint64 {
+	return a.syncStreamDropped.Load()
+}
+
+// ListedKeysEvicted returns the retained listed keys released by whole-peer
+// eviction or expiry, mirrored from the core after the latest event-loop
+// iteration (OBSV-03) — each key removed from the union is counted once.
+// Safe from any goroutine.
+func (a *Adapter) ListedKeysEvicted() uint64 {
+	return a.listedKeysEvicted.Load()
+}
+
+// NotificationsRegressed returns the local-write notifications the
+// not-greater-than-tracked guard ignored, mirrored from the core after the
+// latest event-loop iteration (OBSV-03) — both regressive notifications and
+// equal duplicates of the tracked version. Safe from any goroutine.
+func (a *Adapter) NotificationsRegressed() uint64 {
+	return a.notificationsRegressed.Load()
+}
+
 // SentByType is the alias of the core package's send-type value: the
 // vocabulary moved to internal/app/repl so the metrics exporter reads it
 // without importing this socket adapter (D-07). The alias — distinct from
@@ -169,13 +201,14 @@ func (a *Adapter) ReadErrors() uint64 {
 
 // mirrorStats copies the core's discard counters, known-peer count and
 // peer-id slice, the listing mirror, the OBS-01 gauge set — the pending-set
-// gauge, the remote-merge counters and the retransmissions counter — and the
-// XPORT-07 emission set (total queue depth, egress drops, paced sends) into
-// the atomics after each loop iteration (D-04): cross-goroutine readers — the
-// smoke test, the write-time capture, later observability — never touch core
-// state. The listing and peer-id mirrors are published only when their
-// generation moved, so their clone cost is paid at change cadence, never per
-// event.
+// gauge, the remote-merge counters and the retransmissions counter — the
+// XPORT-07 emission set (total queue depth, egress drops, paced sends) and the
+// four routed Phase-4 counters (listing drops, sync-stream drops, listed-key
+// evictions, notification regressions) into the atomics after each loop
+// iteration (D-04): cross-goroutine readers — the smoke test, the write-time
+// capture, later observability — never touch core state. The listing and
+// peer-id mirrors are published only when their generation moved, so their
+// clone cost is paid at change cadence, never per event.
 func (a *Adapter) mirrorStats() {
 	d := a.core.Discards()
 	a.badCRC.Store(d.BadCRC)
@@ -213,6 +246,12 @@ func (a *Adapter) mirrorStats() {
 	a.sendQueue.Store(int64(a.core.QueuedSends()))
 	a.egressDropped.Store(a.core.EgressDropped())
 	a.pacedSends.Store(a.core.PacedSends())
+	// The four routed Phase-4 counters (OBSV-03): directly-available core
+	// counters, so no clone or generation gate applies.
+	a.listingDropped.Store(a.core.ListingDropped())
+	a.syncStreamDropped.Store(a.core.SyncStreamDropped())
+	a.listedKeysEvicted.Store(a.core.ListedKeysEvicted())
+	a.notificationsRegressed.Store(a.core.NotificationsRegressed())
 	// The listing mirror is content-gated: the core's generation moves only
 	// on an actual {complete, union} change, so an identical listing flood
 	// republishes no pointer and clones no map. Completeness and keys are

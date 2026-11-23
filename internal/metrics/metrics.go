@@ -196,6 +196,17 @@ type Sources struct {
 	SendQueue     func() int
 	EgressDropped func() uint64
 	ReadErrors    func() uint64
+
+	// The four routed Phase-4 counters (OBSV-03, D-05/14.4): targeted
+	// listing triggers a cap refused, partial DataSync streams evicted by
+	// the accumulator bounds, retained listed keys released by whole-peer
+	// eviction or expiry, and local-write notifications ignored by the
+	// not-greater-than-tracked guard — adapter accessors over the core's
+	// post-event mirrors.
+	ListingDropped         func() uint64
+	SyncStreamDropped      func() uint64
+	ListedKeysEvicted      func() uint64
+	NotificationsRegressed func() uint64
 }
 
 // Snapshot reads every source once and returns the whole family table: the
@@ -208,6 +219,7 @@ type Sources struct {
 func Snapshot(s Sources) []Family {
 	families := replicationFamilies(s.Unacked(), s.KnownPeers(), s.Retransmitted(), s.MergeStats())
 	families = append(families, pacingFamilies(s.Paced(), s.SendQueue(), s.EgressDropped(), s.ReadErrors())...)
+	families = append(families, listingFamilies(s.ListingDropped(), s.SyncStreamDropped(), s.ListedKeysEvicted(), s.NotificationsRegressed())...)
 	families = append(families, trafficFamilies(s.Discards(), s.Sent())...)
 	families = append(families, dumpFamilies(s.DumpStats())...)
 	load := s.LoadStats()
@@ -348,6 +360,46 @@ func pacingFamilies(paced uint64, sendQueue int, egressDropped, readErrors uint6
 			Help: "Receive-path errors the read loop survived.",
 			Samples: []Sample{
 				{Value: float64(readErrors)},
+			},
+		},
+	}
+}
+
+// listingFamilies builds the four routed Phase-4 counter families (OBSV-03,
+// D-05/14.4) over one reading of the adapter's post-event mirrors: targeted
+// listing triggers a cap refused, partial-listing streams the accumulator
+// bounds evicted, retained listed keys released by whole-peer eviction or
+// expiry, and local-write notifications the not-greater-than-tracked guard
+// ignored. Every family is unlabeled — the four counters have one dimension
+// only — so no user data can enter the exposition.
+func listingFamilies(listingDropped, syncStreamDropped, listedKeysEvicted, notificationsRegressed uint64) []Family {
+	return []Family{
+		{
+			Name: "supkv_replication_listings_dropped_total", Type: Counter,
+			Help: "Targeted listing triggers refused by the destination or chunk cap; retried later.",
+			Samples: []Sample{
+				{Value: float64(listingDropped)},
+			},
+		},
+		{
+			Name: "supkv_replication_sync_streams_dropped_total", Type: Counter,
+			Help: "Partial DataSync streams evicted by the accumulator bounds.",
+			Samples: []Sample{
+				{Value: float64(syncStreamDropped)},
+			},
+		},
+		{
+			Name: "supkv_replication_listed_keys_evicted_total", Type: Counter,
+			Help: "Retained listed keys released by whole-peer eviction or expiry.",
+			Samples: []Sample{
+				{Value: float64(listedKeysEvicted)},
+			},
+		},
+		{
+			Name: "supkv_replication_notifications_regressed_total", Type: Counter,
+			Help: "Local-write notifications ignored because their version was not greater than the tracked version.",
+			Samples: []Sample{
+				{Value: float64(notificationsRegressed)},
 			},
 		},
 	}

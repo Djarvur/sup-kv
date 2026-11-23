@@ -735,6 +735,11 @@ func metricsSources(adapter *udprepl.Adapter, engine *persist.Engine) metrics.So
 		SendQueue:     adapter.SendQueue,
 		EgressDropped: adapter.EgressDropped,
 		ReadErrors:    adapter.ReadErrors,
+
+		ListingDropped:         adapter.ListingDropped,
+		SyncStreamDropped:      adapter.SyncStreamDropped,
+		ListedKeysEvicted:      adapter.ListedKeysEvicted,
+		NotificationsRegressed: adapter.NotificationsRegressed,
 	}
 }
 
