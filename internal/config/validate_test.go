@@ -324,6 +324,47 @@ func TestValidate(t *testing.T) {
 		assertRejected(t, c, "--grpc-addr", defaultGRPCAddr)
 	})
 
+	t.Run("address-shape rejects a port outside 0..65535", func(t *testing.T) {
+		t.Parallel()
+		rows := []struct {
+			name   string
+			mutate func(*Config)
+			flag   string
+		}{
+			{"99999", func(c *Config) { c.BindAddr = "127.0.0.1:99999" }, "--bind-addr"},
+			{"negative", func(c *Config) { c.BroadcastAddr = "127.255.255.255:-1" }, "--broadcast-addr"},
+			{"65536", func(c *Config) { c.GRPCAddr = ":65536" }, "--grpc-addr"},
+		}
+		for _, row := range rows {
+			t.Run(row.name, func(t *testing.T) {
+				t.Parallel()
+				c := validConfig()
+				row.mutate(&c)
+				assertRejected(t, c, row.flag, "outside 0..65535")
+			})
+		}
+	})
+
+	t.Run("address-shape rejects port 0 on the broadcast destination", func(t *testing.T) {
+		t.Parallel()
+		c := validConfig()
+		// A broadcast address is a destination, not a bind: port 0 can never
+		// be sent to, so the node would start mute.
+		c.BroadcastAddr = "127.255.255.255:0"
+		assertRejected(t, c, "--broadcast-addr", "can never be sent to")
+	})
+
+	t.Run("address-shape accepts port 0 on every listener", func(t *testing.T) {
+		t.Parallel()
+		c := validConfig()
+		// Tests and operators use ephemeral binds: port 0 is legal wherever
+		// the address is a listener, including the optional metrics endpoint.
+		c.BindAddr = "127.0.0.1:0"
+		c.GRPCAddr = "127.0.0.1:0"
+		c.MetricsAddr = "127.0.0.1:0"
+		assertValid(t, c)
+	})
+
 	t.Run("address-shape skips an unset metrics address", func(t *testing.T) {
 		t.Parallel()
 		c := validConfig()

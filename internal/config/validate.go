@@ -283,21 +283,25 @@ func checkMetricsCerts(c Config) error {
 		errIncompleteCertSet, envMetricsCert, envMetricsKey, envMetricsClientCA)
 }
 
-// checkAddressShape rejects a non-empty address that is not host:port and an
-// explicitly empty --grpc-addr: [net.Listen] with an empty address binds the
-// wildcard address on an ephemeral port, so an empty value would expose the
-// unauthenticated API to every reachable host instead of meaning "no
-// listener". Only the metrics endpoint has that documented opt-in; an empty
-// bind/broadcast value is required-knobs' finding.
+// checkAddressShape rejects a non-empty address that is not host:port, an
+// explicitly empty --grpc-addr, a port outside 0..65535, and port 0 on the
+// broadcast destination. [net.Listen] with an empty address binds the
+// wildcard address on an ephemeral port, so an empty --grpc-addr would expose
+// the unauthenticated API to every reachable host instead of meaning "no
+// listener"; only the metrics endpoint has that documented opt-in. Port 0 is
+// legal for every listener (an ephemeral bind), but --broadcast-addr is a
+// destination the kernel must be able to send to, so 0 there can never work.
+// An empty bind/broadcast value is required-knobs' finding.
 func checkAddressShape(c Config) error {
 	addresses := []struct {
-		flag  string
-		value string
+		flag     string
+		value    string
+		listener bool
 	}{
-		{"--bind-addr", c.BindAddr},
-		{"--broadcast-addr", c.BroadcastAddr},
-		{"--grpc-addr", c.GRPCAddr},
-		{"--metrics-addr", c.MetricsAddr},
+		{"--bind-addr", c.BindAddr, true},
+		{"--broadcast-addr", c.BroadcastAddr, false},
+		{"--grpc-addr", c.GRPCAddr, true},
+		{"--metrics-addr", c.MetricsAddr, true},
 	}
 	var errs []error
 	if c.GRPCAddr == "" {
@@ -308,19 +312,24 @@ func checkAddressShape(c Config) error {
 		if a.value == "" {
 			continue
 		}
-		if !validHostPort(a.value) {
+		_, portText, err := net.SplitHostPort(a.value)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%w: %s=%q", errAddressShape, a.flag, a.value))
+			continue
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 0 || port > maxPort {
+			errs = append(errs, fmt.Errorf("%w: %s=%q names port %q outside 0..%d",
+				errAddressShape, a.flag, a.value, portText, maxPort))
+			continue
+		}
+		if !a.listener && port == 0 {
+			errs = append(errs, fmt.Errorf("%w: %s=%q names port 0, a destination port that can never be sent to (use 1..%d)",
+				errAddressShape, a.flag, a.value, maxPort))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// validHostPort reports whether addr splits into a host and a numeric port.
-func validHostPort(addr string) bool {
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	_, err = strconv.Atoi(port)
-	return err == nil
-}
+// maxPort is the largest port an address shape admits.
+const maxPort = 65535

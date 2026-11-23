@@ -114,6 +114,14 @@ bounds above. The relations:
 - `--max-clock-lead` must be at least `--drift-warn` plus 1ms, as stated
   under the record limits above.
 
+The four addresses (`--bind-addr`, `--broadcast-addr`, `--grpc-addr` and
+`--metrics-addr`) must be `host:port` with a port in 0..65535. Port 0 is
+legal on a listener (`--bind-addr`, `--grpc-addr`, `--metrics-addr`) for an
+ephemeral bind; `--broadcast-addr` is a destination, so port 0 there is
+rejected — the kernel can never send to it. `--grpc-addr` must not be empty:
+an empty value would bind the unauthenticated API to every interface on an
+ephemeral port (only `--metrics-addr` has the empty "no listener" opt-in).
+
 ## Load outcomes
 
 At startup the node walks the fallback chain — the main dump file, then its

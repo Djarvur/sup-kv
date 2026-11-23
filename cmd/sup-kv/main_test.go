@@ -766,6 +766,16 @@ func TestMain_validationRelations(t *testing.T) {
 			want: []string{"--grpc-addr", "127.0.0.1:7901"},
 		},
 		{
+			name: "an out-of-range gRPC port exits 2 before any bind",
+			args: []string{"--grpc-addr=127.0.0.1:99999"},
+			want: []string{"--grpc-addr", "99999", "outside 0..65535"},
+		},
+		{
+			name: "a broadcast destination port of 0 exits 2",
+			args: []string{"--broadcast-addr=127.255.255.255:0"},
+			want: []string{"--broadcast-addr", "can never be sent to"},
+		},
+		{
 			name: "a trailing positional argument exits 2 naming it",
 			args: []string{"stray-operand"},
 			want: []string{"stray-operand"},
