@@ -1,15 +1,27 @@
 # sup-kv client example
 
-A standalone Go module that consumes the public sup-kv gRPC API. It is the
-consumer-side proof of the public package: it imports only
-`github.com/Djarvur/sup-kv/api/supkvapi/v1` plus gRPC, so it fails to build if
-the public package ever grows an `internal/` dependency.
+A standalone Go module that consumes the public sup-kv gRPC API. It imports
+only `github.com/Djarvur/sup-kv/api/supkvapi/v1` plus gRPC, so a successful
+build here means the public package is usable by an out-of-tree consumer.
 
-The module is deliberately separate from the server module
-(`module github.com/Djarvur/sup-kv/examples/client`) and requires the root
-module through `replace github.com/Djarvur/sup-kv => ../..`. That is exactly
-how an out-of-tree consumer depends on a published version, so a successful
-build here is the compile-time proof of consumer importability.
+Two mechanisms enforce that boundary, and they are deliberately separate:
+
+- **The depguard rule is the enforced boundary.**
+  `sup-kv-public-api-no-internal` in the root `.golangci.yml` rejects an
+  import of the root module's `internal/` tree from `api/**`, so the published
+  package can never grow an internal dependency that would make it
+  unimportable elsewhere.
+- **This module's path is the compile-time second proof.** It is
+  `example.com/sup-kv-client` — deliberately outside the root module's
+  `github.com/Djarvur/sup-kv/` prefix. Go's internal rule is prefix-based, so
+  an import of the root module's `internal/` tree from this module is a
+  compile error; a module path inside the root prefix would share it and
+  still build, which is why the older in-prefix path was not a proof.
+
+The module is deliberately separate from the server module and requires the
+root module through `replace github.com/Djarvur/sup-kv => ../..`. That is
+exactly how an out-of-tree consumer depends on a published version, so a
+successful build here is the compile-time proof of consumer importability.
 
 ## Run it
 

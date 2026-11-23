@@ -40,9 +40,13 @@
   the replication proto under `internal/udprepl/replproto/` remains internal.
 - `cmd/sup-kv/` — the single binary; `main()` holds no testable logic
   (flags/env/signals live there from Phase 5, nothing else).
-- `examples/client/` — a separate Go module (`examples/client/go.mod`) that
-  imports only the public API package and builds in CI via
-  `make client-example`.
+- `examples/client/` — a separate Go module (`examples/client/go.mod`, module
+  path `example.com/sup-kv-client`, deliberately outside the root module's
+  prefix, with a `replace` to the root) that imports only the public API
+  package and builds in CI via `make client-example`. Its out-of-prefix path
+  makes Go's internal rule reject an `internal/` import from the example; the
+  depguard rule `sup-kv-public-api-no-internal` remains the enforced boundary
+  inside the repository.
 - `internal/app/` — pure decision core, split into three packages:
   `version` (RFC 9562 record versions), `clock` (hybrid logical clock) and
   `storage` (LWW-Element-Map store, consuming the consumer-side `Clock`

@@ -1,4 +1,7 @@
-module github.com/Djarvur/sup-kv/examples/client
+// The module path is deliberately outside the root module's prefix: Go's
+// internal rule is prefix-based, so only a module rooted elsewhere makes an
+// import of the root module's internal/ tree a compile error (README.md).
+module example.com/sup-kv-client
 
 go 1.27.4
 

@@ -1,11 +1,14 @@
 // Command client is a standalone example consumer of the sup-kv gRPC API.
 //
-// It is a separate Go module on purpose: it compiles against the published
-// package github.com/Djarvur/sup-kv/api/supkvapi/v1 using only what any other
-// module can import, so it doubles as the compile-time proof that the public
-// API has no internal/ dependency. It is a demonstration, not a client
-// library — see README.md, including why a last-read-value cache belongs in
-// the consumer's own library (ADR 0007, decision 14.7).
+// It is a separate Go module on purpose, and its module path
+// (example.com/sup-kv-client) sits outside the root module's prefix: Go's
+// internal rule is prefix-based, so an import of the root module's internal/
+// tree from here is a compile error. That makes the example's build the
+// compile-time second proof of consumer importability; the enforced boundary
+// inside the repository is the depguard rule sup-kv-public-api-no-internal
+// (api/** may not import the internal/ tree). It is a demonstration, not a
+// client library — see README.md, including why a last-read-value cache
+// belongs in the consumer's own library (ADR 0007, decision 14.7).
 package main
 
 import (
