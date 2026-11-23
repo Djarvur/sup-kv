@@ -33,7 +33,7 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
 - [x] **Phase 3: Transport** - Paced sync/retransmit sending, socket buffer setup and reporting, datagram validation, bounded queues; key→version view and Outbox seams (completed 2026-11-22)
 - [x] **Phase 4: Protocol** - Interface closed until the full key list arrives, `startup_gate_empty`, DataSync headers, stale-record answer, immediate sync for new/returning peers, 3+-node tests (completed 2026-11-22)
 - [x] **Phase 5: Persistence** - Single value limit, visible dump-load outcomes, generation integrity, decaying retries, streaming encode, blocking deadlines, engine split (completed 2026-11-22)
-- [ ] **Phase 6: API and Semantics** - Honest `wait_for_replication`, snapshot load as full rollback, total error mapping, paginated `List`, public proto + Go client example in CI
+- [x] **Phase 6: API and Semantics** - Honest `wait_for_replication`, snapshot load as full rollback, total error mapping, paginated `List`, public proto + Go client example in CI (completed 2026-11-23)
 - [ ] **Phase 7: Observability and Configuration** - Lifecycle logging, one-point config validation, honest metric definitions, distinct exit codes, machine-enforced dependency boundary
 - [ ] **Phase 8: Performance** - Documented write-latency model for both profiles, standing burst test, amplification and memory measured, `make perf` with thresholds
 - [ ] **Phase 9: Documentation and Release** - All 52 doc mismatches closed, test-anchored reference docs, failure table + runbooks, registry closed, v1.1 release
@@ -248,7 +248,7 @@ Plans:
   3. Snapshot load is a full rollback (14.1): keys absent from the snapshot are deleted, the result broadcasts to peers, and the rewritten `TestEngine_snapshotCreateLoadRestore` proves the new behavior
   4. `List` does not copy the world: pagination or streaming over the key→version view, with cost independent of value sizes
   5. The proto is public: proto and generated Go code live outside `internal/`; a Go client example builds in CI as a separate module; the last-read-value file pattern is documented as consumer-library territory (14.7)
-**Plans**: 12/13 plans executed
+**Plans**: 13/13 plans complete
 
 Plans:
 **Wave 1**
@@ -280,7 +280,7 @@ Plans:
 - [x] 06-10-PLAN.md — Documentation and registry ripple (EXAMPLES, MULTI-NODE, SPEC-DEVIATIONS, AGENTS)
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 06-13-PLAN.md — Phase gate: frozen-file base diff, red-runner 7/7, make lint/test/buf-breaking
+- [x] 06-13-PLAN.md — Phase gate: frozen-file base diff, red-runner 7/7, make lint/test/buf-breaking
 
 ### Phase 7: Observability and Configuration
 **Goal**: An operator can see what the node is doing and misconfiguration fails fast — lifecycle logs, one validation point, metric definitions that match the binary, distinct exit codes, and a machine-enforced dependency boundary.
@@ -329,14 +329,14 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 13/13 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 13/13 | Complete    | 2026-11-22 |
 | 5. gRPC API and Binary | v1.0 | 12/12 | Complete    | 2026-11-22 |
-| 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 12/13 | In Progress |  |
+| 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 9/9 | Complete | 2026-11-16 |
 | 7. v1.0 — Docs, Examples and Release | v1.0 | 5/5 | Complete | 2026-11-18 |
 | 1. Spec Reference and Decisions | v1.1 | 4/4 | Complete | 2026-11-19 |
 | 2. Stand and Simulator as Tests | v1.1 | 17/17 | Complete | 2026-11-21 |
 | 3. Transport | v1.1 | 13/13 | Complete | 2026-11-22 |
 | 4. Protocol | v1.1 | 0/? | Not started | - |
 | 5. Persistence | v1.1 | 0/? | Not started | - |
-| 6. API and Semantics | v1.1 | 9/13 | In Progress | - |
+| 6. API and Semantics | v1.1 | 13/13 | Complete | 2026-11-23 |
 | 7. Observability and Configuration | v1.1 | 0/? | Not started | - |
 | 8. Performance | v1.1 | 0/? | Not started | - |
 | 9. Documentation and Release | v1.1 | 0/? | Not started | - |

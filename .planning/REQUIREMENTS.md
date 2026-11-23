@@ -125,17 +125,17 @@
 
 ### API
 
-- [ ] **APIS-01**: `wait_for_replication` reports honestly (A-01)
+- [x] **APIS-01**: `wait_for_replication` reports honestly (A-01)
   - Acceptance: zero known peers → `(false, 0, 0)`; an `Ack` from a node unknown at write time does not yield `true`; a displaced version answers within 20 ms instead of idling 500 ms
-- [ ] **APIS-02**: `List` is paginated or streaming and its cost does not depend on value sizes (A-02)
-- [ ] **APIS-03**: Error mapping is total and path-free (A-03)
+- [x] **APIS-02**: `List` is paginated or streaming and its cost does not depend on value sizes (A-02)
+- [x] **APIS-03**: Error mapping is total and path-free (A-03)
   - Acceptance: missing snapshot → `NotFound`; no dump → `FailedPrecondition`; no server paths in messages
-- [ ] **APIS-04**: The Watch contract is defined and honest (A-04)
+- [x] **APIS-04**: The Watch contract is defined and honest (A-04)
   - Acceptance: local changes are announced only after dump confirmation; server shutdown ends streams with `Unavailable`, not `OK`; the contract is in the API docs
-- [ ] **APIS-05**: gRPC server settings are deliberate; health never returns to `SERVING` after shutdown begins (A-05)
-- [ ] **APIS-06**: Proto and generated code are public (A-06, 14.7)
+- [x] **APIS-05**: gRPC server settings are deliberate; health never returns to `SERVING` after shutdown begins (A-05)
+- [x] **APIS-06**: Proto and generated code are public (A-06, 14.7)
   - Acceptance: proto and generated Go code outside `internal/`; a Go client example builds in CI as a separate module; the last-read-value file pattern is documented as consumer-library territory (14.7, accepted)
-- [ ] **APIS-07**: Snapshot load is a full rollback (S-01, 14.1)
+- [x] **APIS-07**: Snapshot load is a full rollback (S-01, 14.1)
   - Acceptance: keys absent from the snapshot are deleted; the result is broadcast to peers (with PROTO-08); `TestEngine_snapshotCreateLoadRestore` rewritten for the new behavior
 
 ### Observability & Configuration
@@ -260,13 +260,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERSIST-10 | Phase 5 | Complete |
 | PERSIST-11 | Phase 5 | Complete |
 | PERSIST-12 | Phase 5 | Complete |
-| APIS-01 | Phase 6 | Pending |
-| APIS-02 | Phase 6 | Pending |
-| APIS-03 | Phase 6 | Pending |
-| APIS-04 | Phase 6 | Pending |
-| APIS-05 | Phase 6 | Pending |
-| APIS-06 | Phase 6 | Pending |
-| APIS-07 | Phase 6 | Pending |
+| APIS-01 | Phase 6 | Complete |
+| APIS-02 | Phase 6 | Complete |
+| APIS-03 | Phase 6 | Complete |
+| APIS-04 | Phase 6 | Complete |
+| APIS-05 | Phase 6 | Complete |
+| APIS-06 | Phase 6 | Complete |
+| APIS-07 | Phase 6 | Complete |
 | OBSV-01 | Phase 7 | Pending |
 | OBSV-02 | Phase 7 | Pending |
 | OBSV-03 | Phase 7 | Pending |

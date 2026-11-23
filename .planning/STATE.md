@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 11
-status: executing
-stopped_at: Completed 06-10-PLAN.md
-last_updated: "2026-11-23T01:49:11.815Z"
+current_plan: 13
+status: ready_for_verification
+stopped_at: Completed 06-13-PLAN.md
+last_updated: "2026-11-23T02:15:16.203Z"
 last_activity: 2026-11-23
-last_activity_desc: Completed 06-09-PLAN.md
-state_head: 570a231dfa2c3350c9491e48c52846aca282b070
+last_activity_desc: Phase 6 plans complete; 06-13 done, ready for phase verification
+state_head: 930382c6130f59d7f7562faf150677a766110754
 progress:
   total_phases: 9
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 72
-  completed_plans: 71
+  completed_plans: 72
 ---
 
 # Project State
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 
 ## Current Position
 
-Phase: 6 (API and Semantics) — EXECUTING
-Current Plan: 11
+Phase: 6 (API and Semantics) — ready for verification
+Current Plan: 13
 Total Plans in Phase: 13
-Status: Ready to execute
-Last activity: 2026-11-23 — Completed 06-09-PLAN.md
+Status: Phase complete — ready for verification
+Last activity: 2026-11-23 — 06-13 complete; ready for phase verification
 
 Progress: [███░░░░░░░] 33%
 
@@ -130,6 +130,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P08 | 705s | 3 tasks | 4 files |
 | Phase 06 P09 | 284s | 2 tasks | 4 files |
 | Phase 06 P10 | 200s | 2 tasks | 4 files |
+| Phase 06 P13 | 20min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -418,6 +419,8 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-10: 04-MULTI-NODE names the WritePeers write-time set, the zero-peer (false,0,0) answer and the inert outside Ack, and states IN-05 is closed by APIS-01 (the discovery flush broadcasts and re-arms but never grows the awaited set or ledger).
 - [Phase 06]: 06-10: S-PERS-12 flips to implemented with the sorted-union replay/rollbackKey/restoreChanges links and the engine plus RPC rollback tests; S-PERS-13 and every PROTO-08 row stay for Phase 9.
 - [Phase 06]: 06-10: AGENTS.md gains api/supkvapi/v1 and examples/client in the Layout, the public-schema/internal-replication dependency-policy sentence and the three-rule depguard deviation 1 ('These rules live in .golangci.yml'); deviations 2-3 and the Go version policy are byte-identical.
+- [Phase 06]: Phase gate: the frozen evidence hashes to its phase-start literals and the red-runner is 7/7 with both mutants killed; the gate found a stale F2c assertion (pre-06-07 InvalidArgument vs the documented transport ResourceExhausted) which was fixed with both layers pinned
+- [Phase 06]: TestStand_oversizeKeyF2c reads the rejected key's absence through List, not Get: a Get of the 70 000-byte key is itself over MaxRecvBytes and would prove nothing about the store
 
 ### Pending Todos
 
@@ -440,7 +443,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T01:49:11.202Z
-Stopped at: Completed 06-10-PLAN.md
+Last session: 2026-11-23T02:15:15.596Z
+Stopped at: Completed 06-13-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
