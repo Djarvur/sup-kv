@@ -256,12 +256,15 @@ func checkAckMax(c Config) error {
 // version.Validate and driftBetween both truncate to the layout's millisecond
 // resolution, so the comparison is `max_clock_lead >= drift_warn + 1ms`.
 // Equality at millisecond resolution leaves no reachable warning window — the
-// leading version is discarded before the warning can fire.
+// leading version is discarded before the warning can fire. The rule uses the
+// subtraction form: both durations are positive here, so the difference
+// cannot overflow, while adding 1ms to a drift_warn near [math.MaxInt64] wraps
+// negative and would accept a relation the runbook says is enforced.
 func checkDriftVsLead(c Config) error {
 	if c.DriftWarn <= 0 || c.MaxClockLead <= 0 {
 		return nil
 	}
-	if c.MaxClockLead < c.DriftWarn+time.Millisecond {
+	if c.MaxClockLead-c.DriftWarn < time.Millisecond {
 		return fmt.Errorf("%w: --max-clock-lead=%s must be at least --drift-warn=%s plus 1ms",
 			errDriftVsLead, c.MaxClockLead, c.DriftWarn)
 	}

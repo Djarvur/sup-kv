@@ -273,6 +273,17 @@ func TestValidate(t *testing.T) {
 		assertRejected(t, c, "--drift-warn", "--max-clock-lead")
 	})
 
+	t.Run("drift-vs-lead rejects a drift warn near the duration maximum", func(t *testing.T) {
+		t.Parallel()
+		c := validConfig()
+		c.DriftWarn = math.MaxInt64
+		c.MaxClockLead = 2 * time.Minute
+		// The relation's addition form overflows here (MaxInt64 + 1ms wraps
+		// negative), so this row pins the overflow-free subtraction: the
+		// documented `max_clock_lead >= drift_warn + 1ms` must still reject.
+		assertRejected(t, c, "--drift-warn", "--max-clock-lead")
+	})
+
 	t.Run("metrics-cert-triple accepts none set", func(t *testing.T) {
 		t.Parallel()
 		assertValid(t, validConfig())

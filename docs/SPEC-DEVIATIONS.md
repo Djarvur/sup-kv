@@ -240,7 +240,7 @@ audited.
 | S-PAR-13 | sync_response_rate defaults to 500 per second | implemented | `internal/config/config.go:100,239-241` (`defaultSyncRespRate`); `internal/app/repl/core.go:121,145,301,376` (out-of-range values silently clamp to 500) |
 | S-PAR-14 | startup_gate defaults to 1 s | implemented | `internal/config/config.go:86,228-229` (`defaultStartupGate`); `internal/grpcapi/gate.go:25,178-180` (`RunGate`'s default substitution) |
 | S-PAR-15 | dump_debounce was reinterpreted as the quiet window after the last change, with dump_max_wait added; the amendment adopted the policy and its wording | superseded-by-amendment | `internal/config/config.go:107-108,270-273` (the two defaults); `internal/app/persist/engine.go:16-17,27-28,67-71` (the quiet window and its cap); REVIEW §13 |
-| S-PAR-16 | drift_warn defaults to 60 s and measures the received version's lead over local wall time; max_clock_lead defaults to 2 m, and startup enforces `drift_warn < max_clock_lead` at the layout's millisecond resolution | implemented | `internal/config/config.go:101-109,268-275` (both defaults); `internal/config/validate.go:255-269` (`checkDriftVsLead`); `internal/app/clock/clock.go:117-153`; `cmd/sup-kv/main.go:395-401`; OBSV-05 |
+| S-PAR-16 | drift_warn defaults to 60 s and measures the received version's lead over local wall time; max_clock_lead defaults to 2 m, and startup enforces `drift_warn < max_clock_lead` at the layout's millisecond resolution | implemented | `internal/config/config.go:101-109,268-275` (both defaults); `internal/config/validate.go:255-273` (`checkDriftVsLead`); `internal/app/clock/clock.go:117-153`; `cmd/sup-kv/main.go:395-401`; OBSV-05 |
 
 ### Impact
 
