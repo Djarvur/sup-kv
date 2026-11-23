@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/grpcapi/ -run '^TestServer_list(LegacyAll|FirstPage|PageContinuation)$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestServer_listLegacyAll\n=== PAUSE TestServer_listLegacyAll\n=== RUN   TestServer_listFirstPage\n=== PAUSE TestServer_listFirstPage\n=== RUN   TestServer_listPageContinuation\n=== PAUSE TestServer_listPageContinuation\n=== CONT  TestServer_listFirstPage\n=== CONT  TestServer_listPageContinuation\n=== CONT  TestServer_listLegacyAll\n=== NAME  TestServer_listPageContinuation\n    server_test.go:854: page 1: want keys and records aligned, got 4 keys and 0 records\n=== NAME  TestServer_listFirstPage\n    server_test.go:804: List page_size 2: want the first page keys [a b], got [a b d e]\n--- FAIL: TestServer_listFirstPage (0.04s)\n--- FAIL: TestServer_listPageContinuation (0.04s)\n--- PASS: TestServer_listLegacyAll (2.13s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/grpcapi\t2.147s\nFAIL\n",
+  "targetTest": "TestServer_listFirstPage",
+  "targetFile": "internal/grpcapi/server_test.go",
+  "expected": "List{page_size:2} returns the first two live keys [a b] with two aligned records and a non-empty next_page_token.",
+  "actual": "The unimplemented handler ignored page_size and returned all four live keys [a b d e] with zero records and no token; the continuation walk saw 4 keys and 0 records.",
+  "semanticAssessment": "Both new targets executed and failed on the planned assertions and no fixture, discovery or unrelated failure is involved: TestServer_listFirstPage failed comparing the first page keys (want [a b], got [a b d e]) and TestServer_listPageContinuation failed on the keys/records alignment (4 keys, 0 records). TestServer_listLegacyAll passes deliberately — it pins the existing legacy listing that this plan must preserve. The package compiled, so this is not a build failure."
+}

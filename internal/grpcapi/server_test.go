@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"slices"
@@ -706,6 +707,176 @@ func TestServer_list(t *testing.T) {
 	}
 	if got := none.GetKeys(); len(got) != 0 {
 		t.Fatalf("List unmatched prefix: want 0 keys, got %v", got)
+	}
+}
+
+// seedPagesFixture seeds the pagination fixture directly through the
+// engine: live keys a, b, d and e, with b holding an empty value — a live
+// record, never a tombstone — and c holding a tombstone. The read path is
+// what these tests exercise; hundreds of confirmed RPC writes would only
+// slow the fixture down.
+func seedPagesFixture(t *testing.T, ts *testHarness) {
+	t.Helper()
+	for _, key := range []string{"a", "b", "c", "d", "e"} {
+		value := []byte("value-" + key)
+		if key == "b" {
+			value = []byte{}
+		}
+		if _, _, err := ts.engine.Set(key, value); err != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		}
+	}
+	if _, _, err := ts.engine.Delete("c"); err != nil {
+		t.Fatalf("seed Delete(c) error = %v, want nil", err)
+	}
+}
+
+// TestServer_listLegacyAll pins the page_size-unset contract (the frozen
+// R-01 call shape): one List call with no page size returns every matching
+// live key, byte-wise ascending, with zero records and an empty
+// next_page_token — tombstones excluded, an empty live value included. The
+// 512-key half proves the mode is not bounded by a page size.
+func TestServer_listLegacyAll(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	seedPagesFixture(t, ts)
+	ctx := t.Context()
+
+	resp, err := ts.client.List(ctx, &apiproto.ListRequest{})
+	if err != nil {
+		t.Fatalf("List with no page size: want OK, got error: %v", err)
+	}
+	if got, want := resp.GetKeys(), []string{"a", "b", "d", "e"}; !slices.Equal(got, want) {
+		t.Fatalf("List with no page size: want keys %v sorted and tombstone-free, got %v", want, got)
+	}
+	if got := len(resp.GetRecords()); got != 0 {
+		t.Fatalf("List with no page size: want 0 records, got %d", got)
+	}
+	if got := resp.GetNextPageToken(); got != "" {
+		t.Fatalf("List with no page size: want an empty next_page_token, got %q", got)
+	}
+
+	// The legacy mode covers every matching key in one response, however
+	// many that is: 512 live keys come back from one page_size-0 call.
+	for i := range 512 {
+		key := fmt.Sprintf("bulk/%03d", i)
+		if _, _, err := ts.engine.Set(key, []byte("v")); err != nil {
+			t.Fatalf("seed Set(%q) error = %v, want nil", key, err)
+		}
+	}
+	big, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "bulk/"})
+	if err != nil {
+		t.Fatalf("List 512 keys with no page size: want OK, got error: %v", err)
+	}
+	if got := len(big.GetKeys()); got != 512 {
+		t.Fatalf("List 512 keys with no page size: want 512 keys, got %d", got)
+	}
+	if got := len(big.GetRecords()); got != 0 {
+		t.Fatalf("List 512 keys with no page size: want 0 records, got %d", got)
+	}
+	if got := big.GetNextPageToken(); got != "" {
+		t.Fatalf("List 512 keys with no page size: want an empty next_page_token, got %q", got)
+	}
+	if !slices.IsSorted(big.GetKeys()) {
+		t.Fatal("List 512 keys with no page size: keys are not byte-wise ascending")
+	}
+	if got := slices.Compact(slices.Clone(big.GetKeys())); len(got) != 512 {
+		t.Fatalf("List 512 keys with no page size: want 512 distinct keys, got %d", len(got))
+	}
+}
+
+// TestServer_listFirstPage pins the page_size > 0 contract's first page: at
+// most page_size records with values, keys aligned to records, and a
+// non-empty next_page_token unless the page ends the list.
+func TestServer_listFirstPage(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	seedPagesFixture(t, ts)
+	ctx := t.Context()
+
+	resp, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2})
+	if err != nil {
+		t.Fatalf("List page_size 2: want OK, got error: %v", err)
+	}
+	if got, want := resp.GetKeys(), []string{"a", "b"}; !slices.Equal(got, want) {
+		t.Fatalf("List page_size 2: want the first page keys %v, got %v", want, got)
+	}
+	records := resp.GetRecords()
+	if len(records) != 2 {
+		t.Fatalf("List page_size 2: want 2 records, got %d", len(records))
+	}
+	if got, want := records[0].GetKey(), "a"; got != want {
+		t.Fatalf("first record key: want %q, got %q", want, got)
+	}
+	if got, want := records[1].GetKey(), "b"; got != want {
+		t.Fatalf("second record key: want %q, got %q", want, got)
+	}
+	if got := records[0].GetValue(); !bytes.Equal(got, []byte("value-a")) {
+		t.Fatalf("record a value: want %q, got %q", "value-a", got)
+	}
+	if got := records[1].GetValue(); len(got) != 0 {
+		t.Fatalf("record b value: want the empty live value, got %q", got)
+	}
+	if got := resp.GetNextPageToken(); got == "" {
+		t.Fatal("List page_size 2: want a non-empty next_page_token while more keys remain, got empty")
+	}
+	for _, rec := range records {
+		if key := rec.GetKey(); key == "c" || key == "d" || key == "e" {
+			t.Fatalf("List page_size 2: first page contains the off-page key %q", key)
+		}
+	}
+}
+
+// TestServer_listPageContinuation proves the token is a position that walks
+// the matching keys exactly once: following next_page_token with the same
+// page size yields the remaining keys, then the empty end-of-list token,
+// and the union is the live key set, strictly ascending and duplicate-free.
+func TestServer_listPageContinuation(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	seedPagesFixture(t, ts)
+	ctx := t.Context()
+
+	var walked []string
+	token := ""
+	for pages := 1; ; pages++ {
+		if pages > 8 {
+			t.Fatalf("the page walk did not terminate after %d pages", pages-1)
+		}
+		resp, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 2, PageToken: token})
+		if err != nil {
+			t.Fatalf("List page %d (token %q): want OK, got error: %v", pages, token, err)
+		}
+		if len(resp.GetRecords()) != len(resp.GetKeys()) {
+			t.Fatalf("page %d: want keys and records aligned, got %d keys and %d records",
+				pages, len(resp.GetKeys()), len(resp.GetRecords()))
+		}
+		for i, key := range resp.GetKeys() {
+			if got := resp.GetRecords()[i].GetKey(); got != key {
+				t.Fatalf("page %d: records[%d] key = %q, want the aligned key %q", pages, i, got, key)
+			}
+		}
+		walked = append(walked, resp.GetKeys()...)
+		token = resp.GetNextPageToken()
+		if token == "" {
+			if pages != 2 {
+				t.Fatalf("the page walk ended after %d pages, want 2 (2 keys per page over 4 live keys)", pages)
+			}
+			break
+		}
+	}
+
+	if want := []string{"a", "b", "d", "e"}; !slices.Equal(walked, want) {
+		t.Fatalf("the page walk = %v, want the live key set %v", walked, want)
+	}
+	if !slices.IsSorted(walked) {
+		t.Fatal("the page walk is not strictly ascending")
+	}
+	if got := slices.Compact(slices.Clone(walked)); len(got) != len(walked) {
+		t.Fatalf("the page walk repeats a key: %v", walked)
 	}
 }
 
