@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
-current_plan: 6
+current_plan: 7
 status: executing
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-11-23T07:10:04.692Z"
+stopped_at: Completed 07-02-PLAN.md
+last_updated: "2026-11-23T07:38:09.835Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 6 complete, transitioned to Phase 7
-state_head: 3e560d32503c0db116f5db8c6043e30871de92a4
+state_head: 7b6efc8562396f5a5af78797cc045a58deb9d1ba
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 73
+  completed_plans: 74
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 7 (Observability and Configuration) — READY TO EXECUTE
-Current Plan: 6
+Current Plan: 7
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 6 complete, transitioned to Phase 7
@@ -133,6 +133,7 @@ Progress: [████░░░░░░] 44%
 | Phase 06 P10 | 200s | 2 tasks | 4 files |
 | Phase 06 P13 | 20min | 2 tasks | 2 files |
 | Phase 07 P01 | 567s | 2 tasks | 9 files |
+| Phase 07 P02 | 1324s | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -424,6 +425,11 @@ Recent decisions affecting current work:
 - [Phase 06]: Phase gate: the frozen evidence hashes to its phase-start literals and the red-runner is 7/7 with both mutants killed; the gate found a stale F2c assertion (pre-06-07 InvalidArgument vs the documented transport ResourceExhausted) which was fixed with both layers pinned
 - [Phase 06]: TestStand_oversizeKeyF2c reads the rejected key's absence through List, not Get: a Get of the 70 000-byte key is itself over MaxRecvBytes and would prove nothing about the store
 - [Phase 07]: 07-01: udprepl split into socket/codec/loop/mirror/adapter in one package; SentByType moved to internal/app/repl with the udprepl alias and accessor retained, so metrics no longer imports the socket adapter.
+- [Phase 07]: 07-02: internal/config owns Parse/Validate/Usage and stays outside internal/app because it reads the environment and imports the adapter ceilings; the no-I/O depguard rule must not cover it.
+- [Phase 07]: 07-02: Validate walks one 12-rule catalog and errors.Join's every failure under its rule name; the pre-existing sentinel substrings (`datagram ceiling`, `value-max-bytes must be positive`, `startup gate must be positive`, `sync-chunk-bytes exceeds the datagram ceiling`) stay matchable.
+- [Phase 07]: 07-02: the max-clock-lead default moved to 2 m in the binary and the core in the same commit as the drift-vs-lead rule, because the 1 m default would fail its own validation and violate the 'every default stays accepted' prohibition.
+- [Phase 07]: 07-02: Usage resolves defaults from the process environment (preserving SUPKV_MAX_CLOCK_LEAD=90s --help showing 1m30s) while Parse stays pure over its getenv seam; repl.MaxSyncResponseRate is exported as an int so the cap is never a literal in config.
+- [Phase 07]: 07-02: persist.EncodeTo rejects an out-of-domain value limit before the header write wrapping storage.ErrValueTooLarge, closing IN-04; version.Validate and the core docs state the 2 m default and the max_clock_lead >= drift_warn + 1 ms relation.
 
 ### Pending Todos
 
@@ -446,7 +452,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T07:10:03.950Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-11-23T07:38:09.091Z
+Stopped at: Completed 07-02-PLAN.md
 Resume file: None
-Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
+Next action: start plan 07-03 (`/gsd:execute-phase 7` continues the phase)
