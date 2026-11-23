@@ -229,12 +229,15 @@ func TestFlush_countsOnlySuccessfulWrites(t *testing.T) {
 }
 
 // TestMirror_listingCounters proves the four routed Phase-4 counters reach
-// the adapter mirror with the core's values (OBSV-03, D-05/14.4). The
-// regression counter is driven by an equal duplicate of one tracked
-// notification; the listed-key eviction counter by a retained listing whose
-// two-sync-interval lifetime expires. The remaining two are asserted against
-// the core after the same mirror pass, so a missing or swapped mirror store
-// cannot pass.
+// the adapter mirror with the core's values (OBSV-03, D-05/14.4). EVERY
+// counter is driven to a non-zero sample before the mirror pass: the
+// regression counter by an equal duplicate of one tracked notification, the
+// listed-key eviction counter by a retained listing whose two-sync-interval
+// lifetime expires, the listing-drop counter by overrunning the
+// targeted-listing destination cap, and the sync-stream counter by
+// overrunning the partial-round accumulator. The equality assertions
+// therefore compare real values — a missing or swapped mirror store cannot
+// pass.
 func TestMirror_listingCounters(t *testing.T) {
 	t.Parallel()
 	const (
@@ -242,6 +245,13 @@ func TestMirror_listingCounters(t *testing.T) {
 		peerNode  = uint16(22)
 		key       = "mirror/listed"
 		syncEvery = time.Second
+		// The floods deliberately differ in size (and so in resulting
+		// count): 40 triggers against 32 destination slots cannot yield
+		// fewer than 8 refusals, while 20 partial rounds against 16 stream
+		// slots yield 4 evictions — so a mirror store that swapped the two
+		// accessors compares against the wrong non-zero value.
+		listingFlood = 40
+		streamFlood  = 20
 	)
 	fixedNow := func() time.Time { return time.UnixMilli(1730000000000) }
 	now := fixedNow()
@@ -291,6 +301,52 @@ func TestMirror_listingCounters(t *testing.T) {
 		t.Fatalf("core.NotificationsRegressed() = %d after one equal duplicate, want 1", got)
 	}
 
+	// The two counters the earlier rounds left at zero need real samples on
+	// both sides. Fresh first-seen Hellos each ask for a targeted listing;
+	// past the destination cap every further trigger is refused and counted
+	// (ListingDropped). Distinct sync_ids with a missing second chunk each
+	// retain a partial round; past the stream bound every admission evicts
+	// the least-progressed round and counts it (SyncStreamDropped). The peer
+	// stays bound because the run id matches its Hello and the flood is well
+	// inside the default peer timeout.
+	later := now.Add(2*syncEvery + time.Millisecond)
+	for i := range listingFlood {
+		id := uint16(100 + i)
+		core.HandleDatagram(later, port.InboundDatagram{
+			Source:       "listing-flood",
+			Status:       port.Decoded,
+			ProtoVersion: repl.SupportedProtoVersion,
+			NodeID:       id,
+			RunID:        [16]byte{byte(id)},
+			Msg:          port.Hello{},
+		}, &out)
+	}
+	for i := range streamFlood {
+		core.HandleDatagram(later, port.InboundDatagram{
+			Source:       "n22",
+			Status:       port.Decoded,
+			ProtoVersion: repl.SupportedProtoVersion,
+			NodeID:       peerNode,
+			RunID:        [16]byte{byte(peerNode)},
+			Msg: port.DataSync{
+				SyncID:     uint64(1000 + i),
+				ChunkIndex: 1,
+				ChunkCount: 2,
+				Entries: []port.SyncEntry{{
+					Key:     "stream/part",
+					Version: version.PackVersion(now.UnixMilli(), 1, peerNode),
+				}},
+			},
+		}, &out)
+	}
+	out.Drain()
+	if got := core.ListingDropped(); got == 0 {
+		t.Fatalf("core.ListingDropped() = 0 after the %d-Hello destination flood, want a non-zero count", listingFlood)
+	}
+	if got := core.SyncStreamDropped(); got == 0 {
+		t.Fatalf("core.SyncStreamDropped() = 0 after the %d-round accumulator flood, want a non-zero count", streamFlood)
+	}
+
 	adapter.mirrorStats()
 	for _, tc := range []struct {
 		name     string
@@ -311,5 +367,11 @@ func TestMirror_listingCounters(t *testing.T) {
 	}
 	if got := adapter.ListedKeysEvicted(); got != 1 {
 		t.Fatalf("ListedKeysEvicted() = %d after the mirror pass, want 1", got)
+	}
+	if got := adapter.ListingDropped(); got == 0 {
+		t.Fatal("ListingDropped() = 0 after the mirror pass, want the core's non-zero count")
+	}
+	if got := adapter.SyncStreamDropped(); got == 0 {
+		t.Fatal("SyncStreamDropped() = 0 after the mirror pass, want the core's non-zero count")
 	}
 }
