@@ -46,8 +46,9 @@
   generated Go package `supkvapi`. It is the client-facing surface and stays
   importable from another module (`github.com/Djarvur/sup-kv/api/supkvapi/v1`);
   the replication proto under `internal/udprepl/replproto/` remains internal.
-- `cmd/sup-kv/` — the single binary; `main()` holds no testable logic
-  (flags/env/signals live there from Phase 5, nothing else).
+- `cmd/sup-kv/` — the single binary; `main()` parses (via `internal/config`),
+  handles help/version, installs logging and calls `run`, the tested
+  lifecycle seam; signals and the shutdown order live in `run`/`shutdown`.
 - `internal/config/` — composition-level configuration: `Parse` (flag > env >
   default), `Validate` (every startup range and relation in one pass) and
   `Usage` (the rendered help). It imports the standard library and the own
