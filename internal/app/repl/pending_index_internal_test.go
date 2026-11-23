@@ -30,11 +30,12 @@ const (
 // pendingIndexFixture bundles one core with its real store and the fixed
 // virtual instant every fixture operation runs at — the in-package shape of
 // listedStateStore/newConfigProbeCore, extended with the store handle the
-// driver-level proofs need.
+// driver-level proofs need and the one peer identity they drive.
 type pendingIndexFixture struct {
 	core  *Core
 	store *storage.Store
 	now   time.Time
+	peer  uint16
 }
 
 // newPendingIndexFixture builds a core over an empty real store at the fixed
@@ -47,14 +48,16 @@ func newPendingIndexFixture() *pendingIndexFixture {
 		core:  New(listedTestLocal, [16]byte{1}, listedStateStore{store: store}, Config{}),
 		store: store,
 		now:   time.UnixMilli(listedTestNowMs),
+		peer:  listedTestPeer,
 	}
 }
 
-// handle delivers one decoded datagram through the production entry point,
-// discards the message stream and returns the result stream for assertion.
-func (f *pendingIndexFixture) handle(peer uint16, runID [16]byte, msg port.Message) []port.Result {
+// handle delivers one decoded datagram from the fixture's peer through the
+// production entry point, discards the message stream and returns the result
+// stream for assertion.
+func (f *pendingIndexFixture) handle(runID [16]byte, msg port.Message) []port.Result {
 	var out port.Outbox
-	f.core.HandleDatagram(f.now, pendingIndexDatagram(peer, runID, msg), &out)
+	f.core.HandleDatagram(f.now, pendingIndexDatagram(f.peer, runID, msg), &out)
 	out.Drain()
 	return out.DrainResults()
 }
@@ -65,7 +68,8 @@ func (f *pendingIndexFixture) handle(peer uint16, runID [16]byte, msg port.Messa
 func (f *pendingIndexFixture) write(t *testing.T, key string, ver version.RecordVersion, data []byte) []port.Result {
 	t.Helper()
 	rec := pendingIndexRecord(key, ver, data)
-	if _, _, err := f.store.Merge(key, rec); err != nil {
+	_, _, err := f.store.Merge(key, rec)
+	if err != nil {
 		t.Fatalf("store.Merge(%q): %v", key, err)
 	}
 	return f.notify(t, key, ver)
@@ -138,7 +142,7 @@ func TestCore_pendingVisitsFreshKeyWrite(t *testing.T) {
 		t.Run(fmt.Sprintf("pending=%d", size), func(t *testing.T) {
 			t.Parallel()
 			f := newPendingIndexFixture()
-			f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Hello{})
+			f.handle(pendingIndexRunID(f.peer), port.Hello{})
 			f.seedPending(t, size, []uint16{listedTestPeer})
 			before := f.core.PendingVisits()
 			var out port.Outbox
@@ -165,15 +169,15 @@ func TestCore_pendingVisitsFreshKeyApply(t *testing.T) {
 		t.Run(fmt.Sprintf("pending=%d", size), func(t *testing.T) {
 			t.Parallel()
 			f := newPendingIndexFixture()
-			f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Hello{})
+			f.handle(pendingIndexRunID(f.peer), port.Hello{})
 			f.seedPending(t, size, []uint16{listedTestPeer})
 			before := f.core.PendingVisits()
 			key := "index/fresh-apply"
 			rec := pendingIndexRecord(key, version.PackVersion(listedTestNowMs, 0, listedTestPeer), []byte("v"))
-			f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.DataReplication{Key: key, Record: rec})
+			f.handle(pendingIndexRunID(f.peer), port.DataReplication{Key: key, Record: rec})
 			if got := f.core.PendingVisits() - before; got != 0 {
-				t.Fatalf("an inbound replication for a fresh key over %d pending entries inspected %d pending entries, want 0 (XPORT-02/PERF-05: the apply path must be key-local at any set size)",
-					size, got)
+				t.Fatalf("an inbound replication for a fresh key over %d pending entries inspected %d pending entries, want 0 "+
+					"(XPORT-02/PERF-05: the apply path must be key-local at any set size)", size, got)
 			}
 		})
 	}
@@ -190,7 +194,7 @@ func TestCore_pendingVisitsIdleAdvance(t *testing.T) {
 		t.Run(fmt.Sprintf("pending=%d", size), func(t *testing.T) {
 			t.Parallel()
 			f := newPendingIndexFixture()
-			f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Hello{})
+			f.handle(pendingIndexRunID(f.peer), port.Hello{})
 			f.seedPending(t, size, []uint16{listedTestPeer})
 			before := f.core.PendingVisits()
 			var out port.Outbox
@@ -225,7 +229,7 @@ func TestCore_pendingVisitsStructure(t *testing.T) {
 	t.Run("a due retransmission inspects one entry per due item", func(t *testing.T) {
 		t.Parallel()
 		f := newPendingIndexFixture()
-		f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Hello{})
+		f.handle(pendingIndexRunID(f.peer), port.Hello{})
 		for i := range 3 {
 			key := fmt.Sprintf("index/due-%d", i)
 			f.write(t, key, version.PackVersion(listedTestNowMs+int64(i), 0, listedTestLocal), []byte("v"))
@@ -244,7 +248,7 @@ func TestCore_pendingVisitsStructure(t *testing.T) {
 		f := newPendingIndexFixture()
 		f.seedPending(t, 4, nil)
 		before := f.core.PendingVisits()
-		f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Hello{})
+		f.handle(pendingIndexRunID(f.peer), port.Hello{})
 		if got := f.core.PendingVisits() - before; got != 4 {
 			t.Fatalf("a discovery flush over 4 pending pairs inspected %d pending entries, want 4 (the flush stays deliberately O(n) and prices itself here)", got)
 		}
@@ -368,20 +372,20 @@ func TestCore_pendingIndexInvariant(t *testing.T) {
 	f := newPendingIndexFixture()
 	assertPendingIndexInvariant(t, f.core, f.now)
 
-	f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Hello{})
+	f.handle(pendingIndexRunID(f.peer), port.Hello{})
 	f.seedPending(t, 5, []uint16{listedTestPeer})
 	assertPendingIndexInvariant(t, f.core, f.now)
 
 	f.write(t, "index/seed-000000", version.PackVersion(listedTestNowMs+5, 0, listedTestLocal), []byte("v"))
 	assertPendingIndexInvariant(t, f.core, f.now)
 
-	f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer),
+	f.handle(pendingIndexRunID(f.peer),
 		port.Ack{Key: "index/seed-000001", Version: version.PackVersion(listedTestNowMs+1, 0, listedTestLocal)})
 	assertPendingIndexInvariant(t, f.core, f.now)
 
 	key := "index/seed-000002"
 	rec := pendingIndexRecord(key, version.PackVersion(listedTestNowMs+100, 0, listedTestPeer), []byte("remote"))
-	f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.DataReplication{Key: key, Record: rec})
+	f.handle(pendingIndexRunID(f.peer), port.DataReplication{Key: key, Record: rec})
 	assertPendingIndexInvariant(t, f.core, f.now)
 
 	f.now = f.now.Add(f.core.cfg.PeerTimeout)
@@ -391,7 +395,7 @@ func TestCore_pendingIndexInvariant(t *testing.T) {
 	out.DrainResults()
 	assertPendingIndexInvariant(t, f.core, f.now)
 
-	f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Hello{})
+	f.handle(pendingIndexRunID(f.peer), port.Hello{})
 	assertPendingIndexInvariant(t, f.core, f.now)
 }
 
@@ -409,7 +413,7 @@ const pendingIndexDiffOps = 2_000
 func TestCore_pendingIndexDifferential(t *testing.T) {
 	t.Parallel()
 	f := newPendingIndexFixture()
-	f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Hello{})
+	f.handle(pendingIndexRunID(f.peer), port.Hello{})
 	hotKeys := []string{
 		"diff/k0", "diff/k1", "diff/k2", "diff/k3", "diff/k4",
 		"diff/k5", "diff/k6", "diff/k7", "diff/k8", "diff/k9",
@@ -445,21 +449,21 @@ func TestCore_pendingIndexDifferential(t *testing.T) {
 		case 4:
 			// An Ack from the one known peer: drain when the wait-set empties.
 			if pk, ok := firstPendingHotPair(f.core, hotKeys); ok {
-				f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.Ack{Key: pk.key, Version: pk.version})
+				f.handle(pendingIndexRunID(f.peer), port.Ack{Key: pk.key, Version: pk.version})
 				touched = pk.key
 			}
 		case 5:
 			// An inbound replication above every produced version: displaces.
 			key := hotKeys[rng.IntN(len(hotKeys))]
 			rec := pendingIndexRecord(key, version.PackVersion(listedTestNowMs+4*pendingIndexDiffOps+int64(op), 0, listedTestPeer), []byte("remote"))
-			f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.DataReplication{Key: key, Record: rec})
+			f.handle(pendingIndexRunID(f.peer), port.DataReplication{Key: key, Record: rec})
 			touched = key
 		case 6:
 			// An inbound replication below the held version: it loses and
 			// leaves the tracked pair alone.
 			key := hotKeys[rng.IntN(len(hotKeys))]
 			rec := pendingIndexRecord(key, version.PackVersion(listedTestNowMs, 0, listedTestPeer), []byte("stale"))
-			f.handle(listedTestPeer, pendingIndexRunID(listedTestPeer), port.DataReplication{Key: key, Record: rec})
+			f.handle(pendingIndexRunID(f.peer), port.DataReplication{Key: key, Record: rec})
 			touched = key
 		case 7:
 			// Peer-timeout eviction: every wait-set empties, entries suspend.
@@ -470,10 +474,10 @@ func TestCore_pendingIndexDifferential(t *testing.T) {
 			out.DrainResults()
 		case 8:
 			// A run-id restart of the known peer: the table moves, pending stays.
-			runID := pendingIndexRunID(listedTestPeer)
+			runID := pendingIndexRunID(f.peer)
 			runID[13] = byte(op >> 8)
 			runID[14] = byte(op)
-			f.handle(listedTestPeer, runID, port.Hello{})
+			f.handle(runID, port.Hello{})
 		}
 		assertPendingIndexInvariant(t, f.core, f.now)
 		if touched != "" {
@@ -510,7 +514,7 @@ func TestCore_pendingIndexProductionPaths(t *testing.T) {
 	f := newPendingIndexFixture()
 	key := "prod/key"
 	peer := listedTestPeer
-	runID := pendingIndexRunID(peer)
+	runID := pendingIndexRunID(f.peer)
 	v0 := version.PackVersion(listedTestNowMs, 0, listedTestLocal)
 	v1 := version.PackVersion(listedTestNowMs+1, 0, listedTestLocal)
 	v2 := version.PackVersion(listedTestNowMs+2, 0, listedTestLocal)
@@ -519,7 +523,8 @@ func TestCore_pendingIndexProductionPaths(t *testing.T) {
 	// not hold yet: the promise is the write-time capture, so the waiter
 	// learns the honest false immediately (A-01) and the entry is retained.
 	rec1 := pendingIndexRecord(key, v1, []byte("v1"))
-	if _, _, err := f.store.Merge(key, rec1); err != nil {
+	_, _, err := f.store.Merge(key, rec1)
+	if err != nil {
 		t.Fatalf("(a): store.Merge(%q): %v", key, err)
 	}
 	var out port.Outbox
@@ -537,7 +542,7 @@ func TestCore_pendingIndexProductionPaths(t *testing.T) {
 	// (b) The Hello discovers the peer and flushes the pending set: the pair
 	// is re-armed and queued, but the wait-set and the ledger stay untouched.
 	before := f.core.PendingVisits()
-	assertPendingResults(t, "b: discovery Hello", f.handle(peer, runID, port.Hello{}))
+	assertPendingResults(t, "b: discovery Hello", f.handle(runID, port.Hello{}))
 	if got := f.core.PendingVisits() - before; got != 1 {
 		t.Fatalf("after (b): the discovery flush inspected %d pending entries, want 1", got)
 	}
@@ -597,7 +602,7 @@ func TestCore_pendingIndexProductionPaths(t *testing.T) {
 	conflicts := f.core.MergeStats().Conflicts
 	rec := pendingIndexRecord(key, v3, []byte("remote"))
 	assertPendingResults(t, "f: displacing replication",
-		f.handle(peer, runID, port.DataReplication{Key: key, Record: rec}),
+		f.handle(runID, port.DataReplication{Key: key, Record: rec}),
 		port.Result{Kind: port.ResultSuperseded, Key: key, Version: v2})
 	if got := f.core.MergeStats().Conflicts - conflicts; got != 1 {
 		t.Fatalf("after (f): MergeStats.Conflicts delta = %d, want 1", got)
@@ -611,7 +616,7 @@ func TestCore_pendingIndexProductionPaths(t *testing.T) {
 	ackKey := "prod/ack"
 	v4 := version.PackVersion(listedTestNowMs+3, 0, listedTestLocal)
 	assertPendingResults(t, "g: write", f.write(t, ackKey, v4, []byte("v4")))
-	assertPendingResults(t, "g: Ack drains", f.handle(peer, runID, port.Ack{Key: ackKey, Version: v4}),
+	assertPendingResults(t, "g: Ack drains", f.handle(runID, port.Ack{Key: ackKey, Version: v4}),
 		port.Result{Kind: port.ResultAck, Key: ackKey, Version: v4, Peer: peer},
 		port.Result{Kind: port.ResultDrained, Key: ackKey, Version: v4})
 	assertPendingIndexInvariant(t, f.core, f.now)
@@ -638,11 +643,11 @@ func TestCore_pendingIndexProductionPaths(t *testing.T) {
 
 	// (i) The peer returns and Acks the suspended pair: the re-learn flush
 	// re-arms but never re-seeds the promise, then the Ack drains it.
-	assertPendingResults(t, "i: re-learn Hello", f.handle(peer, runID, port.Hello{}))
+	assertPendingResults(t, "i: re-learn Hello", f.handle(runID, port.Hello{}))
 	if len(f.core.peerUnacked[peer]) != 0 {
 		t.Fatalf("after (i): the re-learn flush extended ledger[%d] to %v", peer, f.core.peerUnacked[peer])
 	}
-	assertPendingResults(t, "i: Ack of the suspended pair", f.handle(peer, runID, port.Ack{Key: suspendKey, Version: v5}),
+	assertPendingResults(t, "i: Ack of the suspended pair", f.handle(runID, port.Ack{Key: suspendKey, Version: v5}),
 		port.Result{Kind: port.ResultAck, Key: suspendKey, Version: v5, Peer: peer},
 		port.Result{Kind: port.ResultDrained, Key: suspendKey, Version: v5})
 	assertPendingIndexInvariant(t, f.core, f.now)
@@ -654,7 +659,8 @@ func TestCore_pendingIndexProductionPaths(t *testing.T) {
 	v6 := version.PackVersion(listedTestNowMs+5, 0, listedTestLocal)
 	assertPendingResults(t, "j: write", f.write(t, staleKey, v6, []byte("v6")))
 	v7 := version.PackVersion(listedTestNowMs+6, 0, peer)
-	if _, _, err := f.store.Merge(staleKey, pendingIndexRecord(staleKey, v7, []byte("changed"))); err != nil {
+	_, _, err = f.store.Merge(staleKey, pendingIndexRecord(staleKey, v7, []byte("changed")))
+	if err != nil {
 		t.Fatalf("j: store.Merge(%q): %v", staleKey, err)
 	}
 	f.now = f.now.Add(defaultAckTimeout)
