@@ -93,6 +93,31 @@ linters:
           deny:
             - pkg: github.com/Djarvur/sup-kv/internal
               desc: the public API package must remain importable by other modules
+        # ---- sup-kv dependency direction (OBSV-07, D-07) ----------------
+        # Adapters are wired only from cmd, the composition root. The pure
+        # decision core (internal/app) and the port definitions
+        # (internal/port) may not import them, so the architecture is a lint
+        # gate with a visible config diff rather than a review convention.
+        # Adapters are named individually: the core packages legitimately
+        # import each other, internal/port imports internal/app/{storage,
+        # version}, and internal/testutil is a shared helper, not an adapter
+        # (research D-07 import audit).
+        sup-kv-adapters-not-in-core:
+          files:
+            - '**/internal/app/**'
+            - '**/internal/port/**'
+            - '!$test'
+          deny:
+            - pkg: github.com/Djarvur/sup-kv/internal/udprepl
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+            - pkg: github.com/Djarvur/sup-kv/internal/persistfile
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+            - pkg: github.com/Djarvur/sup-kv/internal/grpcapi
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+            - pkg: github.com/Djarvur/sup-kv/internal/metrics
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+            - pkg: github.com/Djarvur/sup-kv/internal/stand
+              desc: adapters are wired from cmd; the pure core/ports may not import them
     dupl:
       threshold: 100
     embeddedstructfieldcheck:
