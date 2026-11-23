@@ -436,12 +436,15 @@ type DiscardStats struct {
 	BadSyncHeader uint64
 }
 
-// MergeStats counts the remote-merge observability signals (OBS-01, D-10):
-// Conflicts is every displaced-or-rejected version the store reported — an
-// LWW loser is an ordinary overwrite, counted and never journaled — and
-// DriftWarnings is every received record and DataSync part maximum whose
-// version leads local wall time by more than drift_warn, regardless of the
-// merge outcome: the store clock gates the signal at its drift-warn
+// MergeStats counts the remote-merge observability signals (OBS-01, OBSV-03):
+// Conflicts is every pending (unacked) local write displaced by an applied
+// replicated record, computed from the core's pending set — an ordinary
+// overwrite of a confirmed local record or of a remote record, a rejected
+// stale incoming record and an identical redelivery count nothing, and the
+// store's per-outcome Conflict return is not this counter's source (ADR
+// 0004). DriftWarnings is every received record and DataSync part maximum
+// whose version leads local wall time by more than drift_warn, regardless of
+// the merge outcome: the store clock gates the signal at its drift-warn
 // threshold (zero within tolerance, positive only when the received reading
 // leads), so the counter mirrors exactly the warnings storage.Merge already
 // decided (OBSV-05).
@@ -1487,8 +1490,7 @@ func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, 
 //   - equal version with different content: the store's deterministic
 //     (version, content) tie-break decides, and the wire answer follows the
 //     stored record after the merge — never the version, which is equal on
-//     both sides. The merge is applied and its single tie-break Conflict is
-//     counted; when the store now holds exactly the incoming record the
+//     both sides. When the store now holds exactly the incoming record the
 //     sender won, so it is Acked and no reply is emitted; otherwise the
 //     stored record won, and the sender receives exactly one unicast
 //     DataReplication carrying it and no Ack. Both replicas therefore
@@ -1507,13 +1509,16 @@ func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, 
 // supersession of pending tracking, so the sender keeps retransmitting and
 // the unacked gauge keeps climbing: the truthful signal of divergence,
 // never a "delivered" report for a record that was never stored. The
-// ApplyRemote returns feed the MergeStats counters (OBS-01, D-10): every
-// displaced-or-rejected version counts a conflict — counted only, never
-// journaled — and a POSITIVE drift return counts a drift warning: the store
-// clock reports the received version's lead against local wall time, and
-// only a received reading beyond the threshold ahead of the wall is a
-// warning. A negative return — the wall clock jumped past the received
-// version — is never counted (OBSV-05).
+// ApplyRemote returns feed the MergeStats counters (OBS-01, OBSV-03): a
+// POSITIVE drift return counts a drift warning — the store clock reports the
+// received version's lead against local wall time, and only a received
+// reading beyond the threshold ahead of the wall is a warning (a negative
+// return, the wall clock jumping past the received version, is never
+// counted, OBSV-05) — while Conflicts counts only the displacement of a
+// pending (unacked) local write, detected from the core's own pending set
+// after the apply, never from the store's per-outcome Conflict slice (ADR
+// 0004): the store reports every LWW outcome, so len(conflicts) would count
+// ordinary overwrites the Spec does not call conflicts.
 func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplication, out *port.Outbox) {
 	if held, present := c.store.Version(msg.Key); present {
 		switch cmp := held.Compare(msg.Record.Version); {
@@ -1530,37 +1535,46 @@ func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplicatio
 			}
 		}
 	}
-	conflicts, drift, err := c.store.ApplyRemote(msg.Key, msg.Record)
+	_, drift, err := c.store.ApplyRemote(msg.Key, msg.Record)
 	if err != nil {
 		c.cfg.Log(fmt.Sprintf("sup-kv: applying replicated record for key %q from handle %q: %v", msg.Key, source, err))
 		// Not applied: no Ack, no supersession — never confirm a record the
 		// store refused.
 		return
 	}
-	c.mergeStats.Conflicts += uint64(len(conflicts))
 	if drift > 0 {
 		// Only a received version ahead of local wall time is a drift
 		// warning (OBSV-05); a negative reading — the wall clock jumped past
 		// the received version — is never counted.
 		c.mergeStats.DriftWarnings++
 	}
-	// Remote supersession: a strictly greater remote version under the same
-	// key fulfills the tracking promise by winning — the same byte order
-	// storage.Merge joins by; an equal version (a redelivery) leaves
-	// tracking unchanged (REPL-02). Every older tracked version under the
-	// key leaves, because the record they tracked no longer exists, and
-	// each emits its Superseded result with the TRACKED version — the
-	// displaced write's resolution is an honest false (XPORT-12).
+	// One post-apply read serves both the reply verdict and the displacement
+	// count: the incoming record won exactly when the store now holds it
+	// (ADR 0012).
+	stored, present := c.store.Lookup(msg.Key)
+	incomingWon := present && storage.RecordsEqual(stored, msg.Record)
+	// Pending displacement (OBSV-03, ADR 0004): a tracked local write is
+	// displaced only when the applied record actually replaced it — a
+	// strictly greater version, or an equal version the incoming record won
+	// on content (the identical-content case returned above, so equal
+	// versions here always mean differing records). A pending version the
+	// incoming record did not beat stays tracked and counts nothing, and
+	// every displaced entry emits its Superseded result with the TRACKED
+	// version — the displaced write's resolution is an honest false
+	// (XPORT-12).
 	for pk := range c.pending {
-		if pk.key == msg.Key && msg.Record.Version.Compare(pk.version) > 0 {
-			out.Superseded(pk.key, pk.version)
-			c.removePending(pk)
+		if pk.key != msg.Key {
+			continue
 		}
+		cmp := msg.Record.Version.Compare(pk.version)
+		if cmp < 0 || (cmp == 0 && !incomingWon) {
+			continue
+		}
+		c.mergeStats.Conflicts++
+		out.Superseded(pk.key, pk.version)
+		c.removePending(pk)
 	}
-	// The answer follows the stored record, not an assumption about who won:
-	// the incoming record lost an equal-version tie-break exactly when the
-	// store does not now hold it (ADR 0012).
-	if stored, ok := c.store.Lookup(msg.Key); ok && storage.RecordsEqual(stored, msg.Record) {
+	if incomingWon {
 		out.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})
 		return
 	}

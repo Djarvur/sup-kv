@@ -81,8 +81,13 @@ type Record struct {
 }
 
 // Conflict reports one displaced version from a Merge: the greater version
-// that won and the version it beat or rejected. It is the D-01 return-value
-// contract behind the Phase 4/6 conflict journal.
+// that won and the version it beat or rejected, the equal-version content
+// tie-break included. It is [Store.MergeChanged]/[Store.Merge]'s per-outcome
+// return contract. It is NOT the source of the conflict counter
+// (supkv_merges_conflicts_total): that counter measures pending (unacked)
+// local writes displaced by an applied replicated record, computed from the
+// replication core's pending set — an ordinary overwrite, a stale rejection
+// and an identical redelivery are no conflicts (ADR 0004, OBSV-03).
 type Conflict struct {
 	Key    string
 	Winner version.RecordVersion
