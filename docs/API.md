@@ -141,7 +141,7 @@ transport send ceiling cover any page the server produces.
 
 ## Errors
 
-The table below covers every error the RPC handlers produce. The mapper is
+The table below covers every mapper code and the List validation constants (the List RPC section names its two page-size/page-token messages); the exhaustive per-RPC failure table is Phase 9/DOCS-05. The mapper is
 total: an error that matches no row still answers a fixed status, so no
 internal detail can escape through the response path. The table is the
 contract, and the row order is part of it — the first match wins.
@@ -291,7 +291,7 @@ window sizes, the concurrent-stream cap) keep gRPC's defaults.
 | Minimum client ping interval | 30 s | a consumer library may run its own 30 s client keepalive without tripping enforcement |
 | Permit without stream | `true` | a consumer may hold an idle connection between writes |
 | `MaxRecvBytes` | the envelope ceiling (maximum page token plus field framing) + a 1 024-byte key + the effective value limit — 187 472 bytes at the default limit (190 440 at the 64 408-byte datagram ceiling) | covers the largest valid request of either shape: a maximum `SetRequest`, or a `ListRequest` carrying a maximum page token (the token domain is the dump format's line ceiling, so a pre-upgrade longer key stays walkable); a request above the ceiling is rejected at the transport with `ResourceExhausted`, before allocation-heavy handling |
-| `MaxSendBytes` | 6 MiB page budget + 125 008-byte envelope | covers any `List` page the server can produce — maximum-length page token included — as well as every smaller unary response |
+| `MaxSendBytes` | 6 MiB page budget + 125 008-byte envelope | covers any `List` page the server can produce — maximum-length page token included — as well as every smaller unary response. A client that requests a maximum-size page must raise its own gRPC receive limit: the client default is 4 MiB, below a maximum page. |
 
 An over-limit request is a transport verdict (`ResourceExhausted`), a different
 answer from the handler's `InvalidArgument` value-limit rejection: the layer
