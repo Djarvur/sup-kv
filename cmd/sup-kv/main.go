@@ -1,31 +1,28 @@
 // Command sup-kv is a leaderless replicated in-memory key-value store for
 // small clusters on one trusted LAN broadcast segment.
 //
-// Per the layout contract, main() holds flags, environment, signals and
-// wiring only — every behavior (write confirmation, replication, watch,
-// snapshots) lives in the packages being wired. Configuration resolves
-// once: each knob is a flag whose default is its SUPKV_ env twin, so the
-// stdlib flag parser delivers flag > env > default (D-16/D-17). SIGTERM
-// runs the pinned graceful-shutdown order (D-19) whose final step is the
-// engine's write-confirmed dump.
+// Per the layout contract, main() is wiring only: configuration parsing,
+// validation and usage live in internal/config (OBSV-02, OBSV-08, D-03),
+// signals and the process lifecycle live here, and every behavior (write
+// confirmation, replication, watch, snapshots) lives in the packages being
+// wired. Configuration resolves once — flag > env > default (D-16/D-17) —
+// and is validated before any socket or file work. SIGTERM runs the pinned
+// graceful-shutdown order (D-19) whose final step is the engine's
+// write-confirmed dump.
 package main
 
 import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -37,6 +34,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/config"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
 	"github.com/Djarvur/sup-kv/internal/metrics"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
@@ -51,20 +49,6 @@ import (
 var (
 	version = "dev"
 	commit  = "dev" //nolint:gochecknoglobals // the -X ldflags mechanism (D-18) can only write package-level vars.
-)
-
-// Configuration-error sentinels the startup path wraps with the offending
-// detail; callers match them with [errors.Is], never identity comparison.
-var (
-	errNodeIDRange        = errors.New("node-id exceeds the 16-bit node ID space")
-	errMissingRequired    = errors.New("missing required knobs")
-	errNodeIDEnv          = errors.New("must be an integer within the 16-bit node ID space")
-	errLogFormatEnv       = errors.New("must be json or text")
-	errIncompleteCertSet  = errors.New("the metrics certificate envs must be set together")
-	errDatagramCeiling    = errors.New("value-max-bytes exceeds the datagram ceiling")
-	errValueMaxBytesRange = errors.New("value-max-bytes must be positive")
-	errSyncChunkBytes     = errors.New("sync-chunk-bytes exceeds the datagram ceiling")
-	errStartupGateRange   = errors.New("startup gate must be positive")
 )
 
 // Process exit codes: a configuration error (missing or malformed knob)
@@ -96,117 +80,6 @@ const readHeaderTimeout = 5 * time.Second
 // the signal package — the force path is already taken.
 const signalBuffer = 2
 
-// The SUPKV_ env twins of the flags (D-16, the published operational
-// contract): one per knob, resolved as the flag's default value.
-const (
-	envNodeID             = "SUPKV_NODE_ID"
-	envBindAddr           = "SUPKV_BIND_ADDR"
-	envBroadcastAddr      = "SUPKV_BROADCAST_ADDR"
-	envDumpPath           = "SUPKV_DUMP_PATH"
-	envGRPCAddr           = "SUPKV_GRPC_ADDR"
-	envStartupGate        = "SUPKV_STARTUP_GATE"
-	envStartupGateEmpty   = "SUPKV_STARTUP_GATE_EMPTY"
-	envWaitTimeout        = "SUPKV_WAIT_TIMEOUT"
-	envValueMaxBytes      = "SUPKV_VALUE_MAX_BYTES"
-	envSyncChunkBytes     = "SUPKV_SYNC_CHUNK_BYTES"
-	envHelloInterval      = "SUPKV_HELLO_INTERVAL"
-	envPeerTimeout        = "SUPKV_PEER_TIMEOUT"
-	envAckTimeout         = "SUPKV_ACK_TIMEOUT"
-	envAckTimeoutMax      = "SUPKV_ACK_TIMEOUT_MAX"
-	envRetransmitInterval = "SUPKV_RETRANSMIT_INTERVAL"
-	envSyncInterval       = "SUPKV_SYNC_INTERVAL"
-	envSyncResponseRate   = "SUPKV_SYNC_RESPONSE_RATE"
-	envMaxClockLead       = "SUPKV_MAX_CLOCK_LEAD"
-	envDumpDebounce       = "SUPKV_DUMP_DEBOUNCE"
-	envDumpMaxWait        = "SUPKV_DUMP_MAX_WAIT"
-	envDriftWarn          = "SUPKV_DRIFT_WARN"
-
-	// The structured-logging env knobs (D-06/D-07) are env-only — no flag
-	// twins: they configure the process's own output format, not its
-	// service behavior.
-	envLogLevel  = "SUPKV_LOG_LEVEL"
-	envLogFormat = "SUPKV_LOG_FORMAT"
-
-	// The metrics/debug endpoint knobs (D-01/D-02): the listen address has
-	// a flag twin with NO default — unset means no listener at all; the
-	// certificate triple is env-only and all-or-nothing.
-	envMetricsAddr     = "SUPKV_METRICS_ADDR"
-	envMetricsCert     = "SUPKV_METRICS_CERT"
-	envMetricsKey      = "SUPKV_METRICS_KEY"
-	envMetricsClientCA = "SUPKV_METRICS_CLIENT_CA"
-)
-
-// The design defaults (docs/IDEA.md §Parameters, plus the two API-layer
-// knobs: the Open Q1 pin's distinct gRPC listener and the A2 wait default).
-const (
-	defaultGRPCAddr    = "127.0.0.1:7901"
-	defaultStartupGate = time.Second
-	defaultWaitTimeout = time.Second
-
-	// defaultStartupGateEmpty is the empty-disk node's backstop (D-02,
-	// ADR 0006): a node that loaded no records has nothing local to answer
-	// with, so it waits longer for a peer listing than a node with data.
-	defaultStartupGateEmpty = 60 * time.Second
-	defaultSyncChunkBytes   = 1400
-	defaultHelloInterval    = time.Second
-	defaultPeerTimeout      = 5 * time.Second
-	defaultAckTimeout       = 200 * time.Millisecond
-	defaultAckTimeoutMax    = 5 * time.Second
-	defaultRetransmit       = 100 * time.Millisecond
-	defaultSyncInterval     = 30 * time.Second
-	defaultSyncRespRate     = 500
-	// defaultMaxClockLead is the inbound version bound's launch default
-	// (XPORT-04): 60 s, the documented drift tolerance. The core normalizes
-	// a zero or negative value to the same bound; the flag default only
-	// makes the documented value visible in --help.
-	defaultMaxClockLead = time.Minute
-	defaultDumpDebounce = 50 * time.Millisecond
-	defaultDumpMaxWait  = time.Second
-	defaultDriftWarn    = 60 * time.Second
-
-	// The structured-logging defaults (D-06/D-07): JSON records on stderr,
-	// info level.
-	defaultLogLevel  = slog.LevelInfo
-	defaultLogFormat = logFormatJSON
-)
-
-// The accepted SUPKV_LOG_FORMAT values (D-06).
-const (
-	logFormatJSON = "json"
-	logFormatText = "text"
-)
-
-// config is the resolved launch configuration, built once at startup.
-type config struct {
-	nodeID             uint16
-	bindAddr           string
-	broadcastAddr      string
-	dumpPath           string
-	grpcAddr           string
-	startupGate        time.Duration
-	startupGateEmpty   time.Duration
-	waitTimeout        time.Duration
-	valueMaxBytes      int
-	syncChunkBytes     int
-	helloInterval      time.Duration
-	peerTimeout        time.Duration
-	ackTimeout         time.Duration
-	ackTimeoutMax      time.Duration
-	retransmitInterval time.Duration
-	syncInterval       time.Duration
-	syncResponseRate   int
-	maxClockLead       time.Duration
-	dumpDebounce       time.Duration
-	dumpMaxWait        time.Duration
-	driftWarn          time.Duration
-	logLevel           slog.Level
-	logFormat          string
-	metricsAddr        string
-	metricsCert        string
-	metricsKey         string
-	metricsClientCA    string
-}
-
 // wired bundles the running services with their lifecycle handles — the
 // plumbing main's shutdown path needs, no behavior of its own. metricsSrv is
 // nil when --metrics-addr is unset: the endpoint is opt-in with no listener
@@ -225,20 +98,25 @@ type wired struct {
 }
 
 func main() {
-	var cfg config
-	nodeID := new(uint64)
-	showVersion := new(bool)
-	envErr := registerConfig(&cfg, nodeID, showVersion)
-	flag.Parse()
-
-	if *showVersion {
+	cfg, err := config.Parse(os.Args[1:], os.Getenv)
+	if errors.Is(err, config.ErrHelp) {
+		config.Usage(os.Stdout)
+		return
+	}
+	if err != nil {
+		usageError(err)
+		os.Exit(exitUsage)
+	}
+	// --version is resolved by Parse before any environment or validation
+	// error (Pitfall 20): the build-identity probe works on a broken
+	// environment, and nothing below runs for it.
+	if cfg.ShowVersion {
 		printVersion()
 		return
 	}
-	err := finalizeConfig(&cfg, *nodeID, envErr)
+	err = config.Validate(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sup-kv: %s\n", err)
-		flag.Usage()
+		usageError(err)
 		os.Exit(exitUsage)
 	}
 
@@ -250,7 +128,7 @@ func main() {
 
 	// XPORT-09: a non-wildcard bind is loud before any service starts — the
 	// node would send broadcasts but never receive them.
-	warnOnNonWildcardBind(cfg.bindAddr)
+	warnOnNonWildcardBind(cfg.BindAddr)
 
 	node, listener, err := wire(cfg)
 	if err != nil {
@@ -275,6 +153,15 @@ func main() {
 	os.Exit(0)
 }
 
+// usageError reports a configuration error through the usage path: the error
+// names the offending parameter, the full usage follows on stderr, and main
+// exits with exitUsage. It never exits itself, so main stays the only exit
+// site.
+func usageError(err error) {
+	fmt.Fprintf(os.Stderr, "sup-kv: %s\n", err)
+	config.Usage(os.Stderr)
+}
+
 // setupLogging installs the process's one slog handler on stderr (D-06,
 // D-07): JSON records by default, key=value text when SUPKV_LOG_FORMAT=text,
 // at the level SUPKV_LOG_LEVEL resolved (debug through error). Called once
@@ -282,10 +169,10 @@ func main() {
 // redirects the log package's default logger, so the remaining direct
 // [log.Printf] calls surface as level=INFO records in the same format —
 // every stderr line the running node emits is one handler-formatted record.
-func setupLogging(cfg config) {
-	opts := &slog.HandlerOptions{Level: cfg.logLevel}
+func setupLogging(cfg config.Config) {
+	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
 	var h slog.Handler = slog.NewJSONHandler(os.Stderr, opts)
-	if cfg.logFormat == logFormatText {
+	if cfg.IsTextFormat() {
 		h = slog.NewTextHandler(os.Stderr, opts)
 	}
 	slog.SetDefault(slog.New(h))
@@ -314,258 +201,16 @@ func warnOnNonWildcardBind(bindAddr string) {
 		"detail", "broadcast replication is addressed to the segment broadcast address, which a non-wildcard bind never receives; unicast-only deployment assumed")
 }
 
-// registerConfig declares every knob as a flag whose default is its SUPKV_
-// env twin (or the design default) — an explicit flag overrides the
-// environment and the environment overrides the default (D-17). Parsing
-// stays with the caller (main owns every exit per the deep-exit rule): a
-// malformed env value is collected as the returned error, main aborts with
-// usage after Parse, and --version keeps working even on a broken
-// environment.
-func registerConfig(cfg *config, nodeID *uint64, showVersion *bool) error {
-	var errs []error
-	fail := func(env string, err error) {
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", env, err))
-		}
-	}
-	envDur := func(env string, def time.Duration) time.Duration {
-		v, err := envDuration(env, def)
-		fail(env, err)
-		return v
-	}
-	envNum := func(env string, def int) int {
-		v, err := envInt(env, def)
-		fail(env, err)
-		return v
-	}
-	flag.BoolVar(showVersion, "version", false, "print version, commit and Go runtime version, then exit")
-
-	id, err := envUint16(envNodeID, 0)
-	fail(envNodeID, err)
-	flag.Uint64Var(nodeID, "node-id", uint64(id), "required unique 16-bit node ID (env SUPKV_NODE_ID)")
-	flag.StringVar(&cfg.bindAddr, "bind-addr", envOrDefault(envBindAddr, ""),
-		"required local UDP bind address, e.g. 0.0.0.0:7900 (env SUPKV_BIND_ADDR)")
-	flag.StringVar(&cfg.broadcastAddr, "broadcast-addr", envOrDefault(envBroadcastAddr, ""),
-		"required segment broadcast address, e.g. 127.255.255.255:7900 (env SUPKV_BROADCAST_ADDR)")
-	flag.StringVar(&cfg.dumpPath, "dump-path", envOrDefault(envDumpPath, ""),
-		"required dump file path (env SUPKV_DUMP_PATH)")
-	flag.StringVar(&cfg.grpcAddr, "grpc-addr", envOrDefault(envGRPCAddr, defaultGRPCAddr),
-		"gRPC listen address, distinct from the UDP bind (env SUPKV_GRPC_ADDR)")
-	flag.StringVar(&cfg.metricsAddr, "metrics-addr", envOrDefault(envMetricsAddr, ""),
-		"optional metrics/debug listen address — unset means no listener (env SUPKV_METRICS_ADDR)")
-	flag.DurationVar(&cfg.startupGate, "startup-gate", envDur(envStartupGate, defaultStartupGate),
-		"gate backstop: writable this long after start even without a sync round (env SUPKV_STARTUP_GATE)")
-	flag.DurationVar(&cfg.startupGateEmpty, "startup-gate-empty", envDur(envStartupGateEmpty, defaultStartupGateEmpty),
-		"empty-disk gate backstop: a node with no loaded records waits this long for a peer listing (env SUPKV_STARTUP_GATE_EMPTY)")
-	flag.DurationVar(&cfg.waitTimeout, "wait-timeout", envDur(envWaitTimeout, defaultWaitTimeout),
-		"default wait_for_replication bound (env SUPKV_WAIT_TIMEOUT)")
-	flag.IntVar(&cfg.valueMaxBytes, "value-max-bytes", envNum(envValueMaxBytes, storage.ValueMaxBytes),
-		"maximum value size in bytes (env SUPKV_VALUE_MAX_BYTES)")
-	flag.IntVar(&cfg.syncChunkBytes, "sync-chunk-bytes", envNum(envSyncChunkBytes, defaultSyncChunkBytes),
-		"DataSync chunk byte budget (env SUPKV_SYNC_CHUNK_BYTES)")
-	flag.IntVar(&cfg.syncResponseRate, "sync-response-rate", envNum(envSyncResponseRate, defaultSyncRespRate),
-		"sync responses per second cap (env SUPKV_SYNC_RESPONSE_RATE)")
-	registerDurationFlags(cfg, envDur)
-
-	resolveLogKnobs(cfg, &errs)
-	resolveMetricsCerts(cfg)
-	return errors.Join(errs...)
-}
-
-// registerDurationFlags declares the replication-timing and dump-cycle knobs
-// — every duration flag except startup-gate and wait-timeout, which sit with
-// the API-facing registrations. The envDur closure is registerConfig's
-// collected-error resolution, shared so a malformed SUPKV_ duration twin
-// aborts startup through the same path regardless of which helper declared
-// the flag.
-func registerDurationFlags(cfg *config, envDur func(env string, def time.Duration) time.Duration) {
-	flag.DurationVar(&cfg.helloInterval, "hello-interval", envDur(envHelloInterval, defaultHelloInterval),
-		"discovery broadcast period (env SUPKV_HELLO_INTERVAL)")
-	flag.DurationVar(&cfg.peerTimeout, "peer-timeout", envDur(envPeerTimeout, defaultPeerTimeout),
-		"peer eviction silence bound (env SUPKV_PEER_TIMEOUT)")
-	flag.DurationVar(&cfg.ackTimeout, "ack-timeout", envDur(envAckTimeout, defaultAckTimeout),
-		"retransmit ladder base (env SUPKV_ACK_TIMEOUT)")
-	flag.DurationVar(&cfg.ackTimeoutMax, "ack-timeout-max", envDur(envAckTimeoutMax, defaultAckTimeoutMax),
-		"retransmit ladder ceiling (env SUPKV_ACK_TIMEOUT_MAX)")
-	flag.DurationVar(&cfg.retransmitInterval, "retransmit-interval", envDur(envRetransmitInterval, defaultRetransmit),
-		"retransmit scan period (env SUPKV_RETRANSMIT_INTERVAL)")
-	flag.DurationVar(&cfg.syncInterval, "sync-interval", envDur(envSyncInterval, defaultSyncInterval),
-		"proactive sync listing period (env SUPKV_SYNC_INTERVAL)")
-	flag.DurationVar(&cfg.maxClockLead, "max-clock-lead", envDur(envMaxClockLead, defaultMaxClockLead),
-		"reject received versions beyond now + this bound (env SUPKV_MAX_CLOCK_LEAD)")
-	flag.DurationVar(&cfg.dumpDebounce, "dump-debounce", envDur(envDumpDebounce, defaultDumpDebounce),
-		"dump quiet window (env SUPKV_DUMP_DEBOUNCE)")
-	flag.DurationVar(&cfg.dumpMaxWait, "dump-max-wait", envDur(envDumpMaxWait, defaultDumpMaxWait),
-		"dump start bound from the oldest unconfirmed write (env SUPKV_DUMP_MAX_WAIT)")
-	flag.DurationVar(&cfg.driftWarn, "drift-warn", envDur(envDriftWarn, defaultDriftWarn),
-		"clock drift warning threshold (env SUPKV_DRIFT_WARN)")
-}
-
-// resolveMetricsCerts reads the env-only metrics certificate triple (D-02,
-// the 06-RESEARCH A4 env-only reading) into cfg — file paths, so no
-// malformed-value error exists here; the all-or-nothing check runs in
-// finalizeConfig, before any bind (Pitfall 8).
-func resolveMetricsCerts(cfg *config) {
-	cfg.metricsCert = envOrDefault(envMetricsCert, "")
-	cfg.metricsKey = envOrDefault(envMetricsKey, "")
-	cfg.metricsClientCA = envOrDefault(envMetricsClientCA, "")
-}
-
-// resolveLogKnobs resolves the env-only structured-logging knobs (D-06/D-07)
-// into cfg, appending each malformed value to errs under its env name — the
-// same collected env-error contract registerConfig's fail() applies to the
-// flag twins: a malformed SUPKV_LOG_* value aborts startup with exitUsage,
-// never a silently-swallowed default.
-func resolveLogKnobs(cfg *config, errs *[]error) {
-	level, levelErr := envSlogLevel(envLogLevel, defaultLogLevel)
-	if levelErr != nil {
-		*errs = append(*errs, fmt.Errorf("%s: %w", envLogLevel, levelErr))
-	}
-	cfg.logLevel = level
-	format, formatErr := envLogValue(envLogFormat, defaultLogFormat)
-	if formatErr != nil {
-		*errs = append(*errs, fmt.Errorf("%s: %w", envLogFormat, formatErr))
-	}
-	cfg.logFormat = format
-}
-
-// finalizeConfig validates what only the parsed flags can decide — the
-// node-id range and the required knobs — and applies the resolved node id.
-func finalizeConfig(cfg *config, nodeID uint64, envErr error) error {
-	if envErr != nil {
-		return envErr
-	}
-	if nodeID > math.MaxUint16 {
-		return fmt.Errorf("--node-id %d: %w", nodeID, errNodeIDRange)
-	}
-	cfg.nodeID = uint16(nodeID)
-	if missing := missingRequired(*cfg); len(missing) > 0 {
-		return fmt.Errorf("%w: %s", errMissingRequired, strings.Join(missing, ", "))
-	}
-	err := checkMetricsCerts(*cfg)
-	if err != nil {
-		return err
-	}
-	err = checkStartupGates(*cfg)
-	if err != nil {
-		return err
-	}
-	err = checkValueMaxBytes(*cfg)
-	if err != nil {
-		return err
-	}
-	err = checkDatagramCeiling(*cfg)
-	if err != nil {
-		return err
-	}
-	return checkSyncChunkBytes(*cfg)
-}
-
-// checkSyncChunkBytes rejects an explicit --sync-chunk-bytes above the UDP
-// datagram ceiling before any bind (WR-06): a chunk budget above 65 507
-// describes a chunk no datagram can carry, and the core's defensive clamp
-// would silently ship smaller chunks than the operator configured. The
-// ceiling is the core's own constant (repl.MaxSyncChunkBytes, pinned to the
-// adapter's datagram ceiling by a cross-seam test). A zero or negative value
-// stays legal — the core normalizes it to the design default.
-func checkSyncChunkBytes(cfg config) error {
-	if cfg.syncChunkBytes > repl.MaxSyncChunkBytes {
-		return fmt.Errorf("%w: --sync-chunk-bytes=%d (at most %d, the largest IPv4 UDP payload)",
-			errSyncChunkBytes, cfg.syncChunkBytes, repl.MaxSyncChunkBytes)
-	}
-	return nil
-}
-
-// checkMetricsCerts enforces D-02's all-or-nothing contract before any bind
-// (Pitfall 8): any of the three certificate envs set without all three is a
-// startup error naming every env of the triple — no code path can reach the
-// TLS builder with a half-loaded set, and with none set the listener serves
-// plaintext (the loopback/debug mode).
-func checkMetricsCerts(cfg config) error {
-	noneSet := cfg.metricsCert == "" && cfg.metricsKey == "" && cfg.metricsClientCA == ""
-	allSet := cfg.metricsCert != "" && cfg.metricsKey != "" && cfg.metricsClientCA != ""
-	if noneSet || allSet {
-		return nil
-	}
-	return fmt.Errorf("%w: %s, %s and %s",
-		errIncompleteCertSet, envMetricsCert, envMetricsKey, envMetricsClientCA)
-}
-
-// checkStartupGates enforces T-4-12's positivity contract for both gate
-// backstops before any bind: a zero or negative value can never mean "stay
-// closed forever" — the empty gate's default and this check both guard it —
-// and the error names the offending parameter. Only positivity is checked
-// here; cross-parameter relations are Phase 7's one-point validation (Open
-// Question 7), and ADR 0006 defines the two parameters separately, so neither
-// implies the other.
-func checkStartupGates(cfg config) error {
-	if cfg.startupGate <= 0 {
-		return fmt.Errorf("%w: --startup-gate=%s", errStartupGateRange, cfg.startupGate)
-	}
-	if cfg.startupGateEmpty <= 0 {
-		return fmt.Errorf("%w: --startup-gate-empty=%s", errStartupGateRange, cfg.startupGateEmpty)
-	}
-	return nil
-}
-
-// checkValueMaxBytes rejects a non-positive --value-max-bytes before any bind
-// (PERSIST-01, T-5-02): the store normalizes such a value to the default, so
-// silently accepting it would hide an operator typo behind what looks like a
-// deliberate setting. The error names the flag, and finalizeConfig's caller
-// exits with the usage code. A positive value is passed through unchanged —
-// the datagram-ceiling relation is checkDatagramCeiling's.
-func checkValueMaxBytes(cfg config) error {
-	if cfg.valueMaxBytes <= 0 {
-		return fmt.Errorf("%w: --value-max-bytes=%d", errValueMaxBytesRange, cfg.valueMaxBytes)
-	}
-	return nil
-}
-
-// checkDatagramCeiling enforces XPORT-03's startup half: the largest record
-// the write API accepts — a key of storage.MaxKeyBytes with a value of
-// value_max_bytes — must encode into one UDP datagram. The size comes from
-// udprepl.MaxRecordDatagramBytes, which marshals the real schema at
-// worst-case varint widths, so this check cannot undercount a maximal
-// record (and is why --value-max-bytes=64000 still starts: its worst case
-// is well below the ceiling). A non-positive value-max-bytes is the store's
-// own default (storage.NewStore normalizes it), so the check evaluates that
-// same effective value. The probe width is bounded by the ceiling itself: a
-// misconfigured multi-gigabyte value is over the ceiling before any key or
-// envelope byte, and materializing it just to measure would turn a config
-// typo into an out-of-memory startup. A non-positive setting never reaches
-// this check — checkValueMaxBytes rejects it first — so the
-// storage.ValueMaxBytes fallback keeps the probe total over its input.
-// Called by finalizeConfig, before any bind or socket work, so a bad
-// combination exits with the usage code (2) rather than starting a node
-// whose largest confirmed write could never replicate.
-func checkDatagramCeiling(cfg config) error {
-	valueBytes := cfg.valueMaxBytes
-	if valueBytes <= 0 {
-		valueBytes = storage.ValueMaxBytes
-	}
-	probe := min(valueBytes, udprepl.MaxDatagramBytes)
-	size := udprepl.MaxRecordDatagramBytes(storage.MaxKeyBytes, probe)
-	if probe == valueBytes && size <= udprepl.MaxDatagramBytes {
-		return nil
-	}
-	measured := strconv.Itoa(size)
-	if probe < valueBytes {
-		measured = "at least " + measured
-	}
-	return fmt.Errorf("%w: --value-max-bytes=%d with the %d-byte key limit needs %s-byte datagrams, over the %d-byte UDP ceiling",
-		errDatagramCeiling, cfg.valueMaxBytes, storage.MaxKeyBytes, measured, udprepl.MaxDatagramBytes)
-}
-
 // gateBackstopFor resolves the startup-gate backstop once, from the loaded
 // store's record count (D-02, ADR 0006): the engine finished loading before
 // the wiring runs, so KeyCount is final and the resolver reads only the
 // duration. A node with any record — live or tombstoned — never consults
 // startup_gate_empty.
-func gateBackstopFor(cfg config, engine *persist.Engine) time.Duration {
+func gateBackstopFor(cfg config.Config, engine *persist.Engine) time.Duration {
 	if engine.KeyCount() == 0 {
-		return cfg.startupGateEmpty
+		return cfg.StartupGateEmpty
 	}
-	return cfg.startupGate
+	return cfg.StartupGate
 }
 
 // startEngine opens the real dump store at the configured path, resolves
@@ -573,14 +218,14 @@ func gateBackstopFor(cfg config, engine *persist.Engine) time.Duration {
 // storage.Config and the hub's durability watermark through
 // persist.Config.OnConfirmed, and launches the single dumper goroutine.
 // Returns the engine with its lifecycle handles.
-func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.CancelFunc, <-chan error) {
-	dumps := persistfile.New(cfg.dumpPath)
-	engine, discarded := persist.Open(cfg.nodeID, time.Now, cfg.driftWarn, dumps, storage.Config{
-		ValueMaxBytes: cfg.valueMaxBytes,
+func startEngine(cfg config.Config, hub *grpcapi.WatchHub) (*persist.Engine, context.CancelFunc, <-chan error) {
+	dumps := persistfile.New(cfg.DumpPath)
+	engine, discarded := persist.Open(cfg.WireNodeID(), time.Now, cfg.DriftWarn, dumps, storage.Config{
+		ValueMaxBytes: cfg.ValueMaxBytes,
 		OnChange:      hub.Ingest,
 	}, persist.Config{
-		Debounce: cfg.dumpDebounce,
-		MaxWait:  cfg.dumpMaxWait,
+		Debounce: cfg.DumpDebounce,
+		MaxWait:  cfg.DumpMaxWait,
 		// The durability seam (APIS-04, D-04): only a successful dump's
 		// covered generation releases Watch events, so a change is announced
 		// after it is durable, never at install time.
@@ -597,15 +242,22 @@ func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.Ca
 	if skipped := stats.Decoded.ValueLimit; skipped > 0 {
 		slog.Warn("Dumped records skipped by the configured value limit",
 			"count", skipped,
-			"value_max_bytes", cfg.valueMaxBytes)
+			"value_max_bytes", cfg.ValueMaxBytes)
 	}
 	if remaining := discarded - stats.Decoded.ValueLimit; remaining > 0 {
-		log.Printf("sup-kv: discarded %d undecodable dumped records at startup", remaining)
+		logDiscardedRecords(remaining)
 	}
 	engineCtx, engineCancel := context.WithCancel(context.Background())
 	engineDone := make(chan error, 1)
 	go func() { engineDone <- engine.Run(engineCtx) }()
 	return engine, engineCancel, engineDone
+}
+
+// logDiscardedRecords reports the undecodable-record count left after the
+// value-limit skips were reported separately.
+func logDiscardedRecords(count int) {
+	//nolint:gosec // G706 is a false positive: the message is a constant and the only argument is a counted int, never operator text.
+	log.Printf("sup-kv: discarded %d undecodable dumped records at startup", count)
 }
 
 // logLoadStats reports one startup load in the one-line-per-class policy
@@ -694,7 +346,7 @@ func errorText(err error) string {
 // its seam options — its gate backstop chosen once from the loaded store's
 // record count (D-02) — and the gate resolver plus hub goroutines on the API
 // context. Returns the wired bundle and the listening gRPC endpoint.
-func wire(cfg config) (*wired, net.Listener, error) {
+func wire(cfg config.Config) (*wired, net.Listener, error) {
 	hub := grpcapi.NewWatchHub()
 	engine, engineCancel, engineDone := startEngine(cfg, hub)
 
@@ -725,21 +377,21 @@ func wire(cfg config) (*wired, net.Listener, error) {
 		WaitReplicated: adapter.WaitReplicated,
 		ReplayNotify:   adapter.NotifyReplayedWrite,
 		StartupGate:    gateBackstopFor(cfg, engine),
-		WaitTimeout:    cfg.waitTimeout,
+		WaitTimeout:    cfg.WaitTimeout,
 	})
 
 	apiCtx, apiCancel := context.WithCancel(context.Background())
 	go srv.RunGate(apiCtx)
 	go func() { _ = hub.Run(apiCtx) }()
 
-	listener, gs, err := listenGRPC(cfg.grpcAddr, srv, grpcapi.LimitsFor(cfg.valueMaxBytes))
+	listener, gs, err := listenGRPC(cfg.GRPCAddr, srv, grpcapi.LimitsFor(cfg.ValueMaxBytes))
 	if err != nil {
 		abortWire(engineCancel, replCancel, apiCancel, nil)
 		return nil, nil, err
 	}
 
 	var metricsSrv *http.Server
-	if cfg.metricsAddr != "" { // D-01: unset means no listener, no goroutine.
+	if cfg.MetricsAddr != "" { // D-01: unset means no listener, no goroutine.
 		metricsSrv, err = listenMetrics(cfg, metricsSources(adapter, engine))
 		if err != nil {
 			abortWire(engineCancel, replCancel, apiCancel, listener)
@@ -774,17 +426,17 @@ func abortWire(engineCancel, replCancel, apiCancel context.CancelFunc, listener 
 
 // newReplicationAdapter builds the UDP replication adapter over the engine
 // with the resolved replication knobs.
-func newReplicationAdapter(cfg config, engine *persist.Engine) (*udprepl.Adapter, error) {
-	return udprepl.New(cfg.bindAddr, cfg.broadcastAddr, cfg.nodeID, engine, repl.Config{
-		HelloInterval:      cfg.helloInterval,
-		PeerTimeout:        cfg.peerTimeout,
-		AckTimeout:         cfg.ackTimeout,
-		AckTimeoutMax:      cfg.ackTimeoutMax,
-		RetransmitInterval: cfg.retransmitInterval,
-		SyncInterval:       cfg.syncInterval,
-		SyncChunkBytes:     cfg.syncChunkBytes,
-		SyncResponseRate:   cfg.syncResponseRate,
-		MaxClockLead:       cfg.maxClockLead,
+func newReplicationAdapter(cfg config.Config, engine *persist.Engine) (*udprepl.Adapter, error) {
+	return udprepl.New(cfg.BindAddr, cfg.BroadcastAddr, cfg.WireNodeID(), engine, repl.Config{
+		HelloInterval:      cfg.HelloInterval,
+		PeerTimeout:        cfg.PeerTimeout,
+		AckTimeout:         cfg.AckTimeout,
+		AckTimeoutMax:      cfg.AckTimeoutMax,
+		RetransmitInterval: cfg.RetransmitInterval,
+		SyncInterval:       cfg.SyncInterval,
+		SyncChunkBytes:     cfg.SyncChunkBytes,
+		SyncResponseRate:   cfg.SyncResponseRate,
+		MaxClockLead:       cfg.MaxClockLead,
 		// The core's prebuilt metadata strings (REPL-08 configuration
 		// errors, apply failures) ride as the detail attr under a static
 		// capitalized msg — the sloglint static-msg discipline (D-08); a
@@ -820,14 +472,14 @@ func metricsSources(adapter *udprepl.Adapter, engine *persist.Engine) metrics.So
 // complete by checkMetricsCerts — turns the listener into the mTLS one when
 // set, the plaintext loopback/debug listener when not. Serve runs on its own
 // goroutine; the lifecycle handle shutdown() needs is the [http.Server].
-func listenMetrics(cfg config, sources metrics.Sources) (*http.Server, error) {
-	inner, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", cfg.metricsAddr)
+func listenMetrics(cfg config.Config, sources metrics.Sources) (*http.Server, error) {
+	inner, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", cfg.MetricsAddr)
 	if err != nil {
-		return nil, fmt.Errorf("listen tcp %s: %w", cfg.metricsAddr, err)
+		return nil, fmt.Errorf("listen tcp %s: %w", cfg.MetricsAddr, err)
 	}
 	listener := inner
-	if cfg.metricsCert != "" {
-		tlsCfg, tlsErr := metrics.NewTLSConfig(cfg.metricsCert, cfg.metricsKey, cfg.metricsClientCA)
+	if cfg.MetricsCert != "" {
+		tlsCfg, tlsErr := metrics.NewTLSConfig(cfg.MetricsCert, cfg.MetricsKey, cfg.MetricsClientCA)
 		if tlsErr != nil {
 			_ = inner.Close()
 			return nil, fmt.Errorf("metrics TLS: %w", tlsErr)
@@ -993,112 +645,9 @@ func awaitEngineStop(done <-chan error, grace time.Duration) {
 	}
 }
 
-// missingRequired names every required knob left at its zero default — its
-// SUPKV_ twin unset as well; node-id's zero is not a usable identity.
-func missingRequired(cfg config) []string {
-	var missing []string
-	if cfg.nodeID == 0 {
-		missing = append(missing, "--node-id")
-	}
-	if cfg.bindAddr == "" {
-		missing = append(missing, "--bind-addr")
-	}
-	if cfg.broadcastAddr == "" {
-		missing = append(missing, "--broadcast-addr")
-	}
-	if cfg.dumpPath == "" {
-		missing = append(missing, "--dump-path")
-	}
-	return missing
-}
-
 // printVersion reports the ldflags-injected build identity (D-18): version,
 // commit and the Go runtime version, "dev" standing in for unstamped
 // fields.
 func printVersion() {
 	fmt.Printf("sup-kv %s %s %s\n", version, commit, runtime.Version())
-}
-
-// envOrDefault returns the SUPKV_ env value when set (empty counts as
-// unset) or def — the flag default, so the stdlib flag parser delivers
-// flag > env > default with zero extra machinery (D-16/D-17).
-func envOrDefault(env, def string) string {
-	if v, ok := os.LookupEnv(env); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-// envUint16 resolves an env knob that must parse as a 16-bit unsigned
-// integer — the wire's node_id space. A malformed value is an error, never
-// a silently-swallowed default.
-func envUint16(env string, def uint16) (uint16, error) {
-	raw := envOrDefault(env, "")
-	if raw == "" {
-		return def, nil
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil || v < 0 || v > math.MaxUint16 {
-		return def, errNodeIDEnv
-	}
-	return uint16(v), nil
-}
-
-// envInt resolves an env knob that must parse as an int. A malformed value
-// is an error, never a silently-swallowed default.
-func envInt(env string, def int) (int, error) {
-	raw := envOrDefault(env, "")
-	if raw == "" {
-		return def, nil
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return def, fmt.Errorf("must be an integer: %w", err)
-	}
-	return v, nil
-}
-
-// envDuration resolves an env knob that must parse as a Go duration. A
-// malformed value is an error, never a silently-swallowed default.
-func envDuration(env string, def time.Duration) (time.Duration, error) {
-	raw := envOrDefault(env, "")
-	if raw == "" {
-		return def, nil
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil {
-		return def, fmt.Errorf("must be a duration: %w", err)
-	}
-	return d, nil
-}
-
-// envSlogLevel resolves the log-level env knob (D-07): debug, info, warn or
-// error, case-insensitively, per [slog.Level.UnmarshalText]. A malformed
-// value is an error, never a silently-swallowed default.
-func envSlogLevel(env string, def slog.Level) (slog.Level, error) {
-	raw := envOrDefault(env, "")
-	if raw == "" {
-		return def, nil
-	}
-	var lvl slog.Level
-	err := lvl.UnmarshalText([]byte(raw))
-	if err != nil {
-		return def, fmt.Errorf("must be debug, info, warn or error: %w", err)
-	}
-	return lvl, nil
-}
-
-// envLogValue resolves the log-format env knob (D-06): json (the default)
-// or text, case-insensitively. A malformed value is an error, never a
-// silently-swallowed default.
-func envLogValue(env, def string) (string, error) {
-	raw := envOrDefault(env, "")
-	switch strings.ToLower(raw) {
-	case "":
-		return def, nil
-	case logFormatJSON, logFormatText:
-		return strings.ToLower(raw), nil
-	default:
-		return def, fmt.Errorf("%w: %q", errLogFormatEnv, raw)
-	}
 }
