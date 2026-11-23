@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 10
+current_plan: 11
 status: executing
-stopped_at: Completed 06-09-PLAN.md
-last_updated: "2026-11-23T01:40:23.063Z"
+stopped_at: Completed 06-10-PLAN.md
+last_updated: "2026-11-23T01:49:11.815Z"
 last_activity: 2026-11-23
 last_activity_desc: Completed 06-09-PLAN.md
-state_head: 6ddcc07a880f0cb826fe5c7cbd64e3d4ac60d71c
+state_head: 570a231dfa2c3350c9491e48c52846aca282b070
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 70
+  completed_plans: 71
 ---
 
 # Project State
@@ -30,9 +30,9 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — EXECUTING
-Current Plan: 10
+Current Plan: 11
 Total Plans in Phase: 13
-Status: Executing
+Status: Ready to execute
 Last activity: 2026-11-23 — Completed 06-09-PLAN.md
 
 Progress: [███░░░░░░░] 33%
@@ -129,6 +129,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P07 | 522s | 3 tasks | 11 files |
 | Phase 06 P08 | 705s | 3 tasks | 4 files |
 | Phase 06 P09 | 284s | 2 tasks | 4 files |
+| Phase 06 P10 | 200s | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -412,6 +413,11 @@ Recent decisions affecting current work:
 - [Phase 06]: 06-09: docs/API.md and TestAPIDoc land as one contract pair — the anchor table reads the repo file and pins one literal per mandated statement, so section deletion or heading drift fails the normal test gate (T-06-29); the doc comment states the honest scope (presence and drift, not sentence truth).
 - [Phase 06]: 06-09: the error table follows the mapper's first-match order and adds the handler validation rows beside it; the ordering rationale (pre-built status pass-through, ErrDumpFailed before the port classes, ErrNoDump before the fs rows, context through the matched sentinel, logged constant fallback) is part of the documented contract.
 - [Phase 06]: 06-09: every limit is documented as implemented (caller-bounded wait, non-linearizable rollback, current-memory snapshot) and the Phase 9/DOCS-05 remainder is named pending; requirements-completed stays empty on the #2388 shared-ID gate, with 06-13 closing the checkboxes.
+- [Phase 06]: 06-10: the public-path sweep re-derived the five SPEC-DEVIATIONS proto links line by line (S-ALG-CU-11 :63-80, S-SEM-04 :63-69, S-IMP-01 :66, S-IMP-02 :67-68,86-87, S-IMP-03 :39) - a pure path swap would have cited neighbouring declarations.
+- [Phase 06]: 06-10: EXAMPLES demonstrates both List modes in one executed block - a page_size-1 page carrying records plus nextPageToken ZGVtby9oZWxsbw, a resumed page returning the last key with the empty token omitted, then the legacy unset-page_size keys-only listing.
+- [Phase 06]: 06-10: 04-MULTI-NODE names the WritePeers write-time set, the zero-peer (false,0,0) answer and the inert outside Ack, and states IN-05 is closed by APIS-01 (the discovery flush broadcasts and re-arms but never grows the awaited set or ledger).
+- [Phase 06]: 06-10: S-PERS-12 flips to implemented with the sorted-union replay/rollbackKey/restoreChanges links and the engine plus RPC rollback tests; S-PERS-13 and every PROTO-08 row stay for Phase 9.
+- [Phase 06]: 06-10: AGENTS.md gains api/supkvapi/v1 and examples/client in the Layout, the public-schema/internal-replication dependency-policy sentence and the three-rule depguard deviation 1 ('These rules live in .golangci.yml'); deviations 2-3 and the Go version policy are byte-identical.
 
 ### Pending Todos
 
@@ -434,7 +440,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T01:40:22.477Z
-Stopped at: Completed 06-09-PLAN.md
+Last session: 2026-11-23T01:49:11.202Z
+Stopped at: Completed 06-10-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)

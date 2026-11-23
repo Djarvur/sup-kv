@@ -248,7 +248,7 @@ Plans:
   3. Snapshot load is a full rollback (14.1): keys absent from the snapshot are deleted, the result broadcasts to peers, and the rewritten `TestEngine_snapshotCreateLoadRestore` proves the new behavior
   4. `List` does not copy the world: pagination or streaming over the key→version view, with cost independent of value sizes
   5. The proto is public: proto and generated Go code live outside `internal/`; a Go client example builds in CI as a separate module; the last-read-value file pattern is documented as consumer-library territory (14.7)
-**Plans**: 11/13 plans executed
+**Plans**: 12/13 plans executed
 
 Plans:
 **Wave 1**
@@ -277,7 +277,7 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [x] 06-09-PLAN.md — docs/API.md phase-owned contract sections and doc-anchor guard
-- [ ] 06-10-PLAN.md — Documentation and registry ripple (EXAMPLES, MULTI-NODE, SPEC-DEVIATIONS, AGENTS)
+- [x] 06-10-PLAN.md — Documentation and registry ripple (EXAMPLES, MULTI-NODE, SPEC-DEVIATIONS, AGENTS)
 
 **Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 06-13-PLAN.md — Phase gate: frozen-file base diff, red-runner 7/7, make lint/test/buf-breaking
@@ -329,7 +329,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 3. Persistence — Dump and Write Confirmation | v1.0 | 13/13 | Complete | 2026-11-03 |
 | 4. Replication and Deterministic Simulator | v1.0 | 13/13 | Complete    | 2026-11-22 |
 | 5. gRPC API and Binary | v1.0 | 12/12 | Complete    | 2026-11-22 |
-| 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 11/13 | In Progress |  |
+| 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 12/13 | In Progress |  |
 | 7. v1.0 — Docs, Examples and Release | v1.0 | 5/5 | Complete | 2026-11-18 |
 | 1. Spec Reference and Decisions | v1.1 | 4/4 | Complete | 2026-11-19 |
 | 2. Stand and Simulator as Tests | v1.1 | 17/17 | Complete | 2026-11-21 |
