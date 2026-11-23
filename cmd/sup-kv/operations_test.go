@@ -130,6 +130,7 @@ var operationsForbidden = []struct {
 }{
 	{"Nothing is logged about the outcome itself", "the Main load now logs one INFO `Dump load` record carrying outcome=main"},
 	{"failed-final-dump exit code 1", "a failed final dump exits with code 3; exit code 1 means startup or a Serve error"},
+	{"dump open", "a dump-path/load problem is a load outcome, not a fatal startup stage — the node starts, and a failed final dump exits 3"},
 }
 
 // TestOperationsDoc is the DOCS-02 drift guard: docs/OPERATIONS.md must

@@ -387,8 +387,8 @@ second signal during the drain is the operator's hurry-up: it forces the
 remaining stop calls without skipping the final flush. Exit codes:
 
 - exit code 0 — clean shutdown; the final dump is confirmed on disk;
-- exit code 1 — a startup failure (bind, listen, metrics, dump open) or a
-  `Serve` error. A startup failure never runs a final dump (no
+- exit code 1 — a startup failure (UDP bind, gRPC listen or metrics listen)
+  or a `Serve` error. A startup failure never runs a final dump (no
   client-confirmed write exists yet); a `Serve` error still runs the
   bounded final dump before the code is chosen. A systemd unit with
   `Restart=on-failure` reacts to this;
@@ -397,6 +397,13 @@ remaining stop calls without skipping the final flush. Exit codes:
 - exit code 3 — the final dump failed, including on the `Serve`-error path.
   The failed final dump is the operator's data-loss signal and takes
   precedence over the `Serve` error's 1.
+
+A dump path the node cannot read or write is **not** a startup failure: the
+load reports its outcome (`prompt`, `main`, `backup` or `unusable`) through
+the `Dump load`, `Dump generation fallback` or `No usable dump generation`
+record, and the node starts. A persistently failing dump surfaces on writes
+as `Unavailable` (see below), and a final dump that cannot be written exits
+with code 3 — never 1.
 
 `--help` lists the five env-only knobs that have no flag: `SUPKV_LOG_LEVEL`,
 `SUPKV_LOG_FORMAT`, `SUPKV_METRICS_CERT`, `SUPKV_METRICS_KEY` and
