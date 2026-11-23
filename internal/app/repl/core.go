@@ -423,9 +423,9 @@ type StateStore interface {
 
 	// Observe absorbs one received version into the store's clock without
 	// touching any record: the per-DataSync-part HLC update (PROTO-01), so
-	// the next local write strictly beats the peer's listed state. The
-	// returned drift is the clock's own signal; MergeStats does not count it
-	// this phase.
+	// the next local write beats it. A positive return is a received lead past
+	// drift_warn: handleDataSync counts it once per part in MergeStats.DriftWarnings
+	// and reports it through OnDrift/Log under the shared limiter (OBSV-05).
 	Observe(ver version.RecordVersion) (drift time.Duration)
 
 	// Generation returns the store's monotone content generation: it moves
