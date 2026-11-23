@@ -113,7 +113,7 @@ audited.
 | S-ALG-CU-08 | A dump failure should raise a metric and log an error; the counter exists but the engine has no logger, so the log line never fires | fixed-in-v1.1(OBSV-06) | `internal/app/persist/scheduler.go:248-266` (`handleDumpFailure`: class counters and `OnDumpFailure`); `internal/app/persist/scheduler.go:296-302` (`recordDump`); `internal/metrics/metrics.go:405-445` (`dumpFamilies`); `cmd/sup-kv/main.go:586-588` (the wired ERROR log); REVIEW §7 S-07; G-10 |
 | S-ALG-CU-09 | A dump-failed write stays in memory and replicates to the neighbour as unacked; today it does neither — peers only learn of it via a later periodic sync | fixed-in-v1.1(PROTO-08) | `internal/grpcapi/server.go:147-149`; `internal/app/persist/engine.go:288-291`; REVIEW §7 S-02; G-05 |
 | S-ALG-CU-10 | Create-if-absent on a live key answers AlreadyExists; a deleted key blocks re-creation, which the amendment adopted as Spec behaviour (decision 14.2) | superseded-by-amendment | `internal/app/storage/store.go:187-198`; REVIEW §13 |
-| S-ALG-CU-11 | Optional wait-for-replication waits for peer acknowledgements within a timeout and reports without changing the write result; the report can say acked for a version a peer discarded as stale | fixed-in-v1.1(PROTO-03) | `internal/grpcapi/wait.go:94-225`; `internal/grpcapi/apiproto/supkvapi/v1/supkvapi.proto:64-81`; REVIEW §7 S-08; G-04 |
+| S-ALG-CU-11 | Optional wait-for-replication waits for peer acknowledgements within a timeout and reports without changing the write result; the report can say acked for a version a peer discarded as stale | fixed-in-v1.1(PROTO-03) | `internal/grpcapi/wait.go:94-225`; `api/supkvapi/v1/supkvapi.proto:63-80`; REVIEW §7 S-08; G-04 |
 | S-ALG-DEL-01 | Deleting an absent or already deleted key answers NotFound | implemented | `internal/app/storage/store.go:203-208`; `internal/grpcapi/server.go:293-294` |
 | S-ALG-DEL-02 | A real delete runs the write path with an empty payload and the tombstone flag set | implemented | `internal/app/storage/store.go:209`; `internal/grpcapi/server.go:171-189` |
 | S-ALG-DEL-03 | Tombstones are never garbage-collected | implemented | `internal/app/storage/store.go` (no removal path exists) |
@@ -177,7 +177,7 @@ audited.
 | S-SEM-01 | Per-key last-writer-wins: displaced versions vanish — never stored, never served | implemented | `internal/app/storage/store.go:234-250` |
 | S-SEM-02 | A write issued after a read on any node dominates the value that was read | implemented | `internal/app/storage/store.go:225-227` (caveat for listed-but-unreceived data: S-HLC-10) |
 | S-SEM-03 | Atomicity stops at the key boundary; no operation spans several keys | implemented | — |
-| S-SEM-04 | The only conditional write is create-if-absent; nothing else compares-then-writes | implemented | `internal/grpcapi/apiproto/supkvapi/v1/supkvapi.proto:30-45` |
+| S-SEM-04 | The only conditional write is create-if-absent; nothing else compares-then-writes | implemented | `api/supkvapi/v1/supkvapi.proto:63-69` |
 | S-SEM-05 | Deletes are not sticky: a concurrent write holding a higher version resurrects the key | implemented | `internal/app/storage/store.go:240-249` (no delete-wins policy) |
 | S-SEM-06 | Tombstones are kept forever | implemented | `internal/app/storage/store.go` |
 | S-SEM-07 | The conflict-journal requirement (recording the loser when a pending record is displaced) was dropped from the Spec by decision 14.4; only a counter remains, to be made honest under OBSV-03 | superseded-by-amendment | `internal/app/repl/core.go:531`; ADR 0004; REVIEW §13; G-08 |
@@ -246,9 +246,9 @@ audited.
 
 | ID | Summary (own words) | Status | Links |
 |---|---|---|---|
-| S-IMP-01 | The API gains create-if-absent | implemented | `internal/grpcapi/apiproto/supkvapi/v1/supkvapi.proto:67`; `internal/grpcapi/server.go:142-143` |
-| S-IMP-02 | The API gains optional wait-for-replication | implemented | `internal/grpcapi/apiproto/supkvapi/v1/supkvapi.proto:68-69,87-88`; `internal/grpcapi/wait.go` |
-| S-IMP-03 | Subscribers learn about replicated changes; sup-kv exposes the Watch stream and the consumer bridges it | implemented | `internal/grpcapi/watch.go:364-398`; `internal/grpcapi/apiproto/supkvapi/v1/supkvapi.proto:40` |
+| S-IMP-01 | The API gains create-if-absent | implemented | `api/supkvapi/v1/supkvapi.proto:66`; `internal/grpcapi/server.go:142-143` |
+| S-IMP-02 | The API gains optional wait-for-replication | implemented | `api/supkvapi/v1/supkvapi.proto:67-68,86-87`; `internal/grpcapi/wait.go` |
+| S-IMP-03 | Subscribers learn about replicated changes; sup-kv exposes the Watch stream and the consumer bridges it | implemented | `internal/grpcapi/watch.go:364-398`; `api/supkvapi/v1/supkvapi.proto:39` |
 | S-IMP-04 | Mapping sup-kv snapshot operations onto the consumer's existing snapshot proto is consumer-side work, tracked as a v2 requirement | deferred-v2(SNAP-01) | REVIEW §7 S-11; v2 backlog (SNAP-01) |
 | S-IMP-05 | Embedding the storage inside the consumer's config-manager; sup-kv ships as a separate binary and the amendment adopted the standalone program | superseded-by-amendment | `cmd/sup-kv`; REVIEW §13 |
 | S-IMP-06 | The client library's on-disk cache of the last read value is consumer-side work | consumer-zone | ADR 0007; REVIEW §7 S-11; 14.7 |

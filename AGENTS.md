@@ -31,8 +31,15 @@
 
 ## Layout
 
+- `api/supkvapi/v1/` — the public API schema: `supkvapi.proto` and its
+  generated Go package `supkvapi`. It is the client-facing surface and stays
+  importable from another module (`github.com/Djarvur/sup-kv/api/supkvapi/v1`);
+  the replication proto under `internal/udprepl/replproto/` remains internal.
 - `cmd/sup-kv/` — the single binary; `main()` holds no testable logic
   (flags/env/signals live there from Phase 5, nothing else).
+- `examples/client/` — a separate Go module (`examples/client/go.mod`) that
+  imports only the public API package and builds in CI via
+  `make client-example`.
 - `internal/app/` — pure decision core, split into three packages:
   `version` (RFC 9562 record versions), `clock` (hybrid logical clock) and
   `storage` (LWW-Element-Map store, consuming the consumer-side `Clock`
