@@ -1,6 +1,9 @@
 package repl
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // PeerEventKind names one peer-table lifecycle transition (D-01, OBSV-01).
 // The zero value names no transition, so an uninitialized [PeerEvent] can
@@ -54,4 +57,31 @@ type DriftEvent struct {
 	NodeID uint16
 	Source string
 	Lead   time.Duration
+}
+
+// emitPeer reports ev through the nil-safe OnPeerEvent seam. Every call sits
+// on the single driver goroutine, so the callback needs no synchronization
+// and must return immediately (the OnDumpFailure contract).
+func (c *Core) emitPeer(ev PeerEvent) {
+	if c.cfg.OnPeerEvent == nil {
+		return
+	}
+	c.cfg.OnPeerEvent(ev)
+}
+
+// emitDrift reports one clock-drift warning through the shared
+// per-(node_id, clock_drift) limiter: [MergeStats.DriftWarnings] has already
+// counted every offending record, while the WARN/event is admitted once per
+// peer per interval (T-07-22). A nil OnDrift falls back to the prebuilt Log
+// string, so harnesses that capture only Log keep observing drift.
+func (c *Core) emitDrift(now time.Time, nodeID uint16, source string, lead time.Duration) {
+	if !c.allowWarn(now, nodeID, warnClassClockDrift) {
+		return
+	}
+	if c.cfg.OnDrift != nil {
+		c.cfg.OnDrift(DriftEvent{NodeID: nodeID, Source: source, Lead: lead})
+		return
+	}
+	c.cfg.Log(fmt.Sprintf(
+		"sup-kv: clock drift: node %d at handle %q leads local wall time by %s", nodeID, source, lead))
 }

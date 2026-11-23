@@ -89,6 +89,13 @@ const (
 	// counter moves), but it rides the same per-(node_id, class) limiter so a
 	// peer whose records always fail to apply cannot flood the log.
 	warnClassApplyFailure = "apply_failure"
+
+	// warnClassClockDrift is the shared limiter's class token for a received
+	// version leading local wall time beyond drift_warn (D-02, T-07-22): the
+	// MergeStats counter stays per offending record, while the WARN (or the
+	// OnDrift event) is admitted once per peer per interval so a peer
+	// flooding leading versions cannot flood the log.
+	warnClassClockDrift = "clock_drift"
 )
 
 // Design defaults a zero or negative Config field is normalized to, from
@@ -1247,6 +1254,23 @@ func (c *Core) discardValidated(now time.Time, nodeID uint16, class, detail stri
 	c.warnDiscard(now, nodeID, class)
 }
 
+// allowWarn claims the (node_id, class) limiter slot for now and reports
+// whether the caller should emit its WARN: the first occurrence of every
+// pair is admitted, and a repeat inside discardWarnInterval of event time is
+// suppressed. The slot bookkeeping lives here alone, so every counted-class
+// WARN — the discard classes and the drift warning — shares one cadence
+// (T-3-25, T-4-04, T-4-28, T-07-22). A separate message-formatting caller
+// decides what to log once admitted.
+func (c *Core) allowWarn(now time.Time, nodeID uint16, class string) bool {
+	key := scanDiscardKey{nodeID: nodeID, class: class}
+	last, warned := c.discardWarnAt[key]
+	if warned && now.Sub(last) < discardWarnInterval {
+		return false
+	}
+	c.discardWarnAt[key] = now
+	return true
+}
+
 // warnRateLimited logs msg unless the same (node_id, class) slot already
 // warned inside the last discardWarnInterval of event time — the one shared
 // limiter behind every counted classification WARN: the validation classes,
@@ -1256,12 +1280,9 @@ func (c *Core) discardValidated(now time.Time, nodeID uint16, class, detail stri
 // the bookkeeping is a plain per-slot timestamp on the handler's now, never
 // a wall-clock read and never a global throttle.
 func (c *Core) warnRateLimited(now time.Time, nodeID uint16, class, msg string) {
-	key := scanDiscardKey{nodeID: nodeID, class: class}
-	last, warned := c.discardWarnAt[key]
-	if warned && now.Sub(last) < discardWarnInterval {
+	if !c.allowWarn(now, nodeID, class) {
 		return
 	}
-	c.discardWarnAt[key] = now
 	c.cfg.Log(msg)
 }
 
@@ -1426,7 +1447,18 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 		c.dropPeerSyncStreams(in.NodeID)
 		c.dropListing(listingDst{nodeID: in.NodeID, runID: known.runID})
 		c.dropOwedPeer(in.NodeID)
+		previousRun := known.runID
 		known.pushSeenRun(known.runID)
+		// One restart event carries both identities: the outgoing current run
+		// (captured before the row moved on) and the incoming unseen run
+		// (D-01, OBSV-01).
+		c.emitPeer(PeerEvent{
+			Kind:          PeerRestarted,
+			NodeID:        in.NodeID,
+			Handle:        in.Source,
+			RunID:         in.RunID,
+			PreviousRunID: previousRun,
+		})
 	}
 	known.handle = in.Source
 	known.runID = in.RunID
@@ -1436,6 +1468,7 @@ func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Out
 		// A first-seen id is the one Hello shape that changes the peer id
 		// set; the peer-id mirror publishes on this generation (A-01).
 		c.peerGen++
+		c.emitPeer(PeerEvent{Kind: PeerAppeared, NodeID: in.NodeID, Handle: in.Source, RunID: in.RunID})
 	}
 	c.greetAndList(now, in, known, remembered, out)
 	if remembered || !discovery {
@@ -1578,8 +1611,10 @@ func (c *Core) applyRemote(
 	if drift > 0 {
 		// Only a received version ahead of local wall time is a drift
 		// warning (OBSV-05); a negative reading — the wall clock jumped past
-		// the received version — is never counted.
+		// the received version — is never counted. The counter is per record;
+		// the event rides the shared limiter (D-01, D-02).
 		c.mergeStats.DriftWarnings++
+		c.emitDrift(now, nodeID, source, drift)
 	}
 	// One post-apply read serves both the reply verdict and the displacement
 	// count: the incoming record won exactly when the store now holds it
@@ -1744,6 +1779,7 @@ func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.D
 		drift := c.store.Observe(maxEntryVersion(msg.Entries))
 		if drift > 0 {
 			c.mergeStats.DriftWarnings++
+			c.emitDrift(now, in.NodeID, in.Source, drift)
 		}
 	}
 	c.accumulateSync(now, in, msg)
@@ -2818,6 +2854,17 @@ func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 		}
 	}
 	for _, id := range expired {
+		row := c.peers[id]
+		// One eviction event carries the row identity and the event-time
+		// silence that crossed peer_timeout (D-01, OBSV-01), emitted before
+		// the row and its bookkeeping go.
+		c.emitPeer(PeerEvent{
+			Kind:        PeerEvicted,
+			NodeID:      id,
+			Handle:      row.handle,
+			RunID:       row.runID,
+			LastSeenAge: now.Sub(row.lastHello),
+		})
 		c.dropListing(listingDst{nodeID: id, runID: c.peers[id].runID})
 		c.dropOwedPeer(id)
 		delete(c.peers, id)

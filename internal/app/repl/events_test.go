@@ -108,14 +108,14 @@ func TestPeerEvents(t *testing.T) {
 		core, events := collectPeerEvents()
 		var out port.Outbox
 
-		oldRun := testRunID(peerID1)
+		oldRun := testRunID(peerID2)
 		newRun := oldRun
 		newRun[1] = 0x77
-		core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+		core.HandleDatagram(at(0), helloFrom(peerID2), &out)
 		out.Drain()
-		core.HandleDatagram(at(time.Second), datagramFromRun(peerID1, newRun, port.Hello{}), &out)
+		core.HandleDatagram(at(time.Second), datagramFromRun(peerID2, newRun, port.Hello{}), &out)
 		out.Drain()
-		core.HandleDatagram(at(2*time.Second), datagramFromRun(peerID1, oldRun, port.Hello{}), &out)
+		core.HandleDatagram(at(2*time.Second), datagramFromRun(peerID2, oldRun, port.Hello{}), &out)
 		out.Drain()
 
 		if len(*events) != 2 {

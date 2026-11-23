@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -301,6 +302,53 @@ func logGateOpen(reason string) {
 	slog.Info("Startup gate opened", "reason", reason)
 }
 
+// logPeerEvent renders one peer-table lifecycle transition (D-01, OBSV-01).
+// Appearance is the INFO lifecycle event; a restart and an eviction are WARN
+// because both explain a change in replication reach. Every value is a
+// structured attribute — the handle is a quoted value and a run id lowercase
+// hex, never message text (T-07-20).
+func logPeerEvent(ev repl.PeerEvent) {
+	switch ev.Kind {
+	case repl.PeerAppeared:
+		slog.Info("Peer appeared",
+			"node_id", ev.NodeID,
+			"handle", ev.Handle,
+			"run_id", hexRunID(ev.RunID))
+	case repl.PeerRestarted:
+		slog.Warn("Peer restarted",
+			"node_id", ev.NodeID,
+			"handle", ev.Handle,
+			"previous_run_id", hexRunID(ev.PreviousRunID),
+			"run_id", hexRunID(ev.RunID))
+	case repl.PeerEvicted:
+		slog.Warn("Peer evicted",
+			"node_id", ev.NodeID,
+			"handle", ev.Handle,
+			"reason", "peer_timeout",
+			"last_seen_age", ev.LastSeenAge.String())
+	}
+}
+
+// logDriftEvent renders one clock-drift WARN (D-01, D-02): the received
+// version's lead and the configured threshold as duration strings beside the
+// peer identity. The handle is the same attribute the peer events carry —
+// sloglint reserves the key "source" for the handler's own source attribute,
+// so the event's Source field rides as handle. The core has already applied
+// the per-peer rate limit.
+func logDriftEvent(ev repl.DriftEvent, driftWarn time.Duration) {
+	slog.Warn("Clock drift",
+		"node_id", ev.NodeID,
+		"handle", ev.Source,
+		"lead", ev.Lead.String(),
+		"drift_warn", driftWarn.String())
+}
+
+// hexRunID renders a run identifier as lowercase hex — the stable run_id log
+// form.
+func hexRunID(run [16]byte) string {
+	return hex.EncodeToString(run[:])
+}
+
 // startEngine opens the real dump store at the configured path, resolves
 // the engine over it with the hub's change tap threaded through
 // storage.Config and the hub's durability watermark through
@@ -449,8 +497,7 @@ func wire(cfg config.Config) (*wired, net.Listener, error) {
 	// XPORT-05 startup evidence: the EFFECTIVE (kernel-doubled, clamped)
 	// buffer sizes, never the requested constants — the adapter read them
 	// back in New (RESEARCH Pattern 7).
-	recvBuf, sendBuf := adapter.SocketBuffers()
-	slog.Info("Socket buffers", "recv_buf", recvBuf, "send_buf", sendBuf)
+	logSocketBuffers(adapter)
 
 	replCtx, replCancel := context.WithCancel(context.Background())
 	replDone := make(chan struct{})
@@ -504,6 +551,14 @@ func wire(cfg config.Config) (*wired, net.Listener, error) {
 	}, listener, nil
 }
 
+// logSocketBuffers reports the adapter's EFFECTIVE socket buffer sizes — the
+// kernel-doubled, clamped values read back after bind, never the requested
+// constants (XPORT-05 startup evidence, RESEARCH Pattern 7).
+func logSocketBuffers(adapter *udprepl.Adapter) {
+	recvBuf, sendBuf := adapter.SocketBuffers()
+	slog.Info("Socket buffers", "recv_buf", recvBuf, "send_buf", sendBuf)
+}
+
 // abortWire cancels every context wire() opened — the compensation path when
 // a later wiring step fails, with the already-open gRPC listener closed when
 // the failure came after it.
@@ -534,6 +589,11 @@ func newReplicationAdapter(cfg config.Config, engine *persist.Engine) (*udprepl.
 		// capitalized msg — the sloglint static-msg discipline (D-08); a
 		// dynamic string never becomes the msg.
 		Log: func(msg string) { slog.Warn("Replication adapter", "detail", msg) },
+		// The typed lifecycle seams render once here (D-01): the peer table's
+		// transitions and the drift warning the core's shared limiter already
+		// admitted.
+		OnPeerEvent: logPeerEvent,
+		OnDrift:     func(ev repl.DriftEvent) { logDriftEvent(ev, cfg.DriftWarn) },
 	})
 }
 
