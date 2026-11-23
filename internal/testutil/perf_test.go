@@ -1,4 +1,4 @@
-package testutil
+package testutil //nolint:testpackage // the tests assert the unexported gate constants (perfEnvVar, perfSkipNoEnv, perfSkipRace), which an external test package cannot reach.
 
 import (
 	"strings"
@@ -10,7 +10,7 @@ import (
 // perf threshold run; every other spelling (including unset) keeps it shut.
 // The rows mutate the process environment, so they run sequentially — Go
 // forbids t.Setenv in a parallel test.
-func TestPerfEnabled(t *testing.T) { //nolint:paralleltest // the rows mutate the process environment with t.Setenv; parallel rows would race each other's values and Go forbids t.Setenv after t.Parallel.
+func TestPerfEnabled(t *testing.T) {
 	rows := []struct {
 		name  string
 		value string
@@ -35,7 +35,7 @@ func TestPerfEnabled(t *testing.T) { //nolint:paralleltest // the rows mutate th
 // TestRequirePerfSkips pins the one gate call a perf test makes: it must SKIP
 // (never fail) a test that runs outside the operator target, and its skip
 // messages must name `make perf` so the operator knows the command.
-func TestRequirePerfSkips(t *testing.T) { //nolint:paralleltest // t.Setenv mutates the process environment and the subtest must run sequentially to observe the skip.
+func TestRequirePerfSkips(t *testing.T) {
 	t.Setenv(perfEnvVar, "0")
 	var skipped bool
 	t.Run("without the operator target", func(t *testing.T) {
