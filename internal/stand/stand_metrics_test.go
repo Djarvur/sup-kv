@@ -9,11 +9,18 @@
 // and scrapes the node's /metrics over HTTP, asserting the EXACT rendered
 // values those constructions fix.
 //
-// The retransmit half refuses the same exactness honestly: the scenario
-// brings node B down and writes on A so the record needs retransmission,
-// but the number of retransmit cycles a real socket yields depends on
-// scheduler-dependent Ack timing, so that family asserts the named lower
-// bound >= 1 (and the test additionally checks the counter climbed above
+// The conflict construction matches the shipped definition (OBSV-03): only a
+// pending (unacked) local write displaced by an applied replicated record
+// counts. Node B is therefore stopped BEFORE node A writes the conflict key,
+// which leaves the write unacked in the core's pending set, and the
+// displacement is driven by one crafted, wire-valid DataReplication from a
+// foreign node id — never by an ordinary overwrite of a confirmed record.
+//
+// The retransmit half refuses the same exactness honestly: the already-stopped
+// node B stays in A's peer table, A writes a new key so the record needs
+// retransmission, but the number of retransmit cycles a real socket yields
+// depends on scheduler-dependent Ack timing, so that family asserts the named
+// lower bound >= 1 (and the test additionally checks the counter climbed above
 // the pre-kill baseline, attributing the cycle to the stopped peer).
 // Exactness holds where construction makes it possible: conflict == 1 and
 // discard{class="bad_crc"} == 1 are single constructed events, retransmit
@@ -49,6 +56,8 @@ import (
 
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	replproto "github.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1"
 )
 
@@ -60,23 +69,32 @@ const (
 	standMetricsConflictKey      = "stand/metrics/conflict-key"
 	standMetricsRetransmitKey    = "stand/metrics/retransmit-key"
 	standMetricsValueA           = "from-node-a"
-	standMetricsValueB           = "from-node-b"
+	standMetricsDisplacingValue  = "from-the-impostor"
 	standMetricsRetransmitValue  = "while-b-is-down"
 	standMetricsConflictSample   = "supkv_merges_conflicts_total"
 	standMetricsRetransmitSample = "supkv_replication_datagrams_retransmitted_total"
 	standMetricsBadCRCSample     = `supkv_datagrams_discarded_total{class="bad_crc"}`
 	standMetricsHelloSample      = `supkv_replication_datagrams_sent_total{type="hello"}`
 	standMetricsPeersSample      = "supkv_replication_peers"
+
+	// standMetricsConflictLeadMs is how far the crafted displacing version
+	// leads the wall clock: strictly greater than A's just-stamped local
+	// version, yet far inside the 2 m max_clock_lead bound (so it is
+	// accepted, not a bad_version discard) and inside drift_warn (so the
+	// construction moves only the conflict family).
+	standMetricsConflictLeadMs = int64(5000)
 )
 
 // The scenario's timer knobs, pinned explicitly so every bound derives
 // from a value this package sets: a short Ack timeout makes the first
 // retransmit cycle quick after B stops, the scan period matches it, the
 // long peer timeout keeps B in A's peer table for the whole retransmit
-// window (the scanner suspends on an empty table), and the long sync
-// interval removes proactive listings from the conflict construction —
-// a listing generated before B's displacing write would otherwise be a
-// second (rejected-version) conflict on A.
+// window (the scanner suspends on an empty table, and the write's wait-set
+// is captured from that same table), and the long sync interval keeps the
+// periodic listing out of the effects' observation window (a listing only
+// advances the clock and queues requests — it never merges a record, so it
+// cannot add a conflict, but a shorter cadence would still add noise to the
+// scrape window).
 const (
 	standMetricsAckTimeout     = 100 * time.Millisecond
 	standMetricsAckTimeoutMax  = 200 * time.Millisecond
@@ -133,21 +151,24 @@ const (
 // with --metrics-addr, the three effects driven by construction, then the
 // EXACT rendered values asserted from A's /metrics over HTTP.
 //
-// The scenario fixes each value's cardinality: (1) conflict — A writes the
-// key, B (clock already past A's version, having applied that write) writes
-// a strictly dominating version, and A's remote apply displaces its local
-// record: exactly one conflict, so the family asserts ==. (2) discard —
-// one hand-built Hello with a correct envelope and one flipped body byte
-// reaches A's real UDP port: exactly one bad_crc, so the family asserts ==.
-// (3) retransmit — B stops cleanly, A writes a new key, and the pending
-// record's backoff ladder fires against the still-remembered peer: the
-// family asserts >= 1 and the test checks it climbed past the pre-kill
-// baseline; the cycle count is scheduler-dependent Ack timing on real
-// sockets, so a lower bound is the honest exact-derivable assertion.
+// The scenario fixes each value's cardinality: (1) conflict — node B is
+// stopped first (once, reusing that stopped peer for effect 3), so A's write
+// of the key is never Acked and stays pending; one crafted, wire-valid
+// DataReplication carrying a strictly greater version from a foreign node id
+// then reaches A's real UDP port and displaces that pending write: exactly
+// one conflict, so the family asserts ==. (2) discard — one hand-built Hello
+// with a correct envelope and one flipped body byte reaches A's real UDP
+// port: exactly one bad_crc, so the family asserts ==. (3) retransmit — the
+// already-stopped B is still remembered, A writes a new key, and the pending
+// record's backoff ladder fires against that peer: the family asserts >= 1
+// and the test checks it climbed past the pre-kill baseline; the cycle count
+// is scheduler-dependent Ack timing on real sockets, so a lower bound is the
+// honest exact-derivable assertion.
 //
 // The test is also the referencing link for decisions 14.8 (metrics are
-// opt-in: the flag is what turns the listener on) and 14.4 (the conflict
-// counter is the record — no journal, and the scrape is the only reader).
+// opt-in: the flag is what turns the listener on) and 14.4 / ADR 0004 (the
+// conflict counter is the record — no journal, and the scrape is the only
+// reader).
 func TestStand_metricsByEffect(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
@@ -169,20 +190,19 @@ func TestStand_metricsByEffect(t *testing.T) {
 	awaitServing(t, p.grpcB, servingDeadline)
 
 	clientA := standClient(t, p.grpcA)
-	clientB := standClient(t, p.grpcB)
 	standMetricsReady(t, metricsURL)
 
-	// Effect 1 — one displaced local record. A's first value is served by B
-	// before B writes, so B's clock has absorbed A's version and B's write
-	// strictly dominates it (HLC monotonicity, not wall-clock luck).
+	// Effect 1 — one pending local write displaced by a replicated value.
+	// B must be known to A before it stops: the write-time wait-set and the
+	// retransmit scanner both read A's peer table. B must be stopped before
+	// A writes: only an unacked write is a conflict when displaced.
+	waitFor(t, standMetricsDeadline, "node A's peer gauge showing node B before the stop", func() bool {
+		body := standMetricsScrape(t, metricsURL)
+		return standMetricsSample(t, body, standMetricsPeersSample) == 1
+	})
+	signalAndWaitExit(t, nodeB)
 	standSetWith(t, clientA, standMetricsConflictKey, standMetricsValueA)
-	waitFor(t, standConvergeDeadline, "node B serving A's first value", func() bool {
-		return standServesValue(t, clientB, standMetricsConflictKey, standMetricsValueA)
-	})
-	standSetWith(t, clientB, standMetricsConflictKey, standMetricsValueB)
-	waitFor(t, standConvergeDeadline, "node A serving B's displacing value", func() bool {
-		return standServesValue(t, clientA, standMetricsConflictKey, standMetricsValueB)
-	})
+	standMetricsSendDisplacingReplication(t, p.udpA, standMetricsConflictKey, standMetricsDisplacingValue)
 	waitFor(t, standMetricsDeadline, "node A's conflict counter reaching exactly one", func() bool {
 		body := standMetricsScrape(t, metricsURL)
 		return standMetricsSample(t, body, standMetricsConflictSample) == 1
@@ -195,10 +215,11 @@ func TestStand_metricsByEffect(t *testing.T) {
 		return standMetricsSample(t, body, standMetricsBadCRCSample) == 1
 	})
 
-	// Effect 3 — one retransmit cycle against the stopped peer. The baseline
-	// attributes the climb to this construction; the rendered family is a
-	// running total, so the final assertion is the plan's >= 1 lower bound.
-	signalAndWaitExit(t, nodeB)
+	// Effect 3 — one retransmit cycle against the already-stopped peer. The
+	// baseline attributes the climb to this construction; the rendered family
+	// is a running total, so the final assertion is the plan's >= 1 lower
+	// bound. The peer table still remembers B (peer_timeout is far longer
+	// than this window), so the ladder fires even though the sends fail.
 	baseline := standMetricsSample(t, standMetricsScrape(t, metricsURL), standMetricsRetransmitSample)
 	standSetWith(t, clientA, standMetricsRetransmitKey, standMetricsRetransmitValue)
 	waitFor(t, standMetricsRetransmitWait, "node A's retransmit counter climbing after node B stopped", func() bool {
@@ -429,21 +450,6 @@ func TestConfig_parametersByEffect(t *testing.T) {
 	})
 }
 
-// standServesValue reports whether the endpoint currently serves exactly
-// value under key — the value-specific convergence poll, mirroring
-// standServing's transient-error tolerance.
-func standServesValue(t *testing.T, client apiproto.SupKVServiceClient, key, value string) bool {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
-	defer cancel()
-	resp, err := client.Get(ctx, &apiproto.GetRequest{Key: key})
-	if err != nil {
-		return false
-	}
-	rec := resp.GetRecord()
-	return rec.GetKey() == key && !rec.GetDeleted() && string(rec.GetValue()) == value
-}
-
 // standHealthStatus performs one health Check against addr and returns the
 // reported status; a transport failure (the listener not up yet) returns
 // the error and SERVICE_UNKNOWN, so a poll treats it as not-yet.
@@ -529,6 +535,53 @@ func standMetricsSample(t *testing.T, body, sample string) float64 {
 	}
 	t.Fatalf("the scrape carries no sample %q:\n%s", sample, body)
 	return 0
+}
+
+// standMetricsSendDisplacingReplication builds one wire-valid DataReplication
+// with the test's own encoder and sends it to the node's real UDP port: a
+// correct envelope (supported proto version, foreign node id, a 16-byte run
+// id, the body's real CRC), a 16-byte version packed standMetricsConflictLeadMs
+// ahead of the wall clock, and the record checksum the production domain would
+// stamp. The datagram therefore passes every validation step and reaches the
+// apply path, where the greater foreign version displaces the node's pending
+// local write — exactly one conflict.
+func standMetricsSendDisplacingReplication(t *testing.T, udpPort int, key, value string) {
+	t.Helper()
+	data := []byte(value)
+	ver := version.PackVersion(time.Now().UnixMilli()+standMetricsConflictLeadMs, 0, standMetricsImpostorNodeID)
+	body, err := proto.Marshal(&replproto.Body{Msg: &replproto.Body_DataReplication{DataReplication: &replproto.DataReplication{
+		Key:      key,
+		Version:  ver[:],
+		Data:     data,
+		Checksum: storage.RecordChecksum(key, ver, data, false),
+	}}})
+	if err != nil {
+		t.Fatalf("marshal DataReplication body: %v", err)
+	}
+	runID := [16]byte{0x5A, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	envelope := &replproto.Envelope{
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeId:       standMetricsImpostorNodeID,
+		RunId:        runID[:],
+		Crc32:        crc32.ChecksumIEEE(body),
+		Body:         body,
+	}
+	datagram, err := proto.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "udp4", "127.0.0.1:"+strconv.Itoa(udpPort))
+	if err != nil {
+		t.Fatalf("dial node UDP port %d: %v", udpPort, err)
+	}
+	defer func() { _ = conn.Close() }()
+	written, err := conn.Write(datagram)
+	if err != nil {
+		t.Fatalf("send displacing datagram to %d: %v", udpPort, err)
+	}
+	if written != len(datagram) {
+		t.Fatalf("displacing datagram write = %d bytes, want %d", written, len(datagram))
+	}
 }
 
 // standMetricsSendCorruptHello builds one wire datagram with the test's own

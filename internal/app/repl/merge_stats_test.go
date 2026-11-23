@@ -283,7 +283,8 @@ func TestMergeStats_counts(t *testing.T) {
 		if got := core.Discards().BadVersion; got != 1 {
 			t.Fatalf("Discards().BadVersion = %d after the beyond-lead record, want 1", got)
 		}
-		if _, err := st.store.Get(keyBeta); err == nil {
+		_, err := st.store.Get(keyBeta)
+		if err == nil {
 			t.Fatal("the beyond-lead record reached the store, want it discarded before any store call")
 		}
 	})

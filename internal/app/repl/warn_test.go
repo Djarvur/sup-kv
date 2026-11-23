@@ -122,6 +122,76 @@ func TestDiscard_warnLimiterKeyedByNodeAndClass(t *testing.T) {
 	}
 }
 
+// TestApplyFailure_warnLimiterKeyedByNodeAndClass pins the apply-failure
+// WARN's flood guard and key-free text (Phase-3 IN-01, T-07-17, T-07-18):
+// repeated datagrams whose store apply fails produce exactly ONE captured
+// WARN per (node_id, apply_failure) per limiter interval, the message names
+// the quoted source handle and never the key, no Ack and no Superseded result
+// is emitted, the pending entry survives untouched, and a second peer's
+// failure gets its own WARN.
+func TestApplyFailure_warnLimiterKeyedByNodeAndClass(t *testing.T) {
+	t.Parallel()
+	now := at(0)
+	const warnInterval = 10 * time.Second // the pinned discardWarnInterval
+	var logs []string
+	core, st := newLimitedTestCore(8, &logs)
+	var out port.Outbox
+
+	// "local" fits the store's 8-byte value limit; the replicated record never
+	// does, so every apply below fails with ErrValueTooLarge after validation.
+	tracked := localWrite(t, core, st, now, keyAlpha, "local")
+	oversize := remoteRecord(testNowMs+5000, peerID1, "over-the-limit")
+
+	fail := func(peer uint16, at time.Time) {
+		t.Helper()
+		core.HandleDatagram(at, replFrom(peer, keyAlpha, oversize), &out)
+		if got := len(out.Drain()); got != 0 {
+			t.Fatalf("the refused apply from peer %d emitted %d message(s), want none — a refused record is never Acked", peer, got)
+		}
+		if got := len(out.DrainResults()); got != 0 {
+			t.Fatalf("the refused apply from peer %d emitted %d result(s), want none — no supersession", peer, got)
+		}
+	}
+
+	fail(peerID1, now)
+	if got := len(logs); got != 1 {
+		t.Fatalf("Config.Log fired %d time(s) for the first failed apply, want 1: %v", got, logs)
+	}
+	if strings.Contains(logs[0], keyAlpha) {
+		t.Fatalf("the apply-failure WARN names the key %q, want the key absent: %q", keyAlpha, logs[0])
+	}
+	if !strings.Contains(logs[0], handleFor(peerID1)) {
+		t.Fatalf("the apply-failure WARN does not name the quoted source handle %q: %q", handleFor(peerID1), logs[0])
+	}
+
+	// Inside the interval the same peer's pair stays silent: the limiter, not
+	// the datagram count, bounds the log.
+	fail(peerID1, now.Add(warnInterval-time.Nanosecond))
+	if got := len(logs); got != 1 {
+		t.Fatalf("Config.Log fired %d time(s) for a repeat inside the interval, want still 1: %v", got, logs)
+	}
+
+	// A second peer's first failure has its own slot: the node id is the
+	// key's other half.
+	fail(peerID2, now.Add(warnInterval-time.Nanosecond))
+	if got := len(logs); got != 2 {
+		t.Fatalf("Config.Log fired %d time(s) after a second peer's failure, want 2: %v", got, logs)
+	}
+
+	// At exactly the interval the first peer's pair fires again.
+	fail(peerID1, now.Add(warnInterval))
+	if got := len(logs); got != 3 {
+		t.Fatalf("Config.Log fired %d time(s) at the interval boundary, want 3: %v", got, logs)
+	}
+
+	// The failures changed no tracking state and no stored record.
+	assertPending(t, core.PendingSnapshot(), keyAlpha, tracked, nil)
+	served, err := st.store.Get(keyAlpha)
+	if err != nil || served.Version != tracked {
+		t.Fatalf("store serves (%x, %v) after the refused applies, want the untouched pending version %x", served.Version[:], err, tracked[:])
+	}
+}
+
 // TestCore_noPeerWarn pins XPORT-09's core half of D-07: a node that receives
 // no Hello within peer_timeout after its first Advance WARNs exactly once —
 // never per interval — naming peer_timeout, and a Hello arriving before the

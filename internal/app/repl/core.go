@@ -82,6 +82,13 @@ const (
 	// a count disagreeing with the live round — is discarded before any
 	// accumulation, clock call or entry comparison.
 	DiscardBadSyncHeader = "bad_sync_header"
+
+	// warnClassApplyFailure is the shared limiter's class token for a failed
+	// replicated-record apply (Phase-3 IN-01, T-07-17): it is not a discard
+	// class (nothing is discarded at the framing level and no DiscardStats
+	// counter moves), but it rides the same per-(node_id, class) limiter so a
+	// peer whose records always fail to apply cannot flood the log.
+	warnClassApplyFailure = "apply_failure"
 )
 
 // Design defaults a zero or negative Config field is normalized to, from
@@ -1260,7 +1267,7 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 	case port.Hello:
 		c.handleHello(now, in, out)
 	case port.DataReplication:
-		c.applyRemote(now, in.Source, msg, out)
+		c.applyRemote(now, in.NodeID, in.Source, msg, out)
 	case port.Ack:
 		c.handleAck(in.NodeID, msg, out)
 	case port.DataRequest:
@@ -1508,7 +1515,11 @@ func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, 
 // down, and a record the store refused is never confirmed — no Ack and no
 // supersession of pending tracking, so the sender keeps retransmitting and
 // the unacked gauge keeps climbing: the truthful signal of divergence,
-// never a "delivered" report for a record that was never stored. The
+// never a "delivered" report for a record that was never stored. The WARN
+// rides the shared (node_id, apply_failure) limiter and names only the
+// quoted source handle, never the key: a peer whose records always fail
+// cannot flood the log, and the failure text cannot echo record data
+// (T-07-17, T-07-18). The
 // ApplyRemote returns feed the MergeStats counters (OBS-01, OBSV-03): a
 // POSITIVE drift return counts a drift warning — the store clock reports the
 // received version's lead against local wall time, and only a received
@@ -1519,7 +1530,9 @@ func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, 
 // after the apply, never from the store's per-outcome Conflict slice (ADR
 // 0004): the store reports every LWW outcome, so len(conflicts) would count
 // ordinary overwrites the Spec does not call conflicts.
-func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplication, out *port.Outbox) {
+func (c *Core) applyRemote(
+	now time.Time, nodeID uint16, source string, msg port.DataReplication, out *port.Outbox,
+) {
 	if held, present := c.store.Version(msg.Key); present {
 		switch cmp := held.Compare(msg.Record.Version); {
 		case cmp > 0:
@@ -1537,7 +1550,11 @@ func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplicatio
 	}
 	_, drift, err := c.store.ApplyRemote(msg.Key, msg.Record)
 	if err != nil {
-		c.cfg.Log(fmt.Sprintf("sup-kv: applying replicated record for key %q from handle %q: %v", msg.Key, source, err))
+		// The key is deliberately absent: the shared (node_id,
+		// apply_failure) limiter bounds the flood and the quoted source
+		// handle is all the operator needs (T-07-17, T-07-18).
+		c.warnRateLimited(now, nodeID, warnClassApplyFailure,
+			fmt.Sprintf("sup-kv: applying replicated record from handle %q: %v", source, err))
 		// Not applied: no Ack, no supersession — never confirm a record the
 		// store refused.
 		return
