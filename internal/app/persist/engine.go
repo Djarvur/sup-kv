@@ -46,6 +46,16 @@ type Config struct {
 	// the binary wires it to one ERROR log line and must not block. Nil is
 	// valid — the counters and the retry ladder still apply.
 	OnDumpFailure func(err error, class port.FailureClass)
+
+	// OnConfirmed receives the store content generation covered by every
+	// successful dump, exactly once per dump and only after that dump's
+	// waiters are confirmed (APIS-04, D-04): the generation is read
+	// immediately before the Records snapshot, so it names the state the
+	// dump actually saved. A failed dump calls it never — a failed save
+	// proves nothing durable. The binary wires it to the Watch hub's
+	// watermark and it must not block; the call runs on the dumper goroutine.
+	// Nil is valid — the dump still confirms its waiters.
+	OnConfirmed func(generation uint64)
 }
 
 // normalized returns cfg with zero or negative fields replaced by the

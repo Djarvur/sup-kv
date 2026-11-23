@@ -81,7 +81,11 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 		clock.NewClock(time.Now, 0, 0, time.Minute),
 		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
 	)
-	eng := persist.New(storeA, &fakeDumpStore{}, persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond})
+	eng := persist.New(storeA, &fakeDumpStore{}, persist.Config{
+		Debounce:    time.Millisecond,
+		MaxWait:     50 * time.Millisecond,
+		OnConfirmed: hub.Confirm,
+	})
 	engCtx, cancelEng := context.WithCancel(b.Context())
 	go func() { _ = eng.Run(engCtx) }()
 	b.Cleanup(cancelEng)

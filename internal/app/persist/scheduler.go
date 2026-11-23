@@ -200,7 +200,11 @@ func (s *scheduler) rearm(
 
 // runDump is the serialized dump cycle: the confirmation role captures the
 // current waiter list and clears the dirty epoch before any encode or I/O —
-// write-path dirty-marking must never block on adapter I/O. The cycle takes
+// write-path dirty-marking must never block on adapter I/O. The content
+// generation is read immediately BEFORE Records() so the published watermark
+// covers the snapshot it describes (APIS-04, D-04): an install between the
+// two reads is in the snapshot but publishes one dump later, while an
+// install before the read is in both. The cycle takes
 // exactly one Records() copy and streams it through SaveStream, whose fill
 // runs EncodeTo against the adapter's buffered temp writer: the encoded dump
 // is never materialized as a second buffer (D-06, PERSIST-06). The
@@ -213,7 +217,10 @@ func (s *scheduler) rearm(
 // waiter's record is in the snapshot this dump saves. A write racing the
 // capture either appends before it (covered by this snapshot) or re-marks
 // the engine dirty after it (covered by the next), so no waiter is ever
-// confirmed against a dump that misses its record. On failure every current
+// confirmed against a dump that misses its record. After the waiters are
+// confirmed, the successful dump publishes the captured generation through
+// cfg.OnConfirmed — the Watch hub's durability watermark (D-04); a failed
+// dump publishes nothing. On failure every current
 // waiter resolves ErrDumpFailed while the state stays readable in memory,
 // dirty re-arms from a fresh epoch and the bounded retry ladder arms the
 // next attempt — 100 ms doubling to the 5 s cap, reset by a success — so a
@@ -222,6 +229,7 @@ func (s *scheduler) runDump() error {
 	captured := s.conf.capture()
 
 	start := s.cfg.Now()
+	gen := s.store.Generation()
 	records := s.store.Records()
 	err := s.dumps.SaveStream(func(w io.Writer) error {
 		return EncodeTo(w, records, s.valueMaxBytes)
@@ -234,6 +242,9 @@ func (s *scheduler) runDump() error {
 	}
 	s.resetRetry()
 	s.conf.confirmWaiters(captured)
+	if s.cfg.OnConfirmed != nil {
+		s.cfg.OnConfirmed(gen)
+	}
 	return nil
 }
 

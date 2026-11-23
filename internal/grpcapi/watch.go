@@ -27,10 +27,12 @@ const (
 
 	// watchIngress bounds the hub's single event queue fed by the store's
 	// OnChange tap from under the store write lock (T-05-05: the store
-	// never waits on any subscriber). Beyond it Ingest only raises the
-	// overflow flag — the hub answers by disconnecting every subscriber
-	// with the resubscribe status, never by silently dropping events,
-	// because shed subscribers re-snapshot on resubscribe (D-02).
+	// never waits on any subscriber). It bounds both legs of the pipeline —
+	// the ingress channel and the pending (unconfirmed) queue — because an
+	// event is in one or the other, never both. Beyond it the hub sheds:
+	// every subscriber is disconnected with the resubscribe status and the
+	// pending queue is cleared, never silently dropped, because shed
+	// subscribers re-snapshot on resubscribe (D-02, APIS-04).
 	watchIngress = 4096
 )
 
@@ -42,13 +44,19 @@ func watchOverwhelmed() error {
 	return status.Error(codes.ResourceExhausted, "watch subscriber overwhelmed; resubscribe")
 }
 
-// watchEvent is one change notification inside the hub: the key and the
-// stored record the tap handed over. The store replaces records wholesale
-// on the next install and never mutates one in place, so a single install
-// fans out to every subscriber without copying.
+// watchEvent is one change notification inside the hub: the key, the stored
+// record the tap handed over, and the store content generation the install
+// produced. The generation is the durability gate's unit (APIS-04, D-04): an
+// event leaves the pending queue for delivery only once the persist engine
+// has confirmed a dump covering that generation. The store replaces records
+// wholesale on the next install and never mutates one in place, so a single
+// install fans out to every subscriber without copying. Snapshot events are
+// built directly from the store's current state and never pass through the
+// pending queue, so their generation is zero and unused.
 type watchEvent struct {
 	key string
 	rec storage.Record
+	gen uint64
 }
 
 // toProto maps one event onto the wire message (D-01): snapshot and live
@@ -110,11 +118,15 @@ type watchSubscription struct {
 // blocking (it runs under the store write lock, T-05-05), subscribe and
 // unsubscribe requests arrive on channels, and the hub serializes snapshot
 // taking and fan-out — which is what makes the snapshot-then-live cut exact
-// by construction (research Pattern 2). On either overflow flavor (a full
-// subscriber channel or a full ingress) the hub disconnects subscribers
-// with the resubscribe status instead of dropping events silently; shed
-// clients re-snapshot on resubscribe, so the D-02 no-holes contract
-// survives overload. Each subscriber costs one bounded channel and v1 has
+// by construction (research Pattern 2). Ingress events are held in a pending
+// queue in install order and released for delivery only when the persist
+// engine's confirmed watermark covers their generation (APIS-04, D-04): the
+// live feed is the durable change feed, never the install announcement. On
+// either overflow flavor (a full subscriber channel, a full ingress or a
+// full pending queue) the hub disconnects subscribers with the resubscribe
+// status instead of dropping events silently; shed clients re-snapshot on
+// resubscribe, so the D-02 no-holes contract survives overload. Each
+// subscriber costs one bounded channel and v1 has
 // no per-subscriber cap — the trusted-LAN operational envelope recorded as
 // accepted (T-05-06), to revisit with the Phase 6 observability work.
 type WatchHub struct {
@@ -132,6 +144,24 @@ type WatchHub struct {
 	overflow      atomic.Bool
 	done          chan struct{}
 	buffer        int
+
+	// pending holds the ingress events not yet covered by the confirmed
+	// durability watermark, in arrival (install) order — Run-goroutine state
+	// only. It is bounded by watchIngress: an append that would exceed the
+	// bound sheds every subscriber, clears the queue and lets resubscription
+	// rebuild from the snapshot (D-02).
+	pending []watchEvent
+
+	// confirmed is the persist engine's durability watermark: the highest
+	// store generation a successful dump has saved. Confirm atomically maxes
+	// it from the engine's goroutine; Run reads it to release pending events.
+	confirmed atomic.Uint64
+
+	// confirmCh wakes Run when Confirm advances the watermark, so a confirmed
+	// generation releases held events without another ingress event arriving.
+	// Buffered one and written with a non-blocking send: repeated confirmations
+	// collapse into one wake-up.
+	confirmCh chan struct{}
 }
 
 // NewWatchHub returns a hub with the default per-subscriber buffer
@@ -160,6 +190,7 @@ func newWatchHub(buffer int) *WatchHub {
 		subs:          make(map[*watchSubscriber]struct{}),
 		done:          make(chan struct{}),
 		buffer:        buffer,
+		confirmCh:     make(chan struct{}, 1),
 	}
 }
 
@@ -173,10 +204,14 @@ func (h *WatchHub) attach(engine *persist.Engine) {
 }
 
 // Run is the single hub goroutine the caller launches. It services the
-// subscribe and unsubscribe requests, fans every ingested install event
-// out to the matching subscribers in arrival order, and — on either
-// overflow flavor — sheds subscribers with the resubscribe status instead
-// of dropping events (D-02). Run returns ctx's error once the context is
+// subscribe and unsubscribe requests, moves every ingested install event into
+// the pending queue, and releases the leading queue entries for fan-out once
+// the confirmed durability watermark covers them (APIS-04, D-04) — before
+// and after each select iteration, so a confirmation, an ingress event and a
+// subscription are all observed in one pass. It sheds subscribers with the
+// resubscribe status on either overflow flavor instead of dropping events
+// (D-02) and clears the pending queue then, because resubscription re-snapshots
+// from the store. Run returns ctx's error once the context is
 // cancelled, closing every subscriber's channel with a nil termination
 // status and the done channel that guards the late subscribe and
 // unsubscribe sends. Plain channel selects, no timers (the persist engine
@@ -185,36 +220,69 @@ func (h *WatchHub) Run(ctx context.Context) error {
 	defer close(h.done)
 	defer h.shutdownSubscribers()
 	for {
+		h.release()
 		if h.overflow.CompareAndSwap(true, false) {
-			h.disconnectAll()
+			h.shed()
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case ev := <-h.ingress:
-			h.dispatch(ev)
+			h.hold(ev)
 		case req := <-h.subscribeCh:
 			h.handleSubscribe(req)
 		case sub := <-h.unsubscribeCh:
 			h.remove(sub)
+		case <-h.confirmCh:
+			// Confirm advanced the watermark; the release below delivers
+			// every newly covered pending event.
 		}
+		h.release()
 	}
 }
 
 // Ingest is the storage.Config.OnChange target (the change tap): it hands
-// one install event to the hub through a non-blocking send into the
-// bounded ingress, so the store write lock is never held waiting on the
-// Watch surface (T-05-05). A full ingress is never a silent drop: the
-// overflow flag makes the hub disconnect every subscriber on its next
+// one install event — with the content generation the install produced — to
+// the hub through a non-blocking send into the bounded ingress, so the store
+// write lock is never held waiting on the Watch surface (T-05-05). The event
+// is an announcement of an install, not of durability: Run holds it in the
+// pending queue until Confirm publishes a covering watermark (APIS-04, D-04).
+// A full ingress is never a silent drop: the
+// overflow flag makes the hub shed every subscriber on its next
 // iteration, and they re-snapshot on resubscribe (D-02). The handed record
 // is the store's stored copy — never mutated in place — so the hub may fan
 // it out to every subscriber without copying. Safe from any goroutine;
 // never blocks.
-func (h *WatchHub) Ingest(key string, rec storage.Record) {
+func (h *WatchHub) Ingest(key string, rec storage.Record, gen uint64) {
 	select {
-	case h.ingress <- watchEvent{key: key, rec: rec}:
+	case h.ingress <- watchEvent{key: key, rec: rec, gen: gen}:
 	default:
 		h.overflow.Store(true)
+	}
+}
+
+// Confirm publishes the persist engine's durability watermark: every store
+// generation at or below gen is covered by a successful dump, so pending
+// events at or below it may be announced. It atomically keeps the maximum —
+// a later, lower confirmation never moves the watermark backwards — and
+// wakes Run through the buffered confirm channel, so a confirmation releases
+// held events without waiting for another ingress event. Safe from any
+// goroutine; never blocks. It is the persist.Config.OnConfirmed target
+// (D-04): the engine calls it once per successful dump, after the dump's
+// waiters are confirmed.
+func (h *WatchHub) Confirm(gen uint64) {
+	for {
+		cur := h.confirmed.Load()
+		if gen <= cur {
+			return
+		}
+		if h.confirmed.CompareAndSwap(cur, gen) {
+			break
+		}
+	}
+	select {
+	case h.confirmCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -282,9 +350,57 @@ func (h *WatchHub) handleSubscribe(req watchSubscribeRequest) {
 	req.ready <- watchSubscription{sub: sub, snapshot: snapshot}
 }
 
-// dispatch fans one install event out to the matching subscribers in
-// arrival order — tap order is install order under the store write lock
-// (D-05), so no re-sorting anywhere — with the exact-cut suppression rule
+// hold appends one ingress event to the pending queue, enforcing the
+// watchIngress bound: an append that would exceed it sheds every subscriber
+// and clears the queue — a silent drop is not acceptable, and the
+// resubscription re-snapshot heals the shed (D-02). Run-goroutine only.
+func (h *WatchHub) hold(ev watchEvent) {
+	if len(h.pending) >= watchIngress {
+		h.shed()
+	}
+	h.pending = append(h.pending, ev)
+}
+
+// release dispatches every leading pending event covered by the confirmed
+// watermark, in arrival order, and drops them from the queue. Only a prefix
+// is eligible: install generations are monotone in arrival order, so an
+// uncovered event blocks the queue behind it and no event is ever delivered
+// out of order or twice — a released entry is gone, so a repeated Confirm
+// delivers nothing. The dropped entries are zeroed so the queue pins no
+// record references. Run-goroutine only.
+func (h *WatchHub) release() {
+	confirmed := h.confirmed.Load()
+	released := 0
+	for ; released < len(h.pending); released++ {
+		ev := h.pending[released]
+		if ev.gen > confirmed {
+			break
+		}
+		h.dispatch(ev)
+	}
+	if released == 0 {
+		return
+	}
+	remaining := copy(h.pending, h.pending[released:])
+	clear(h.pending[remaining:])
+	h.pending = h.pending[:remaining]
+}
+
+// shed applies the overflow policy to both bounded queues: it ends every
+// subscriber's stream with the resubscribe status and drops the pending
+// queue. Pending entries are install announcements, not durable state, so a
+// shed client's resubscription snapshot reconstructs everything it needs
+// (D-02); keeping a queue no remaining subscriber can safely consume would
+// only pin memory. Run-goroutine only.
+func (h *WatchHub) shed() {
+	h.disconnectAll()
+	clear(h.pending)
+	h.pending = h.pending[:0]
+}
+
+// dispatch fans one released install event out to the matching subscribers
+// in queue order — install generations are monotone, so arrival order is
+// install/version order (D-05) — with the exact-cut suppression rule
 // and the non-blocking per-subscriber send: a full channel disconnects
 // that subscriber only (A3), never blocks the hub or the store.
 func (h *WatchHub) dispatch(ev watchEvent) {
@@ -325,11 +441,10 @@ func (h *WatchHub) disconnect(sub *watchSubscriber) {
 	close(sub.events)
 }
 
-// disconnectAll sheds every current subscriber on a hub-ingress overflow:
-// events past the ingress bound were dropped — silently losing them to
-// connected subscribers would violate D-02 — so the honest verdict is to
-// end every stream with the resubscribe status; the re-snapshot on
-// resubscribe heals the loss.
+// disconnectAll sheds every current subscriber on an overflow: events past a
+// queue bound were dropped — silently losing them to connected subscribers
+// would violate D-02 — so the honest verdict is to end every stream with the
+// resubscribe status; the re-snapshot on resubscribe heals the loss.
 func (h *WatchHub) disconnectAll() {
 	for sub := range h.subs {
 		h.disconnect(sub)
@@ -356,7 +471,13 @@ func (h *WatchHub) shutdownSubscribers() {
 
 // Watch streams the subscriber's snapshot as ordinary WatchResponse events (D-03)
 // followed by every live change under the prefix in arrival order (D-05) —
-// tombstones included as deleted=true (D-02), no origin marking (D-07).
+// tombstones included as deleted=true (D-02), no origin marking (D-07). The
+// live feed is the durable change feed (D-04): the hub releases an event only
+// once the persist engine has confirmed a dump covering its install
+// generation, so a change the API announced is on disk. The subscribe
+// snapshot stays the current in-memory state — what Get sees — so the
+// snapshot and the live feed have different durability guarantees by design
+// (the documented asymmetry, D-04).
 // The startup gate is the first statement, before even the nil-hub check
 // (API-04, D-01): a closed node refuses the stream with Unavailable, like
 // every other read — the gate is the interface contract, so a

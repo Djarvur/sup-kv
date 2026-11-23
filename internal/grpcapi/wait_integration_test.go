@@ -199,7 +199,11 @@ func TestWaitIntegration_ackedThroughRealAdapterTracker(t *testing.T) {
 		time.Minute,
 		&fakeDumpStore{},
 		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
-		persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond},
+		persist.Config{
+			Debounce:    time.Millisecond,
+			MaxWait:     50 * time.Millisecond,
+			OnConfirmed: hub.Confirm,
+		},
 	)
 	engCtx, cancelEng := context.WithCancel(t.Context())
 	go func() { _ = eng.Run(engCtx) }()
@@ -335,7 +339,11 @@ func TestWaitIntegration_staleRecordNotAcked(t *testing.T) {
 		time.Minute,
 		&fakeDumpStore{},
 		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
-		persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond},
+		persist.Config{
+			Debounce:    time.Millisecond,
+			MaxWait:     50 * time.Millisecond,
+			OnConfirmed: hub.Confirm,
+		},
 	)
 	engCtx, cancelEng := context.WithCancel(t.Context())
 	go func() { _ = eng.Run(engCtx) }()

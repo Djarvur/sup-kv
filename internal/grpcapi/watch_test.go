@@ -66,12 +66,12 @@ func recvEvent(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchRes
 	}
 }
 
-// recvNone proves the stream stays quiet for the window: the negative proof
-// for suppressed events (merge losers, off-prefix writes). Sound because
-// the pipeline is known empty when it runs — the preceding positive event
-// arrived through a synchronous Recv — so it must be the stream's final
-// assertion.
-func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchResponse], window time.Duration) {
+// recvNone proves the stream stays quiet for watchQuietWindow: the negative
+// proof for suppressed events (merge losers, off-prefix writes, a repeated
+// confirmation). Sound because the pipeline is known empty when it runs — the
+// preceding positive event arrived through a synchronous Recv — so it must be
+// the stream's final assertion.
+func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchResponse]) {
 	t.Helper()
 	ch := make(chan watchRecv, 1)
 	go func() {
@@ -80,8 +80,8 @@ func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchResp
 	}()
 	select {
 	case got := <-ch:
-		t.Fatalf("Recv: want silence for %s, got event %v (err %v)", window, got.ev, got.err)
-	case <-time.After(window):
+		t.Fatalf("Recv: want silence for %s, got event %v (err %v)", watchQuietWindow, got.ev, got.err)
+	case <-time.After(watchQuietWindow):
 	}
 }
 
@@ -388,7 +388,7 @@ func TestWatch_replicatedChange(t *testing.T) {
 	}) {
 		t.Fatalf("ApplyRemote(loser) conflicts = %v, want %v", conflicts, want)
 	}
-	recvNone(t, stream, watchQuietWindow)
+	recvNone(t, stream)
 }
 
 // TestWatch_prefix proves D-04 on both phases: the snapshot of a prefixed
@@ -459,7 +459,7 @@ func TestWatch_prefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Set cfg/other: want OK, got error: %v", err)
 	}
-	recvNone(t, svcStream, watchQuietWindow)
+	recvNone(t, svcStream)
 }
 
 // TestWatch_slowConsumer proves the shed policy end-to-end (A3, T-05-05):
@@ -533,11 +533,15 @@ func TestWatch_slowConsumer(t *testing.T) {
 		}
 	}()
 
-	// The flood: the OnChange entry point at production rates.
+	// The flood: the OnChange entry point at production rates. Generation 0
+	// is already at or below the starting watermark, so these synthetic
+	// events release immediately — the flood exercises the shed path, not the
+	// durability gate (TestWatchHub_confirmGate and the held-dump tests own
+	// that).
 	nowMs := time.Now().UnixMilli()
 	for i := range watchSlowFlood {
 		ts.hub.Ingest(fmt.Sprintf("big/f%05d", i),
-			storage.Record{Version: version.PackVersion(nowMs+int64(i), 0, 0x0FE9), Data: []byte("f")})
+			storage.Record{Version: version.PackVersion(nowMs+int64(i), 0, 0x0FE9), Data: []byte("f")}, 0)
 	}
 	select {
 	case err := <-got:
@@ -625,7 +629,7 @@ func TestWatch_unconfirmedNotAnnounced(t *testing.T) {
 	if rec.GetKey() != "gate/a" || !bytes.Equal(rec.GetValue(), []byte("held")) {
 		t.Fatalf("released event = (%s, %q), want (gate/a, held)", rec.GetKey(), rec.GetValue())
 	}
-	recvNone(t, stream, watchQuietWindow) // exactly once: the final assertion.
+	recvNone(t, stream) // exactly once: the final assertion.
 }
 
 // TestWatch_dumpFailedThenConfirmed proves the gate's hardest case (D-04,
@@ -660,7 +664,8 @@ func TestWatch_dumpFailedThenConfirmed(t *testing.T) {
 	ts.dumps.mu.Lock()
 	ts.dumps.failSave = true
 	ts.dumps.mu.Unlock()
-	if _, _, setErr := ts.engine.Set("gatefail/a", []byte("unconfirmed")); !errors.Is(setErr, persist.ErrDumpFailed) {
+	_, _, setErr := ts.engine.Set("gatefail/a", []byte("unconfirmed"))
+	if !errors.Is(setErr, persist.ErrDumpFailed) {
 		t.Fatalf("engine.Set during the failed dump = %v, want ErrDumpFailed", setErr)
 	}
 	select {
@@ -672,7 +677,8 @@ func TestWatch_dumpFailedThenConfirmed(t *testing.T) {
 	ts.dumps.mu.Lock()
 	ts.dumps.failSave = false
 	ts.dumps.mu.Unlock()
-	if flushErr := ts.engine.Flush(); flushErr != nil {
+	flushErr := ts.engine.Flush()
+	if flushErr != nil {
 		t.Fatalf("Flush after healing the dump: want nil, got error: %v", flushErr)
 	}
 	var live *apiproto.WatchResponse
@@ -689,5 +695,67 @@ func TestWatch_dumpFailedThenConfirmed(t *testing.T) {
 	if rec.GetKey() != "gatefail/a" || !bytes.Equal(rec.GetValue(), []byte("unconfirmed")) {
 		t.Fatalf("released event = (%s, %q), want (gatefail/a, unconfirmed)", rec.GetKey(), rec.GetValue())
 	}
-	recvNone(t, stream, watchQuietWindow) // exactly once: the final assertion.
+	recvNone(t, stream) // exactly once: the final assertion.
+}
+
+// TestWatchHub_confirmGate pins the hub's durability gate deterministically
+// (APIS-04, D-04, T-06-17): an event whose generation is above the confirmed
+// watermark is not delivered, Confirm(gen) releases it exactly once, and a
+// second Confirm of the same generation delivers nothing. The seed write
+// proves the subscription is registered; the synthetic event's generation is
+// far above the watermark the seed's own dump left, so the gate — not timing
+// — is what holds it.
+func TestWatchHub_confirmGate(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "hubgate/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set hubgate/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "hubgate/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "hubgate/seed" {
+		t.Fatalf("snapshot event = %s, want hubgate/seed", snap.GetRecord().GetKey())
+	}
+
+	pending := make(chan watchRecv, 1)
+	go func() {
+		ev, recvErr := stream.Recv()
+		pending <- watchRecv{ev: ev, err: recvErr}
+	}()
+
+	const heldGen = 5
+	held := storage.Record{
+		Version: version.PackVersion(time.Now().UnixMilli(), 0, 0x0A11),
+		Data:    []byte("held"),
+	}
+	ts.hub.Ingest("hubgate/a", held, heldGen)
+	select {
+	case got := <-pending:
+		t.Fatalf("Recv: delivered generation %d before Confirm reached it (event %v, err %v)", heldGen, got.ev, got.err)
+	case <-time.After(watchQuietWindow):
+	}
+
+	ts.hub.Confirm(heldGen)
+	var live *apiproto.WatchResponse
+	select {
+	case got := <-pending:
+		if got.err != nil {
+			t.Fatalf("Recv: want the released event, got error: %v", got.err)
+		}
+		live = got.ev
+	case <-time.After(watchTestTimeout):
+		t.Fatalf("Confirm(%d) did not release the held event within the deadline", heldGen)
+	}
+	rec := live.GetRecord()
+	if rec.GetKey() != "hubgate/a" || !bytes.Equal(rec.GetValue(), []byte("held")) {
+		t.Fatalf("released event = (%s, %q), want (hubgate/a, held)", rec.GetKey(), rec.GetValue())
+	}
+
+	ts.hub.Confirm(heldGen) // the repeated confirmation delivers nothing.
+	recvNone(t, stream)
 }

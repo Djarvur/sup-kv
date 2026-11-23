@@ -45,7 +45,12 @@ type Config struct {
 	// (API-03): install fires it under the store write lock with the record
 	// that just became the stored record — the exact record a subsequent
 	// Records() snapshot holds, recomputed checksum included, and the record
-	// a subsequent Get returns only when it is live. A tombstone install
+	// a subsequent Get returns only when it is live — and with the content
+	// generation that install produced. The generation is the durability
+	// watermark's unit (APIS-04, D-04): a tapped event is an install
+	// announcement, never a durability claim; the persist engine publishes
+	// the generation covered by a successful dump, and the Watch hub releases
+	// the event only once that watermark reaches it. A tombstone install
 	// fires the tap exactly like any other change (a delete IS a change),
 	// yet a subsequent Get returns ErrNotFound for it — the tombstone is
 	// visible only through Records(). Every change source
@@ -63,7 +68,7 @@ type Config struct {
 	// store operation. The handed record is the
 	// store's stored copy: records are replaced wholesale on the next
 	// install, never mutated in place, so retaining it is safe.
-	OnChange func(key string, rec Record)
+	OnChange func(key string, rec Record, generation uint64)
 }
 
 // Record is one stored key's state. Data is defensively copied on the way
@@ -140,7 +145,7 @@ func (c Config) ValueLimit() int {
 func (c Config) normalized() Config {
 	c.ValueMaxBytes = c.ValueLimit()
 	if c.OnChange == nil {
-		c.OnChange = func(_ string, _ Record) {}
+		c.OnChange = func(_ string, _ Record, _ uint64) {}
 	}
 	return c
 }
@@ -437,12 +442,12 @@ func (s *Store) join(key string, rec Record) ([]Conflict, bool) {
 
 // install defensively copies rec and stores it under key with a recomputed
 // checksum, bumps the content generation and fires the Config.OnChange tap
-// with the stored record. install is the single convergence point of every
-// change source — local writes reach it through write, remote merges through
-// a winning join branch — so the tap fires exactly when a record
-// became the stored record (D-06) and observes commit order, and the
-// generation moves exactly once per actual change and never for a no-op; the
-// caller must hold the write lock.
+// with the stored record and that generation. install is the single
+// convergence point of every change source — local writes reach it through
+// write, remote merges through a winning join branch — so the tap fires
+// exactly when a record became the stored record (D-06) and observes commit
+// order, and the generation moves exactly once per actual change and never
+// for a no-op; the caller must hold the write lock.
 func (s *Store) install(key string, rec Record) {
 	data := bytes.Clone(rec.Data)
 	stored := Record{
@@ -453,7 +458,7 @@ func (s *Store) install(key string, rec Record) {
 	}
 	s.records[key] = stored
 	s.generation++
-	s.cfg.OnChange(key, stored)
+	s.cfg.OnChange(key, stored, s.generation)
 }
 
 // Records returns a full snapshot of the map, tombstones included, with Data

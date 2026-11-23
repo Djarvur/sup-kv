@@ -902,13 +902,15 @@ func TestStore_concurrentDeleteVsSet(t *testing.T) {
 	}
 }
 
-// changeTapEvent is one OnChange tap firing as the tests observe it: the key
-// and the handed record — the store's stored copy, which is replaced
+// changeTapEvent is one OnChange tap firing as the tests observe it: the key,
+// the handed record — the store's stored copy, which is replaced
 // wholesale on the next install and never mutated in place, so retaining it
-// is safe per the field's documented contract.
+// is safe per the field's documented contract — and the content generation
+// the install produced.
 type changeTapEvent struct {
-	key    string
-	record storage.Record
+	key        string
+	record     storage.Record
+	generation uint64
 }
 
 // changeTapRecorder collects the events a storage.Config.OnChange tap
@@ -921,10 +923,10 @@ type changeTapRecorder struct {
 }
 
 // tap is the Config.OnChange callback.
-func (r *changeTapRecorder) tap(key string, rec storage.Record) {
+func (r *changeTapRecorder) tap(key string, rec storage.Record, gen uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.events = append(r.events, changeTapEvent{key: key, record: rec})
+	r.events = append(r.events, changeTapEvent{key: key, record: rec, generation: gen})
 }
 
 // count returns how many events have fired so far.
@@ -1182,6 +1184,56 @@ func TestStore_onChange(t *testing.T) {
 		// Reaching here without a nil-callback panic is the assertion: the
 		// zero-value Config behaves exactly like the pre-tap store.
 	})
+}
+
+// TestStore_changeTapGeneration pins the generation the tap hands over
+// (APIS-04, D-04): it is the just-incremented content generation — one step
+// per actual install, in tap order — and no event fires for a rejected
+// SetIfAbsent, a Delete of a missing key, an identical merge redelivery or a
+// clock-only Observe, so the persist engine's durability watermark can never
+// be advanced for a change that did not happen.
+func TestStore_changeTapGeneration(t *testing.T) {
+	t.Parallel()
+
+	store, tap := newTapStore()
+	_, _, err := store.Set("k", []byte("v1"))
+	if err != nil {
+		t.Fatalf("Set k=v1: want nil, got error: %v", err)
+	}
+	_, _, err = store.Set("k", []byte("v2"))
+	if err != nil {
+		t.Fatalf("Set k=v2: want nil, got error: %v", err)
+	}
+	_, _, err = store.SetIfAbsent("k", []byte("rejected"))
+	if !errors.Is(err, storage.ErrAlreadyExists) {
+		t.Fatalf("SetIfAbsent on an existing key = %v, want ErrAlreadyExists", err)
+	}
+	_, _, err = store.Delete("missing")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Delete of a missing key = %v, want ErrNotFound", err)
+	}
+	delVer, _, err := store.Delete("k")
+	if err != nil {
+		t.Fatalf("Delete k: want nil, got error: %v", err)
+	}
+	_, _, err = store.Merge("k", storage.Record{Version: delVer, Deleted: true})
+	if err != nil {
+		t.Fatalf("Merge identical tombstone: want nil, got error: %v", err)
+	}
+	store.Observe(delVer) // clock-only: no record, no install, no tap event.
+
+	want := []uint64{1, 2, 3}
+	if got := tap.count(); got != len(want) {
+		t.Fatalf("tap fired %d times, want %d (one per actual install, none for rejections or no-ops)", got, len(want))
+	}
+	for i, wantGen := range want {
+		if ev := tap.event(i); ev.generation != wantGen {
+			t.Fatalf("tap event %d generation = %d, want %d", i, ev.generation, wantGen)
+		}
+	}
+	if got := store.Generation(); got != want[len(want)-1] {
+		t.Fatalf("Store.Generation() = %d, want the last tapped generation %d", got, want[len(want)-1])
+	}
 }
 
 // requireGeneration fails unless store.Generation() equals want — the

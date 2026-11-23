@@ -570,8 +570,9 @@ func gateBackstopFor(cfg config, engine *persist.Engine) time.Duration {
 
 // startEngine opens the real dump store at the configured path, resolves
 // the engine over it with the hub's change tap threaded through
-// storage.Config, and launches the single dumper goroutine. Returns the
-// engine with its lifecycle handles.
+// storage.Config and the hub's durability watermark through
+// persist.Config.OnConfirmed, and launches the single dumper goroutine.
+// Returns the engine with its lifecycle handles.
 func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.CancelFunc, <-chan error) {
 	dumps := persistfile.New(cfg.dumpPath)
 	engine, discarded := persist.Open(cfg.nodeID, time.Now, cfg.driftWarn, dumps, storage.Config{
@@ -580,6 +581,10 @@ func startEngine(cfg config, hub *grpcapi.WatchHub) (*persist.Engine, context.Ca
 	}, persist.Config{
 		Debounce: cfg.dumpDebounce,
 		MaxWait:  cfg.dumpMaxWait,
+		// The durability seam (APIS-04, D-04): only a successful dump's
+		// covered generation releases Watch events, so a change is announced
+		// after it is durable, never at install time.
+		OnConfirmed: hub.Confirm,
 		// One ERROR per failed attempt with the class label the metric uses
 		// (D-05, PERSIST-05): a static message plus attributes, never dynamic
 		// text, and the engine's dumper goroutine only formats and logs.

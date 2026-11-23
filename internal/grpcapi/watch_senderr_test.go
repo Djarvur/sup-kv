@@ -118,7 +118,11 @@ func newSenderrServer(t *testing.T) (*grpcapi.Server, *persist.Engine) {
 		time.Minute,
 		&fakeDumpStore{},
 		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
-		persist.Config{Debounce: senderrEngineDebounce, MaxWait: senderrEngineMaxWait},
+		persist.Config{
+			Debounce:    senderrEngineDebounce,
+			MaxWait:     senderrEngineMaxWait,
+			OnConfirmed: hub.Confirm,
+		},
 	)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -324,7 +328,7 @@ func TestWatch_sendErrorDisconnectsSubscriber(t *testing.T) {
 		nowMs := time.Now().UnixMilli()
 		for i := range senderrShedFlood {
 			ts.hub.Ingest(fmt.Sprintf("%s%05d", senderrShedKeys, i),
-				storage.Record{Version: version.PackVersion(nowMs+int64(i), 0, senderrFloodOrigin), Data: []byte("f")})
+				storage.Record{Version: version.PackVersion(nowMs+int64(i), 0, senderrFloodOrigin), Data: []byte("f")}, 0)
 		}
 		got := make(chan error, 1)
 		go func() {

@@ -205,6 +205,7 @@ type testHarness struct {
 	hub          *grpcapi.WatchHub
 	dumps        *fakeDumpStore // nil on the file-backed harness
 	cancelEngine context.CancelFunc
+	cancelHub    context.CancelFunc
 }
 
 // testServerConfig holds the harness knobs the test families vary: the
@@ -307,8 +308,10 @@ func newTestServerWithWatchBuffer(t *testing.T, subscriberBuffer int) *testHarne
 
 // buildTestServer assembles the full bufconn harness from the config. The
 // hub is constructed FIRST — persist.Open threads the change tap through
-// storage.Config (OnChange: hub.Ingest, no persist change) — then the
-// engine, then go hub.Run under its own context, cancelled via t.Cleanup:
+// storage.Config (OnChange: hub.Ingest) and the durability watermark through
+// persist.Config (OnConfirmed: hub.Confirm) — then the engine, then go hub.Run
+// under its own context, cancelled via t.Cleanup (and exposed on the harness
+// as cancelHub, so a shutdown test can end the hub deliberately):
 // a slow or wedged Watch hub must never hold the harness's writes hostage.
 // The api server is constructed with the config's gate wiring and LocalNotify
 // seam (nil unless a test installs a capture), its health server registered
@@ -354,6 +357,9 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 			Debounce:       time.Millisecond,
 			MaxWait:        50 * time.Millisecond,
 			ConfirmTimeout: cfg.confirmTimeout,
+			// The durability seam the Watch tests observe: a successful dump
+			// publishes its covered generation, releasing the held events.
+			OnConfirmed: hub.Confirm,
 		},
 	)
 	engCtx, cancelEng := context.WithCancel(t.Context())
@@ -408,6 +414,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 		hub:          hub,
 		dumps:        fake,
 		cancelEngine: cancelEng,
+		cancelHub:    cancelHub,
 	}
 }
 
