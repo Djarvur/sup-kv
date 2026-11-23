@@ -795,6 +795,23 @@ func standAbsent(t *testing.T, client apiproto.SupKVServiceClient, key string) b
 	return status.Code(err) == codes.NotFound
 }
 
+// standListPrefix returns the live keys under prefix in one legacy List
+// response (page_size 0: every matching live key, keys only). An absence
+// check reads the store through it when the key itself cannot travel: a Get
+// of a key over the transport envelope is rejected before the handler, while
+// List's small request reports the live keys. The error is returned rather
+// than fatally failing so a waitFor poll can retry a transient RPC error.
+func standListPrefix(t *testing.T, client apiproto.SupKVServiceClient, prefix string) ([]string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
+	defer cancel()
+	resp, err := client.List(ctx, &apiproto.ListRequest{Prefix: prefix})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetKeys(), nil
+}
+
 // readFinalDump reads the named dump file off disk and returns its text —
 // the dump-grep seam: callers assert key presence or absence (and JSON
 // fragments such as "deleted":true) against the returned text, naming the

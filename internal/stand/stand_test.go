@@ -566,18 +566,22 @@ func emptyDiskRecovered(t *testing.T, client apiproto.SupKVServiceClient, keys [
 }
 
 // TestStand_oversizeKeyF2c pins review finding F2c at process level against
-// the fixed behavior (XPORT-03): node A Sets a 70 000-character key and the
-// API rejects it locally with InvalidArgument, because the one key-length
-// ceiling (storage.MaxKeyBytes) runs before the store. The original finding
-// — Set OK locally, then every replication datagram refused by the kernel
-// with EMSGSIZE forever — is fixed by the key bound rather than by kernel
-// error handling; the scenario keeps its name for traceability. The key
-// therefore never reaches node B: over the derived window (2×sync_interval
-// plus the discovery, gate and slack margin) B's endpoint serves nothing
-// under it, and neither node's final dump carries a record for it. The
-// positive half proves the bound admits the documented maximum: a key of
-// exactly storage.MaxKeyBytes bytes with a 61 440-byte value replicates to
-// B and lands in B's final confirmed dump.
+// the fixed behavior (XPORT-03). Two layers reject a bad key, and the code
+// names the layer that spoke (docs/API.md, Transport): a key just over the
+// one key-length ceiling (storage.MaxKeyBytes+1) still fits the transport
+// envelope, so the handler's key bound answers InvalidArgument before the
+// store; a 70 000-character key is over MaxRecvBytes itself, so the
+// production server answers ResourceExhausted at the transport before any
+// handler runs. The original finding — Set OK locally, then every
+// replication datagram refused by the kernel with EMSGSIZE forever — is
+// fixed by both bounds rather than by kernel error handling; the scenario
+// keeps its name for traceability. The oversize key therefore never reaches
+// node B: over the derived window (2×sync_interval plus the discovery, gate
+// and slack margin) B's endpoint serves nothing under it, and neither
+// node's final dump carries a record for it. The positive half proves the
+// bounds admit the documented maximum: a key of exactly storage.MaxKeyBytes
+// bytes with a 61 440-byte value replicates to B and lands in B's final
+// confirmed dump.
 func TestStand_oversizeKeyF2c(t *testing.T) {
 	t.Parallel()
 	p := newStandPair(t)
@@ -593,18 +597,41 @@ func TestStand_oversizeKeyF2c(t *testing.T) {
 	// so the dump-grep assertions stay readable.
 	oversizeKey := strings.Repeat("f2c-", standOversizeKeyLen/len("f2c-"))
 
-	// The fixed half: the API rejects the key locally, before the store, so
-	// there is no confirmed-but-unsendable record.
+	// The handler-layer half: one byte over the key ceiling still fits the
+	// transport envelope, so the key bound speaks first — InvalidArgument,
+	// and no confirmed-but-unsendable record reaches the store.
+	overKey := strings.Repeat("k", storage.MaxKeyBytes+1)
 	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
-	_, err := clientA.Set(ctx, &apiproto.SetRequest{Key: oversizeKey, Value: []byte("f")})
+	_, err := clientA.Set(ctx, &apiproto.SetRequest{Key: overKey, Value: []byte("f")})
 	cancel()
 	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("Set with a %d-byte key: want InvalidArgument from the key bound, got %v", len(oversizeKey), err)
+		t.Fatalf("Set with a %d-byte key: want InvalidArgument from the key bound, got %v", len(overKey), err)
 	}
 
-	// The rejection is real on A: its own endpoint must not serve the key.
-	if _, found := standGet(t, clientA, oversizeKey); found {
-		t.Fatalf("node A serves the rejected %d-byte key", len(oversizeKey))
+	// The transport-layer half: the review's 70 000-character key exceeds
+	// MaxRecvBytes (a legitimate maximum Set plus the envelope), so the
+	// server refuses the message before any handler runs — the documented
+	// ResourceExhausted verdict, never a stored record.
+	ctx, cancel = context.WithTimeout(t.Context(), rpcTimeout)
+	_, err = clientA.Set(ctx, &apiproto.SetRequest{Key: oversizeKey, Value: []byte("f")})
+	cancel()
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("Set with a %d-byte key: want ResourceExhausted from the transport envelope, got %v", len(oversizeKey), err)
+	}
+
+	// The rejection is real on A: its own endpoint must not list the key.
+	// The absence is read with List, not Get: a Get of the 70 000-byte key
+	// is itself over MaxRecvBytes, so the transport would answer
+	// ResourceExhausted without saying anything about the store, while
+	// List's request stays inside the envelope and reports the live keys.
+	// Only live keys are listed, which is exactly the claim — a rejected
+	// write must leave no record behind.
+	listed, err := standListPrefix(t, clientA, "f2c-")
+	if err != nil {
+		t.Fatalf("List(prefix %q) on node A: %v", "f2c-", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("node A lists %d live key(s) under the rejected %d-byte key's prefix: %q", len(listed), len(oversizeKey), listed)
 	}
 
 	// The never-replicated half: the key must stay absent from node B for
@@ -617,7 +644,11 @@ func TestStand_oversizeKeyF2c(t *testing.T) {
 	window := 2*standSyncInterval + standStartupGate + 2*standHelloInterval + 2*time.Second
 	start := time.Now()
 	waitFor(t, window+checkTimeout, "the rejected oversize key to stay absent from node B for the full window", func() bool {
-		return time.Since(start) >= window && standAbsent(t, clientB, oversizeKey)
+		if time.Since(start) < window {
+			return false
+		}
+		polled, err := standListPrefix(t, clientB, "f2c-")
+		return err == nil && len(polled) == 0
 	})
 	t.Logf("oversize key stayed unreplicated for the full %v window (2x sync_interval + margin)", window)
 
