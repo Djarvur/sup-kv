@@ -5,17 +5,17 @@ milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
 current_plan: 11
-status: executing
-stopped_at: Completed 07-10-PLAN.md
-last_updated: "2026-11-23T11:33:03.613Z"
+status: verifying
+stopped_at: Completed 07-11-PLAN.md
+last_updated: "2026-11-23T12:13:51.062Z"
 last_activity: 2026-11-23
-last_activity_desc: Completed 07-06-PLAN.md (pending-displacement conflict counter); 5 plans remain in Phase 7
-state_head: 032959b46e56d05a0bef86e03ed95ab02657095b
+last_activity_desc: Completed 07-11-PLAN.md (phase gate); Phase 7 complete, ready for verification
+state_head: 1c7c871697df79cf4a71384a294caf1a59f57505
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 82
+  completed_plans: 83
 ---
 
 # Project State
@@ -32,8 +32,8 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 Phase: 7 (Observability and Configuration) — EXECUTING
 Current Plan: 11
 Total Plans in Phase: 11
-Status: Ready to execute
-Last activity: 2026-11-23 — Completed 07-06-PLAN.md; 5 plans remain
+Status: Phase complete — ready for verification
+Last activity: 2026-11-23 — Completed 07-11-PLAN.md (phase gate); Phase 7 complete, ready for verification
 
 Progress: [████░░░░░░] 44%
 
@@ -142,6 +142,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P08 | 1214s | 2 tasks | 13 files |
 | Phase 07 P09 | 921s | 3 tasks | 12 files |
 | Phase 07 P10 | 281s | 2 tasks | 4 files |
+| Phase 07 P11 | 1105 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -467,6 +468,9 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-10: operationsForbidden matches whitespace-normalized text on both sides, so a reflowed stale claim (the Main load no-log sentence) cannot survive
 - [Phase 07]: 07-10: S-SEM-07 keeps superseded-by-amendment and S-IMP-08 keeps accepted-deviation(ADR 0008); only their notes/evidence changed (pending-local displacement; honest conflict and drift counters)
 - [Phase 07]: 07-10: AGENTS names internal/config as composition-level outside the app no-I/O rule and lists the three additive depguard rules plus the written grpcapi composition exception
+- [Phase 07]: 07-11: The first full red-runner attempt failed only on an ordinary stand test (TestStand_persistLoadUnusableSingle, 'SIGKILL <pid>: os: process already finished') while all seven expectation rows were green; the full gate re-ran unchanged and passed, so the transient was recorded in deferred-items for Phase 8 instead of being fixed in a no-source gate plan.
+- [Phase 07]: 07-11: buf-breaking ran the real FILE-policy comparison against refs/remotes/origin/master (d6b2a75) because supkv.proto is now published there, not the D-08 deferral.
+- [Phase 07]: 07-11: The phase gate produced zero task commits — it changes no source and every gate passed on the committed tree, so the record lives in 07-11-SUMMARY.md (the 01-04 precedent).
 
 ### Pending Todos
 
@@ -489,7 +493,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T11:33:01.806Z
-Stopped at: Completed 07-10-PLAN.md
+Last session: 2026-11-23T12:13:48.467Z
+Stopped at: Completed 07-11-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)

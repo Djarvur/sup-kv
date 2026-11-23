@@ -140,21 +140,21 @@
 
 ### Observability & Configuration
 
-- [ ] **OBSV-01**: The node logs its lifecycle (O-01)
+- [x] **OBSV-01**: The node logs its lifecycle (O-01)
   - Acceptance: startup entry with version and effective config; one entry each for loaded dump generation, dump failures, gate opening, peer appear/disappear/restart, drift warnings; a fatal bind error at `SUPKV_LOG_LEVEL=error` produces an ERROR entry, not a silent exit 1
-- [ ] **OBSV-02**: Configuration is validated in one place (O-02, Q-07)
+- [x] **OBSV-02**: Configuration is validated in one place (O-02, Q-07)
   - Acceptance: one validation function with ranges and relations (negative/zero values, `sync-chunk-bytes` overflow panic, `retransmit-interval=1ns` busy loop, `peer_timeout ≤ hello_interval`, `ack_timeout > ack_timeout_max`, positional args ignored); exit code 2 naming the parameter; table test; flag parsing extracted from `main.go`
-- [ ] **OBSV-03**: Metric definitions are honest and test-confirmed (O-03, 14.4)
+- [x] **OBSV-03**: Metric definitions are honest and test-confirmed (O-03, 14.4)
   - Acceptance: the conflict counter counts only the displacement of a local unconfirmed record by another value; a failed send is not counted as sent; `process_resident_memory_bytes` reports current RSS; dump duration semantics defined; the drift counter matches its documented definition; every definition confirmed by a test
-- [ ] **OBSV-04**: Exit codes and shutdown are distinct and ordered (O-05)
+- [x] **OBSV-04**: Exit codes and shutdown are distinct and ordered (O-05)
   - Acceptance: distinct codes for usage error, startup failure and final-dump failure; a `Serve` error does not skip the final dump; the final dump is time-bounded; the signal handler is installed before dump load and bind; `--help` lists the five env-only variables
-- [ ] **OBSV-05**: Clock-drift warnings match the Spec (S-06)
+- [x] **OBSV-05**: Clock-drift warnings match the Spec (S-06)
   - Acceptance: WARN log + metric when a received version leads the system time by more than `drift_warn`; the runbook describes a condition that exists in the binary
-- [ ] **OBSV-06**: Spec-mandated log entries exist (S-07)
+- [x] **OBSV-06**: Spec-mandated log entries exist (S-07)
   - Acceptance: dump failure, start without usable dumps, foreign proto_version, duplicate node_id — each has its entry at the right level (with OBSV-01)
-- [ ] **OBSV-07**: The dependency direction is machine-enforced (Q-05)
+- [x] **OBSV-07**: The dependency direction is machine-enforced (Q-05)
   - Acceptance: a linter rule forbidding adapter imports from `app`/`port` and the observed cross-imports (`metrics`→`udprepl`, `grpcapi`→`persistfile`/`*persist.Engine`); any boundary change is a visible `.golangci.yml` diff
-- [ ] **OBSV-08**: `repl.go` and `main.go` are decomposed (Q-07)
+- [x] **OBSV-08**: `repl.go` and `main.go` are decomposed (Q-07)
   - Acceptance: socket, loop, mirror and codec are separate units in `udprepl`; `main.go` is wiring only; validation and shutdown are testable
 
 ### Performance
@@ -267,14 +267,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | APIS-05 | Phase 6 | Complete |
 | APIS-06 | Phase 6 | Complete |
 | APIS-07 | Phase 6 | Complete |
-| OBSV-01 | Phase 7 | Pending |
-| OBSV-02 | Phase 7 | Pending |
-| OBSV-03 | Phase 7 | Pending |
-| OBSV-04 | Phase 7 | Pending |
-| OBSV-05 | Phase 7 | Pending |
-| OBSV-06 | Phase 7 | Pending |
-| OBSV-07 | Phase 7 | Pending |
-| OBSV-08 | Phase 7 | Pending |
+| OBSV-01 | Phase 7 | Complete |
+| OBSV-02 | Phase 7 | Complete |
+| OBSV-03 | Phase 7 | Complete |
+| OBSV-04 | Phase 7 | Complete |
+| OBSV-05 | Phase 7 | Complete |
+| OBSV-06 | Phase 7 | Complete |
+| OBSV-07 | Phase 7 | Complete |
+| OBSV-08 | Phase 7 | Complete |
 | PERF-01 | Phase 8 | Pending |
 | PERF-02 | Phase 8 | Pending |
 | PERF-03 | Phase 8 | Pending |
