@@ -313,6 +313,17 @@ func TestValidate(t *testing.T) {
 		assertRejected(t, c, "--grpc-addr")
 	})
 
+	t.Run("address-shape rejects an explicitly empty gRPC address", func(t *testing.T) {
+		t.Parallel()
+		c := validConfig()
+		c.GRPCAddr = ""
+		// An empty --grpc-addr must never reach net.Listen: it binds the
+		// wildcard address on an ephemeral port, exposing the unauthenticated
+		// API to every interface. The rejection names the flag and the default
+		// the operator meant to keep.
+		assertRejected(t, c, "--grpc-addr", defaultGRPCAddr)
+	})
+
 	t.Run("address-shape skips an unset metrics address", func(t *testing.T) {
 		t.Parallel()
 		c := validConfig()

@@ -283,10 +283,12 @@ func checkMetricsCerts(c Config) error {
 		errIncompleteCertSet, envMetricsCert, envMetricsKey, envMetricsClientCA)
 }
 
-// checkAddressShape rejects a non-empty address that is not host:port. It
-// covers the four listening/destination addresses; an empty value is a
-// separate rule's finding (required-knobs) or the documented "no listener"
-// opt-in for the metrics endpoint.
+// checkAddressShape rejects a non-empty address that is not host:port and an
+// explicitly empty --grpc-addr: [net.Listen] with an empty address binds the
+// wildcard address on an ephemeral port, so an empty value would expose the
+// unauthenticated API to every reachable host instead of meaning "no
+// listener". Only the metrics endpoint has that documented opt-in; an empty
+// bind/broadcast value is required-knobs' finding.
 func checkAddressShape(c Config) error {
 	addresses := []struct {
 		flag  string
@@ -298,6 +300,10 @@ func checkAddressShape(c Config) error {
 		{"--metrics-addr", c.MetricsAddr},
 	}
 	var errs []error
+	if c.GRPCAddr == "" {
+		errs = append(errs, fmt.Errorf("%w: --grpc-addr must not be empty (the default is %s)",
+			errAddressShape, defaultGRPCAddr))
+	}
 	for _, a := range addresses {
 		if a.value == "" {
 			continue

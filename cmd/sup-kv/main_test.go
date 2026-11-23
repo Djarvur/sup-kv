@@ -761,6 +761,11 @@ func TestMain_validationRelations(t *testing.T) {
 			want: []string{"--drift-warn=2m", "--max-clock-lead=2m"},
 		},
 		{
+			name: "an explicitly empty gRPC address exits 2",
+			args: []string{"--grpc-addr="},
+			want: []string{"--grpc-addr", "127.0.0.1:7901"},
+		},
+		{
 			name: "a trailing positional argument exits 2 naming it",
 			args: []string{"stray-operand"},
 			want: []string{"stray-operand"},
