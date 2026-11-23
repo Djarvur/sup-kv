@@ -805,3 +805,187 @@ func TestWatchHub_confirmGate(t *testing.T) {
 	ts.hub.Confirm(heldGen) // the repeated confirmation delivers nothing.
 	recvNone(t, stream)
 }
+
+// watchShutdownMessage is the pinned termination message every stream sees
+// when the hub itself is going away (D-04): a dying node must never look
+// like a clean end of stream.
+const watchShutdownMessage = "watch hub is shutting down"
+
+// TestWatch_shutdownUnavailable proves the shutdown verdict (D-04, T-06-19):
+// a Watch stream open when the hub's context is cancelled ends with
+// codes.Unavailable and the pinned message — never OK. The seed snapshot
+// proves the subscription is registered before the hub is cancelled.
+func TestWatch_shutdownUnavailable(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "shutdown/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set shutdown/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "shutdown/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "shutdown/seed" {
+		t.Fatalf("snapshot event = %s, want shutdown/seed", snap.GetRecord().GetKey())
+	}
+
+	ts.cancelHub()
+
+	ch := make(chan watchRecv, 1)
+	go func() {
+		ev, recvErr := stream.Recv()
+		ch <- watchRecv{ev: ev, err: recvErr}
+	}()
+	select {
+	case got := <-ch:
+		if got.err == nil {
+			t.Fatalf("Recv after hub shutdown = nil, want codes.Unavailable %q", watchShutdownMessage)
+		}
+		if code := status.Code(got.err); code != codes.Unavailable {
+			t.Fatalf("Recv after hub shutdown code = %s, want %s (err %v)", code, codes.Unavailable, got.err)
+		}
+		if msg := status.Convert(got.err).Message(); msg != watchShutdownMessage {
+			t.Fatalf("Recv after hub shutdown message = %q, want %q", msg, watchShutdownMessage)
+		}
+	case <-time.After(watchTestTimeout):
+		t.Fatal("the shutdown verdict did not arrive within the deadline")
+	}
+}
+
+// TestWatchHub_pendingBounded pins the pending queue's bound end-to-end
+// (D-04, T-06-18): installs whose covering dump never confirms accumulate
+// only up to watchIngress; crossing the bound sheds every subscriber with
+// ResourceExhausted, and a resubscription re-snapshots the current state.
+// The synthetic events reuse the snapshot's own key at the zero version, so
+// any residue left in the pipeline after the shed is suppressed as
+// already-contained rather than delivered.
+func TestWatchHub_pendingBounded(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "pending/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set pending/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "pending/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "pending/seed" {
+		t.Fatalf("snapshot event = %s, want pending/seed", snap.GetRecord().GetKey())
+	}
+
+	shed := make(chan error, 1)
+	go func() {
+		for {
+			_, recvErr := stream.Recv()
+			if recvErr != nil {
+				shed <- recvErr
+				return
+			}
+		}
+	}()
+
+	// Feed past the watchIngress bound in paced batches: the batch pacing
+	// keeps the ingress channel from overflowing (which would shed for the
+	// other reason), so the pending bound is the overflow under test. The
+	// generation is far above the confirmed watermark, so nothing is
+	// released while the queue fills.
+	const (
+		heldGen      = uint64(1) << 20
+		pendingFlood = 5 * 1024
+		batchSize    = 256
+	)
+	var zeroVersion version.RecordVersion
+	var shedErr error
+feed:
+	for i := range pendingFlood {
+		ts.hub.Ingest("pending/seed", storage.Record{Version: zeroVersion, Data: []byte("p")}, heldGen)
+		if i%batchSize == batchSize-1 {
+			time.Sleep(time.Millisecond)
+			select {
+			case shedErr = <-shed:
+				break feed
+			default:
+			}
+		}
+	}
+	if shedErr == nil {
+		select {
+		case shedErr = <-shed:
+		case <-time.After(watchShedDeadline):
+			t.Fatal("the pending-bound shed verdict did not arrive within the deadline")
+		}
+	}
+	assertCode(t, "Recv on the pending-bound shed watch stream", shedErr, codes.ResourceExhausted)
+
+	// Drain whatever residue the shed left behind (the synthetic events are
+	// suppressed by the snapshot, so no subscriber sees them), then
+	// resubscribe: the snapshot is the complete current state.
+	ts.hub.Confirm(^uint64(0))
+	fresh, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "pending/"})
+	if err != nil {
+		t.Fatalf("Watch after the shed: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, fresh); snap.GetRecord().GetKey() != "pending/seed" {
+		t.Fatalf("resubscribe snapshot event = %s, want pending/seed", snap.GetRecord().GetKey())
+	}
+	recvNone(t, fresh) // the snapshot is complete; no stale event leaks through.
+}
+
+// TestWatch_deletionsAndOrder pins the live feed's change semantics (D-04,
+// D-05): a Delete install is delivered as a deleted=true event (a delete IS
+// a change), and two writes under one key arrive strictly in version order
+// with no duplicate. Each write returns only after its covering dump, so
+// every observed event is a confirmed durable change.
+func TestWatch_deletionsAndOrder(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "ord/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set ord/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "ord/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "ord/seed" {
+		t.Fatalf("snapshot event = %s, want ord/seed", snap.GetRecord().GetKey())
+	}
+
+	var prev []byte
+	for i, value := range []string{"v1", "v2"} {
+		_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "ord/a", Value: []byte(value)})
+		if err != nil {
+			t.Fatalf("Set ord/a %s: want OK, got error: %v", value, err)
+		}
+		rec := recvEvent(t, stream).GetRecord()
+		if rec.GetKey() != "ord/a" || rec.GetDeleted() || !bytes.Equal(rec.GetValue(), []byte(value)) {
+			t.Fatalf("write %d event = (%s, deleted=%t, %q), want (ord/a, false, %s)",
+				i, rec.GetKey(), rec.GetDeleted(), rec.GetValue(), value)
+		}
+		if prev != nil && bytes.Compare(rec.GetVersion(), prev) <= 0 {
+			t.Fatalf("write %d version %x does not strictly dominate the previous %x", i, rec.GetVersion(), prev)
+		}
+		prev = slices.Clone(rec.GetVersion())
+	}
+
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "ord/a"})
+	if err != nil {
+		t.Fatalf("Delete ord/a: want OK, got error: %v", err)
+	}
+	del := recvEvent(t, stream).GetRecord()
+	if del.GetKey() != "ord/a" || !del.GetDeleted() {
+		t.Fatalf("delete event = (%s, deleted=%t), want (ord/a, true)", del.GetKey(), del.GetDeleted())
+	}
+	if bytes.Compare(del.GetVersion(), prev) <= 0 {
+		t.Fatalf("delete version %x does not strictly dominate the write version %x", del.GetVersion(), prev)
+	}
+	recvNone(t, stream) // no duplicate of any event, the delete included.
+}

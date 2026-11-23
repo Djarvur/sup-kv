@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/grpcapi/ -run '^TestWatch_shutdownUnavailable$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestWatch_shutdownUnavailable\n=== PAUSE TestWatch_shutdownUnavailable\n=== CONT  TestWatch_shutdownUnavailable\n    watch_test.go:848: Recv after hub shutdown code = Unknown, want Unavailable (err EOF)\n--- FAIL: TestWatch_shutdownUnavailable (0.03s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/grpcapi\t0.040s\nFAIL\n",
+  "targetTest": "TestWatch_shutdownUnavailable",
+  "targetFile": "internal/grpcapi/watch_test.go",
+  "expected": "A Watch stream open when the hub context is cancelled ends with codes.Unavailable and the message \"watch hub is shutting down\", never OK.",
+  "actual": "The handler returned sub.err, which shutdownSubscribers left nil, so the RPC ended OK and the client Recv observed io.EOF (status code Unknown).",
+  "semanticAssessment": "The target test compiled and executed and failed on its planned assertion (watch_test.go:848: code = Unknown, want Unavailable, err EOF). The seed snapshot arrived first, proving the subscription was registered and the hub was running, so this is the nil shutdown status, not a fixture or discovery fault. The paired pending-bound and deletion/order tests pass on the pre-change tree by design: plan 06-06 already bounded the pending queue and pinned deletion/order semantics, so they are regression pins, not RED targets."
+}
