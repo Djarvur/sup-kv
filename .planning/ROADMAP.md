@@ -248,7 +248,7 @@ Plans:
   3. Snapshot load is a full rollback (14.1): keys absent from the snapshot are deleted, the result broadcasts to peers, and the rewritten `TestEngine_snapshotCreateLoadRestore` proves the new behavior
   4. `List` does not copy the world: pagination or streaming over the key→version view, with cost independent of value sizes
   5. The proto is public: proto and generated Go code live outside `internal/`; a Go client example builds in CI as a separate module; the last-read-value file pattern is documented as consumer-library territory (14.7)
-**Plans**: 7/13 plans executed
+**Plans**: 8/13 plans executed
 
 Plans:
 **Wave 1**
@@ -269,7 +269,7 @@ Plans:
 - [x] 06-06-PLAN.md — Durability-gate tracer: generation-tagged installs and the confirmed watermark
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 06-12-PLAN.md — Watch expansion: nil-safe startup suppression, bounded pending, Unavailable shutdown
+- [x] 06-12-PLAN.md — Watch expansion: nil-safe startup suppression, bounded pending, Unavailable shutdown
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 06-07-PLAN.md — Explicit gRPC transport limits and one-way health
@@ -336,7 +336,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 3. Transport | v1.1 | 13/13 | Complete | 2026-11-22 |
 | 4. Protocol | v1.1 | 0/? | Not started | - |
 | 5. Persistence | v1.1 | 0/? | Not started | - |
-| 6. API and Semantics | v1.1 | 7/13 | In Progress | - |
+| 6. API and Semantics | v1.1 | 8/13 | In Progress | - |
 | 7. Observability and Configuration | v1.1 | 0/? | Not started | - |
 | 8. Performance | v1.1 | 0/? | Not started | - |
 | 9. Documentation and Release | v1.1 | 0/? | Not started | - |
