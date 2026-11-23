@@ -44,6 +44,65 @@ func TestGRPC_maxRecv(t *testing.T) {
 	}
 }
 
+// datagramCeilingValueLimit is the largest --value-max-bytes the UDP
+// datagram ceiling admits (the udprepl max-record probe's value width), the
+// high end of the configured range the transport envelope must follow.
+const datagramCeilingValueLimit = 64408
+
+// TestGRPC_maxValueRoundTrip is research Pitfall 11's largest-value transport
+// round trip (IN-04): a node configured at the datagram-ceiling value limit
+// accepts a Set carrying a storage.MaxKeyBytes-length key and a 64 408-byte
+// value — the largest record the wire ceiling allows — through the production
+// transport options, and the value reads back. The transport ceiling is
+// derived from the EFFECTIVE value limit (LimitsFor(64 408)), so a node at the
+// documented maximum cannot reject its own maximum-size write at the
+// transport.
+//
+// The receive envelope now also has to admit a maximum List page token
+// (WR-01), so MaxRecvBytes is much larger than one SetRequest and a single
+// maximum-size write can no longer distinguish the effective limit from the
+// storage default by message size alone. That derivation stays pinned by
+// TestLimitsFor's exact arithmetic (MaxKeyBytes + effective limit + envelope
+// for each case); this test keeps the end-to-end half — the documented
+// maximum really round-trips.
+func TestGRPC_maxValueRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	limits := grpcapi.LimitsFor(datagramCeilingValueLimit)
+	ts := buildTestServer(t, testServerConfig{
+		gate:          openGateOptions(),
+		valueMaxBytes: datagramCeilingValueLimit,
+		discardDumps:  true,
+		limits:        &limits,
+	})
+	awaitGateOpen(t, ts)
+	ctx := t.Context()
+
+	key := strings.Repeat("k", storage.MaxKeyBytes)
+	value := bytes.Repeat([]byte("v"), datagramCeilingValueLimit)
+	if payload := len(key) + len(value); payload > limits.MaxRecvBytes {
+		t.Fatalf("largest accepted record payload = %d bytes, exceeds MaxRecvBytes (%d)", payload, limits.MaxRecvBytes)
+	}
+
+	setResp, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: key, Value: value})
+	if err != nil {
+		t.Fatalf("Set of a %d-byte key and a %d-byte value at the datagram-ceiling limit: want OK, got %v",
+			len(key), len(value), err)
+	}
+	if got := len(setResp.GetVersion()); got != 16 {
+		t.Fatalf("Set response version size = %d, want the full 16-byte version", got)
+	}
+
+	got, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: key})
+	if err != nil {
+		t.Fatalf("Get of the largest accepted record: want OK, got %v", err)
+	}
+	if rec := got.GetRecord(); rec.GetKey() != key || !bytes.Equal(rec.GetValue(), value) {
+		t.Errorf("Get returned (%d-byte key, %d-byte value), want the %d-byte key and %d-byte value written",
+			len(rec.GetKey()), len(rec.GetValue()), len(key), len(value))
+	}
+}
+
 // TestGRPC_worstCasePageFitsSendLimit is the cross-plan proof that plan
 // 06-05's serialized-entry accounting and this plan's send ceiling agree at
 // maximum key length (D-05, APIS-05): 257 maximum-length keys holding
