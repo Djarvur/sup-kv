@@ -370,6 +370,34 @@ func TestMain_version(t *testing.T) {
 	}
 }
 
+// TestMain_helpListsEnvOnly pins the OBSV-02 usage contract at the real
+// binary boundary: --help exits 0 and the Environment-only block names all
+// five flagless knobs, so the logging and metrics-certificate surface is
+// discoverable from the help output alone.
+func TestMain_helpListsEnvOnly(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	out, err := runToCompletion(t, bin, nil, "--help")
+	if err != nil {
+		t.Fatalf("--help exited with %v, want the flag package's clean help exit 0", err)
+	}
+	if !strings.Contains(out, "Environment-only (no flag):") {
+		t.Fatalf("--help output lacks the %q block:\n%s", "Environment-only (no flag):", out)
+	}
+	for _, name := range []string{
+		"SUPKV_LOG_LEVEL",
+		"SUPKV_LOG_FORMAT",
+		"SUPKV_METRICS_CERT",
+		"SUPKV_METRICS_KEY",
+		"SUPKV_METRICS_CLIENT_CA",
+	} {
+		if !strings.Contains(out, name) {
+			t.Fatalf("--help output does not name the env-only variable %s:\n%s", name, out)
+		}
+	}
+}
+
 // TestMain_precedence proves the D-16/D-17 precedence end-to-end on the
 // observable gRPC listener: with only SUPKV_GRPC_ADDR set, the health
 // endpoint answers on the env-chosen port (env over the 127.0.0.1:7901
