@@ -36,6 +36,15 @@ const (
 	watchIngress = 4096
 )
 
+// watchShuttingDown returns the status every stream ends with when the hub
+// itself is going away (D-04, T-06-19): a fresh value per subscriber, since
+// status errors are single-use response payloads. Shutdown is never OK — a
+// dying node must not look like a clean end of the change feed — and the
+// subscribe path answers a late subscriber with the same verdict.
+func watchShuttingDown() error {
+	return status.Error(codes.Unavailable, "watch hub is shutting down")
+}
+
 // watchOverwhelmed returns the status a shed subscriber's stream ends with:
 // the slow-consumer policy is disconnect, never drop events (A3) — the
 // client resubscribes and re-snapshots, losing nothing (D-02). A fresh
@@ -88,10 +97,10 @@ type watchSubscriber struct {
 	snapshot map[string]version.RecordVersion
 
 	// err is the stream's termination status for a closed events channel:
-	// the resubscribe status on a disconnect, nil on hub shutdown. The hub
-	// writes it before closing the channel, and a receive observing the
-	// close happens after that write (Go memory model), so the handler
-	// reads it without further synchronization.
+	// the resubscribe status on a disconnect, the Unavailable shutdown status
+	// on hub shutdown. The hub writes it before closing the channel, and a
+	// receive observing the close happens after that write (Go memory model),
+	// so the handler reads it without further synchronization.
 	err error
 }
 
@@ -212,8 +221,8 @@ func (h *WatchHub) attach(engine *persist.Engine) {
 // resubscribe status on either overflow flavor instead of dropping events
 // (D-02) and clears the pending queue then, because resubscription re-snapshots
 // from the store. Run returns ctx's error once the context is
-// cancelled, closing every subscriber's channel with a nil termination
-// status and the done channel that guards the late subscribe and
+// cancelled, closing every subscriber's channel with the Unavailable
+// shutdown status and the done channel that guards the late subscribe and
 // unsubscribe sends. Plain channel selects, no timers (the persist engine
 // timer discipline).
 func (h *WatchHub) Run(ctx context.Context) error {
@@ -459,12 +468,14 @@ func (h *WatchHub) remove(sub *watchSubscriber) {
 	delete(h.subs, sub)
 }
 
-// shutdownSubscribers closes every subscriber's channel with a nil
-// termination status — the ctx-cancel path: the streams end cleanly while
-// the process is shutting down around them.
+// shutdownSubscribers closes every subscriber's channel with a fresh
+// codes.Unavailable status — the ctx-cancel path: the streams end with the
+// honest "hub is going away" verdict, never OK (D-04, T-06-19). The status is
+// written before the close, so the handler's zero-value receive reads it.
 func (h *WatchHub) shutdownSubscribers() {
 	for sub := range h.subs {
 		delete(h.subs, sub)
+		sub.err = watchShuttingDown()
 		close(sub.events)
 	}
 }
@@ -496,7 +507,7 @@ func (s *Server) Watch(req *apiproto.WatchRequest, stream apiproto.SupKVService_
 	}
 	got, ok := s.hub.subscribe(req.GetPrefix())
 	if !ok {
-		return status.Error(codes.Unavailable, "watch hub is shutting down")
+		return watchShuttingDown()
 	}
 	for _, ev := range got.snapshot {
 		err := stream.Send(ev.toProto())
@@ -515,7 +526,8 @@ func (s *Server) Watch(req *apiproto.WatchRequest, stream apiproto.SupKVService_
 				// The hub closed the channel: sub.err was written before
 				// the close, and the zero-value receive happens after it,
 				// so the read is synchronized by the close itself — the
-				// resubscribe status on a disconnect, nil on hub shutdown.
+				// resubscribe status on a disconnect, the Unavailable
+				// shutdown status on hub shutdown.
 				return got.sub.err
 			}
 			err := s.relayEvent(stream, got.sub, ev)
