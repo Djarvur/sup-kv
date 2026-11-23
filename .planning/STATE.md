@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 7
 current_phase_name: Observability and Configuration
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 07-06-PLAN.md
-last_updated: "2026-11-23T09:36:40.252Z"
+stopped_at: Completed 07-07-PLAN.md
+last_updated: "2026-11-23T10:19:05.547Z"
 last_activity: 2026-11-23
 last_activity_desc: Completed 07-06-PLAN.md (pending-displacement conflict counter); 5 plans remain in Phase 7
-state_head: 355f8aab53a962e1183a5f2c404c928b47dfb0e7
+state_head: 0f68776e69da86175a2d7a220d5feb27be4a7591
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 83
-  completed_plans: 78
+  completed_plans: 79
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 7 (Observability and Configuration) — EXECUTING
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Completed 07-06-PLAN.md; 5 plans remain
@@ -138,6 +138,7 @@ Progress: [████░░░░░░] 44%
 | Phase 07 P04 | 819s | 2 tasks | 3 files |
 | Phase 07 P05 | 1154 | 2 tasks | 10 files |
 | Phase 07 P06 | 27min | 2 tasks | 8 files |
+| Phase 07 P07 | 24min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -449,6 +450,10 @@ Recent decisions affecting current work:
 - [Phase 07]: 07-06: the apply-failure WARN rides the shared (node_id, apply_failure) limiter and names only the quoted handle; the key name is gone (T-07-17, T-07-18).
 - [Phase 07]: 07-06: TestStand_metricsByEffect stops node B before A's write and drives the displacement with one crafted wire-valid higher-version DataReplication, keeping an exact conflicts == 1 assertion.
 - [Phase 07]: 07-06: the chaos scenario logs the aggregate conflict count instead of asserting it — a definition is proven by constructed unit and stand rows, not a scheduler-dependent total.
+- [Phase 07]: Gate opening is narrated by a typed reason fired inside the openGate CAS after the SERVING flip, so the event and the writable transition are one single-shot fact.
+- [Phase 07]: Peer lifecycle and drift cross the core boundary as typed events (PeerEvent/DriftEvent); only cmd renders them, so internal/app stays slog-free and the transition matrix is unit-testable.
+- [Phase 07]: Drift rides the shared allowWarn slot keyed (node_id, clock_drift) while MergeStats.DriftWarnings stays per record; nil OnDrift falls back to the prebuilt Log string. The log key is handle because sloglint forbids source.
+- [Phase 07]: A start logs exactly one load-outcome record: INFO Dump load for prompt/main and the existing Backup WARN/Unusable ERROR with the same outcome/generation/records/discarded attributes; generation none is derived from the outcome, never the zero enum.
 
 ### Pending Todos
 
@@ -471,7 +476,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T09:36:39.101Z
-Stopped at: Completed 07-06-PLAN.md
+Last session: 2026-11-23T10:19:04.636Z
+Stopped at: Completed 07-07-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)

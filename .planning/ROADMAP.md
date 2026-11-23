@@ -292,7 +292,7 @@ Plans:
   3. Metrics mean what they say (14.4): the conflict counter counts only the displacement of a local unconfirmed record by another value; a failed send is not counted as sent; `process_resident_memory_bytes` reports current RSS; dump-duration and drift-counter semantics are defined — and every definition is confirmed by a test
   4. Exit codes and shutdown are distinct and ordered: usage error, startup failure and final-dump failure have distinct codes; a `Serve` error does not skip the final dump; the final dump is time-bounded; the signal handler is installed before dump load and bind; `--help` lists the five env-only variables
   5. Boundaries are machine-enforced and units decomposed: a depguard rule forbids adapter imports from `app`/`port` and the observed cross-imports (`metrics`→`udprepl`, `grpcapi`→`persistfile`/`*persist.Engine`) — any boundary change is a visible `.golangci.yml` diff; socket, loop, mirror and codec are separate units in `udprepl` and `main.go` is wiring only
-**Plans**: 6/11 plans executed
+**Plans**: 7/11 plans executed
 
 Plans:
 **Wave 1**
@@ -308,7 +308,7 @@ Plans:
 - [x] 07-06-PLAN.md — Tracer: pending-displacement conflict counting, keyless rate-limited apply-failure WARN, rebuilt stand conflict proof (OBSV-03; D-05)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 07-07-PLAN.md — Tracer: gate-open reason, typed peer/drift seams, startup and load-outcome records (OBSV-01, OBSV-06, OBSV-05; D-01)
+- [x] 07-07-PLAN.md — Tracer: gate-open reason, typed peer/drift seams, startup and load-outcome records (OBSV-01, OBSV-06, OBSV-05; D-01)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 07-08-PLAN.md — Tracer: unbound_listing discard class end-to-end, proto-version WARN on both branches, catalog level matrix (OBSV-06, OBSV-03; D-04, D-01)
@@ -358,7 +358,7 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 4. Replication and Deterministic Simulator | v1.0 | 13/13 | Complete    | 2026-11-22 |
 | 5. gRPC API and Binary | v1.0 | 12/12 | Complete    | 2026-11-22 |
 | 6. Hardening — Failure Scenarios, Observability, Benchmarks | v1.0 | 13/13 | Complete | 2026-11-16 |
-| 7. v1.0 — Docs, Examples and Release | v1.0 | 3/11 | In Progress |  |
+| 7. v1.0 — Docs, Examples and Release | v1.0 | 7/11 | In Progress |  |
 | 1. Spec Reference and Decisions | v1.1 | 4/4 | Complete | 2026-11-19 |
 | 2. Stand and Simulator as Tests | v1.1 | 17/17 | Complete | 2026-11-21 |
 | 3. Transport | v1.1 | 13/13 | Complete | 2026-11-22 |
