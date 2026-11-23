@@ -732,7 +732,7 @@ func wire(cfg config) (*wired, net.Listener, error) {
 	go srv.RunGate(apiCtx)
 	go func() { _ = hub.Run(apiCtx) }()
 
-	listener, gs, err := listenGRPC(cfg.grpcAddr, srv)
+	listener, gs, err := listenGRPC(cfg.grpcAddr, srv, grpcapi.LimitsFor(cfg.valueMaxBytes))
 	if err != nil {
 		abortWire(engineCancel, replCancel, apiCancel, nil)
 		return nil, nil, err
@@ -852,16 +852,20 @@ func listenMetrics(cfg config, sources metrics.Sources) (*http.Server, error) {
 // address (the Open Q1 pin: localhost is the safe default on the trusted
 // segment) — and registers the SupKV service, the standard health server
 // (bound 1:1 to the startup gate) and the gRPC server reflection service on
-// one grpc.Server. Reflection lets grpcurl discover the whole API with zero
-// proto files — docs/EXAMPLES.md walks the service exactly that way; the
-// schema is public in the repo and the default bind is loopback on the
-// trusted segment, so always-on reflection adds no exposure worth a flag.
-func listenGRPC(grpcAddr string, srv *grpcapi.Server) (net.Listener, *grpc.Server, error) {
+// one grpc.Server. The message-size and keepalive settings are explicit: the
+// transport limits come from the effective value limit and the List page
+// budget (D-05, APIS-05), so no gRPC default governs a message size or the
+// keepalive cadence.
+// Reflection lets grpcurl discover the whole API with zero proto files —
+// docs/EXAMPLES.md walks the service exactly that way; the schema is public
+// in the repo and the default bind is loopback on the trusted segment, so
+// always-on reflection adds no exposure worth a flag.
+func listenGRPC(grpcAddr string, srv *grpcapi.Server, limits grpcapi.TransportLimits) (net.Listener, *grpc.Server, error) {
 	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", grpcAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("listen tcp %s: %w", grpcAddr, err)
 	}
-	gs := grpc.NewServer()
+	gs := grpc.NewServer(limits.ServerOptions()...)
 	apiproto.RegisterSupKVServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, srv.Health())
 	reflection.Register(gs)
