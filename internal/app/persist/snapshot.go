@@ -41,13 +41,17 @@ func (e *Engine) Snapshot(name string) error {
 	return e.dumps.CreateSnapshot(name)
 }
 
-// RestoredRecord is one record a Restore actually replayed: the snapshot
-// key, the fresh version the store stamped for the replay, the record's
-// data and whether the replay installed a tombstone. Records a replay
-// skips — a tombstone with nothing to beat, a value the store's shrunk
-// limit rejects — are absent, and the order is the replay's deterministic
-// sorted-key order, so the notify sequence a snapshot load drives is stable
-// across runs.
+// RestoredRecord is one record a Restore actually installed: the key, the
+// fresh version the store stamped for it, the record's data and whether the
+// install wrote a tombstone. A report covers the whole rollback — both the
+// snapshot's own records (re-stamped fresh) and the ROLLBACK tombstones of
+// current live keys the snapshot does not name (nil Data, Deleted true) —
+// so the notify sequence a snapshot load drives replicates the restored key
+// set. Records a replay skips — a tombstone with nothing to beat, a value
+// the store's shrunk limit rejects, a live key a concurrent writer already
+// deleted — are absent, and the order is the replay's deterministic
+// sorted-key order (the sorted union of snapshot keys and rollback keys),
+// so the notify sequence a snapshot load drives is stable across runs.
 type RestoredRecord struct {
 	Key     string
 	Version version.RecordVersion
@@ -55,19 +59,28 @@ type RestoredRecord struct {
 	Deleted bool
 }
 
-// Restore replays the named snapshot's records as ordinary writes and
-// deletes with fresh versions (D-09, PERS-05): a snapshot-live record is a
-// fresh Set that beats any current tombstone, a snapshot tombstone a fresh
-// Delete that beats any current live value, and keys absent from the
-// snapshot keep their state untouched — the snapshot's own versions are
-// never re-installed (no Merge); fresh versions are what make the restore
-// replicate and win by normal LWW. A snapshot that already equals the
-// store's current state — every record, version and tombstone — replays
-// as a whole-restore no-op: the engine stays clean, the returned record
-// list is empty and the final flush replies nil without a redundant dump
-// (D-15, 03 IN-02 + 04 IN-02); ANY difference replays in full, every
-// snapshot record re-stamped fresh, preserving the fresh-version dominance
-// the restore replicates and wins by. The replay runs in deterministic
+// Restore is a FULL ROLLBACK of the named snapshot (decision 14.1, ADR
+// 0001): it replays the snapshot's records as ordinary writes and deletes
+// with fresh versions (D-09, PERS-05) — a snapshot-live record is a fresh
+// Set that beats any current tombstone, a snapshot tombstone a fresh Delete
+// that beats any current live value — and it DELETES every current live key
+// the snapshot does not name, stamping a fresh tombstone of its own, so the
+// snapshot's key set becomes the store's key set. A key already tombstoned
+// locally and absent from the snapshot is already rolled back and stays
+// untouched: no version is burned and no record is produced. The snapshot's
+// own versions are never re-installed (no Merge); fresh versions are what
+// make the restore replicate and win by normal LWW. The replay and the
+// rollback walk one deterministic sorted union of snapshot keys and
+// rollback keys, so a load's notify sequence is stable. Concurrent writes
+// after the rollback set is computed are ordinary LWW, not snapshot
+// isolation: a write that lands mid-load is neither suppressed nor
+// rolled back beyond the key set the pass computed. A snapshot that already
+// equals the store's current state — every record, version and tombstone —
+// and leaves no extra live key replays as a whole-restore no-op: the engine
+// stays clean, the returned record list is empty and the final flush replies
+// nil without a redundant dump (D-15, 03 IN-02 + 04 IN-02); ANY difference
+// replays in full, every snapshot record re-stamped fresh, preserving the
+// fresh-version dominance the restore replicates and wins by. The replay runs in deterministic
 // sorted-key order through the store's write path, and the call returns
 // only after one final flush whose dump covers every replayed write — the
 // same write-confirmation contract as Set, batched into one flush because
@@ -114,53 +127,105 @@ func (e *Engine) Restore(name string) ([]RestoredRecord, error) {
 	}
 }
 
-// replaySnapshot replays the snapshot's records in deterministic sorted-key
-// order, marks the engine dirty whenever anything was installed, and returns
-// exactly the records the replay installed. A mid-replay store error aborts
-// the replay deterministically and returns the PARTIAL list with the error
-// (IN-04): the records installed before the abort are already in memory, so
-// they are marked dirty for the next dump and returned so the caller's
-// totality notify covers them — an installed-but-unreturned record would be
-// neither dumped nor replicated.
+// replaySnapshot walks the sorted union of the snapshot's keys and the
+// current live keys the snapshot does not name, in one deterministic pass
+// (decision 14.1, ADR 0001). A snapshot key replays through replayRecord
+// exactly as before; a current-live-only key is the ROLLBACK delete — the
+// store's ordinary Delete stamps a fresh tombstone that beats the live
+// value — and a concurrent ErrNotFound (another writer deleted the key
+// between the Records read and this delete) is a benign skip that burned no
+// version. The pass marks the engine dirty whenever anything was installed
+// and returns exactly the records it installed: the replayed snapshot
+// records and the rollback tombstones, which is what a snapshot load
+// broadcasts. A mid-pass store error aborts the replay deterministically and
+// returns the PARTIAL list with the error (IN-04): the records installed
+// before the abort are already in memory, so they are marked dirty for the
+// next dump and returned so the caller's totality notify covers them — an
+// installed-but-unreturned record would be neither dumped nor replicated.
 func (e *Engine) replaySnapshot(records map[string]storage.Record) ([]RestoredRecord, error) {
+	current := e.store.Records()
 	restored := make([]RestoredRecord, 0, len(records))
-	if !restoreChanges(e.store.Records(), records) {
+	if !restoreChanges(current, records) {
 		return restored, nil
 	}
-	for _, key := range slices.Sorted(maps.Keys(records)) {
-		ver, replayed, err := replayRecord(e.store, key, records[key])
+	union := make(map[string]struct{}, len(records)+len(current))
+	for key := range records {
+		union[key] = struct{}{}
+	}
+	for key, rec := range current {
+		if rec.Deleted {
+			// Already rolled back: absent from the snapshot and tombstoned
+			// locally is exactly the state the rollback wants.
+			continue
+		}
+		union[key] = struct{}{}
+	}
+	for _, key := range slices.Sorted(maps.Keys(union)) {
+		snapRec, inSnapshot := records[key]
+		if inSnapshot {
+			ver, replayed, err := replayRecord(e.store, key, snapRec)
+			if err != nil {
+				if len(restored) > 0 {
+					e.markDirty()
+				}
+				return restored, err
+			}
+			if !replayed {
+				continue
+			}
+			restored = append(restored, RestoredRecord{
+				Key:     key,
+				Version: ver,
+				Data:    bytes.Clone(snapRec.Data),
+				Deleted: snapRec.Deleted,
+			})
+			continue
+		}
+		ver, _, err := e.store.Delete(key)
+		if errors.Is(err, storage.ErrNotFound) {
+			// A concurrent writer tombstoned the key first: the rollback
+			// outcome already holds, and Delete burned no version.
+			continue
+		}
 		if err != nil {
 			if len(restored) > 0 {
 				e.markDirty()
 			}
 			return restored, err
 		}
-		if !replayed {
-			continue
-		}
 		restored = append(restored, RestoredRecord{
 			Key:     key,
 			Version: ver,
-			Data:    bytes.Clone(records[key].Data),
-			Deleted: records[key].Deleted,
+			Deleted: true,
 		})
 	}
 	e.markDirty()
 	return restored, nil
 }
 
-// restoreChanges reports whether replaying the snapshot's records would
-// change the store's current state: the snapshot differs from the store
-// when any of its keys holds a different record — version, data or
-// tombstone flag — than the store does now. Keys the snapshot does not
-// carry never matter, exactly as the replay never touches them; a
-// snapshot equal to the store's current state is a whole-restore no-op
-// (D-15), while any difference replays in full with every snapshot record
-// re-stamped fresh (D-09's dominance contract).
+// restoreChanges reports whether a full rollback of the snapshot would
+// change the store's current state: true when any of the snapshot's keys
+// holds a different record — version, data or tombstone flag — than the
+// store does now, OR when any current LIVE key is absent from the snapshot,
+// because the rollback deletes it (decision 14.1; missing the second half
+// would make a load that only deletes look like a no-op). An extra current
+// TOMBSTONE absent from the snapshot is not a change: the key is already
+// deleted, and the rollback touches neither its version nor the dump. A
+// snapshot equal to the store's current state with no extra live key is a
+// whole-restore no-op (D-15), while any difference replays in full with
+// every snapshot record re-stamped fresh (D-09's dominance contract).
 func restoreChanges(current, snap map[string]storage.Record) bool {
 	for key, rec := range snap {
 		stored, ok := current[key]
 		if !ok || stored.Version != rec.Version || stored.Deleted != rec.Deleted || !bytes.Equal(stored.Data, rec.Data) {
+			return true
+		}
+	}
+	for key, rec := range current {
+		if rec.Deleted {
+			continue
+		}
+		if _, inSnapshot := snap[key]; !inSnapshot {
 			return true
 		}
 	}
