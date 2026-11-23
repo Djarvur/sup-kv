@@ -166,6 +166,13 @@ func resolveListPageSize(pageSize int32, hasToken bool) (int, error) {
 // values are copied, and the encoded last examined key as the token when
 // any matching key follows it. A key that raced away between the view and
 // the lookup is skipped while the token still advances past it.
+//
+// The page also stops when one more entry would push the summed
+// listEntrySerializedBytes over listPageByteBudget, so a page's cost stays
+// independent of the store's total value bytes (A-02). The first entry is
+// always included even when it alone exceeds the budget, so the walk always
+// makes progress; the token then names the last included key and the
+// over-budget entry becomes the next page's first.
 func pagedResponse(lookup func(key string) (storage.Record, bool), keys []string,
 	pageSize int,
 ) *apiproto.ListResponse {
@@ -174,16 +181,27 @@ func pagedResponse(lookup func(key string) (storage.Record, bool), keys []string
 		Keys:    make([]string, 0, capacity),
 		Records: make([]*apiproto.Record, 0, capacity),
 	}
+	budget := 0
 	lastExamined := -1
 	for i, key := range keys {
 		if len(resp.Keys) >= pageSize {
 			break
 		}
-		lastExamined = i
 		rec, ok := lookup(key)
 		if !ok || rec.Deleted {
+			lastExamined = i
 			continue
 		}
+		cost := listEntrySerializedBytes(len(key), len(rec.Data))
+		if len(resp.Keys) > 0 && budget+cost > listPageByteBudget {
+			// One more entry would exceed the serialized-page budget: stop
+			// with the token at the last included key, leaving this entry as
+			// the next page's first. The len>0 floor above keeps a page
+			// non-empty, so the walk always progresses.
+			break
+		}
+		budget += cost
+		lastExamined = i
 		resp.Keys = append(resp.Keys, key)
 		resp.Records = append(resp.Records, recordToProto(key, rec))
 	}
