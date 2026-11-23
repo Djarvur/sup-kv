@@ -34,7 +34,7 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
 - [x] **Phase 4: Protocol** - Interface closed until the full key list arrives, `startup_gate_empty`, DataSync headers, stale-record answer, immediate sync for new/returning peers, 3+-node tests (completed 2026-11-22)
 - [x] **Phase 5: Persistence** - Single value limit, visible dump-load outcomes, generation integrity, decaying retries, streaming encode, blocking deadlines, engine split (completed 2026-11-22)
 - [x] **Phase 6: API and Semantics** - Honest `wait_for_replication`, snapshot load as full rollback, total error mapping, paginated `List`, public proto + Go client example in CI (completed 2026-11-23)
-- [ ] **Phase 7: Observability and Configuration** - Lifecycle logging, one-point config validation, honest metric definitions, distinct exit codes, machine-enforced dependency boundary
+- [x] **Phase 7: Observability and Configuration** - Lifecycle logging, one-point config validation, honest metric definitions, distinct exit codes, machine-enforced dependency boundary (completed 2026-11-23)
 - [ ] **Phase 8: Performance** - Documented write-latency model for both profiles, standing burst test, amplification and memory measured, `make perf` with thresholds
 - [ ] **Phase 9: Documentation and Release** - All 52 doc mismatches closed, test-anchored reference docs, failure table + runbooks, registry closed, v1.1 release
 
@@ -292,7 +292,7 @@ Plans:
   3. Metrics mean what they say (14.4): the conflict counter counts only the displacement of a local unconfirmed record by another value; a failed send is not counted as sent; `process_resident_memory_bytes` reports current RSS; dump-duration and drift-counter semantics are defined — and every definition is confirmed by a test
   4. Exit codes and shutdown are distinct and ordered: usage error, startup failure and final-dump failure have distinct codes; a `Serve` error does not skip the final dump; the final dump is time-bounded; the signal handler is installed before dump load and bind; `--help` lists the five env-only variables
   5. Boundaries are machine-enforced and units decomposed: a depguard rule forbids adapter imports from `app`/`port` and the observed cross-imports (`metrics`→`udprepl`, `grpcapi`→`persistfile`/`*persist.Engine`) — any boundary change is a visible `.golangci.yml` diff; socket, loop, mirror and codec are separate units in `udprepl` and `main.go` is wiring only
-**Plans**: 11/11 plans executed
+**Plans**: 11/11 plans complete
 
 Plans:
 **Wave 1**
@@ -362,9 +362,9 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 1. Spec Reference and Decisions | v1.1 | 4/4 | Complete | 2026-11-19 |
 | 2. Stand and Simulator as Tests | v1.1 | 17/17 | Complete | 2026-11-21 |
 | 3. Transport | v1.1 | 13/13 | Complete | 2026-11-22 |
-| 4. Protocol | v1.1 | 0/? | Not started | - |
-| 5. Persistence | v1.1 | 0/? | Not started | - |
+| 4. Protocol | v1.1 | 13/13 | Complete | 2026-11-22 |
+| 5. Persistence | v1.1 | 12/12 | Complete | 2026-11-22 |
 | 6. API and Semantics | v1.1 | 13/13 | Complete | 2026-11-23 |
-| 7. Observability and Configuration | v1.1 | 11/11 | In Progress | - |
+| 7. Observability and Configuration | v1.1 | 11/11 | Complete | 2026-11-23 |
 | 8. Performance | v1.1 | 0/? | Not started | - |
 | 9. Documentation and Release | v1.1 | 0/? | Not started | - |
