@@ -3,6 +3,7 @@ package persist_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/rand/v2"
@@ -22,6 +23,10 @@ import (
 const (
 	codecPropertySteps = 500
 	oversizeBy         = 1
+	// dumpValueCeiling is the documented UDP datagram ceiling the dump
+	// format's line bound is sized from. Kept as a literal because this
+	// external test package cannot see the unexported maxDumpValueBytes.
+	dumpValueCeiling = 65507
 	// watermarkOrderScans re-scans the equal-counter fixture: map iteration
 	// order is random per call, so the law is asserted over many orders.
 	watermarkOrderScans = 100
@@ -736,4 +741,56 @@ func TestCodec_truncatedGenerationUnreadable(t *testing.T) {
 	if err != nil {
 		t.Errorf("Decode(intact) error = %v, want nil", err)
 	}
+}
+
+// TestCodec_encodeValueLimitGuard pins the IN-04 library guard: a
+// non-positive or over-ceiling value limit is rejected before the header
+// write, so an invalid configuration can never emit a partial generation —
+// the buffer stays empty and the error wraps storage.ErrValueTooLarge — while
+// a valid limit at the documented ceiling still writes a complete generation.
+func TestCodec_encodeValueLimitGuard(t *testing.T) {
+	t.Parallel()
+	records := map[string]storage.Record{
+		"guard": sealed("guard", storage.Record{Version: version.PackVersion(3001, 1, 1), Data: []byte("guard-value")}),
+	}
+
+	for _, tt := range []struct {
+		name  string
+		limit int
+	}{
+		{"a zero limit is rejected before any byte", 0},
+		{"a negative limit is rejected before any byte", -1},
+		{"one byte over the dump ceiling is rejected", dumpValueCeiling + 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			err := persist.EncodeTo(&buf, records, tt.limit)
+			if !errors.Is(err, storage.ErrValueTooLarge) {
+				t.Fatalf("EncodeTo(limit=%d) error = %v, want a wrap of storage.ErrValueTooLarge", tt.limit, err)
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("EncodeTo(limit=%d) wrote %d bytes before rejecting, want an empty buffer", tt.limit, buf.Len())
+			}
+		})
+	}
+
+	t.Run("the ceiling itself still writes a complete generation", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		err := persist.EncodeTo(&buf, records, dumpValueCeiling)
+		if err != nil {
+			t.Fatalf("EncodeTo(limit=%d) error = %v, want nil", dumpValueCeiling, err)
+		}
+		decoded, stats, err := persist.Decode(buf.Bytes(), dumpValueCeiling)
+		if err != nil {
+			t.Fatalf("Decode() of the written generation error = %v, want nil", err)
+		}
+		if stats.Total() != 0 {
+			t.Fatalf("Decode() stats = %+v, want no discarded record", stats)
+		}
+		if got := decoded["guard"]; string(got.Data) != "guard-value" {
+			t.Fatalf("Decode() guard = %q, want the written value", got.Data)
+		}
+	})
 }

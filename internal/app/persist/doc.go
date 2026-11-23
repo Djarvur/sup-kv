@@ -28,12 +28,13 @@
 // composition of those values; the split adds no exported name and no
 // interface.
 //
-// EncodeTo trusts its valueMaxBytes argument to stay at or below the dump
-// format's datagram ceiling (maxDumpValueBytes), because the format's line
-// bound is sized from that ceiling: a larger configured limit could emit a
-// line this package's own Decode rejects. The shipped binary enforces the
-// ceiling at startup; the library-level guard belongs to Phase 7's config
-// validation (IN-04, deferred there).
+// EncodeTo rejects an out-of-domain value limit — zero or negative, or above
+// the dump format's datagram ceiling (maxDumpValueBytes) — before writing any
+// byte (IN-04), so a valid dump is byte-identical and an invalid configuration
+// can never emit a partial generation. The format's line bound is sized from
+// that ceiling, so a larger configured limit could emit a line this package's
+// own Decode rejects; the shipped binary's config validation rejects it first,
+// and the library guard keeps every non-binary caller honest.
 //
 // Timing guarantees (D-04, PERS-03): under any write cadence a write is
 // confirmed within MaxWait plus one dump duration — the dump starts no

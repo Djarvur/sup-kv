@@ -130,7 +130,18 @@ type recordLine struct {
 // storage.ErrValueTooLarge naming the key. The tripwire sits over the
 // store's own write check, so a confirmed write can never fail to encode for
 // size.
+//
+// The limit itself must be inside (0, maxDumpValueBytes]: the format's line
+// bound is sized from that ceiling, so a larger configured limit could emit a
+// line this package's own Decode rejects. The guard runs before the header
+// write, so an out-of-domain limit — a library caller's mistake the binary's
+// config validation already rejects — can never emit a partial generation
+// (IN-04).
 func EncodeTo(w io.Writer, records map[string]storage.Record, valueMaxBytes int) error {
+	if valueMaxBytes <= 0 || valueMaxBytes > maxDumpValueBytes {
+		return fmt.Errorf("persist: value limit %d is outside (0, %d]: %w",
+			valueMaxBytes, maxDumpValueBytes, storage.ErrValueTooLarge)
+	}
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	count := len(records)

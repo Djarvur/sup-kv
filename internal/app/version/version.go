@@ -96,10 +96,12 @@ func (v RecordVersion) Compare(other RecordVersion) int {
 // A reading in the past is always accepted — the hybrid logical clock absorbs
 // it on merge. The future bound is exclusive only beyond now+maxLead: a
 // reading of exactly now+maxLead is accepted, one millisecond beyond is
-// rejected with ErrVersionFuture. The design default for maxLead is 60 s, the
-// documented drift tolerance, so peers inside it stay accepted; a negative
-// maxLead normalizes to zero. Milliseconds are the only precision the layout
-// carries, so a fractional now is truncated to its unix_ts_ms.
+// rejected with ErrVersionFuture. The design default for maxLead is 2 m,
+// strictly above the 60 s drift-warn default: the shipped binary enforces
+// max_clock_lead >= drift_warn + 1 ms, so a received version may lead by more
+// than drift_warn and still be accepted — that gap is the drift WARN window.
+// A negative maxLead normalizes to zero. Milliseconds are the only precision
+// the layout carries, so a fractional now is truncated to its unix_ts_ms.
 //
 // Validate reads no clock (now is the caller's, the D-02 seam), allocates
 // nothing and is total: every one of the 2^128 bit patterns yields a verdict,
