@@ -20,6 +20,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/app/persist"
@@ -51,6 +52,13 @@ const listedNotArrivedMessage = "startup gate: key is listed by a peer but its v
 // window refills and no unary or streaming test ever notices it.
 const testFlowWindowSize = 64 * 1024
 
+// maxTestRecvBytes is the harness client's receive ceiling: the List
+// byte-budget test legitimately returns a page up to the 6 MiB serialized
+// budget, which the gRPC 4 MiB default client receive limit would reject.
+// Plan 06-07 raises the production limits from the same page constants; the
+// harness client only has to accept what the budget permits.
+const maxTestRecvBytes = 8 << 20
+
 // errSaveFailed is the injected Save failure: the fake reports it for every
 // Save while failSave is set, driving the engine's ErrDumpFailed path
 // without touching a filesystem.
@@ -72,6 +80,10 @@ var errFakeSnapshot = errors.New("fakeDumpStore: no snapshot generations in this
 type fakeDumpStore struct {
 	mu       sync.Mutex
 	failSave bool
+	// discard keeps the completed-generation fact without the bytes: the
+	// List cost tests seed hundreds of maximum-size values, and retaining
+	// every dump generation would dominate the test's memory.
+	discard  bool
 	saved    [][]byte
 	snapshot []byte
 	hold     chan struct{}
@@ -96,6 +108,9 @@ func (f *fakeDumpStore) SaveStream(fill func(io.Writer) error) error {
 	defer f.mu.Unlock()
 	if f.failSave {
 		return errSaveFailed
+	}
+	if f.discard {
+		return nil
 	}
 	f.saved = append(f.saved, bytes.Clone(buf.Bytes()))
 	return nil
@@ -207,6 +222,16 @@ type testServerConfig struct {
 	// keeps the 10 s design default.
 	confirmTimeout time.Duration
 
+	// valueMaxBytes is the store's value limit; zero keeps the shrunken
+	// testValueLimit harness limit. The List cost tests run the production
+	// storage.ValueMaxBytes limit so a maximum-size record is the real one.
+	valueMaxBytes int
+
+	// discardDumps keeps the fake dump store from retaining each completed
+	// generation — the cost tests seed maximum-size values and would
+	// otherwise hold every generation in memory.
+	discardDumps bool
+
 	// gate is the ServerOptions the api server is constructed with. The
 	// builder always launches the gate resolver; tests that need an open
 	// gate pass always-open wiring and call awaitGateOpen.
@@ -309,18 +334,22 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 	var fake *fakeDumpStore
 	dumps := cfg.dumps
 	if dumps == nil {
-		fake = &fakeDumpStore{}
+		fake = &fakeDumpStore{discard: cfg.discardDumps}
 		dumps = fake
 		// A test may park the dumper; release it at cleanup so the engine
 		// goroutine can exit after cancelEng.
 		t.Cleanup(fake.releaseDumps)
+	}
+	valueLimit := cfg.valueMaxBytes
+	if valueLimit <= 0 {
+		valueLimit = testValueLimit
 	}
 	eng, _ := persist.Open(
 		42,
 		time.Now,
 		time.Minute,
 		dumps,
-		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
+		storage.Config{ValueMaxBytes: valueLimit, OnChange: hub.Ingest},
 		persist.Config{
 			Debounce:       time.Millisecond,
 			MaxWait:        50 * time.Millisecond,
@@ -365,6 +394,7 @@ func buildTestServer(t *testing.T, cfg testServerConfig) *testHarness {
 		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) { return lis.Dial() }),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStaticStreamWindowSize(testFlowWindowSize),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxTestRecvBytes)),
 	)
 	if err != nil {
 		t.Fatalf("grpc.NewClient: want nil, got error: %v", err)
@@ -1123,6 +1153,172 @@ func TestServer_listPrefix(t *testing.T) {
 	}
 	if got := second.GetNextPageToken(); got != "" {
 		t.Fatalf("List svc/ page 2: want the empty end-of-list token, got %q", got)
+	}
+}
+
+// listEnvelopeCeiling bounds a ListResponse's serialized bytes beyond its
+// entries: the 1 366-character base64 token ceiling, its field framing and
+// the gRPC message prefix. It restates the package's
+// listEnvelopeOverheadBytes (1 382) with slack because this external test
+// cannot see the unexported constant.
+const listEnvelopeCeiling = 2048
+
+// newProdLimitServer builds the open-gate harness at the production value
+// limit with a discarding dump store: the List cost tests seed and return
+// maximum-size values, which the shrunken harness limit rejects and the
+// recording fake would retain generation after generation.
+func newProdLimitServer(t *testing.T) *testHarness {
+	t.Helper()
+	h := buildTestServer(t, testServerConfig{
+		gate:          openGateOptions(),
+		valueMaxBytes: storage.ValueMaxBytes,
+		discardDumps:  true,
+	})
+	awaitGateOpen(t, h)
+	return h
+}
+
+// seedMaxValueRecords seeds count records holding maximum-size values under
+// keys derived from prefix, through ApplyRemote — the bulk merge path — so
+// the seeding neither waits for one confirmed dump per record nor grows the
+// dump history. The cost tests care only about the store's contents.
+func seedMaxValueRecords(t *testing.T, ts *testHarness, prefix string, count int) {
+	t.Helper()
+	value := bytes.Repeat([]byte("v"), storage.ValueMaxBytes)
+	for i := range count {
+		key := fmt.Sprintf("%s%03d", prefix, i)
+		rec := storage.Record{
+			Version: version.PackVersion(int64(i)+1, 0, 7),
+			Data:    value,
+		}
+		if _, _, err := ts.engine.ApplyRemote(key, rec); err != nil {
+			t.Fatalf("seed ApplyRemote(%q) error = %v, want nil", key, err)
+		}
+	}
+}
+
+// TestServer_listLegacyCostIndependent proves the legacy path copies no
+// value bytes: with a hundred maximum-size values in the store, a
+// page_size-unset List returns the single small key, no records and no
+// token, and the marshaled response is bounded by that key plus the
+// envelope ceiling — the off-page values cross nothing.
+func TestServer_listLegacyCostIndependent(t *testing.T) {
+	t.Parallel()
+
+	ts := newProdLimitServer(t)
+	if _, _, err := ts.engine.Set("a", []byte("small")); err != nil {
+		t.Fatalf("seed Set(a) error = %v, want nil", err)
+	}
+	seedMaxValueRecords(t, ts, "z/bulk-", 100)
+	ctx := t.Context()
+
+	resp, err := ts.client.List(ctx, &apiproto.ListRequest{Prefix: "a"})
+	if err != nil {
+		t.Fatalf("List a with no page size: want OK, got error: %v", err)
+	}
+	if got := resp.GetKeys(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("List a with no page size: want the one small key, got %v", got)
+	}
+	if got := len(resp.GetRecords()); got != 0 {
+		t.Fatalf("List a with no page size: want 0 records, got %d", got)
+	}
+	if got := resp.GetNextPageToken(); got != "" {
+		t.Fatalf("List a with no page size: want an empty token, got %q", got)
+	}
+	raw, err := proto.Marshal(resp)
+	if err != nil {
+		t.Fatalf("proto.Marshal(ListResponse): want nil error, got %v", err)
+	}
+	if got, max := len(raw), len("a")+listEnvelopeCeiling; got > max {
+		t.Fatalf("legacy response is %d bytes, want at most %d (the key plus envelope) despite %d off-page maximum-size values",
+			got, max, 100)
+	}
+}
+
+// TestServer_listCostIndependent proves a page pays only for its own
+// entries: on the same maximum-value store, a page_size-1 request returns
+// one record and marshals below one value limit plus the envelope ceiling,
+// independent of the hundred off-page values.
+func TestServer_listCostIndependent(t *testing.T) {
+	t.Parallel()
+
+	ts := newProdLimitServer(t)
+	if _, _, err := ts.engine.Set("a", []byte("small")); err != nil {
+		t.Fatalf("seed Set(a) error = %v, want nil", err)
+	}
+	seedMaxValueRecords(t, ts, "z/bulk-", 100)
+	ctx := t.Context()
+
+	resp, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 1})
+	if err != nil {
+		t.Fatalf("List page_size 1: want OK, got error: %v", err)
+	}
+	if got := len(resp.GetRecords()); got != 1 {
+		t.Fatalf("List page_size 1: want 1 record, got %d", got)
+	}
+	raw, err := proto.Marshal(resp)
+	if err != nil {
+		t.Fatalf("proto.Marshal(ListResponse): want nil error, got %v", err)
+	}
+	if got, max := len(raw), storage.ValueMaxBytes+listEnvelopeCeiling; got > max {
+		t.Fatalf("page_size-1 response is %d bytes, want at most %d (one value plus envelope) despite %d off-page values",
+			got, max, 100)
+	}
+}
+
+// TestServer_listByteBudget proves the serialized-page budget stops a page
+// below the page size while guaranteeing progress: 120 maximum-size values
+// exceed the 6 MiB budget, the first page is smaller than 256 entries and
+// carries a token, and walking the token reaches every record exactly once.
+func TestServer_listByteBudget(t *testing.T) {
+	t.Parallel()
+
+	ts := newProdLimitServer(t)
+	seedMaxValueRecords(t, ts, "v/", 120)
+	ctx := t.Context()
+
+	first, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 256})
+	if err != nil {
+		t.Fatalf("List page_size 256: want OK, got error: %v", err)
+	}
+	if got := len(first.GetRecords()); got == 0 {
+		t.Fatal("List page_size 256: want a non-empty first page, got 0 records")
+	}
+	if got := len(first.GetRecords()); got >= 256 {
+		t.Fatalf("List page_size 256: want the byte budget to stop the page below 256, got %d records", got)
+	}
+	if got := first.GetNextPageToken(); got == "" {
+		t.Fatal("List page_size 256: want a non-empty token for the remaining records, got empty")
+	}
+
+	seen := make(map[string]struct{}, 120)
+	page := 0
+	token := ""
+	for {
+		page++
+		if page > 4 {
+			t.Fatalf("the byte-budget walk did not terminate after %d pages", page-1)
+		}
+		resp, err := ts.client.List(ctx, &apiproto.ListRequest{PageSize: 256, PageToken: token})
+		if err != nil {
+			t.Fatalf("List page %d (token %q): want OK, got error: %v", page, token, err)
+		}
+		if len(resp.GetKeys()) != len(resp.GetRecords()) {
+			t.Fatalf("page %d: want keys and records aligned, got %d keys and %d records",
+				page, len(resp.GetKeys()), len(resp.GetRecords()))
+		}
+		for _, key := range resp.GetKeys() {
+			if _, dup := seen[key]; dup {
+				t.Fatalf("page %d repeats key %q: the byte-budget walk must progress without duplicates", page, key)
+			}
+			seen[key] = struct{}{}
+		}
+		if token = resp.GetNextPageToken(); token == "" {
+			break
+		}
+	}
+	if got := len(seen); got != 120 {
+		t.Fatalf("the byte-budget walk saw %d distinct keys, want all 120", got)
 	}
 }
 
