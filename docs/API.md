@@ -280,8 +280,9 @@ invalid name is `InvalidArgument`. A create is a write and is gated like one.
 
 ## Transport and health
 
-Every gRPC server setting is explicit; no message size or keepalive cadence is
-inherited from a gRPC default.
+The message-size ceilings and the keepalive cadence are pinned explicitly; the
+remaining transport knobs (header-list size, connection timeout, stream and
+window sizes, the concurrent-stream cap) keep gRPC's defaults.
 
 | Setting | Value | Contract |
 |---------|-------|----------|

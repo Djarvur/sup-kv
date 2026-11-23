@@ -45,9 +45,11 @@ const (
 const apiEnvelopeOverheadBytes = listEnvelopeOverheadBytes
 
 // TransportLimits is the explicit gRPC transport envelope (D-05, APIS-05):
-// nothing the server accepts or sends is governed by a gRPC default, and
-// every value is derived from the configured protocol constants so a
-// node-size change can never leave a limit behind.
+// the message-size ceilings and the keepalive cadence are pinned here and
+// every value is derived from the configured protocol constants, so a
+// node-size change can never leave a limit behind. Other transport knobs
+// (header-list size, connection timeout, stream/window sizes and the
+// concurrent-stream cap) keep gRPC's defaults (IN-03).
 type TransportLimits struct {
 	// MaxRecvBytes bounds one inbound message. It covers the largest valid
 	// request of either shape: a SetRequest with a key at storage.MaxKeyBytes
@@ -106,8 +108,9 @@ func LimitsFor(valueMaxBytes int) TransportLimits {
 // ServerOptions renders the limits as the grpc.Server options the production
 // constructor passes to [grpc.NewServer] (D-05, APIS-05). PermitWithoutStream
 // is always true: a consumer may hold an idle connection between writes and
-// must not be disconnected for pinging without a stream. Every option is
-// explicit so the server never silently inherits a gRPC default.
+// must not be disconnected for pinging without a stream. The pinned families
+// — the message-size ceilings and the keepalive policy — are explicit;
+// everything else keeps gRPC's default (IN-03).
 func (l TransportLimits) ServerOptions() []grpc.ServerOption {
 	return []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(l.MaxRecvBytes),
