@@ -213,9 +213,13 @@ func TestMergeStats_counts(t *testing.T) {
 		var out port.Outbox
 
 		// "local" fits the store's 8-byte value limit; the replicated record
-		// is over it, so the apply is refused after validation.
+		// is over it, so the apply is refused after validation. The stamp is
+		// one drift window plus a second ahead — beyond drift_warn, so an
+		// accepted reading WOULD count, but still inside the 2 m clock lead.
+		// The zero DriftWarnings below is therefore the refusal's doing, not
+		// the stamp's.
 		tracked := localWrite(t, core, st, now, keyAlpha, "local")
-		oversize := remoteRecord(testNowMs+5000, peerID1, "over-the-limit")
+		oversize := remoteRecord(testNowMs+int64(testDriftWarn/time.Millisecond)+1000, peerID1, "over-the-limit")
 		core.HandleDatagram(now, replFrom(peerID1, keyAlpha, oversize), &out)
 		out.Drain()
 		if got := core.MergeStats(); got.Conflicts != 0 || got.DriftWarnings != 0 {
