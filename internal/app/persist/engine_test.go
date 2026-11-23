@@ -1680,11 +1680,11 @@ func TestEngine_restorePartialSnapshotRefused(t *testing.T) {
 			"keep":   {Version: snapVersion, Data: []byte("snap-keep")},
 			"victim": {Version: snapVersion, Data: []byte("snap-victim")},
 		})
-		dumps.installSnapshot("snap", corruptKeyChecksum(t, valid, "victim"))
+		dumps.installSnapshot("partial", corruptKeyChecksum(t, valid, "victim"))
 
 		before := eng.Records()
 		saves := dumps.saveCount()
-		restored, err := eng.Restore("snap")
+		restored, err := eng.Restore("partial")
 		if !errors.Is(err, persist.ErrSnapshotIncomplete) {
 			t.Fatalf("Restore(partially readable snapshot) error = %v, want ErrSnapshotIncomplete", err)
 		}

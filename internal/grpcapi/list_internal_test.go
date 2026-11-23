@@ -153,8 +153,12 @@ func TestListPage_tokenAboveWriteCeiling(t *testing.T) {
 	if got, want := len(token), 1499; got != want {
 		t.Fatalf("next_page_token length = %d, want %d for the %d-byte key", got, want, len(longKey))
 	}
-	if _, decodeErr := decodeListToken(token); decodeErr != nil {
+	decoded, decodeErr := decodeListToken(token)
+	if decodeErr != nil {
 		t.Fatalf("decodeListToken(pre-upgrade long key token) error = %v, want nil", decodeErr)
+	}
+	if decoded != longKey {
+		t.Fatalf("decodeListToken token = %d bytes, want the %d-byte key back", len(decoded), len(longKey))
 	}
 	raw, err := proto.Marshal(first)
 	if err != nil {
