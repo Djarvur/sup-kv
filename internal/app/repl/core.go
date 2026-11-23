@@ -439,10 +439,12 @@ type DiscardStats struct {
 // MergeStats counts the remote-merge observability signals (OBS-01, D-10):
 // Conflicts is every displaced-or-rejected version the store reported — an
 // LWW loser is an ordinary overwrite, counted and never journaled — and
-// DriftWarnings is every apply whose drift signal was nonzero: the store
-// clock gates the signal at its drift-warn threshold (zero drift is within
-// tolerance, any nonzero return is beyond it), so the counter mirrors
-// exactly the warnings storage.Merge already decided.
+// DriftWarnings is every received record and DataSync part maximum whose
+// version leads local wall time by more than drift_warn, regardless of the
+// merge outcome: the store clock gates the signal at its drift-warn
+// threshold (zero within tolerance, positive only when the received reading
+// leads), so the counter mirrors exactly the warnings storage.Merge already
+// decided (OBSV-05).
 type MergeStats struct {
 	Conflicts     uint64
 	DriftWarnings uint64
@@ -1507,8 +1509,11 @@ func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, 
 // never a "delivered" report for a record that was never stored. The
 // ApplyRemote returns feed the MergeStats counters (OBS-01, D-10): every
 // displaced-or-rejected version counts a conflict — counted only, never
-// journaled — and a nonzero drift return (the store clock's beyond-threshold
-// signal) counts a drift warning.
+// journaled — and a POSITIVE drift return counts a drift warning: the store
+// clock reports the received version's lead against local wall time, and
+// only a received reading beyond the threshold ahead of the wall is a
+// warning. A negative return — the wall clock jumped past the received
+// version — is never counted (OBSV-05).
 func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplication, out *port.Outbox) {
 	if held, present := c.store.Version(msg.Key); present {
 		switch cmp := held.Compare(msg.Record.Version); {
@@ -1533,7 +1538,10 @@ func (c *Core) applyRemote(now time.Time, source string, msg port.DataReplicatio
 		return
 	}
 	c.mergeStats.Conflicts += uint64(len(conflicts))
-	if drift != 0 {
+	if drift > 0 {
+		// Only a received version ahead of local wall time is a drift
+		// warning (OBSV-05); a negative reading — the wall clock jumped past
+		// the received version — is never counted.
 		c.mergeStats.DriftWarnings++
 	}
 	// Remote supersession: a strictly greater remote version under the same
@@ -1683,7 +1691,13 @@ func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.D
 		return
 	}
 	if len(msg.Entries) > 0 {
-		c.store.Observe(maxEntryVersion(msg.Entries))
+		// A listing part's maximum entry version is a received reading for
+		// OBSV-05: count one warning per offending part — never one per
+		// entry, so a large listing cannot inflate the counter (T-07-16).
+		drift := c.store.Observe(maxEntryVersion(msg.Entries))
+		if drift > 0 {
+			c.mergeStats.DriftWarnings++
+		}
 	}
 	c.accumulateSync(now, in, msg)
 	for _, entry := range msg.Entries {
