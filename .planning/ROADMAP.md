@@ -332,7 +332,20 @@ Plans:
   3. Amplification and memory are measured, or the gap is recorded: disk-write amplification on target-grade media (Spec open question #2) and the memory model from stand measurements (with PERSIST-06)
   4. Write latency with an absent peer and a growing unconfirmed set stays near live-peer latency, proven by a benchmark (same fix as XPORT-02)
   5. `make perf` runs the stand suite with thresholds, and every published number carries a hardware description
-**Plans**: TBD
+**Plans**: 11 plans, 6 waves
+
+Plans:
+- [ ] 08-01-PLAN.md — Threshold table, perf/race gates, hardware block, dump-dir guard, burst perf row and `make perf` (tracer)
+- [ ] 08-02-PLAN.md — Per-key pending index, `PendingVisits` seam and the index invariants (PERF-05 core fix)
+- [ ] 08-03-PLAN.md — synctest dumpNotify harness and chunker capacity teeth
+- [ ] 08-04-PLAN.md — Version-only replay seam (04 New-3 double copy removed)
+- [ ] 08-05-PLAN.md — Deterministic store-call and pending-visit gates; paired absent/live benchmark
+- [ ] 08-06-PLAN.md — Shared port allocator with package bands; every socket package adopts it
+- [ ] 08-07-PLAN.md — Default-profile latency, amplification and memory perf rows
+- [ ] 08-08-PLAN.md — Two-profile confirmation-latency benchmark, fast-profile gate, bench-target completeness
+- [ ] 08-09-PLAN.md — `killAndReap`/readiness diagnostics and serialized doc walkthroughs
+- [ ] 08-10-PLAN.md — `docs/PERFORMANCE.md`, `TestPerformanceDoc` drift guard, OPERATIONS/PROJECT ripple
+- [ ] 08-11-PLAN.md — Phase gate: frozen evidence, red-runner, full make gates, recorded `make perf`
 
 ### Phase 9: Documentation and Release
 **Goal**: The documentation is the as-built contract and the milestone ships — every documented mismatch closed, every reference anchored to a test that exists, the deviation registry fully closed, and v1.1 released.
