@@ -372,10 +372,15 @@ The levels are the operator contract, pinned by `TestCatalogLevels`.
 - **ERROR `Dump failed`** — one per failed dump attempt: the failure
   `class` (`disk_full`, `permission`, `other`) and the underlying error as
   `detail`.
-- **WARN `Replication adapter`** — the core's rate-limited adaptation and
-  discard details as `detail`: a foreign `proto_version`
+- **WARN `Replication adapter`** — one record per adapter WARN, with the
+  rendered text in `detail`. Three sources share the message: the core's
+  rate-limited adaptation and discard details — a foreign `proto_version`
   (`class bad_proto_version`), a duplicate `node_id`, an apply failure and
-  the `unbound_listing` drop.
+  the `unbound_listing` drop; adapter-side send failures (`udprepl: send to
+  ...`), one record per refused datagram and **not** rate-limited, so a
+  broken broadcast destination produces a steady WARN stream; and
+  adapter-side receive errors (`udprepl: receive error ...`), rate-limited
+  to one record per second while the read loop keeps running.
 
 ## Lifecycle and exit codes
 
