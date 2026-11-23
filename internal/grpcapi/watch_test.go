@@ -3,6 +3,7 @@ package grpcapi_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
@@ -543,4 +545,149 @@ func TestWatch_slowConsumer(t *testing.T) {
 	case <-time.After(watchShedDeadline):
 		t.Fatal("shed verdict did not arrive within the deadline")
 	}
+}
+
+// TestWatch_unconfirmedNotAnnounced proves the durability gate end-to-end
+// (D-04, APIS-04, T-06-17): an install the covering dump has not yet saved is
+// not announced, and the successful dump that makes it durable releases it
+// exactly once. The seed write proves the subscription is registered before
+// the held write starts — the hub takes the snapshot only after registering
+// the subscriber, so the snapshot event cannot arrive unregistered — and the
+// single pending Recv serves both the silence proof and the later delivery: a
+// timed-out select leaves that goroutine blocked in Recv, so it consumes the
+// first released event instead of racing a second receiver.
+func TestWatch_unconfirmedNotAnnounced(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gate/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set gate/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "gate/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "gate/seed" {
+		t.Fatalf("snapshot event = %s, want gate/seed", snap.GetRecord().GetKey())
+	}
+
+	pending := make(chan watchRecv, 1)
+	go func() {
+		ev, recvErr := stream.Recv()
+		pending <- watchRecv{ev: ev, err: recvErr}
+	}()
+
+	// Park every dump: the next install lands in memory but is not durable.
+	ts.dumps.holdDumps()
+	setDone := make(chan error, 1)
+	go func() {
+		_, setErr := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gate/a", Value: []byte("held")})
+		setDone <- setErr
+	}()
+	waitFor(t, gateWait, "the held write to install in memory", func() bool {
+		_, getErr := ts.engine.Get("gate/a")
+		return getErr == nil
+	})
+
+	select {
+	case got := <-pending:
+		t.Fatalf("Recv: announced an unconfirmed write before its dump (event %v, err %v)", got.ev, got.err)
+	case <-time.After(watchQuietWindow):
+	}
+	select {
+	case setErr := <-setDone:
+		t.Fatalf("Set returned while its covering dump was held: %v", setErr)
+	default:
+	}
+
+	ts.dumps.releaseDumps()
+	select {
+	case setErr := <-setDone:
+		if setErr != nil {
+			t.Fatalf("Set after the dump released: want OK, got error: %v", setErr)
+		}
+	case <-time.After(watchTestTimeout):
+		t.Fatal("Set did not return within the deadline after the dump was released")
+	}
+	var live *apiproto.WatchResponse
+	select {
+	case got := <-pending:
+		if got.err != nil {
+			t.Fatalf("Recv: want the released event, got error: %v", got.err)
+		}
+		live = got.ev
+	case <-time.After(watchTestTimeout):
+		t.Fatal("the released durable event did not arrive within the deadline")
+	}
+	rec := live.GetRecord()
+	if rec.GetKey() != "gate/a" || !bytes.Equal(rec.GetValue(), []byte("held")) {
+		t.Fatalf("released event = (%s, %q), want (gate/a, held)", rec.GetKey(), rec.GetValue())
+	}
+	recvNone(t, stream, watchQuietWindow) // exactly once: the final assertion.
+}
+
+// TestWatch_dumpFailedThenConfirmed proves the gate's hardest case (D-04,
+// T-06-17): a write whose dump failed stays unannounced even though it is
+// installed and its API answer is ErrDumpFailed, and the later successful
+// dump — whose snapshot covers the record — releases it exactly once. A
+// handler-side "notify after Set" would have announced it before the only
+// dump that made it durable.
+func TestWatch_dumpFailedThenConfirmed(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gatefail/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set gatefail/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "gatefail/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "gatefail/seed" {
+		t.Fatalf("snapshot event = %s, want gatefail/seed", snap.GetRecord().GetKey())
+	}
+
+	pending := make(chan watchRecv, 1)
+	go func() {
+		ev, recvErr := stream.Recv()
+		pending <- watchRecv{ev: ev, err: recvErr}
+	}()
+
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = true
+	ts.dumps.mu.Unlock()
+	if _, _, setErr := ts.engine.Set("gatefail/a", []byte("unconfirmed")); !errors.Is(setErr, persist.ErrDumpFailed) {
+		t.Fatalf("engine.Set during the failed dump = %v, want ErrDumpFailed", setErr)
+	}
+	select {
+	case got := <-pending:
+		t.Fatalf("Recv: announced a write whose dump failed (event %v, err %v)", got.ev, got.err)
+	case <-time.After(watchQuietWindow):
+	}
+
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = false
+	ts.dumps.mu.Unlock()
+	if flushErr := ts.engine.Flush(); flushErr != nil {
+		t.Fatalf("Flush after healing the dump: want nil, got error: %v", flushErr)
+	}
+	var live *apiproto.WatchResponse
+	select {
+	case got := <-pending:
+		if got.err != nil {
+			t.Fatalf("Recv: want the released event, got error: %v", got.err)
+		}
+		live = got.ev
+	case <-time.After(watchTestTimeout):
+		t.Fatal("the released event did not arrive within the deadline after the covering dump")
+	}
+	rec := live.GetRecord()
+	if rec.GetKey() != "gatefail/a" || !bytes.Equal(rec.GetValue(), []byte("unconfirmed")) {
+		t.Fatalf("released event = (%s, %q), want (gatefail/a, unconfirmed)", rec.GetKey(), rec.GetValue())
+	}
+	recvNone(t, stream, watchQuietWindow) // exactly once: the final assertion.
 }
