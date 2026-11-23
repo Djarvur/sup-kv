@@ -104,3 +104,12 @@ An operator can see what the node is doing and misconfiguration fails fast: life
 
 *Phase: 7-Observability and Configuration*
 *Context gathered: 2026-11-23*
+
+## Research resolutions (2026-11-23, phase-planning addendum)
+
+Applied to the decisions above, with the research's evidence:
+- **D-02 refined:** `max_clock_lead` must be strictly greater than `drift_warn` at millisecond resolution (default raised to 2 m), otherwise the drift WARN is unreachable — `version.Validate` discards the leading version before the warning can fire. The relation is enforced by the D-03 validation catalog.
+- **D-05 refined:** "local unconfirmed record" means **pending/unacked** (the core's pending set), grounded in review-engine.md:736; `storage.join`'s `Conflict` slice no longer feeds the conflict counter. Failed sends are counted only after the write/resolve succeeds. Current RSS on Linux via `/proc/self/statm`; darwin uses the documented peak fallback (development-only per ADR 0010).
+- **D-03 refined:** `retransmit_interval` gets a 1 ms floor (rejects the 1 ns busy loop); the remaining routing rules stand as decided.
+- **D-06 confirmed:** exit codes 0 clean / 1 startup-or-Serve error / 2 usage / 3 final-dump failure; a `Serve` error still runs the bounded final dump; signals are armed before dump load and bind.
+- **D-07 refined:** `metrics`→`udprepl` is removed by moving the sent-by-type accounting; `grpcapi`→`persistfile`/`*persist.Engine` is explicitly allowed in the depguard rules with a written justification (the adapter legitimately composes the engine), so the rule set forbids the direction while naming the one allowed composition edge.
