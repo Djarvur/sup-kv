@@ -438,22 +438,21 @@ func TestScenario_partitionDays(t *testing.T) {
 		}
 	}
 
-	// D-10 evidence: the conflicts counter covers the displaced versions.
-	// A displaced version is reported as a displacement on the side that
-	// applied the winner (Merge's Conflict contract). Under the paced
-	// discovery flush the winner can land before the loser's flush send
-	// leaves — the loser is then superseded out of tracking and never
-	// crosses the wire — so the rejection half on the winner's node is not
-	// guaranteed; the counted-at-least-once half always is. Counted only —
-	// no journal, no per-conflict events.
+	// The conflicts counter is NOT asserted here: its definition — a pending
+	// (unacked) local write displaced by an applied replicated record — is
+	// proven by the unit matrix in TestMergeStats_counts and by the
+	// real-socket TestStand_metricsByEffect, which construct the exact
+	// displacement. An aggregate chaos count can never prove a definition:
+	// whether a same-key overwrite happened to displace a still-pending
+	// local write is scheduler-dependent, so this scenario only logs what it
+	// observed. Counted only — no journal, no per-conflict events (OBSV-03,
+	// ADR 0004).
 	var conflicts uint64
 	for i := range cluster.Nodes() {
 		conflicts += cluster.Core(i).MergeStats().Conflicts
 	}
-	if conflicts < sharedKeys {
-		t.Fatalf("the cluster counted %d merge conflicts for %d displaced same-key versions, want >= %d %s",
-			conflicts, sharedKeys, sharedKeys, scnReplay(seed, test))
-	}
+	t.Logf("observed %d merge conflict(s) across %d nodes for %d same-key write pairs %s",
+		conflicts, cluster.Nodes(), sharedKeys, scnReplay(seed, test))
 }
 
 // scnWritten is one recorded write the no-fresh-loss qualifier tracks: the

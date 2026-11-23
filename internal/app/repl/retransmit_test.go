@@ -1381,8 +1381,9 @@ func TestReplication_equalVersionAcked(t *testing.T) {
 // with identical content keeps the old Ack-and-no-reply outcome; an incoming
 // tie-break win installs and Acks with no reply; and a stored tie-break win
 // answers with exactly one unicast DataReplication carrying the stored record
-// and sends no Ack. Both tie-break directions count exactly one merge
-// conflict.
+// and sends no Ack. Neither tie-break direction counts a merge conflict: the
+// records were seeded directly into the store, so no pending (unacked) local
+// write exists to displace (OBSV-03, ADR 0004).
 func TestReplication_equalVersionContentLaw(t *testing.T) {
 	t.Parallel()
 	v5 := version.PackVersion(testNowMs, 5, peerID1)
@@ -1402,8 +1403,8 @@ func TestReplication_equalVersionContentLaw(t *testing.T) {
 		if got := core.QueuedResponses(); got != 0 {
 			t.Fatalf("QueuedResponses() = %d after an incoming tie-break win, want 0 — a win Acks and never replies", got)
 		}
-		if stats := core.MergeStats(); stats.Conflicts != 1 {
-			t.Fatalf("MergeStats().Conflicts = %d after the tie-break win, want 1", stats.Conflicts)
+		if stats := core.MergeStats(); stats.Conflicts != 0 {
+			t.Fatalf("MergeStats().Conflicts = %d after the tie-break win, want 0 — the seeded record had no pending entry to displace", stats.Conflicts)
 		}
 		got, err := st.store.Get(keyAlpha)
 		if err != nil || got.Version != v5 || !bytes.Equal(got.Data, []byte("six")) {
@@ -1428,8 +1429,8 @@ func TestReplication_equalVersionContentLaw(t *testing.T) {
 		if got := core.QueuedResponses(); got != 1 {
 			t.Fatalf("QueuedResponses() = %d after a stored tie-break win, want exactly 1", got)
 		}
-		if stats := core.MergeStats(); stats.Conflicts != 1 {
-			t.Fatalf("MergeStats().Conflicts = %d after the tie-break loss, want 1", stats.Conflicts)
+		if stats := core.MergeStats(); stats.Conflicts != 0 {
+			t.Fatalf("MergeStats().Conflicts = %d after the tie-break loss, want 0 — the seeded record had no pending entry to displace", stats.Conflicts)
 		}
 
 		drained := advanceDrain(core, &out, now)
@@ -1578,8 +1579,9 @@ func TestReplication_equalVersionSameSeedTrace(t *testing.T) {
 }
 
 // TestReplication_newerApplied proves the strictly-newer outcome: a held
-// k@v5 that receives k@v6 applies it through ApplyRemote (one displaced-
-// version conflict) and Acks v6, emitting no reply.
+// k@v5 that receives k@v6 applies it through ApplyRemote and Acks v6, emitting
+// no reply. The v5 record was seeded directly, so it is an ordinary overwrite
+// of a confirmed record and counts no conflict (OBSV-03, ADR 0004).
 func TestReplication_newerApplied(t *testing.T) {
 	t.Parallel()
 	now := at(0)
@@ -1595,8 +1597,8 @@ func TestReplication_newerApplied(t *testing.T) {
 	if got := core.QueuedResponses(); got != 0 {
 		t.Fatalf("QueuedResponses() = %d after a strictly newer record, want 0", got)
 	}
-	if stats := core.MergeStats(); stats.Conflicts != 1 {
-		t.Fatalf("MergeStats().Conflicts = %d after displacing v5, want 1", stats.Conflicts)
+	if stats := core.MergeStats(); stats.Conflicts != 0 {
+		t.Fatalf("MergeStats().Conflicts = %d after displacing the seeded v5, want 0 — an ordinary overwrite is not a pending displacement", stats.Conflicts)
 	}
 	got, err := st.store.Get(keyAlpha)
 	if err != nil || got.Version != v6 || !bytes.Equal(got.Data, []byte("six")) {
