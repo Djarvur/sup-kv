@@ -28,6 +28,12 @@ const (
 	// names both opening paths so an operator reading client logs can tell
 	// a cold node (no sync yet) from one whose backstop elapsed.
 	gateMessage = "startup gate: waiting for first sync round or startup_gate"
+
+	// The two reasons a gate opening names (D-01): a complete listing round
+	// arrived, or the StartupGate backstop elapsed. The tokens are stable log
+	// values, never parsed text.
+	gateReasonSync     = "sync"
+	gateReasonBackstop = "backstop"
 )
 
 // ServerOptions carries the startup-gate wiring (API-04, API-06): the
@@ -108,6 +114,13 @@ type ServerOptions struct {
 	// handler then notifies each replayed record through the live LocalNotify
 	// seam with track=false. Only SnapshotLoad calls it.
 	ReplayNotify LocalReplayNotify
+
+	// OnGateOpen receives the gate-opening reason exactly once: "sync" when a
+	// complete listing arrived, "backstop" when StartupGate elapsed (D-01).
+	// Nil is a no-op. The callback fires on RunGate's goroutine, after the
+	// single gate CAS and the health endpoint's SERVING flip, and must return
+	// immediately — production wires it to one INFO record.
+	OnGateOpen func(reason string)
 }
 
 // gateUnavailable returns the API-04 status every gated write carries
@@ -153,13 +166,14 @@ func (s *Server) gated() bool {
 // RunGate runs the startup-gate resolver: a poll loop (the A8 pin — one
 // small goroutine, one wake per interval until the gate opens) that opens
 // the gate on the earlier of the injected SyncArrived signal flipping true
-// or StartupGate elapsing since this call. Opening stores the gate flag
-// and flips the health endpoint's empty service name to SERVING — the two
+// or StartupGate elapsing since this call. Opening stores the gate flag and
+// flips the health endpoint's empty service name to SERVING — the two
 // transitions are one event (T-05-08's 1:1 binding, and the resolver is
-// the only opener). RunGate returns once the gate has opened, or on ctx
-// cancel with the gate left closed: shutdown sheds traffic through the
-// health endpoint instead (plan 05-06's D-19 order). Launch exactly once,
-// before serving: `go srv.RunGate(ctx)`.
+// the only opener) — then reports the opening reason through OnGateOpen
+// (D-01). RunGate returns once the gate has opened, or on ctx cancel with
+// the gate left closed: shutdown sheds traffic through the health endpoint
+// instead (plan 05-06's D-19 order). Launch exactly once, before serving:
+// `go srv.RunGate(ctx)`.
 func (s *Server) RunGate(ctx context.Context) {
 	deadline := s.opts.StartupGate
 	if deadline <= 0 {
@@ -174,24 +188,28 @@ func (s *Server) RunGate(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-backstop.C:
-			s.openGate()
+			s.openGate(gateReasonBackstop)
 			return
 		case <-poll.C:
 			if s.opts.SyncArrived != nil && s.opts.SyncArrived() {
-				s.openGate()
+				s.openGate(gateReasonSync)
 				return
 			}
 		}
 	}
 }
 
-// openGate opens the gate exactly once and mirrors the transition into the
-// health endpoint under the same branch. The resolver is the only opener,
-// but its two opening paths (sync flip, backstop) can both fire in one
-// select iteration — the CAS keeps the health flip single-shot with the
-// flag store.
-func (s *Server) openGate() {
+// openGate opens the gate exactly once, mirrors the transition into the
+// health endpoint and reports the reason, all inside the single CAS branch.
+// The resolver is the only opener, but its two opening paths (sync flip,
+// backstop) can both fire in one select iteration — the CAS keeps the flag
+// store, the health flip and the OnGateOpen callback single-shot together
+// (D-01).
+func (s *Server) openGate(reason string) {
 	if s.gateOpen.CompareAndSwap(false, true) {
 		s.healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+		if s.opts.OnGateOpen != nil {
+			s.opts.OnGateOpen(reason)
+		}
 	}
 }

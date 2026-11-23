@@ -293,6 +293,14 @@ func gateBackstopFor(cfg config.Config, engine *persist.Engine) time.Duration {
 	return cfg.StartupGate
 }
 
+// logGateOpen renders the gate resolver's one opening event (D-01): a static
+// INFO message with the stable reason attribute — "sync" when a complete
+// listing arrived, "backstop" when the startup gate elapsed. It runs on
+// RunGate's goroutine and returns immediately.
+func logGateOpen(reason string) {
+	slog.Info("Startup gate opened", "reason", reason)
+}
+
 // startEngine opens the real dump store at the configured path, resolves
 // the engine over it with the hub's change tap threaded through
 // storage.Config and the hub's durability watermark through
@@ -461,6 +469,7 @@ func wire(cfg config.Config) (*wired, net.Listener, error) {
 		ReplayNotify:   adapter.NotifyReplayedWrite,
 		StartupGate:    gateBackstopFor(cfg, engine),
 		WaitTimeout:    cfg.WaitTimeout,
+		OnGateOpen:     logGateOpen,
 	})
 
 	apiCtx, apiCancel := context.WithCancel(context.Background())

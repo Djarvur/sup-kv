@@ -1222,6 +1222,58 @@ func TestMain_socketBuffersLogged(t *testing.T) {
 	assertNoPanic(t, node, "the socket-buffers startup run")
 }
 
+// TestMain_gateOpenLogged pins the gate catalog row at the binary boundary
+// (D-01): a lone real node's startup gate opens on its backstop — no listing
+// can ever arrive — and the process emits exactly one INFO "Startup gate
+// opened" record carrying reason=backstop, then still exits 0 on SIGTERM.
+func TestMain_gateOpenLogged(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+
+	node := startLoggedNode(t, bin, []string{"SUPKV_LOG_FORMAT=json", "SUPKV_LOG_LEVEL=info"},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
+	)
+	awaitServing(t, addr, servingDeadline)
+	waitFor(t, servingDeadline, "the one Startup gate opened record", func() bool {
+		return len(gateOpenRecords(node.stderr.String())) == 1
+	})
+	records := gateOpenRecords(node.stderr.String())
+	if len(records) != 1 {
+		t.Fatalf("the run emitted %d Startup gate opened records, want exactly 1:\n%s", len(records), node.stderr.String())
+	}
+	if records[0].Level != "INFO" {
+		t.Fatalf("the Startup gate opened record level = %q, want INFO:\n%s", records[0].Level, node.stderr.String())
+	}
+	if records[0].Reason != "backstop" {
+		t.Fatalf("the Startup gate opened record reason = %q, want backstop:\n%s", records[0].Reason, node.stderr.String())
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the gate-open run")
+}
+
+// gateOpenRecords returns the parsed records with the gate catalog's static
+// message.
+func gateOpenRecords(output string) []logRecord {
+	var records []logRecord
+	for _, record := range parseLogRecords(output) {
+		if record.Msg == "Startup gate opened" {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
 // parseSocketBuffersLine extracts recv_buf and send_buf from the startup
 // "Socket buffers" JSON log line. ok reports the line appeared with both
 // integer attrs present; the caller asserts their positivity.
@@ -1247,12 +1299,13 @@ func parseSocketBuffersLine(output string) (recv, send int, ok bool) {
 }
 
 // logRecord is the one JSON record shape the lifecycle-log tests parse: the
-// level and static message every handler emits, plus the optional stage a
-// startup failure names (D-06).
+// level and static message every handler emits, the optional stage a startup
+// failure names (D-06), and the gate-open reason (D-01).
 type logRecord struct {
-	Level string `json:"level"`
-	Msg   string `json:"msg"`
-	Stage string `json:"stage"`
+	Level  string `json:"level"`
+	Msg    string `json:"msg"`
+	Stage  string `json:"stage"`
+	Reason string `json:"reason"`
 }
 
 // parseLogRecords parses every JSON-object line of output, skipping the

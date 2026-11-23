@@ -286,6 +286,72 @@ func TestGate_opensOnTimeout(t *testing.T) {
 	}
 }
 
+// TestGate_openReason pins the D-01 gate-open narration: the resolver's one
+// opening callback carries the reason — "sync" when a complete listing
+// arrived, "backstop" when StartupGate elapsed — and fires exactly once,
+// after the gate CAS and the health flip (the succeeding Set proves both).
+func TestGate_openReason(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sync", func(t *testing.T) {
+		t.Parallel()
+		var sync atomic.Bool
+		reasons := make(chan string, 2)
+		ts := newGateServer(t, grpcapi.ServerOptions{
+			SyncArrived: sync.Load,
+			StartupGate: gateTestNeverBackstop,
+			OnGateOpen:  func(reason string) { reasons <- reason },
+		})
+		time.AfterFunc(gateSyncFlipDelay, func() { sync.Store(true) })
+		awaitGateOpen(t, ts)
+		assertOneGateReason(t, reasons, "sync")
+		_, err := ts.client.Set(t.Context(), &apiproto.SetRequest{Key: "gate/reason", Value: []byte("v")})
+		if err != nil {
+			t.Fatalf("Set after the gate opened on sync: want OK, got error: %v", err)
+		}
+	})
+
+	t.Run("backstop", func(t *testing.T) {
+		t.Parallel()
+		reasons := make(chan string, 2)
+		ts := newGateServer(t, grpcapi.ServerOptions{
+			SyncArrived: func() bool { return false },
+			StartupGate: gateTestBackstop,
+			OnGateOpen:  func(reason string) { reasons <- reason },
+		})
+		awaitGateOpen(t, ts)
+		assertOneGateReason(t, reasons, "backstop")
+		_, err := ts.client.Set(t.Context(), &apiproto.SetRequest{Key: "gate/reason", Value: []byte("v")})
+		if err != nil {
+			t.Fatalf("Set after the gate opened on the backstop: want OK, got error: %v", err)
+		}
+	})
+}
+
+// gateReasonGrace is the window assertOneGateReason holds open after the one
+// callback: the gate CAS makes a second one impossible, so the window only
+// has to outlast the resolver's own return.
+const gateReasonGrace = 100 * time.Millisecond
+
+// assertOneGateReason waits for the one opening callback, requires its
+// reason, and then proves the CAS kept it single-shot.
+func assertOneGateReason(t *testing.T, reasons <-chan string, want string) {
+	t.Helper()
+	select {
+	case got := <-reasons:
+		if got != want {
+			t.Fatalf("gate-open reason = %q, want %q", got, want)
+		}
+	case <-time.After(gateWait):
+		t.Fatalf("no gate-open callback within %v, want reason %q", gateWait, want)
+	}
+	select {
+	case extra := <-reasons:
+		t.Fatalf("the gate-open callback fired more than once (extra reason %q)", extra)
+	case <-time.After(gateReasonGrace):
+	}
+}
+
 // TestHealth_reflectsGate proves the API-06 binding on both transitions
 // through the standard health client over the same bufconn: the empty
 // service name — the whole-server status per the health protocol — reads
