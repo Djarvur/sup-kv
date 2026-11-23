@@ -54,9 +54,12 @@ type LocalNotify func(key string, rec storage.Record, track bool, peers []uint16
 // snapshot load replayed (PROTO-08, T-4-20, WR-04). The record is already
 // installed; the seam queues it without a tracker and without an immediate
 // broadcast, so a large load drains through the record-send pacer instead of
-// emitting one datagram per key back-to-back. Production injects
-// udprepl.Adapter.NotifyReplayedWrite; a nil seam means "no paced path" and
-// the handler falls back to LocalNotify with track=false.
+// emitting one datagram per key back-to-back. The handed-over record is
+// version only: the core reads nothing else, and the paced record-send drain
+// re-reads the stored record through Lookup, so the seam must not rebuild the
+// payload. Production injects udprepl.Adapter.NotifyReplayedWrite; a nil seam
+// means "no paced path" and the handler falls back to LocalNotify with
+// track=false, where the live seam's contract still requires the full record.
 type LocalReplayNotify func(key string, rec storage.Record) error
 
 // Server implements the apiproto.SupKVServiceServer surface over one persist
@@ -404,22 +407,22 @@ func (s *Server) notifyLocalWrite(key string, ver version.RecordVersion, data []
 // seam when the wiring provides one (WR-04, T-4-20), else through the live
 // notification seam with track=false — a load has no waiter report. The
 // peers slice is nil: a replay has no waiter, so no write-time peer set
-// exists to carry (D-01's promise covers live writes only). The rebuilt
-// record is notifyLocalWrite's: the replay's stored version, its data and the
-// store's checksum. A notify error is ignored for the same reason as on the
-// live path: the record is already installed and the RPC's own error (if any)
-// reports the dump honestly.
+// exists to carry (D-01's promise covers live writes only).
+//
+// The paced seam receives the version only: the replay is already installed,
+// the core consumes nothing but rec.Version, and the paced record-send drain
+// re-reads the stored record through Lookup before emitting — so a rebuilt
+// Data slice (and the checksum over it) would be garbage the core never
+// reads. The nil-seam fallback still rebuilds the full record, because the
+// live seam's contract carries it. A notify error is ignored for the same
+// reason as on the live path: the record is already installed and the RPC's
+// own error (if any) reports the dump honestly.
 func (s *Server) notifyReplayedWrite(rec persist.RestoredRecord) {
 	if s.opts.ReplayNotify == nil {
 		s.notifyLocalWrite(rec.Key, rec.Version, rec.Data, rec.Deleted, false, nil)
 		return
 	}
-	_ = s.opts.ReplayNotify(rec.Key, storage.Record{
-		Version:  rec.Version,
-		Data:     bytes.Clone(rec.Data),
-		Deleted:  rec.Deleted,
-		Checksum: storage.RecordChecksum(rec.Key, rec.Version, rec.Data, rec.Deleted),
-	})
+	_ = s.opts.ReplayNotify(rec.Key, storage.Record{Version: rec.Version})
 }
 
 // keyTooLongError builds the InvalidArgument for a write key over the

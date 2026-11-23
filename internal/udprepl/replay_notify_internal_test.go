@@ -42,7 +42,8 @@ func TestNotifyReplayedWriteCarriesVersionOnly(t *testing.T) {
 		Checksum: storage.RecordChecksum(replayNotifyKey, replayed, data, true),
 	}
 
-	if err := adapter.NotifyReplayedWrite(replayNotifyKey, rec); err != nil {
+	err := adapter.NotifyReplayedWrite(replayNotifyKey, rec)
+	if err != nil {
 		t.Fatalf("NotifyReplayedWrite: %v", err)
 	}
 
@@ -91,9 +92,11 @@ func TestNotifyReplayedWriteAllocationBound(t *testing.T) {
 	}
 
 	result := testing.Benchmark(func(b *testing.B) {
+		b.Helper()
 		b.ReportAllocs()
 		for range b.N {
-			if err := adapter.NotifyReplayedWrite(replayNotifyKey, rec); err != nil {
+			err := adapter.NotifyReplayedWrite(replayNotifyKey, rec)
+			if err != nil {
 				b.Errorf("NotifyReplayedWrite: %v", err)
 				return
 			}
@@ -108,7 +111,10 @@ func TestNotifyReplayedWriteAllocationBound(t *testing.T) {
 		}
 	})
 
-	if got := result.AllocedBytesPerOp(); got >= replayNotifyAllocCeiling {
+	got := result.AllocedBytesPerOp()
+	t.Logf("NotifyReplayedWrite allocates %d bytes/op for a %d-byte record (ceiling %d)",
+		got, replayNotifyRecordBytes, replayNotifyAllocCeiling)
+	if got >= replayNotifyAllocCeiling {
 		t.Fatalf("NotifyReplayedWrite allocates %d bytes/op for a %d-byte record, want under %d: the version-only replay seam must not copy rec.Data",
 			got, replayNotifyRecordBytes, replayNotifyAllocCeiling)
 	}

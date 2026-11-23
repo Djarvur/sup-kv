@@ -58,16 +58,18 @@ type inboundEvent struct {
 }
 
 // localWrite is one author's NotifyLocalWrite notification on the event
-// loop's queue, with the record defensively copied at enqueue — the author
-// may reuse its buffer once the call returns. The queue carries no track
-// flag: the tracker is created synchronously in NotifyLocalWrite before the
-// enqueue, so no later code can mistake a notification for a tracker
-// creation site. peers is the write-time peer-id snapshot the author captured
-// before its engine write, cloned at enqueue for the same reuse reason; the
-// event loop hands it to the core so the promise set is the acceptance-time
-// set (A-01). The replay flag marks a notification for already-installed
-// state (a snapshot load) rather than a live write; a replay takes the core's
-// paced record-send path instead of the immediate broadcast (WR-04).
+// loop's queue, with the live path's record defensively copied at enqueue —
+// the author may reuse its buffer once the call returns. A replay enqueues a
+// version-only record instead: the core reads nothing but the version (see
+// NotifyReplayedWrite). The queue carries no track flag: the tracker is
+// created synchronously in NotifyLocalWrite before the enqueue, so no later
+// code can mistake a notification for a tracker creation site. peers is the
+// write-time peer-id snapshot the author captured before its engine write,
+// cloned at enqueue for the same reuse reason; the event loop hands it to the
+// core so the promise set is the acceptance-time set (A-01). The replay flag
+// marks a notification for already-installed state (a snapshot load) rather
+// than a live write; a replay takes the core's paced record-send path instead
+// of the immediate broadcast (WR-04).
 type localWrite struct {
 	key    string
 	rec    storage.Record
@@ -250,13 +252,19 @@ func (a *Adapter) NotifyLocalWrite(key string, rec storage.Record, track bool, p
 // instead of broadcasting immediately (WR-04, T-4-20): a large load drains one
 // datagram per pacing slot rather than emitting one broadcast per key
 // back-to-back. No tracker is created — a load has no wait_for_replication
-// report — and the copy rules are NotifyLocalWrite's.
+// report. The enqueued record is version only: the core reads nothing else,
+// and the paced drain re-reads the stored record through Lookup before
+// emitting, so the copy rules differ from NotifyLocalWrite's — no author
+// buffer outlives this call on the replay path, and there is no payload to
+// own.
 func (a *Adapter) NotifyReplayedWrite(key string, rec storage.Record) error {
-	return a.enqueueLocalWrite(localWrite{key: key, rec: cloneLocalRecord(rec), replay: true})
+	return a.enqueueLocalWrite(localWrite{key: key, rec: storage.Record{Version: rec.Version}, replay: true})
 }
 
-// cloneLocalRecord defensively copies one record for the notification
-// channel: the author may reuse its buffer once the call returns.
+// cloneLocalRecord defensively copies one record for the notification channel
+// on the LIVE seam only: NotifyLocalWrite's author may reuse its buffer once
+// the call returns. The replay seam never uses it — its record is version
+// only, with no payload to own.
 func cloneLocalRecord(rec storage.Record) storage.Record {
 	return storage.Record{
 		Version:  rec.Version,
