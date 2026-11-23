@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 6
 current_phase_name: API and Semantics
-current_plan: 10
+current_plan: 11
 status: executing
-stopped_at: Completed 06-07-PLAN.md
-last_updated: "2026-11-23T01:11:19.309Z"
+stopped_at: Completed 06-08-PLAN.md
+last_updated: "2026-11-23T01:27:55.295Z"
 last_activity: 2026-11-22
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: b50a4a2dc9351658ee96df96ceebfdfe678be95b
+state_head: 339b06ba9664bbb79c2d0cb88c93b49a0849cc99
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 72
-  completed_plans: 68
+  completed_plans: 69
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 6 (API and Semantics) — READY TO EXECUTE
-Current Plan: 10
+Current Plan: 11
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-11-22 — Phase 5 complete, transitioned to Phase 6
@@ -127,6 +127,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 06 P06 | 580s | 1 tasks | 12 files |
 | Phase 06 P12 | 361 | 2 tasks | 7 files |
 | Phase 06 P07 | 522s | 3 tasks | 11 files |
+| Phase 06 P08 | 705s | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -402,6 +403,11 @@ Recent decisions affecting current work:
 - [Phase 06]: APIS-05: MaxRecvBytes = storage.MaxKeyBytes + the effective configured value limit + apiEnvelopeOverheadBytes (63 846 at the default, 66 814 at the 64 408 datagram limit), never the default constant; MaxSendBytes = listPageByteBudget + listEnvelopeOverheadBytes, and apiEnvelopeOverheadBytes is an alias of 06-05's listEnvelopeOverheadBytes, not a second definition.
 - [Phase 06]: APIS-05: Server.Shutdown calls the standard health server's one-way Shutdown (never Resume); the binary calls node.api.Shutdown() before apiCancel and no longer flips health directly, so a gate-resolver backstop firing after shutdown began cannot return SERVING (T-06-23, RESEARCH Pitfall 9).
 - [Phase 06]: APIS-05: the transport-limits harness knob is opt-in (nil keeps the plain grpc.NewServer()), the receive-ceiling test proves ResourceExhausted at the transport versus InvalidArgument at the handler, and the one-way test waits for the backstop through a successful Set rather than a sleep; all three tasks carry machine-valid RED records despite their new symbols needing compiling skeletons.
+- [Phase 06]: Full rollback is one deterministic sorted union of snapshot keys and current live keys absent from the snapshot; a snapshot key replays through replayRecord and an absent live key is deleted with a fresh tombstone that joins the returned report (D-07, ADR 0001).
+- [Phase 06]: restoreChanges counts an extra current live key as a change but never an extra current tombstone: an already-rolled-back key burns no version and produces no record (RESEARCH Pitfalls 13-14).
+- [Phase 06]: Rollback tombstones join RestoredRecord (nil Data, Deleted=true), so SnapshotLoad's existing notify loop broadcasts them with zero handler wiring, including when the final dump fails (PROTO-08 / T-06-26).
+- [Phase 06]: A rollback delete rides storage.Store.Delete, whose ErrNotFound is a benign concurrent skip that burns no version; concurrent writes after the rollback set is computed are ordinary LWW, not snapshot isolation.
+- [Phase 06]: 06-08 tasks 2 and 3 were investigated unexpected GREENs (behaviour landed in Task 1's GREEN commit and the handler needed no change), so their test commits are the deliverables; gocognit/nestif/revive/noinlineerr forced the replay-pass helper split (04-07 / 06-04 precedent).
 
 ### Pending Todos
 
@@ -424,7 +430,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T01:11:18.745Z
-Stopped at: Completed 06-07-PLAN.md
+Last session: 2026-11-23T01:27:54.685Z
+Stopped at: Completed 06-08-PLAN.md
 Resume file: None
 Next action: verify Phase 5, then start Phase 6 (`/gsd:execute-phase 6` after the phase verification)
