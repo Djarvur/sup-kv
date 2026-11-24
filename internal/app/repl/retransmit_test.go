@@ -91,6 +91,99 @@ func (s stateStore) Generation() uint64 { return s.store.Generation() }
 // Records returns the full snapshot, tombstones included — test expectations only.
 func (s stateStore) Records() map[string]storage.Record { return s.store.Records() }
 
+// storeCounts is one snapshot of the consumer-seam calls the inbound handlers
+// made: the deterministic replacement for a wall-clock ratio (XPORT-06,
+// PERF-05). The fields are named after the seam methods.
+type storeCounts struct {
+	version     int
+	lookup      int
+	versions    int
+	records     int
+	applyRemote int
+	observe     int
+	generation  int
+}
+
+// countingStore wraps the real consumer-side stateStore and counts the calls
+// the core makes through repl.StateStore. The fixture is single-goroutine
+// (HandleDatagram and Advance are driver-goroutine-only), so plain ints need
+// no atomics. A method added to repl.StateStore appears here as a compile
+// error, which is the forcing function that keeps the count complete; the
+// double lives in the external test package, so no production surface is
+// added for it.
+type countingStore struct {
+	*stateStore
+
+	version     int
+	lookup      int
+	versions    int
+	records     int
+	applyRemote int
+	observe     int
+	generation  int
+}
+
+// countingStore must satisfy the complete consumer seam; the next method added
+// to repl.StateStore turns this assertion into a compile error.
+var _ repl.StateStore = (*countingStore)(nil)
+
+// ApplyRemote counts and delegates to the real merge.
+func (c *countingStore) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
+	c.applyRemote++
+	return c.stateStore.ApplyRemote(key, rec)
+}
+
+// Version counts and delegates to the real point probe.
+func (c *countingStore) Version(key string) (version.RecordVersion, bool) {
+	c.version++
+	return c.stateStore.Version(key)
+}
+
+// Lookup counts and delegates to the real record read.
+func (c *countingStore) Lookup(key string) (storage.Record, bool) {
+	c.lookup++
+	return c.stateStore.Lookup(key)
+}
+
+// Versions counts and delegates to the real shallow version map.
+func (c *countingStore) Versions() map[string]version.RecordVersion {
+	c.versions++
+	return c.stateStore.Versions()
+}
+
+// Observe counts and delegates to the real clock absorption.
+func (c *countingStore) Observe(ver version.RecordVersion) time.Duration {
+	c.observe++
+	return c.stateStore.Observe(ver)
+}
+
+// Generation counts and delegates to the real generation read.
+func (c *countingStore) Generation() uint64 {
+	c.generation++
+	return c.stateStore.Generation()
+}
+
+// Records counts the test-only full snapshot: the core interface does not
+// declare it, so a nonzero count means the measured path reached outside the
+// consumer seam.
+func (c *countingStore) Records() map[string]storage.Record {
+	c.records++
+	return c.stateStore.Records()
+}
+
+// counts returns the comparable snapshot the gates diff.
+func (c *countingStore) counts() storeCounts {
+	return storeCounts{
+		version:     c.version,
+		lookup:      c.lookup,
+		versions:    c.versions,
+		records:     c.records,
+		applyRemote: c.applyRemote,
+		observe:     c.observe,
+		generation:  c.generation,
+	}
+}
+
 // newTestCore returns the local node's core over a real store whose clock
 // parks at the fixed test millisecond (the D-02 seam), carrying the default
 // replication Config (docs/IDEA.md §Parameters: ack_timeout 200ms,
