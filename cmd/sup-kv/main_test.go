@@ -63,6 +63,31 @@ const (
 	versionBytes       = 16
 	hardDeadlineMargin = 250 * time.Millisecond
 
+	// processServingDeadline is a HARNESS START BUDGET, not a product
+	// bound: the first SERVING wait of a freshly spawned child covers
+	// process start plus the startup gate while the full -race suite and
+	// other packages' binaries compete for the machine. The recorded 06/07
+	// readiness failures were process-start starvation — the child needed
+	// more than the 10 s servingDeadline to start under load — so the
+	// structural cure lands first: spawnSem below caps this test binary at
+	// spawnSemSlots live spawned children. The 30 s hard upper bound is
+	// fixed; the 06/07 evidence and this host's load average are recorded
+	// in 08-09-SUMMARY.md, and exceeding the bound is a finding to report,
+	// never a reason to raise it. Every poll of an already-running node
+	// keeps servingDeadline.
+	processServingDeadline = 30 * time.Second
+	// logEventDeadline bounds a log-delivery wait for a driven event (the
+	// duplicate-node-id pair's configuration-error line), not a serving
+	// wait: the event crosses the UDP pair, so it needs its own budget
+	// rather than borrowing the readiness one.
+	logEventDeadline = 30 * time.Second
+	// spawnSemSlots caps the live spawned binaries this test binary keeps;
+	// the release-after-reap serializer is the structural cure for the
+	// process-start starvation, and spawnAcquireDeadline turns a would-be
+	// slot deadlock into a named failure instead of a suite timeout.
+	spawnSemSlots        = 8
+	spawnAcquireDeadline = 2 * time.Minute
+
 	smokeKey   = "smoke/lifecycle-key"
 	smokeValue = "sup-kv-binary-smoke-value"
 )
@@ -73,6 +98,13 @@ var (
 	smokeDir       string
 	smokeBin       string
 	errSmokeBinary error
+
+	// spawnSem is the release-after-reap serializer: a buffered channel of
+	// spawnSemSlots slots, acquired in launchNode before cmd.Start and
+	// released by the cleanup registered BEFORE node.reap, so the LIFO
+	// order kills the child first and frees the slot second. Test files are
+	// exempt from gochecknoglobals, so no directive is needed.
+	spawnSem = make(chan struct{}, spawnSemSlots)
 )
 
 func TestMain(m *testing.M) {
@@ -167,12 +199,18 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 // smokeNode is one running binary under test with its captured output and
 // its single Wait result. stderr holds the plain post-exit buffer or the
 // structured-logging tests' lock-guarded live buffer (outputCapture).
+// exitResult is the reaper's stored Wait result, written under exitMu before
+// exited closes: the channel closure is the happens-before fence, so a
+// readiness wait can explain a dead child without consuming the one-buffered
+// exit channel.
 type smokeNode struct {
-	cmd    *exec.Cmd
-	stdout *bytes.Buffer
-	stderr outputCapture
-	exit   chan error
-	exited chan struct{}
+	cmd        *exec.Cmd
+	stdout     *bytes.Buffer
+	stderr     outputCapture
+	exit       chan error
+	exited     chan struct{}
+	exitMu     sync.Mutex
+	exitResult error
 }
 
 // outputCapture is the stderr seam smokeNode holds: the plain bytes.Buffer
@@ -223,6 +261,21 @@ func startLoggedNode(t *testing.T, bin string, env []string, args ...string) *sm
 // launchNode is the shared startNode body over one stderr capture.
 func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, args ...string) *smokeNode {
 	t.Helper()
+	// The serializer is the structural cure for process-start starvation:
+	// at most spawnSemSlots spawned binaries stay live in this test binary.
+	// Acquire before Start so the cap counts processes, not test bodies.
+	select {
+	case spawnSem <- struct{}{}:
+	case <-time.After(spawnAcquireDeadline):
+		t.Fatalf(
+			"no spawn slot free after %v (%d slots) — a spawned child leaked or the serializer is saturated",
+			spawnAcquireDeadline,
+			spawnSemSlots,
+		)
+	}
+	// Registered BEFORE node.reap: cleanups run LIFO, so the kill-and-reap
+	// runs first and this slot is freed only after the child is gone.
+	t.Cleanup(func() { <-spawnSem })
 	cmd := exec.CommandContext(t.Context(), bin, args...)
 	stdout := &bytes.Buffer{}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
@@ -240,8 +293,15 @@ func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, ar
 		exit:   make(chan error, 1),
 		exited: make(chan struct{}),
 	}
+	// The reaper stores the Wait result before closing exited: the channel
+	// closure fences the field, so exitDiagnosis can read a completed child
+	// without racing and without consuming the one-buffered exit channel.
 	go func() {
-		node.exit <- cmd.Wait()
+		waitErr := cmd.Wait()
+		node.exitMu.Lock()
+		node.exitResult = waitErr
+		node.exitMu.Unlock()
+		node.exit <- waitErr
 		close(node.exited)
 	}()
 	t.Cleanup(node.reap)
@@ -300,6 +360,105 @@ func assertExitCode(t *testing.T, err error, want int) {
 	}
 	if ee.ExitCode() != want {
 		t.Fatalf("process exit code = %d (%s), want %d", ee.ExitCode(), ee.String(), want)
+	}
+}
+
+// errChildExited reports a spawned child that finished on its own before the
+// harness's wait completed; exitDiagnosis wraps it with the evidence.
+var errChildExited = errors.New("child exited unexpectedly")
+
+// exitDiagnosisTailBytes bounds each captured-output tail the diagnosis
+// carries: enough for the last log lines and the error text, never the whole
+// transcript.
+const exitDiagnosisTailBytes = 2048
+
+// exitStatus reports whether the reaper has closed exited, with the stored
+// Wait result when it has. The closed channel is the happens-before fence for
+// the field read; the result may legitimately be nil (a clean exit 0).
+func (n *smokeNode) exitStatus() (bool, error) {
+	select {
+	case <-n.exited:
+		n.exitMu.Lock()
+		defer n.exitMu.Unlock()
+		return true, n.exitResult
+	default:
+		return false, nil
+	}
+}
+
+// outputTail returns the last n bytes of s, or all of s when it is shorter.
+func outputTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
+// waitStatus renders a completed Wait: exit 0 for nil, the exit code and
+// String() for an ExitError, and the raw error otherwise.
+func waitStatus(err error) string {
+	if err == nil {
+		return "exit 0 (clean)"
+	}
+	exitErr, ok := errors.AsType[*exec.ExitError](err)
+	if ok {
+		return fmt.Sprintf("exit code %d (%s)", exitErr.ExitCode(), exitErr.String())
+	}
+	return err.Error()
+}
+
+// exitDiagnosis explains a spawned child that has already exited: nil while
+// it runs, otherwise an error wrapping errChildExited and naming the pid, the
+// Wait status and the tails of the captured stdout and stderr. It reads the
+// stored Wait result, so it is callable repeatedly and never consumes the
+// exit channel — a crashed child can never look like a slow one.
+func (n *smokeNode) exitDiagnosis() error {
+	exited, exitErr := n.exitStatus()
+	if !exited {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: process %d exited: %s; stderr tail: %q; stdout tail: %q",
+		errChildExited,
+		n.cmd.Process.Pid,
+		waitStatus(exitErr),
+		outputTail(n.stderr.String(), exitDiagnosisTailBytes),
+		outputTail(n.stdout.String(), exitDiagnosisTailBytes),
+	)
+}
+
+// awaitNodeServing is the node-aware readiness wait: an already-exited child
+// returns the exit diagnosis on the first poll instead of waiting out the
+// timeout — every poll of an already-running node is still awaitServing's.
+func awaitNodeServing(t *testing.T, node *smokeNode, addr string, timeout time.Duration) error {
+	t.Helper()
+	var diagnosis error
+	waitFor(t, timeout, "health SERVING on "+addr, func() bool {
+		diagnosis = node.exitDiagnosis()
+		if diagnosis != nil {
+			return true
+		}
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = conn.Close() }()
+		ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
+		defer cancel()
+		resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
+	return diagnosis
+}
+
+// requireNodeServing is awaitNodeServing's fatal wrapper for the call sites
+// whose freshly spawned child must reach SERVING: the process-start budget is
+// the one a first wait needs, so the wrapper carries it.
+func requireNodeServing(t *testing.T, node *smokeNode, addr string) {
+	t.Helper()
+	err := awaitNodeServing(t, node, addr, processServingDeadline)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -421,7 +580,7 @@ func TestMain_precedence(t *testing.T) {
 		"--startup-gate=10ms",
 		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, envAddr, servingDeadline)
+	requireNodeServing(t, node1, envAddr)
 	signalAndWaitExit(t, node1)
 
 	// Run 2 — the same env plus an explicit flag: the flag must win.
@@ -436,7 +595,7 @@ func TestMain_precedence(t *testing.T) {
 		"--startup-gate=10ms",
 		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, flagAddr, servingDeadline)
+	requireNodeServing(t, node2, flagAddr)
 	signalAndWaitExit(t, node2)
 
 	dialer := &net.Dialer{Timeout: dialTimeout}
@@ -568,7 +727,7 @@ func TestMain_valueMaxDatagram(t *testing.T) {
 				"--startup-gate-empty=10ms",
 				"--value-max-bytes="+strconv.Itoa(tc.valueMax),
 			)
-			awaitServing(t, addr, servingDeadline)
+			requireNodeServing(t, node, addr)
 			if stderr := node.stderr.String(); strings.Contains(stderr, datagramCeilingLine) {
 				t.Fatalf("--value-max-bytes=%d produced the datagram-ceiling error while starting:\n%s", tc.valueMax, stderr)
 			}
@@ -879,7 +1038,7 @@ func TestMain_startupGateEmptySelection(t *testing.T) {
 			"--startup-gate=10ms",
 			"--startup-gate-empty=10ms",
 		)...)
-		awaitServing(t, addr, servingDeadline)
+		requireNodeServing(t, seed, addr)
 		client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
 		ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
 		_, err := client.Set(ctx, &apiproto.SetRequest{Key: seedKey, Value: []byte(smokeValue)})
@@ -897,7 +1056,7 @@ func TestMain_startupGateEmptySelection(t *testing.T) {
 			"--startup-gate="+normalGate.String(),
 			"--startup-gate-empty="+emptyGate.String(),
 		)...)
-		awaitServing(t, addr, servingDeadline)
+		requireNodeServing(t, node, addr)
 		if elapsed := time.Since(started); elapsed > startupGateSeededBound {
 			t.Fatalf("the seeded node opened %v after launch, want within %v (the normal gate, not the %v empty backstop)",
 				elapsed, startupGateSeededBound, emptyGate)
@@ -953,7 +1112,7 @@ func TestMain_bindAddrWarn(t *testing.T) {
 			"--startup-gate=10ms",
 			"--startup-gate-empty=10ms",
 		)
-		awaitServing(t, grpcAddr, servingDeadline)
+		requireNodeServing(t, node, grpcAddr)
 		waitFor(t, servingDeadline, "the non-wildcard bind WARN", func() bool {
 			return strings.Contains(node.stderr.String(), bindAddrWarnMsg)
 		})
@@ -978,7 +1137,7 @@ func TestMain_bindAddrWarn(t *testing.T) {
 		)
 		// The WARN is emitted synchronously before wire, so a serving node
 		// has already decided the question.
-		awaitServing(t, grpcAddr, servingDeadline)
+		requireNodeServing(t, node, grpcAddr)
 		if out := node.stderr.String(); strings.Contains(out, bindAddrWarnMsg) {
 			t.Fatalf("a wildcard bind produced the non-wildcard WARN:\n%s", out)
 		}
@@ -1091,7 +1250,7 @@ func TestMain_lifecycle(t *testing.T) {
 		"--startup-gate=10ms",
 		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, addr, servingDeadline)
+	requireNodeServing(t, node, addr)
 
 	client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
 	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
@@ -1123,6 +1282,51 @@ func TestMain_lifecycle(t *testing.T) {
 	}
 }
 
+// earlyExitReadinessBound bounds the dead-child readiness assertion: the
+// diagnosis must land on the first poll, far below the serving budget it
+// replaces.
+const earlyExitReadinessBound = 2 * time.Second
+
+// TestMain_readinessDiagnosis proves an already-exited child fails a
+// readiness wait immediately with the exit diagnosis — pid, status and the
+// captured stderr tail — instead of waiting out the serving budget as if it
+// were slow. It drives the error-returning core behind requireNodeServing, so
+// the dead-child path is asserted directly rather than through a timeout.
+func TestMain_readinessDiagnosis(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	node := startNode(t, bin, nil, "--node-id=0")
+	waitFor(t, exitDeadline, "the invalid-configuration child's exit", func() bool {
+		select {
+		case <-node.exited:
+			return true
+		default:
+			return false
+		}
+	})
+	started := time.Now()
+	err := awaitNodeServing(t, node, "127.0.0.1:1", servingDeadline)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("awaitNodeServing on an exited child = nil, want the exit diagnosis")
+	}
+	if elapsed > earlyExitReadinessBound {
+		t.Fatalf("awaitNodeServing returned after %v on an exited child, want the diagnosis on the first poll (bound %v)",
+			elapsed, earlyExitReadinessBound)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("process %d", node.cmd.Process.Pid),
+		"exit code 2",
+		"stderr tail",
+		"required unique 16-bit node ID",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("awaitNodeServing diagnosis lacks %q:\n%s", want, err)
+		}
+	}
+}
+
 // TestMain_finalDumpFailureExitsThree pins D-06's distinct failed-final-dump
 // code at the binary boundary. The dump directory is replaced by a regular
 // file, so the atomic save's os.CreateTemp fails with ENOTDIR for every uid —
@@ -1145,7 +1349,7 @@ func TestMain_finalDumpFailureExitsThree(t *testing.T) {
 		"--startup-gate=10ms",
 		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, addr, servingDeadline)
+	requireNodeServing(t, node, addr)
 
 	// Block the dump path: a regular file where the directory was. ensureDir
 	// stats the path and finds something, then os.CreateTemp fails with
@@ -1253,7 +1457,7 @@ func TestMain_gateOpenLogged(t *testing.T) {
 		"--startup-gate=10ms",
 		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, addr, servingDeadline)
+	requireNodeServing(t, node, addr)
 	waitFor(t, servingDeadline, "the one Startup gate opened record", func() bool {
 		return len(gateOpenRecords(node.stderr.String())) == 1
 	})
@@ -1306,7 +1510,7 @@ func TestMain_startupLogRecord(t *testing.T) {
 		"--startup-gate=10ms",
 		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, addr, servingDeadline)
+	requireNodeServing(t, node, addr)
 
 	var record map[string]any
 	waitFor(t, servingDeadline, "the Starting sup-kv record", func() bool {
@@ -1367,7 +1571,7 @@ func TestMain_startupLogLoadOutcome(t *testing.T) {
 
 	firstAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
 	first := startLoggedNode(t, bin, env, flags(firstAddr)...)
-	awaitServing(t, firstAddr, servingDeadline)
+	requireNodeServing(t, first, firstAddr)
 	waitFor(t, servingDeadline, "the fresh start's Dump load record", func() bool {
 		return countLogMaps(first.stderr.String(), "Dump load") == 1
 	})
@@ -1390,7 +1594,7 @@ func TestMain_startupLogLoadOutcome(t *testing.T) {
 
 	secondAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
 	second := startLoggedNode(t, bin, env, flags(secondAddr)...)
-	awaitServing(t, secondAddr, servingDeadline)
+	requireNodeServing(t, second, secondAddr)
 	waitFor(t, servingDeadline, "the restart's Dump load record", func() bool {
 		return countLogMaps(second.stderr.String(), "Dump load") == 1
 	})
@@ -1788,7 +1992,7 @@ func TestLog_jsonDefault(t *testing.T) {
 	probeLoopbackBroadcast(t, portB)
 	nodeA, nodeB := startLogPair(t, bin, nil, portA, portB)
 
-	waitFor(t, servingDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
+	waitFor(t, logEventDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
 		return strings.Contains(nodeA.stderr.String(), "configuration error")
 	})
 
@@ -1842,7 +2046,7 @@ func TestLog_formatText(t *testing.T) {
 	probeLoopbackBroadcast(t, portB)
 	nodeA, nodeB := startLogPair(t, bin, []string{"SUPKV_LOG_FORMAT=text"}, portA, portB)
 
-	waitFor(t, servingDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
+	waitFor(t, logEventDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
 		return strings.Contains(nodeA.stderr.String(), "configuration error")
 	})
 
@@ -1951,7 +2155,7 @@ func TestMetrics_optIn(t *testing.T) {
 		"--startup-gate=10ms",
 		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, grpcAddr, servingDeadline)
+	requireNodeServing(t, node, grpcAddr)
 
 	status, body := httpGetBody(t, metricsURL)
 	if status != http.StatusOK {
@@ -2027,8 +2231,8 @@ func TestMetrics_noDefaultListener(t *testing.T) {
 	nodeA, addrA := launch(1)
 	nodeB, addrB := launch(2)
 
-	awaitServing(t, addrA, servingDeadline)
-	awaitServing(t, addrB, servingDeadline)
+	requireNodeServing(t, nodeA, addrA)
+	requireNodeServing(t, nodeB, addrB)
 	signalAndWaitExit(t, nodeA)
 	signalAndWaitExit(t, nodeB)
 }
@@ -2186,7 +2390,7 @@ func startMTLSNode(t *testing.T, bin string, certs metricsCertSuite, metricsPort
 		"--startup-gate=10ms",
 		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, grpcAddr, servingDeadline)
+	requireNodeServing(t, node, grpcAddr)
 	return node, metricsAddr
 }
 
