@@ -76,7 +76,7 @@
     {
       "number": "8",
       "name": "Performance",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "9",
@@ -86,8 +86,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step (verify)",
-    "reason": "Phase 8 of 9 · ready to verify"
+    "label": "Advance to the next step (plan phase 9)",
+    "reason": "Phase 9 of 9 — needs a plan"
   },
-  "updated_at": "2026-11-24T21:58:36.036Z"
+  "updated_at": "2026-11-24T22:17:22.110Z"
 }

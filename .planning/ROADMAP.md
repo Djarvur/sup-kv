@@ -35,7 +35,7 @@ Full phase details, decisions and evidence: [milestones/v1.0-ROADMAP.md](milesto
 - [x] **Phase 5: Persistence** - Single value limit, visible dump-load outcomes, generation integrity, decaying retries, streaming encode, blocking deadlines, engine split (completed 2026-11-22)
 - [x] **Phase 6: API and Semantics** - Honest `wait_for_replication`, snapshot load as full rollback, total error mapping, paginated `List`, public proto + Go client example in CI (completed 2026-11-23)
 - [x] **Phase 7: Observability and Configuration** - Lifecycle logging, one-point config validation, honest metric definitions, distinct exit codes, machine-enforced dependency boundary (completed 2026-11-23)
-- [ ] **Phase 8: Performance** - Documented write-latency model for both profiles, standing burst test, amplification and memory measured, `make perf` with thresholds
+- [x] **Phase 8: Performance** - Documented write-latency model for both profiles, standing burst test, amplification and memory measured, `make perf` with thresholds (completed 2026-11-25)
 - [ ] **Phase 9: Documentation and Release** - All 52 doc mismatches closed, test-anchored reference docs, failure table + runbooks, registry closed, v1.1 release
 
 ## Phase Details
@@ -332,7 +332,7 @@ Plans:
   3. Amplification and memory are measured, or the gap is recorded: disk-write amplification on target-grade media (Spec open question #2) and the memory model from stand measurements (with PERSIST-06)
   4. Write latency with an absent peer and a growing unconfirmed set stays near live-peer latency, proven by a benchmark (same fix as XPORT-02)
   5. `make perf` runs the stand suite with thresholds, and every published number carries a hardware description
-**Plans**: 11/11 plans executed, 6 waves
+**Plans**: 11/11 plans complete, 6 waves
 
 Plans:
 - [x] 08-01-PLAN.md — Threshold table, perf/race gates, hardware block, dump-dir guard, burst perf row and `make perf` (tracer)
@@ -379,5 +379,5 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 5. Persistence | v1.1 | 12/12 | Complete | 2026-11-22 |
 | 6. API and Semantics | v1.1 | 13/13 | Complete | 2026-11-23 |
 | 7. Observability and Configuration | v1.1 | 11/11 | Complete | 2026-11-23 |
-| 8. Performance | v1.1 | 11/11 | In Progress | - |
+| 8. Performance | v1.1 | 11/11 | Complete    | 2026-11-25 |
 | 9. Documentation and Release | v1.1 | 0/? | Not started | - |
