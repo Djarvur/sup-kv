@@ -14,6 +14,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -39,23 +40,17 @@ const (
 // smokeValue is the one replicated payload.
 var smokeValue = []byte("smoke-value-over-real-udp")
 
-// freeUDPPort picks one free UDP port: bind a throwaway wildcard socket to
-// :0, read its port, close it. Takes testing.TB so the benchmarks reuse the
-// same picker; the context is [context.Background] because the TB interface
-// carries no Context method (T and B grew one in Go 1.24; the shared
-// interface could not without breaking its implementers).
+// freeUDPPort returns one free UDP port from the udprepl band inside the
+// private port window (testutil.UDPReplBand: [30100, 31100), strictly below
+// the kernel's ephemeral range, so no other test's :0 bind is ever issued
+// there and the band is disjoint from every sibling package's). The shared
+// allocator claims the candidate while its bind probe is held, so no
+// parallel test in this process can take it between pick and bind. Takes
+// testing.TB so the benchmarks reuse the picker; the allocator's own
+// signature is testing.TB for the same reason.
 func freeUDPPort(tb testing.TB) int {
 	tb.Helper()
-	var lc net.ListenConfig
-	// tb.Context() does not exist (testing.TB carries no Context method,
-	// Go 1.24 added it to T and B only), so usetesting's suggested fix does
-	// not compile — the documented-nolint case.
-	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:0") //nolint:usetesting // suggestion does not compile on TB
-	if err != nil {
-		tb.Fatalf("bind throwaway port-picking socket: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	return conn.LocalAddr().(*net.UDPAddr).Port
+	return testutil.UDPPort(tb, testutil.UDPReplBand())
 }
 
 // smokeSocket binds a wildcard udp4 socket with SO_REUSEADDR and

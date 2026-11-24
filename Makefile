@@ -66,8 +66,13 @@ perf:
 ## spans scheduled runs: plan 11's nightly job runs this target three
 ## nights and requires green across runs.
 ## Flake classes audited after the internal/stand harness move:
-##   1. UDP port pick-to-bind — structurally mitigated: internal/stand's
-##      private window [28100, 32678) plus the claim registry moved intact.
+##   1. UDP port pick-to-bind — structurally mitigated for the whole suite:
+##      every socket-owning package (internal/stand, cmd/sup-kv,
+##      internal/udprepl, internal/grpcapi) picks from internal/testutil's
+##      one claim-while-held allocator, whose disjoint per-package bands
+##      (stand 28100, cmd 29100, udprepl 30100, grpcapi 31100; each 1 000
+##      wide) all sit below the kernel's ephemeral range, so neither a
+##      sibling test nor a separate test process can take a picked port.
 ##   2. SIGTERM before the handler is installed — a real product-side
 ##      binary window, carried per D-09's bar (needs a Phase 3-5 fix;
 ##      TestShutdown_secondSignal stays the existing post-arm pin).

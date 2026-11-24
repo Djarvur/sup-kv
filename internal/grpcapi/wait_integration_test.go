@@ -21,6 +21,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -53,23 +54,18 @@ const (
 	integrationDeadline  = 5 * time.Second
 )
 
-// integrationUDPPort picks one free UDP port: bind a throwaway wildcard
-// socket to :0, read its port, close it (the udprepl smoke-test recipe —
-// the adapter keeps no local-address accessor, so the test must know the
-// ports before constructing the nodes). Takes testing.TB so the
-// confirmation-latency benchmark reuses the same picker.
+// integrationUDPPort returns one free UDP port from the grpcapi band inside
+// the private port window (testutil.GRPCApiBand: [31100, 32100), strictly
+// below the kernel's ephemeral range, so no other test's :0 bind is ever
+// issued there and the band is disjoint from every sibling package's). The
+// shared allocator claims the candidate while its bind probe is held, so no
+// parallel test in this process can take it between pick and bind. The
+// adapter keeps no local-address accessor, so the test must know the ports
+// before constructing the nodes; the testing.TB signature lets the
+// confirmation-latency benchmark reuse the picker.
 func integrationUDPPort(tb testing.TB) int {
 	tb.Helper()
-	var lc net.ListenConfig
-	// tb.Context() does not exist (testing.TB carries no Context method,
-	// Go 1.24 added it to T and B only), so usetesting's suggested fix does
-	// not compile — the documented-nolint case.
-	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:0") //nolint:usetesting // suggestion does not compile on TB
-	if err != nil {
-		tb.Fatalf("bind throwaway port-picking socket: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	return conn.LocalAddr().(*net.UDPAddr).Port
+	return testutil.UDPPort(tb, testutil.GRPCApiBand())
 }
 
 // integrationSocket binds a wildcard udp4 socket with SO_REUSEADDR and
