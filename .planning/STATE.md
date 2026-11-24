@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 08-05-PLAN.md
-last_updated: "2026-11-24T18:33:09.194Z"
+stopped_at: Completed 08-06-PLAN.md
+last_updated: "2026-11-24T18:49:03.345Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: 147a154002c0e353e16daea624b80af4c49542ad
+state_head: 3e7b465558622238d61826d94e0dae34b065275e
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 87
+  completed_plans: 88
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -148,6 +148,7 @@ Progress: [████░░░░░░] 44%
 | Phase 08 P02 | 954 | 3 tasks | 2 files |
 | Phase 08 P04 | 408 | 2 tasks | 4 files |
 | Phase 08 P05 | 15min | 3 tasks | 2 files |
+| Phase 08 P06 | 9min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -490,6 +491,9 @@ Recent decisions affecting current work:
 - [Phase 08]: Task 2's three PendingVisits gates are tripwires that pass on arrival; 08-02's Tests 1-2 remain the RED evidence for the write/apply flatness.
 - [Phase 08]: The paired PERF-05 test SKIPs outside make perf, logs the hardware block and both arms, and reads its bound from testutil.PerfAbsentPeerRatio.
 - [Phase 08]: The store-keys and unacked metrics are reported after the measured loop because ResetTimer clears b.extra.
+- [Phase 08]: The port allocator splits claim (returns an error) from pick (turns it into tb.Fatalf): testing.TB cannot be implemented outside the testing package, so this is the only way to assert the empty/full band contract in-process and pick can never return zero
+- [Phase 08]: TCP probes use net.Listen and UDP probes ListenPacket: ListenPacket rejects the tcp network, which the first GREEN run exposed; one probeBind helper branches per transport
+- [Phase 08]: Four disjoint per-package bands below the kernel's ephemeral range plus a network:port claim held across the bind probe replace every private picker; both duplicate registries (scenarioPorts, probePorts) are deleted
 
 ### Pending Todos
 
@@ -512,7 +516,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-24T18:33:08.794Z
-Stopped at: Completed 08-05-PLAN.md
+Last session: 2026-11-24T18:49:02.926Z
+Stopped at: Completed 08-06-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)

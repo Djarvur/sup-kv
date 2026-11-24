@@ -161,12 +161,12 @@
 
 - [ ] **PERF-01**: The write-latency model is documented for both profiles (PERF-01, PERF-02, 14.3)
   - Acceptance: docs state that under sustained write flow latency reaches `dump_max_wait` + dump time by design; the fast-response profile (`Debounce`/`MaxWait` tuning) is documented with its disk cost; the "~10 ms under 1000 writes/s" claim is tied to its measurement conditions
-- [ ] **PERF-02**: The 1000 writes/s burst over distinct keys is a tested bound (PERF-03)
+- [x] **PERF-02**: The 1000 writes/s burst over distinct keys is a tested bound (PERF-03)
   - Acceptance: the XPORT-02(3) scenario is a standing test; the docs describe what is and is not guaranteed at that rate
 - [ ] **PERF-03**: Disk-write amplification is measured on target-grade media or the gap is recorded (PERF-04, Spec open question #2)
 - [ ] **PERF-04**: The memory model is documented from stand measurements (PERF-05, with PERSIST-06)
 - [x] **PERF-05**: Write latency with an absent peer and a growing unconfirmed set stays near the live-peer latency (PERF-06; same fix as XPORT-02, proven by a benchmark)
-- [ ] **PERF-06**: `make perf` runs the stand suite with thresholds; published numbers carry a hardware description
+- [x] **PERF-06**: `make perf` runs the stand suite with thresholds; published numbers carry a hardware description
 
 ### Documentation & Release
 
@@ -276,11 +276,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OBSV-07 | Phase 7 | Complete |
 | OBSV-08 | Phase 7 | Complete |
 | PERF-01 | Phase 8 | Pending |
-| PERF-02 | Phase 8 | Pending |
+| PERF-02 | Phase 8 | Complete |
 | PERF-03 | Phase 8 | Pending |
 | PERF-04 | Phase 8 | Pending |
 | PERF-05 | Phase 8 | Complete |
-| PERF-06 | Phase 8 | Pending |
+| PERF-06 | Phase 8 | Complete |
 | DOCS-01 | Phase 9 | Pending |
 | DOCS-02 | Phase 9 | Pending |
 | DOCS-03 | Phase 9 | Pending |
