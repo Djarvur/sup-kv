@@ -73,10 +73,11 @@ func benchFixtureWith(tb testing.TB, keys int, wrap func(*stateStore) repl.State
 	head := make([]port.SyncEntry, 0, benchChunkEntries)
 	for i := range keys {
 		key := fmt.Sprintf("bench/key-%06d", i)
-		// The seeded version packs the key index into the counter field; the
-		// gate below pins the version domain the fixture must stay inside
-		// (03-REVIEW IN-04).
-		ver := version.PackVersion(testNowMs, uint16(i), localID)
+		// A legal version domain: the millisecond offset goes in the l field
+		// and the 12-bit counter stays 0 (03-REVIEW IN-04). The 50 000-key
+		// seed spans 49 999 ms, inside the 60 s drift-warn default, so the
+		// fixture's readings never look like a drifted peer.
+		ver := version.PackVersion(testNowMs+int64(i), 0, localID)
 		rec := storage.Record{Version: ver, Data: make([]byte, benchDataBytes)}
 		_, _, err := store.Merge(key, rec)
 		if err != nil {
@@ -162,9 +163,11 @@ func benchHandleDataRequest(b *testing.B, keys int) {
 	core, head, base := benchFixture(b, keys)
 	in := benchDatagram(port.DataRequest{Key: head[0].Key})
 	b.ReportAllocs()
-	b.ReportMetric(float64(keys), "store-keys")
 	b.ResetTimer()
 	benchHandleDataRequestBody(core, in, base, b.N)
+	// ReportMetric after ResetTimer: ResetTimer clears the extra metrics, so a
+	// metric reported before it would silently vanish from the result line.
+	b.ReportMetric(float64(keys), "store-keys")
 }
 
 // BenchmarkHandleDataSync measures one DataSync handler call carrying the
@@ -189,9 +192,9 @@ func benchHandleDataSync(b *testing.B, keys int) {
 	// and the benchmark would measure the discard branch.
 	in := benchDatagram(port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: head})
 	b.ReportAllocs()
-	b.ReportMetric(float64(keys), "store-keys")
 	b.ResetTimer()
 	benchHandleDataSyncBody(core, in, base, b.N)
+	b.ReportMetric(float64(keys), "store-keys")
 }
 
 // TestCore_keyCountCostFlat is XPORT-06's deterministic acceptance: each
