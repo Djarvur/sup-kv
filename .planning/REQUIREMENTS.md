@@ -159,7 +159,7 @@
 
 ### Performance
 
-- [ ] **PERF-01**: The write-latency model is documented for both profiles (PERF-01, PERF-02, 14.3)
+- [x] **PERF-01**: The write-latency model is documented for both profiles (PERF-01, PERF-02, 14.3)
   - Acceptance: docs state that under sustained write flow latency reaches `dump_max_wait` + dump time by design; the fast-response profile (`Debounce`/`MaxWait` tuning) is documented with its disk cost; the "~10 ms under 1000 writes/s" claim is tied to its measurement conditions
 - [x] **PERF-02**: The 1000 writes/s burst over distinct keys is a tested bound (PERF-03)
   - Acceptance: the XPORT-02(3) scenario is a standing test; the docs describe what is and is not guaranteed at that rate
@@ -275,7 +275,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OBSV-06 | Phase 7 | Complete |
 | OBSV-07 | Phase 7 | Complete |
 | OBSV-08 | Phase 7 | Complete |
-| PERF-01 | Phase 8 | Pending |
+| PERF-01 | Phase 8 | Complete |
 | PERF-02 | Phase 8 | Complete |
 | PERF-03 | Phase 8 | Pending |
 | PERF-04 | Phase 8 | Pending |

@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 6
+current_plan: 7
 status: executing
-stopped_at: Completed 08-06-PLAN.md
-last_updated: "2026-11-24T18:49:03.345Z"
+stopped_at: Completed 08-03-PLAN.md
+last_updated: "2026-11-24T19:01:13.009Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: 3e7b465558622238d61826d94e0dae34b065275e
+state_head: 5513fcd0f4db09aade0c15a48778e280fc589670
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 88
+  completed_plans: 89
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 6
+Current Plan: 7
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -149,6 +149,7 @@ Progress: [████░░░░░░] 44%
 | Phase 08 P04 | 408 | 2 tasks | 4 files |
 | Phase 08 P05 | 15min | 3 tasks | 2 files |
 | Phase 08 P06 | 9min | 3 tasks | 9 files |
+| Phase 08 P03 | 7min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -494,6 +495,8 @@ Recent decisions affecting current work:
 - [Phase 08]: The port allocator splits claim (returns an error) from pick (turns it into tb.Fatalf): testing.TB cannot be implemented outside the testing package, so this is the only way to assert the empty/full band contract in-process and pick can never return zero
 - [Phase 08]: TCP probes use net.Listen and UDP probes ListenPacket: ListenPacket rejects the tcp network, which the first GREEN run exposed; one probeBind helper branches per transport
 - [Phase 08]: Four disjoint per-package bands below the kernel's ephemeral range plus a network:port claim held across the bind probe replace every private picker; both duplicate registries (scenarioPorts, probePorts) are deleted
+- [Phase 08]: Each dumpNotify scenario run owns one testing/synctest bubble created in the subtest body; assertions run on the captured result after bubble exit, and two same-seed runs use two bubbles so the first engine cannot outlive its run.
+- [Phase 08]: The chunker test pins cap(chunks[0]) == len(entries), per-chunk capacity bounded by entries remaining and adjacent chunks never sharing a backing array; teeth proved by temporary budget-hint (2729 vs 3) and cur[:0] mutations reverted byte-identically, since the WR-06 fix predates the plan.
 
 ### Pending Todos
 
@@ -516,7 +519,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-24T18:49:02.926Z
-Stopped at: Completed 08-06-PLAN.md
+Last session: 2026-11-24T19:01:12.435Z
+Stopped at: Completed 08-03-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
