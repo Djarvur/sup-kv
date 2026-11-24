@@ -333,8 +333,16 @@ var examplesAssertions = []struct {
 // error text, and the Watch stream carries the live event key. grpcurl
 // omits zero-valued fields, so every asserted field is non-zero in the
 // example flow (the zero-valued shapes are documented in the doc's prose).
+//
+// The walkthrough is serialized on purpose: it drives bash -e plus the
+// `go tool grpcurl` shim and competes with this package's process-spawning
+// tests, so running it beside those siblings produced empty tool captures
+// under compile load (04-protocol/deferred-items.md). The per-block budget
+// (docBlockBudget) and the process-group reap still bound a genuinely
+// wedged block; only the explicit parallel marker is gone.
+//
+//nolint:paralleltest // serialized on purpose: the grpcurl walkthrough competes with the package's process-spawning tests and stalls under compile load (doc comment).
 func TestExamplesDoc(t *testing.T) {
-	t.Parallel()
 	raw, err := os.ReadFile(examplesDocPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", examplesDocPath, err)
