@@ -29,21 +29,30 @@ const (
 	rankScale = 100
 )
 
+// LatencyPercentiles returns the nearest-rank p50 and p99 of durations,
+// sorting the slice in place: the ceil(p/100*n)-th smallest sample. One
+// rank rule serves both the benchmark reporter and the stand's threshold
+// rows, so the definition cannot drift between the two consumers. A single
+// sample is both percentiles, and an empty slice yields zeroes rather than
+// a panic.
+func LatencyPercentiles(durations []time.Duration) (p50, p99 time.Duration) {
+	slices.Sort(durations)
+	if len(durations) == 0 {
+		return 0, 0
+	}
+	return percentileRank(durations, p50Rank), percentileRank(durations, p99Rank)
+}
+
 // ReportLatencyPercentiles reports the p50 and p99 of a benchmark's
 // collected per-op durations in milliseconds, under the whitespace-free
 // metric names p50-ms and p99-ms (this repo's ReportMetric convention: see
-// the benchmarks' latency-ns/op and dump-bytes). It sorts durations in
-// place. A single sample reports p50 == p99 == that sample (the
-// -benchtime=1x smoke), and an empty slice reports zeros rather than
-// dropping the metrics.
+// the benchmarks' latency-ns/op and dump-bytes). It delegates to
+// LatencyPercentiles (which sorts durations in place). A single sample
+// reports p50 == p99 == that sample (the -benchtime=1x smoke), and an empty
+// slice reports zeros rather than dropping the metrics.
 func ReportLatencyPercentiles(b *testing.B, durations []time.Duration) {
 	b.Helper()
-	slices.Sort(durations)
-	var p50, p99 time.Duration
-	if len(durations) > 0 {
-		p50 = percentileRank(durations, p50Rank)
-		p99 = percentileRank(durations, p99Rank)
-	}
+	p50, p99 := LatencyPercentiles(durations)
 	b.ReportMetric(millis(p50), "p50-ms")
 	b.ReportMetric(millis(p99), "p99-ms")
 }
