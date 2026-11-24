@@ -332,7 +332,7 @@ Plans:
   3. Amplification and memory are measured, or the gap is recorded: disk-write amplification on target-grade media (Spec open question #2) and the memory model from stand measurements (with PERSIST-06)
   4. Write latency with an absent peer and a growing unconfirmed set stays near live-peer latency, proven by a benchmark (same fix as XPORT-02)
   5. `make perf` runs the stand suite with thresholds, and every published number carries a hardware description
-**Plans**: 10/11 plans executed, 6 waves
+**Plans**: 11/11 plans executed, 6 waves
 
 Plans:
 - [x] 08-01-PLAN.md — Threshold table, perf/race gates, hardware block, dump-dir guard, burst perf row and `make perf` (tracer)
@@ -345,7 +345,7 @@ Plans:
 - [x] 08-08-PLAN.md — Two-profile confirmation-latency benchmark, fast-profile gate, bench-target completeness
 - [x] 08-09-PLAN.md — `killAndReap`/readiness diagnostics and serialized doc walkthroughs
 - [x] 08-10-PLAN.md — `docs/PERFORMANCE.md`, `TestPerformanceDoc` drift guard, OPERATIONS/PROJECT ripple
-- [ ] 08-11-PLAN.md — Phase gate: frozen evidence, red-runner, full make gates, recorded `make perf`
+- [x] 08-11-PLAN.md — Phase gate: frozen evidence, red-runner, full make gates, recorded `make perf`
 
 ### Phase 9: Documentation and Release
 **Goal**: The documentation is the as-built contract and the milestone ships — every documented mismatch closed, every reference anchored to a test that exists, the deviation registry fully closed, and v1.1 released.
@@ -379,5 +379,5 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 5. Persistence | v1.1 | 12/12 | Complete | 2026-11-22 |
 | 6. API and Semantics | v1.1 | 13/13 | Complete | 2026-11-23 |
 | 7. Observability and Configuration | v1.1 | 11/11 | Complete | 2026-11-23 |
-| 8. Performance | v1.1 | 10/11 | In Progress | - |
+| 8. Performance | v1.1 | 11/11 | In Progress | - |
 | 9. Documentation and Release | v1.1 | 0/? | Not started | - |
