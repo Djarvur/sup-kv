@@ -63,14 +63,14 @@ const (
 	perfPreloadWait = 2 * time.Minute
 )
 
-// perfMetric reads one rendered sample from the node's /metrics page,
-// failing by name when the family is absent. It reuses the frozen file's
-// parser rather than growing a second one.
-func perfMetric(t *testing.T, addr, name string) float64 {
+// perfDumps reads the node's supkv_dumps_total attempt counter, failing when
+// the family is absent. It reuses the frozen file's parser rather than
+// growing a second one.
+func perfDumps(t *testing.T, addr string) float64 {
 	t.Helper()
-	value, found := redMetricValue(redMetricsBody(t, addr), name)
+	value, found := redMetricValue(redMetricsBody(t, addr), "supkv_dumps_total")
 	if !found {
-		t.Fatalf("node %s /metrics carries no %s family", addr, name)
+		t.Fatalf("node %s /metrics carries no supkv_dumps_total family", addr)
 	}
 	return value
 }
@@ -290,7 +290,7 @@ func TestPerfDefaultProfileLatency(t *testing.T) { //nolint:paralleltest // wall
 	// The preload's covering dump and an empty replication unacked set are
 	// the measurement precondition: the window then carries only the
 	// schedule's own dumps, never the seed's backlog.
-	preloadDumps := perfMetric(t, metricsAddr, "supkv_dumps_total")
+	preloadDumps := perfDumps(t, metricsAddr)
 	preloadKeys := make([]string, redBurstKeys)
 	for i := range preloadKeys {
 		preloadKeys[i] = fmt.Sprintf(redBurstKeyFmt, i)
@@ -429,7 +429,7 @@ type perfDumpSnapshot struct {
 func perfTakeSnapshot(t *testing.T, addr string, node *standNode, dumpPath string) perfDumpSnapshot {
 	t.Helper()
 	return perfDumpSnapshot{
-		dumps:      perfMetric(t, addr, "supkv_dumps_total"),
+		dumps:      perfDumps(t, addr),
 		dumpBytes:  perfDumpSize(t, dumpPath),
 		writeBytes: perfProcIO(t, node.cmd.Process.Pid, "write_bytes"),
 		failures:   perfFailures(t, addr),
@@ -473,7 +473,7 @@ func TestPerfAmplification(t *testing.T) { //nolint:paralleltest // wall-clock w
 
 	// The fixed preload, then its covering dump and an empty unacked set:
 	// the baseline window then contains only the measured schedule's dumps.
-	preloadDumps := perfMetric(t, metricsAddr, "supkv_dumps_total")
+	preloadDumps := perfDumps(t, metricsAddr)
 	preloadKeys := make([]string, redBurstKeys)
 	for i := range preloadKeys {
 		preloadKeys[i] = fmt.Sprintf(redBurstKeyFmt, i)
@@ -566,4 +566,258 @@ func TestPerfAmplification(t *testing.T) { //nolint:paralleltest // wall-clock w
 	signalAndWaitExit(t, nodeB)
 	assertNoPanic(t, nodeA, "the amplification node A")
 	assertNoPanic(t, nodeB, "the amplification peer node B")
+}
+
+// The PERF-04 memory points' scale and sampling shape. The three states are
+// the value-dominated and key-dominated points the model must publish: two
+// at 1 KiB and one at the 60 KiB value limit (60 * 1024 == storage's 61 440
+// bytes).
+const (
+	perfMemKeyFmt      = "perf/mem/%05d"
+	perfMemSmallKeys   = 1000
+	perfMemSmallValue  = 1024
+	perfMemLargeKeys   = 10000
+	perfMemLargeValue  = 60 * 1024
+	perfMemSampleEvery = 2 * time.Millisecond
+
+	// perfKiB scales /proc/<pid>/status's KiB memory fields to bytes.
+	perfKiB = 1024
+)
+
+// perfSeedKeys writes every key with the caller's value through the worker
+// pool — redSeedKeys' shape with the value size parameterised for the memory
+// points. Every write must succeed: a failed seed invalidates the
+// measurement, so the first error fails the subtest.
+func perfSeedKeys(t *testing.T, clients []supkvapi.SupKVServiceClient, keys []string, value []byte) {
+	t.Helper()
+	if len(clients) == 0 {
+		t.Fatal("perfSeedKeys: no clients")
+	}
+	next := make(chan string, len(keys))
+	for _, key := range keys {
+		next <- key
+	}
+	close(next)
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+	for w := range redSeedWorkers {
+		client := clients[w%len(clients)]
+		wg.Go(func() {
+			for key := range next {
+				ctx, cancel := context.WithTimeout(t.Context(), redSeedRPCTimeout)
+				_, err := client.Set(ctx, &supkvapi.SetRequest{Key: key, Value: value})
+				cancel()
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("seed Set(%q): %w", key, err)
+					}
+					errMu.Unlock()
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatalf("seeding %d keys: %v", len(keys), firstErr)
+	}
+}
+
+// perfProcStatus reads one /proc/<pid>/status memory field in bytes: status
+// reports VmRSS and VmHWM in KiB, so the value is scaled by perfKiB. ok is
+// false for an unreadable file or an absent/non-numeric field, which lets
+// the transient sampler skip a miss instead of failing from its own
+// goroutine.
+func perfProcStatus(pid int, field string) (uint64, bool) {
+	path := fmt.Sprintf("/proc/%d/status", pid)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		name, value, found := strings.Cut(line, ":")
+		if !found || name != field {
+			continue
+		}
+		fields := strings.Fields(value)
+		if len(fields) == 0 {
+			return 0, false
+		}
+		kib, parseErr := strconv.ParseUint(fields[0], 10, 64)
+		if parseErr != nil {
+			return 0, false
+		}
+		return kib * perfKiB, true
+	}
+	return 0, false
+}
+
+// perfStatusBytes reads one /proc/<pid>/status memory field and fails the
+// test by name when it is absent — the test-goroutine wrapper around
+// perfProcStatus.
+func perfStatusBytes(t *testing.T, pid int, field string) uint64 {
+	t.Helper()
+	value, ok := perfProcStatus(pid, field)
+	if !ok {
+		t.Fatalf("read %s from /proc/%d/status", field, pid)
+	}
+	return value
+}
+
+// perfDumpPeakRSS forces one dump (one covering write) and samples VmRSS
+// every perfMemSampleEvery until the write returns, returning the RSS
+// immediately before the write and the peak observed across the cycle. The
+// write is synchronous at the engine: Set returns only after a dump
+// containing its record completed (PERS-04), so the sampling window covers
+// exactly one dump. The sampler runs in the test goroutine (the write blocks
+// in its own goroutine), so a missing sample never calls FailNow off-thread.
+func perfDumpPeakRSS(t *testing.T, client supkvapi.SupKVServiceClient, pid int, key string, value []byte) (idle, peak uint64) {
+	t.Helper()
+	idle = perfStatusBytes(t, pid, "VmRSS")
+	peak = idle
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(t.Context(), redBurstRPCTimeout)
+		defer cancel()
+		_, err := client.Set(ctx, &supkvapi.SetRequest{Key: key, Value: value})
+		done <- err
+	}()
+	ticker := time.NewTicker(perfMemSampleEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("the forced dump's covering write: %v", err)
+			}
+			return idle, peak
+		case <-ticker.C:
+			if current, sampled := perfProcStatus(pid, "VmRSS"); sampled && current > peak {
+				peak = current
+			}
+		}
+	}
+}
+
+// TestPerfMemoryPoints is PERF-04's measured half (D-04): three state→RSS
+// points — 1 000 x 1 KiB (a small state), 10 000 x 1 KiB (key-dominated
+// overhead) and 1 000 x 60 KiB (value-dominated, the flag's limit) — each
+// on its own fresh pair, real filesystem dump and a pinned sync interval.
+// Every row logs the logical state size (Σ(len(key)+len(value)), with the
+// formatted key width stated), the dump bytes, the current RSS
+// (process_resident_memory_bytes), VmHWM, the pre-dump RSS and the peak
+// observed across one further forced dump, plus both ratios and the
+// filesystem type. Only the value-dominated 60 KiB row gates: the loose
+// PerfMemoryRSSRatio tripwire and the PerfDumpPeakLiveRatio dump-transient
+// gate (that constant's only consumer — a return to encode-into-bytes would
+// show roughly 4-5x). The precise transient stays the persist benchmark's
+// peak-live-B; this row's sampled peak is deliberately the loose check.
+func TestPerfMemoryPoints(t *testing.T) { //nolint:paralleltest // one measurement per machine: the subtests are sequential by contract (file doc).
+	testutil.RequirePerf(t)
+	t.Log(testutil.HardwareBlock())
+
+	points := []struct {
+		name       string
+		keys       int
+		valueBytes int
+	}{
+		{name: "1k-1KiB", keys: perfMemSmallKeys, valueBytes: perfMemSmallValue},
+		{name: "10k-1KiB", keys: perfMemLargeKeys, valueBytes: perfMemSmallValue},
+		{name: "1k-60KiB", keys: perfMemSmallKeys, valueBytes: perfMemLargeValue},
+	}
+	for _, point := range points { //nolint:paralleltest // a shared machine would let one state's dump contaminate the next point's RSS.
+		t.Run(point.name, func(t *testing.T) {
+			perfAssertMemoryPoint(t, point.keys, point.valueBytes)
+		})
+	}
+}
+
+// perfAssertMemoryPoint measures one PERF-04 state→RSS point: preload the
+// state, wait for its covering dump, record the five figures, force one more
+// dump while sampling VmRSS, and apply the two gates on the value-dominated
+// row only.
+func perfAssertMemoryPoint(t *testing.T, keys, valueBytes int) {
+	t.Helper()
+	p := newStandPair(t)
+	p.dumpA = filepath.Join(testutil.PerfDumpDir(t), "dump.json")
+	p.dumpB = filepath.Join(testutil.PerfDumpDir(t), "dump.json")
+	dir := filepath.Dir(p.dumpA)
+	fsType := testutil.PerfDumpFSType(dir)
+
+	metricsAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	metricsURL := "http://" + metricsAddr + "/metrics"
+	syncLong := "--sync-interval=" + perfSyncIntervalLong.String()
+	nodeA := startStandNode(t, p, standNodeAID, syncLong, "--metrics-addr="+metricsAddr)
+	nodeB := startStandNode(t, p, standNodeBID, syncLong)
+	awaitServing(t, p.grpcA, servingDeadline)
+	awaitServing(t, p.grpcB, servingDeadline)
+	standMetricsReady(t, metricsURL)
+
+	preloadDumps := perfDumps(t, metricsAddr)
+	value := []byte(strings.Repeat("v", valueBytes))
+	keyList := make([]string, keys)
+	for i := range keyList {
+		keyList[i] = fmt.Sprintf(perfMemKeyFmt, i)
+	}
+	perfSeedKeys(t, redSeedClients(t, p.grpcA), keyList, value)
+	waitFor(t, perfPreloadWait, "the preload's covering dump and an empty replication unacked set",
+		redThrottled(func() bool {
+			body := redMetricsBody(t, metricsAddr)
+			dumps, dumpsFound := redMetricValue(body, "supkv_dumps_total")
+			unacked, unackedFound := redMetricValue(body, "supkv_replication_unacked_records")
+			return dumpsFound && unackedFound && dumps > preloadDumps && unacked == 0
+		}))
+
+	pid := nodeA.cmd.Process.Pid
+	keyWidth := len(fmt.Sprintf(perfMemKeyFmt, 0))
+	logical := keys * (keyWidth + valueBytes)
+	dumpBytes := perfDumpSize(t, p.dumpA)
+	rss := standMetricsSample(t, standMetricsScrape(t, metricsURL), "process_resident_memory_bytes")
+	vmRSS := perfStatusBytes(t, pid, "VmRSS")
+	vmHWM := perfStatusBytes(t, pid, "VmHWM")
+
+	dumpsBefore := perfDumps(t, metricsAddr)
+	rssIdle, rssPeak := perfDumpPeakRSS(t, standClient(t, p.grpcA), pid, keyList[0], value)
+	if after := perfDumps(t, metricsAddr); after <= dumpsBefore {
+		t.Fatalf("the forced write did not complete a dump (supkv_dumps_total %.0f → %.0f): "+
+			"the dump-cycle RSS peak has no cycle to describe", dumpsBefore, after)
+	}
+
+	rssRatio := rss / float64(logical)
+	peakRatio := float64(rssPeak-rssIdle) / float64(logical)
+	t.Logf("PERF-04 memory point: keys=%d value-bytes=%d key-bytes=%d logical=%d dump-bytes=%d "+
+		"rss=%.0f vmrss=%d vmhwm=%d rssIdle=%d rssPeak=%d rss-ratio=%.2fx peak-ratio=%.2fx fs=%s pid=%d",
+		keys, valueBytes, keyWidth, logical, dumpBytes, rss, vmRSS, vmHWM, rssIdle, rssPeak,
+		rssRatio, peakRatio, fsType, pid)
+	t.Logf("PERF-04 formula: logical = Σ(len(key)+len(value)); dump_bytes ≈ 1.37 × Σ len(value) + " +
+		"JSON/key overhead; live heap = one Records copy + one streamed record line (64 KiB bufio); " +
+		"rss ≈ baseline + live heap + GC headroom; one dump cycle's peak live ≈ 1.3 × logical (PERSIST-06)")
+
+	if valueBytes == perfMemLargeValue {
+		rssBound := testutil.PerfMemoryRSSRatio*float64(logical) + testutil.PerfMemoryRSSBase
+		if rss > rssBound {
+			t.Fatalf("PERF-04 memory tripwire: RSS %.0f > PerfMemoryRSSRatio (%.1f) × logical (%d) + "+
+				"PerfMemoryRSSBase (%d) = %.0f [point=%d keys × %d-byte values; dump-bytes=%d; "+
+				"rss-ratio=%.2fx; fs=%s; pid=%d; race=off]",
+				rss, testutil.PerfMemoryRSSRatio, logical, testutil.PerfMemoryRSSBase, rssBound,
+				keys, valueBytes, dumpBytes, rssRatio, fsType, pid)
+		}
+		peakBound := testutil.PerfDumpPeakLiveRatio * float64(logical)
+		if float64(rssPeak-rssIdle) > peakBound {
+			t.Fatalf("PERF-04 dump transient: sampled peak RSS growth %d > PerfDumpPeakLiveRatio (%.1f) × "+
+				"logical (%d) = %.0f [point=%d keys × %d-byte values; rssIdle=%d rssPeak=%d; "+
+				"peak-ratio=%.2fx; dump-bytes=%d; fs=%s; pid=%d; race=off] — a return to "+
+				"encode-into-bytes would show roughly 4-5x",
+				rssPeak-rssIdle, testutil.PerfDumpPeakLiveRatio, logical, peakBound,
+				keys, valueBytes, rssIdle, rssPeak, peakRatio, dumpBytes, fsType, pid)
+		}
+	}
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the memory-point node A")
+	assertNoPanic(t, nodeB, "the memory-point peer node B")
 }
