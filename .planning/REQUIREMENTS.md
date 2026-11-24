@@ -165,7 +165,7 @@
   - Acceptance: the XPORT-02(3) scenario is a standing test; the docs describe what is and is not guaranteed at that rate
 - [ ] **PERF-03**: Disk-write amplification is measured on target-grade media or the gap is recorded (PERF-04, Spec open question #2)
 - [ ] **PERF-04**: The memory model is documented from stand measurements (PERF-05, with PERSIST-06)
-- [ ] **PERF-05**: Write latency with an absent peer and a growing unconfirmed set stays near the live-peer latency (PERF-06; same fix as XPORT-02, proven by a benchmark)
+- [x] **PERF-05**: Write latency with an absent peer and a growing unconfirmed set stays near the live-peer latency (PERF-06; same fix as XPORT-02, proven by a benchmark)
 - [ ] **PERF-06**: `make perf` runs the stand suite with thresholds; published numbers carry a hardware description
 
 ### Documentation & Release
@@ -279,7 +279,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERF-02 | Phase 8 | Pending |
 | PERF-03 | Phase 8 | Pending |
 | PERF-04 | Phase 8 | Pending |
-| PERF-05 | Phase 8 | Pending |
+| PERF-05 | Phase 8 | Complete |
 | PERF-06 | Phase 8 | Pending |
 | DOCS-01 | Phase 9 | Pending |
 | DOCS-02 | Phase 9 | Pending |

@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 08-04-PLAN.md
-last_updated: "2026-11-23T18:31:59.127Z"
+stopped_at: Completed 08-05-PLAN.md
+last_updated: "2026-11-24T18:33:09.194Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: bde702c1ced3b4e84e5c60972cc07303398f5c36
+state_head: 147a154002c0e353e16daea624b80af4c49542ad
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 86
+  completed_plans: 87
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -147,6 +147,7 @@ Progress: [████░░░░░░] 44%
 | Phase 08 P01 | 746s | 3 tasks | 9 files |
 | Phase 08 P02 | 954 | 3 tasks | 2 files |
 | Phase 08 P04 | 408 | 2 tasks | 4 files |
+| Phase 08 P05 | 15min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -484,6 +485,11 @@ Recent decisions affecting current work:
 - [Phase 08]: PERF-05 remains unmarked in REQUIREMENTS.md: 08-02 lands the core fix and deterministic proofs, while 08-04 (docs) and 08-05 (paired wall-clock gates) still cover the requirement; requirements ready-ids still reports it blocked
 - [Phase 08]: The paced replay seam carries storage.Record{Version} at both hops (gRPC LocalReplayNotify and the adapter enqueue); the nil-ReplayNotify fallback and the live NotifyLocalWrite clone stay unchanged, because the live seam's contract still carries the full record.
 - [Phase 08]: The replay allocation gate is an assertion, not a report: 60 KiB record, AllocedBytesPerOp() ceiling 1 KiB; RED measured 65536 bytes/op, GREEN 0, and the passing run logs the measurement.
+- [Phase 08]: The key-count gate asserts exact consumer-seam call vectors at both sizes: DataRequest = 1 Version + 1 Lookup, DataSync = 1 Observe + 16 Version, with Versions/Records/ApplyRemote at zero.
+- [Phase 08]: The counting double embeds the external test package's delegating stateStore and adds no production surface; a StateStore method addition becomes a compile error in the double.
+- [Phase 08]: Task 2's three PendingVisits gates are tripwires that pass on arrival; 08-02's Tests 1-2 remain the RED evidence for the write/apply flatness.
+- [Phase 08]: The paired PERF-05 test SKIPs outside make perf, logs the hardware block and both arms, and reads its bound from testutil.PerfAbsentPeerRatio.
+- [Phase 08]: The store-keys and unacked metrics are reported after the measured loop because ResetTimer clears b.extra.
 
 ### Pending Todos
 
@@ -506,7 +512,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-23T18:31:58.539Z
-Stopped at: Completed 08-04-PLAN.md
+Last session: 2026-11-24T18:33:08.794Z
+Stopped at: Completed 08-05-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)

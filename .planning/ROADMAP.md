@@ -332,14 +332,14 @@ Plans:
   3. Amplification and memory are measured, or the gap is recorded: disk-write amplification on target-grade media (Spec open question #2) and the memory model from stand measurements (with PERSIST-06)
   4. Write latency with an absent peer and a growing unconfirmed set stays near live-peer latency, proven by a benchmark (same fix as XPORT-02)
   5. `make perf` runs the stand suite with thresholds, and every published number carries a hardware description
-**Plans**: 3/11 plans executed, 6 waves
+**Plans**: 4/11 plans executed, 6 waves
 
 Plans:
 - [x] 08-01-PLAN.md — Threshold table, perf/race gates, hardware block, dump-dir guard, burst perf row and `make perf` (tracer)
 - [x] 08-02-PLAN.md — Per-key pending index, `PendingVisits` seam and the index invariants (PERF-05 core fix)
 - [ ] 08-03-PLAN.md — synctest dumpNotify harness and chunker capacity teeth
 - [x] 08-04-PLAN.md — Version-only replay seam (04 New-3 double copy removed)
-- [ ] 08-05-PLAN.md — Deterministic store-call and pending-visit gates; paired absent/live benchmark
+- [x] 08-05-PLAN.md — Deterministic store-call and pending-visit gates; paired absent/live benchmark
 - [ ] 08-06-PLAN.md — Shared port allocator with package bands; every socket package adopts it
 - [ ] 08-07-PLAN.md — Default-profile latency, amplification and memory perf rows
 - [ ] 08-08-PLAN.md — Two-profile confirmation-latency benchmark, fast-profile gate, bench-target completeness
@@ -379,5 +379,5 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 5. Persistence | v1.1 | 12/12 | Complete | 2026-11-22 |
 | 6. API and Semantics | v1.1 | 13/13 | Complete | 2026-11-23 |
 | 7. Observability and Configuration | v1.1 | 11/11 | Complete | 2026-11-23 |
-| 8. Performance | v1.1 | 3/11 | In Progress | - |
+| 8. Performance | v1.1 | 4/11 | In Progress | - |
 | 9. Documentation and Release | v1.1 | 0/? | Not started | - |
