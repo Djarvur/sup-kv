@@ -22,23 +22,30 @@ lint:
 test:
 	go test -race -cover ./...
 
-## bench: the three TEST-05 benchmarks (D-13) — dump at 10k keys
-## (BenchmarkDump10kKeys), replication burst throughput
-## (BenchmarkReplicationBurst) and bounded confirmation latency
-## (BenchmarkConfirmationLatency). Manual before/after comparison target
+## bench: every benchmark for manual before/after comparison (D-13): the
+## three TEST-05 shapes — dump at 10k keys (BenchmarkDump10kKeys),
+## replication burst throughput (BenchmarkReplicationBurst) and bounded
+## confirmation latency under both documented profiles
+## (BenchmarkConfirmationLatency/{fast,default}) — plus the Phase-3/4 core
+## benchmarks (BenchmarkHandleDataRequest, BenchmarkHandleDataSync,
+## BenchmarkCoreEventLoop) in internal/app/repl. Manual comparison target
 ## ONLY: CI never runs it and there are no thresholds — shared-runner noise
 ## makes those flaky (D-13) — and no profiles are stored (D-14). Unit tests
 ## stay excluded (-run anchored empty); compare two runs by hand.
 bench:
-	go test -run '^$$' -bench . ./internal/app/persist/ ./internal/udprepl/ ./internal/grpcapi/
+	go test -run '^$$' -bench . ./internal/app/persist/ ./internal/app/repl/ ./internal/udprepl/ ./internal/grpcapi/
 
 ## bench-smoke: TEST-10's CI smoke — every benchmark exactly once
 ## (-benchtime=1x) on the real paths (real persistfile, default parameters)
 ## so CI exercises the measurement code and asserts the p50-ms/p99-ms lines
-## appear; no thresholds, no self-pacing. Plan 11's scheduled bench job
-## invokes this target, so the command has exactly one definition.
+## appear; no thresholds, no self-pacing. The package list includes the
+## Phase-3/4 core benchmarks (internal/app/repl), and the 10 000-entry
+## fixture seeding stays linear since the per-key pending index landed, so
+## the smoke stays cheap. Plan 11's scheduled bench job invokes this target
+## (scheduled.yml runs `make bench-smoke`, never a copied command), so the
+## command has exactly one definition.
 bench-smoke:
-	go test -run '^$$' -bench . -benchtime=1x ./internal/app/persist/ ./internal/udprepl/ ./internal/grpcapi/
+	go test -run '^$$' -bench . -benchtime=1x ./internal/app/persist/ ./internal/app/repl/ ./internal/udprepl/ ./internal/grpcapi/
 
 ## perf: the operator-facing threshold run (D-06, PERF-06): the perf ROWS
 ## over the real-binary stand harness with the thresholds from
