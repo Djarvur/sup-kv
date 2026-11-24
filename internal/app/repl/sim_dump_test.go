@@ -17,12 +17,11 @@ import (
 	"errors"
 	"io"
 	"math/rand/v2"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/internal/simnet"
@@ -35,9 +34,10 @@ import (
 
 // The dump-notify scenario constants: the engine timing driven on virtual
 // time (the design defaults, D-04), the network's one-way and announcement
-// latencies, the drive slack past an announcement, the wall-clock guard the
-// driver's settle loop uses (the engine goroutine is a real goroutine even
-// though its time is virtual), the seed, and the shrunk-limit fixture sizes.
+// latencies, the drive slack past an announcement, the seed, and the
+// shrunk-limit fixture sizes. The engine goroutine is a real goroutine inside
+// a testing/synctest bubble (the engine's time is virtual), so synctest.Wait
+// is the only idle barrier and no wall-clock constant is needed.
 const (
 	simDumpDebounce = 50 * time.Millisecond
 	simDumpMaxWait  = time.Second
@@ -45,10 +45,6 @@ const (
 	simDumpAnnounce = time.Millisecond
 	simDumpSlack    = 4 * time.Millisecond
 	simDumpSeed     = int64(50707)
-
-	simSettlePause   = 200 * time.Microsecond
-	simQuietRounds   = 6
-	simSettleWallCap = 5 * time.Second
 
 	simSkipLimit    = 8
 	simSkipValueLen = simSkipLimit + 1
@@ -72,26 +68,14 @@ var simDumpLadder = []time.Duration{
 	700 * time.Millisecond,
 }
 
-// simActivity counts engine-side seam events — timer arms and dump attempts
-// — so the driver can tell the engine goroutine has gone idle at the current
-// virtual instant before advancing time.
-type simActivity struct{ events atomic.Uint64 }
-
-// bump records one seam event.
-func (a *simActivity) bump() { a.events.Add(1) }
-
-// count returns the observed event count.
-func (a *simActivity) count() uint64 { return a.events.Load() }
-
 // virtualAfter adapts the engine's Config.After seam to the simulator: each
 // armed duration books one scheduler event that fires the channel at the due
 // instant. The scheduler's one-call ScheduleAfter computes the instant and
 // enqueues it under one lock, so the engine goroutine cannot split the two
 // across another goroutine's clock advance.
-func virtualAfter(sched *simnet.Scheduler, activity *simActivity) func(time.Duration) <-chan time.Time {
+func virtualAfter(sched *simnet.Scheduler) func(time.Duration) <-chan time.Time {
 	return func(d time.Duration) <-chan time.Time {
 		ch := make(chan time.Time, 1)
-		activity.bump()
 		sched.ScheduleAfter(d, func() { ch <- sched.Now() })
 		return ch
 	}
@@ -104,7 +88,6 @@ func virtualAfter(sched *simnet.Scheduler, activity *simActivity) func(time.Dura
 // snapshot methods are the in-memory stand-ins the engine's interface needs.
 type simDumpPort struct {
 	sched    *simnet.Scheduler
-	activity *simActivity
 	mu       sync.Mutex
 	fail     int
 	attempts []time.Time
@@ -118,7 +101,6 @@ func (p *simDumpPort) SaveStream(fill func(io.Writer) error) error {
 	var buf bytes.Buffer
 	err := fill(&buf)
 	at := p.sched.Now()
-	p.activity.bump()
 	p.mu.Lock()
 	p.attempts = append(p.attempts, at)
 	failed := p.fail > 0
@@ -199,115 +181,86 @@ func (*simLoadPort) ReadSnapshot(string) ([]byte, error) { return nil, errSimDum
 // simEngine is the engine-over-cluster harness: a real persist.Engine over
 // node 0's store, its clock and timers bound to the scheduler.
 type simEngine struct {
-	sched    *simnet.Scheduler
-	cluster  *simnet.Cluster
-	port     *simDumpPort
-	activity *simActivity
-	eng      *persist.Engine
-	cancel   context.CancelFunc
-	done     chan error
-	once     sync.Once
+	sched   *simnet.Scheduler
+	cluster *simnet.Cluster
+	port    *simDumpPort
+	eng     *persist.Engine
+	cancel  context.CancelFunc
+	done    chan error
+	once    sync.Once
 }
 
 // startSimEngine builds and launches the engine over node 0's store, failing
-// the leading failAttempts dumps.
+// the leading failAttempts dumps. It must run inside the scenario's synctest
+// bubble: the engine goroutine joins the bubble and t.Cleanup's stop runs at
+// the bubble's exit.
 func startSimEngine(t *testing.T, sched *simnet.Scheduler, cluster *simnet.Cluster, failAttempts int) *simEngine {
 	t.Helper()
-	activity := &simActivity{}
-	dumps := &simDumpPort{sched: sched, activity: activity, fail: failAttempts}
+	dumps := &simDumpPort{sched: sched, fail: failAttempts}
 	eng := persist.New(cluster.Store(0), dumps, persist.Config{
 		Debounce: simDumpDebounce,
 		MaxWait:  simDumpMaxWait,
 		Now:      sched.Now,
-		After:    virtualAfter(sched, activity),
+		After:    virtualAfter(sched),
 	})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- eng.Run(ctx) }()
-	h := &simEngine{sched: sched, cluster: cluster, port: dumps, activity: activity, eng: eng, cancel: cancel, done: done}
+	h := &simEngine{sched: sched, cluster: cluster, port: dumps, eng: eng, cancel: cancel, done: done}
 	t.Cleanup(func() { h.stop(t) })
 	return h
 }
 
-// stop cancels the engine and waits for Run to return the context error.
+// stop cancels the engine and reads Run's result after the runtime's idle
+// barrier: synctest.Wait returns only once the engine goroutine has exited, so
+// the buffered result must already be there.
 func (h *simEngine) stop(t *testing.T) {
 	t.Helper()
 	h.once.Do(func() {
 		h.cancel()
+		synctest.Wait()
 		select {
 		case err := <-h.done:
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("Run() error = %v, want context.Canceled", err)
 			}
-		case <-time.After(simSettleWallCap):
-			t.Error("Run() did not return after cancel")
+		default:
+			t.Error("Run() did not return after cancel — the engine goroutine outlived its bubble")
 		}
 	})
 }
 
-// settle waits until the engine goroutine has been idle for a full quiet
-// window at the current virtual instant: virtual time never moves here, so
-// the engine cannot miss a due timer. The wall budget guards a lost wake-up.
-func (h *simEngine) settle(t *testing.T) {
-	t.Helper()
-	h.sched.RunUntil(h.sched.Now()) // drain anything already due at this instant
-	quiet, last := 0, h.activity.count()
-	deadline := time.Now().Add(simSettleWallCap)
-	for quiet < simQuietRounds {
-		if time.Now().After(deadline) {
-			t.Fatalf("the engine did not quiesce at virtual %v", h.sched.Now())
-		}
-		runtime.Gosched()
-		time.Sleep(simSettlePause)
-		current := h.activity.count()
-		if current == last {
-			quiet++
-			continue
-		}
-		quiet, last = 0, current
-	}
-}
-
-// awaitActivity waits until the engine's seam has produced a new event beyond
-// base — the proof it consumed the preceding nudge or timer before the test
-// advances virtual time.
-func (h *simEngine) awaitActivity(t *testing.T, base uint64) {
-	t.Helper()
-	deadline := time.Now().Add(simSettleWallCap)
-	for h.activity.count() == base {
-		if time.Now().After(deadline) {
-			t.Fatal("the engine never armed a timer after the write")
-		}
-		runtime.Gosched()
-		time.Sleep(simSettlePause)
-	}
-}
-
-// advanceTo drives virtual time to target and settles the engine at that
-// instant.
+// advanceTo drives virtual time to target and then waits for the engine
+// goroutine to reach its next durable block: RunUntil executed every event due
+// at or before target, and synctest.Wait proves the engine consumed them and
+// re-armed before the caller advances again.
 func (h *simEngine) advanceTo(t *testing.T, target time.Time) {
 	t.Helper()
 	h.sched.RunUntil(target)
-	h.settle(t)
+	synctest.Wait()
 }
 
 // writeAndConfirm starts a Set, waits for its debounce dump at the exact
 // virtual instant and returns the write's start instant and result.
 func (h *simEngine) writeAndConfirm(t *testing.T, key, value string) (time.Time, error) {
 	t.Helper()
-	h.settle(t)
+	synctest.Wait() // the engine is idle at the write's epoch start
 	start := h.sched.Now()
-	base := h.activity.count()
 	setRet := make(chan error, 1)
 	go func() {
 		_, _, err := h.eng.Set(key, []byte(value))
 		setRet <- err
 	}()
-	h.awaitActivity(t, base)
-	h.settle(t)
-	h.advanceTo(t, start.Add(simDumpDebounce))
-	err := <-setRet
-	h.settle(t)
+	synctest.Wait() // the Set blocks on its waiter; the engine consumed the nudge and armed the debounce
+	h.sched.RunUntil(start.Add(simDumpDebounce))
+	synctest.Wait() // the dump completed and the engine re-armed clean
+	var err error
+	select {
+	case err = <-setRet:
+	default:
+		t.Fatalf("no Set result at the dump instant %v after the idle barrier — the engine did not confirm the write",
+			start.Add(simDumpDebounce))
+	}
 	return start, err
 }
 
@@ -431,12 +384,16 @@ func runDumpFailure(t *testing.T) simDumpRun {
 // time: a confirmed write is announced and the peer converges, a failure
 // window returns ErrDumpFailed but still notifies while the retries follow the
 // bounded ladder, the shrunk-limit skip is reported on the Open-built engine,
-// and two same-seed runs are identical.
+// and two same-seed runs are identical. Every scenario run owns its synctest
+// bubble (created here, in the subtest body) and its assertions run on the
+// captured result after the bubble returned, where the engine goroutine has
+// already been stopped by the bubble's cleanup.
+//
+//nolint:paralleltest // a bubble forbids t.Parallel; the four scenario runs are independent bubbles, not shared-state subtests.
 func TestScenario_dumpNotify(t *testing.T) {
-	t.Parallel()
 	t.Run("a confirmed write is announced and converges the peer", func(t *testing.T) {
-		t.Parallel()
-		run := runDumpConfirm(t)
+		var run simDumpRun
+		synctest.Test(t, func(t *testing.T) { run = runDumpConfirm(t) })
 		if run.firstAttempt != simDumpDebounce {
 			t.Errorf("the first attempt landed %v after the write, want the debounce instant %v",
 				run.firstAttempt, simDumpDebounce)
@@ -458,8 +415,8 @@ func TestScenario_dumpNotify(t *testing.T) {
 		}
 	})
 	t.Run("a failure window still notifies and retries on the ladder", func(t *testing.T) {
-		t.Parallel()
-		run := runDumpFailure(t)
+		var run simDumpRun
+		synctest.Test(t, func(t *testing.T) { run = runDumpFailure(t) })
 		if run.confirmAt != simDumpDebounce {
 			t.Errorf("Set returned %v after the write, want the first attempt's instant %v", run.confirmAt, simDumpDebounce)
 		}
@@ -476,7 +433,6 @@ func TestScenario_dumpNotify(t *testing.T) {
 		}
 	})
 	t.Run("a shrunk limit is reported at load", func(t *testing.T) {
-		t.Parallel()
 		records := map[string]storage.Record{
 			"skip/fat":  {Version: version.PackVersion(simSkipVersion, 0, 1), Data: bytes.Repeat([]byte("f"), simSkipValueLen)},
 			"skip/slim": {Version: version.PackVersion(simSkipVersion, 1, 1), Data: []byte("slim")},
@@ -513,9 +469,11 @@ func TestScenario_dumpNotify(t *testing.T) {
 		}
 	})
 	t.Run("two same-seed runs are identical", func(t *testing.T) {
-		t.Parallel()
-		first := runDumpConfirm(t)
-		second := runDumpConfirm(t)
+		// One bubble per run: the engine goroutine's cleanup runs at bubble
+		// exit, so two runs in one bubble would leave the first engine alive.
+		var first, second simDumpRun
+		synctest.Test(t, func(t *testing.T) { first = runDumpConfirm(t) })
+		synctest.Test(t, func(t *testing.T) { second = runDumpConfirm(t) })
 		if !slices.Equal(first.attempts, second.attempts) ||
 			first.confirmAt != second.confirmAt ||
 			first.notifyAt != second.notifyAt {
