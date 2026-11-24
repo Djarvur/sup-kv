@@ -324,3 +324,77 @@ func benchConfirmationLatency(b *testing.B, profile benchProfile) {
 	b.ReportMetric(float64(totalDrainNanos)/float64(b.N), "latency-ns/op")
 	b.ReportMetric(float64(maxDrainNanos), "max-latency-ns")
 }
+
+// TestPerfFastProfileLatency is PERF-01's executable bound for the fast
+// profile: it wraps benchConfirmationLatency with benchFastProfile in
+// testing.Benchmark and asserts the reported mean (`latency-ns/op`) and
+// `p99-ms` against testutil.PerfFastMean and testutil.PerfFastP99, under
+// exactly the conditions that profile states — Debounce 1 ms, MaxWait 50 ms,
+// the in-memory dump, two real loopback UDP adapters, the bufconn gRPC
+// client, the ~1 ms background burst, one Set(WaitForReplication) per
+// iteration, race off. The benchmark auto-scales its own sample count (a
+// test cannot set -benchtime), so the measured span is per-op and never
+// paced by the harness. It runs only under `make perf`: inside `make test` it
+// SKIPs, and under -race it SKIPs too (the detector measures the detector).
+//
+//nolint:paralleltest // Wall-clock latency bound: a parallel sibling sharing the machine would corrupt the measurement.
+func TestPerfFastProfileLatency(t *testing.T) {
+	testutil.RequirePerf(t)
+	block := testutil.HardwareBlock()
+	t.Log(block)
+	result := testing.Benchmark(func(b *testing.B) {
+		b.Helper()
+		benchConfirmationLatency(b, benchFastProfile)
+	})
+	metric := func(key string) float64 {
+		value, ok := result.Extra[key]
+		if !ok {
+			t.Fatalf("PERF-01 %s profile: benchmark reported no %q metric — a missing metric is a failure, never a silent zero",
+				benchFastProfile.name, key)
+		}
+		return value
+	}
+	mean := time.Duration(metric("latency-ns/op"))
+	p50 := time.Duration(metric("p50-ms") * float64(time.Millisecond))
+	p99 := time.Duration(metric("p99-ms") * float64(time.Millisecond))
+	maxLatency := time.Duration(metric("max-latency-ns"))
+	if mean > testutil.PerfFastMean {
+		t.Fatalf(
+			"PERF-01 %s profile: mean %s exceeds PerfFastMean %s — measured with Debounce %s, MaxWait %s, IN-MEMORY dump, two loopback UDP adapters, bufconn gRPC client, ~%s background burst, %d-byte values, race=off; record the hardware block and load instead of relaxing the bound",
+			benchFastProfile.name,
+			mean,
+			testutil.PerfFastMean,
+			benchFastProfile.debounce,
+			benchFastProfile.maxWait,
+			benchBurstPace,
+			len(benchWaitValue),
+		)
+	}
+	if p99 > testutil.PerfFastP99 {
+		t.Fatalf(
+			"PERF-01 %s profile: p99 %s exceeds PerfFastP99 %s — measured with Debounce %s, MaxWait %s, IN-MEMORY dump, two loopback UDP adapters, bufconn gRPC client, ~%s background burst, %d-byte values, race=off; record the hardware block and load instead of relaxing the bound",
+			benchFastProfile.name,
+			p99,
+			testutil.PerfFastP99,
+			benchFastProfile.debounce,
+			benchFastProfile.maxWait,
+			benchBurstPace,
+			len(benchWaitValue),
+		)
+	}
+	t.Logf(
+		"PERF-01 %s profile: mean %s (bound %s), p99 %s (bound %s), p50 %s, max %s, samples %d [debounce %s, max-wait %s, dump=in-memory, adapters=2 loopback UDP, client=bufconn, burst=%s, value=%d B, race=off]",
+		benchFastProfile.name,
+		mean,
+		testutil.PerfFastMean,
+		p99,
+		testutil.PerfFastP99,
+		p50,
+		maxLatency,
+		result.N,
+		benchFastProfile.debounce,
+		benchFastProfile.maxWait,
+		benchBurstPace,
+		len(benchWaitValue),
+	)
+}
