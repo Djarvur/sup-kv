@@ -286,13 +286,19 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 
 // standNode is one running binary under test with its captured output and
 // its single Wait result. stderr holds the plain post-exit buffer or the
-// live lock-guarded buffer (outputCapture).
+// live lock-guarded buffer (outputCapture). exitResult is the reaper's
+// stored Wait result, written under exitMu before exited closes: the
+// channel closure is the happens-before fence, so a reader may wait for
+// exited and then read the field without racing and without consuming the
+// one-buffered exit channel the scenario waits still use.
 type standNode struct {
-	cmd    *exec.Cmd
-	stdout *bytes.Buffer
-	stderr outputCapture
-	exit   chan error
-	exited chan struct{}
+	cmd        *exec.Cmd
+	stdout     *bytes.Buffer
+	stderr     outputCapture
+	exit       chan error
+	exited     chan struct{}
+	exitMu     sync.Mutex
+	exitResult error
 }
 
 // outputCapture is the stderr seam standNode holds: the plain
@@ -325,17 +331,14 @@ func (b *logBuffer) String() string {
 	return b.buf.String()
 }
 
-// launchNode launches the binary with args (env appended to the inherited
-// environment) and registers a kill-and-reap cleanup: a test path that
-// never reaches its own SIGTERM still cannot leak the process.
-func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, args ...string) *standNode {
+// launchNode launches the binary with args (the inherited environment) and
+// registers a kill-and-reap cleanup: a test path that never reaches its own
+// SIGTERM still cannot leak the process.
+func launchNode(t *testing.T, bin string, stderr outputCapture, args ...string) *standNode {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), bin, args...) //nolint:gosec // G204: bin is the build-once sup-kv binary and args the harness's fixed flag set, never caller input.
 	stdout := &bytes.Buffer{}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
 	err := cmd.Start()
 	if err != nil {
 		t.Fatalf("start %s %v: %v", bin, args, err)
@@ -347,8 +350,15 @@ func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, ar
 		exit:   make(chan error, 1),
 		exited: make(chan struct{}),
 	}
+	// The reaper stores the Wait result before closing exited: the channel
+	// closure fences the field, so exitDiagnosis can read a completed child
+	// without racing and without consuming the one-buffered exit channel.
 	go func() {
-		node.exit <- cmd.Wait()
+		waitErr := cmd.Wait()
+		node.exitMu.Lock()
+		node.exitResult = waitErr
+		node.exitMu.Unlock()
+		node.exit <- waitErr
 		close(node.exited)
 	}()
 	t.Cleanup(node.reap)
@@ -366,15 +376,121 @@ func (n *standNode) reap() {
 	<-n.exited
 }
 
-// killAndReap drives the kill -9 half of a scenario: SIGKILL semantics
-// via Process.Kill — never the SIGTERM contract — then waits for the exit
-// and asserts the harness's kill exit shape (an ExitError reporting -1,
-// the "signal: killed" Wait result assertExitCode documents).
+// exitDiagnosisTailBytes bounds each captured-output tail the diagnosis
+// carries: enough for the last log lines and the error text, never the whole
+// transcript.
+const exitDiagnosisTailBytes = 2048
+
+// The diagnosis sentinels: every kill/readiness failure wraps one of these
+// with its evidence, so a caller can match the outcome class with
+// [errors.Is] instead of the message text.
+var (
+	// errChildExited reports a child that finished on its own where the
+	// harness expected it alive; exitDiagnosis wraps it with the pid, the
+	// Wait status and the captured output tails.
+	errChildExited = errors.New("child exited unexpectedly")
+	// errKillShape reports a completed Wait that is not the SIGKILL shape
+	// the kill path asserts.
+	errKillShape = errors.New("unexpected Wait result after SIGKILL")
+)
+
+// exitStatus reports whether the reaper has closed exited, with the stored
+// Wait result when it has. The closed channel is the happens-before fence for
+// the field read; the result may legitimately be nil (a clean exit 0).
+func (n *standNode) exitStatus() (bool, error) {
+	select {
+	case <-n.exited:
+		n.exitMu.Lock()
+		defer n.exitMu.Unlock()
+		return true, n.exitResult
+	default:
+		return false, nil
+	}
+}
+
+// outputTail returns the last n bytes of s, or all of s when it is shorter.
+func outputTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
+// waitStatus renders a completed Wait: exit 0 for nil, the exit code and
+// String() for an ExitError, and the raw error otherwise.
+func waitStatus(err error) string {
+	if err == nil {
+		return "exit 0 (clean)"
+	}
+	exitErr, ok := errors.AsType[*exec.ExitError](err)
+	if ok {
+		return fmt.Sprintf("exit code %d (%s)", exitErr.ExitCode(), exitErr.String())
+	}
+	return err.Error()
+}
+
+// exitDiagnosis explains a child that has already exited: nil while it runs,
+// otherwise an error wrapping errChildExited and naming the pid, the Wait
+// status and the tails of the captured stdout and stderr. It reads the
+// stored Wait result, so it never consumes the exit channel and is callable
+// repeatedly — a dead child explains itself instead of costing a rerun to
+// learn nothing.
+func (n *standNode) exitDiagnosis() error {
+	exited, exitErr := n.exitStatus()
+	if !exited {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: process %d exited: %s; stderr tail: %q; stdout tail: %q",
+		errChildExited,
+		n.cmd.Process.Pid,
+		waitStatus(exitErr),
+		outputTail(n.stderr.String(), exitDiagnosisTailBytes),
+		outputTail(n.stdout.String(), exitDiagnosisTailBytes),
+	)
+}
+
+// killAndReap drives the kill -9 half of a scenario: SIGKILL semantics via
+// Process.Kill — never the SIGTERM contract — then waits for the exit and
+// asserts the harness's kill exit shape (an ExitError reporting -1, the
+// "signal: killed" Wait result assertExitCode documents). A refusal is
+// fatal with reapAfterKill's error: an already-exited child is diagnosed,
+// never swallowed.
 func killAndReap(t *testing.T, node *standNode) {
 	t.Helper()
-	err := node.cmd.Process.Kill()
+	err := reapAfterKill(t, node)
 	if err != nil {
-		t.Fatalf("SIGKILL %d: %v", node.cmd.Process.Pid, err)
+		t.Fatal(err)
+	}
+}
+
+// reapAfterKill is killAndReap's error-returning core. It has three
+// outcomes: the genuine SIGKILL path waits for the -1 Wait result and
+// returns nil; a Process.Kill error of [os.ErrProcessDone] means the child
+// exited on its own first — the reaper is waited for and the exit diagnosis
+// returned, prefixed "process exited before SIGKILL"; any other kill error
+// is returned with the diagnosis when the child has already exited.
+func reapAfterKill(t *testing.T, node *standNode) error {
+	t.Helper()
+	pid := node.cmd.Process.Pid
+	killErr := node.cmd.Process.Kill()
+	if errors.Is(killErr, os.ErrProcessDone) {
+		waitFor(t, exitDeadline, "process exit after the already-finished kill", func() bool {
+			select {
+			case <-node.exited:
+				return true
+			default:
+				return false
+			}
+		})
+		return fmt.Errorf("process exited before SIGKILL: %w", node.exitDiagnosis())
+	}
+	if killErr != nil {
+		diagnosis := node.exitDiagnosis()
+		if diagnosis != nil {
+			return fmt.Errorf("SIGKILL %d: %w; %w", pid, killErr, diagnosis)
+		}
+		return fmt.Errorf("SIGKILL %d: %w", pid, killErr)
 	}
 	var exitErr error
 	waitFor(t, exitDeadline, "process exit after SIGKILL", func() bool {
@@ -385,7 +501,20 @@ func killAndReap(t *testing.T, node *standNode) {
 			return false
 		}
 	})
-	assertExitCode(t, exitErr, -1)
+	exitProcessErr, ok := errors.AsType[*exec.ExitError](exitErr)
+	if !ok {
+		if exitErr == nil {
+			return fmt.Errorf("%w: process %d wait error is nil, want an ExitError", errKillShape, pid)
+		}
+		return fmt.Errorf("%w: process %d wait error: %w", errKillShape, pid, exitErr)
+	}
+	if exitProcessErr.ExitCode() != -1 {
+		return fmt.Errorf(
+			"%w: process %d exit code = %d (%s), want -1",
+			errKillShape, pid, exitProcessErr.ExitCode(), exitProcessErr.String(),
+		)
+	}
+	return nil
 }
 
 // signalAndWaitExit SIGTERMs the node and waits for a clean exit 0 — the
@@ -448,6 +577,41 @@ func awaitServing(t *testing.T, addr string, timeout time.Duration) {
 		resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
 		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
 	})
+}
+
+// awaitNodeServing is awaitServing with the node's liveness checked on every
+// poll: a child that already exited returns the exit diagnosis on the first
+// iteration — a crashed child can never look like a slow one — while a
+// running child polls health SERVING exactly as awaitServing does.
+func awaitNodeServing(t *testing.T, node *standNode, addr string, timeout time.Duration) error {
+	t.Helper()
+	var diagnosis error
+	waitFor(t, timeout, "health SERVING on "+addr, func() bool {
+		diagnosis = node.exitDiagnosis()
+		if diagnosis != nil {
+			return true
+		}
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = conn.Close() }()
+		ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
+		defer cancel()
+		resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
+	return diagnosis
+}
+
+// requireNodeServing is awaitNodeServing's fatal wrapper for the call sites
+// that expect a serving node.
+func requireNodeServing(t *testing.T, node *standNode, addr string, timeout time.Duration) {
+	t.Helper()
+	err := awaitNodeServing(t, node, addr, timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // supKVConn opens one gRPC client connection for the SupKV service calls.
@@ -636,7 +800,7 @@ func (p *standPair) nodeArgsWithExtras(nodeID int, extra []string) []string {
 // from an explicit normal gate in those extras).
 func startStandNode(t *testing.T, p *standPair, nodeID int, extra ...string) *standNode {
 	t.Helper()
-	return launchNode(t, p.bin, &bytes.Buffer{}, nil, p.nodeArgsWithExtras(nodeID, extra)...)
+	return launchNode(t, p.bin, &bytes.Buffer{}, p.nodeArgsWithExtras(nodeID, extra)...)
 }
 
 // startStandLoggedNode is startStandNode with the lock-guarded live
@@ -644,7 +808,7 @@ func startStandNode(t *testing.T, p *standPair, nodeID int, extra ...string) *st
 // still runs.
 func startStandLoggedNode(t *testing.T, p *standPair, nodeID int, extra ...string) *standNode {
 	t.Helper()
-	return launchNode(t, p.bin, &logBuffer{}, nil, p.nodeArgsWithExtras(nodeID, extra)...)
+	return launchNode(t, p.bin, &logBuffer{}, p.nodeArgsWithExtras(nodeID, extra)...)
 }
 
 // startStandPair launches both nodes of a fresh topology — the scenarios
