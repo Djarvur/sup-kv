@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 8
+current_plan: 9
 status: executing
-stopped_at: Completed 08-07-PLAN.md
-last_updated: "2026-11-24T19:18:13.049Z"
+stopped_at: Completed 08-08-PLAN.md
+last_updated: "2026-11-24T19:28:30.747Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: 21310333073405bcb29ab0b2a68b9a78a311dd10
+state_head: e1a056481c29f0f2b4456d8427d2462952f668e4
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 90
+  completed_plans: 91
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 8
+Current Plan: 9
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -151,6 +151,7 @@ Progress: [████░░░░░░] 44%
 | Phase 08 P06 | 9min | 3 tasks | 9 files |
 | Phase 08 P03 | 7min | 2 tasks | 2 files |
 | Phase 8 P7 | 15min | 3 tasks | 3 files |
+| Phase 08 P08 | 6min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -501,6 +502,9 @@ Recent decisions affecting current work:
 - [Phase 8]: LatencyPercentiles is the one nearest-rank primitive (pinned by a 1..100 ms sample); the default-profile row measured p50 584 ms / p99 1.074 s at 1000.1 writes/s on ext4 against the 750/1500 ms bounds.
 - [Phase 8]: Disk-write amplification is published as 14.36x (15 dumps x 14.98 MB vs 15.65 MB logical), bytes-per-dump 1.0001x the dump file; a tmpfs/ramfs base fails by name before any measurement.
 - [Phase 8]: The memory points gate only the value-dominated 60 KiB row: RSS 280 MB against the 1.006 GB tripwire and dump-cycle peak growth 19.6 MB against the 122.9 MB PerfDumpPeakLiveRatio bound.
+- [Phase 08]: Confirmation-latency profiles are data over one body: only the knobs and dump implementation differ, so the fast arm's cited 1 ms/50 ms + in-memory-dump conditions cannot drift.
+- [Phase 08]: TestPerfFastProfileLatency wraps the shared body, not the benchmark table, because testing.Benchmark's Extra map is per-B: sub-benchmark metrics never reach the parent result.
+- [Phase 08]: All four benchmark metrics are required by key name in the gate; the 25 ms/100 ms fast-profile bounds stay the documented values and are not retuned to the measured 2.64 ms/4.82 ms.
 
 ### Pending Todos
 
@@ -523,7 +527,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-24T19:18:12.638Z
-Stopped at: Completed 08-07-PLAN.md
+Last session: 2026-11-24T19:28:30.329Z
+Stopped at: Completed 08-08-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
