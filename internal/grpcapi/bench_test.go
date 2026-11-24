@@ -1,19 +1,25 @@
 package grpcapi_test
 
-// The TEST-05 bounded-confirmation-latency benchmark (D-13, plan 06-08):
-// BenchmarkConfirmationLatency measures per-write wait_for_replication
-// submission-to-resolution latency under a continuous ~1000 writes/s
-// background burst, through the REAL stack — one server wired with the
-// tracker wait seam over a real two-adapter asymmetric UDP topology (the
-// wait_integration_test.go construction), a bufconn-dialed gRPC client, the
-// production result-event timing. An unacked report FAILS the benchmark:
-// bounded confirmation latency is the property under test, a miss is a bug,
-// never noise. Manual `make bench` target only, no thresholds (D-13).
+// The TEST-05 bounded-confirmation-latency benchmark (D-13, plan 06-08) and
+// PERF-01's two-profile surface (plan 08-08): BenchmarkConfirmationLatency
+// measures per-write wait_for_replication submission-to-resolution latency
+// under a continuous ~1000 writes/s background burst, through the REAL stack
+// — one server wired with the tracker wait seam over a real two-adapter
+// asymmetric UDP topology (the wait_integration_test.go construction), a
+// bufconn-dialed gRPC client, the production result-event timing — under
+// BOTH profiles decision 14.3 names: `fast` (Debounce 1 ms / MaxWait 50 ms,
+// in-memory dump) and `default` (Debounce 50 ms / MaxWait 1 s, real
+// filesystem dump). An unacked report FAILS the benchmark: bounded
+// confirmation latency is the property under test, a miss is a bug, never
+// noise. Manual `make bench` target only, no thresholds (D-13); the fast
+// arm's executable bound is TestPerfFastProfileLatency under `make perf`
+// (D-06).
 
 import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +35,8 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
+	"github.com/Djarvur/sup-kv/internal/persistfile"
+	"github.com/Djarvur/sup-kv/internal/port"
 	"github.com/Djarvur/sup-kv/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
@@ -54,18 +62,85 @@ var (
 	benchWaitValue  = []byte("bench-wait-value")
 )
 
-// BenchmarkConfirmationLatency runs a background burst writer on node A's
-// store (the author-notification path — store.Set plus NotifyLocalWrite,
-// the scenarioWrite precedent — so the burst cadence never serializes on
-// dump confirmation) for the whole measured window while each iteration
-// performs one gRPC Set with WaitForReplication through the real wait seam.
-// The measured span is submission to acked report; accumulated totals are
-// reported as latency-ns/op plus max-latency-ns (whitespace-free units),
+// benchDumpFile is the default arm's dump file name inside its own temp
+// directory — the production persistfile store's path.
+const benchDumpFile = "dump.json"
+
+// benchProfile is one benchmarked dump profile: the two persist knobs and
+// the dump implementation whose cost the measured span includes (D-01: a
+// number is only honest with its conditions).
+type benchProfile struct {
+	name     string
+	debounce time.Duration
+	maxWait  time.Duration
+	// realDump selects the production file store over the in-memory fake:
+	// only the real store puts encode + fsync + rotate inside the span.
+	realDump bool
+}
+
+// benchFastProfile is the fast-response arm the D-01 "~10 ms under 1000
+// writes/s" claim is measured under (research PERF-01 "Doc conditions"):
+// Debounce 1 ms and MaxWait 50 ms, an IN-MEMORY dump (fakeDumpStore encodes
+// into a bytes.Buffer — no file, no fsync, no rotate, so the dump time the
+// claim excludes is genuinely absent), two real loopback UDP adapters over
+// the asymmetric broadcast topology, a bufconn-dialed gRPC client, a ~1 ms
+// background burst writing through the author-notification path, one
+// Set(WaitForReplication) per measured iteration, and race off. An unacked
+// report fails the run: bounded confirmation latency under this burst is the
+// property under test, a miss is a bug, never noise.
+var benchFastProfile = benchProfile{
+	name:     "fast",
+	debounce: time.Millisecond,
+	maxWait:  50 * time.Millisecond,
+	realDump: false,
+}
+
+// benchDefaultProfile is the operator profile the default configuration runs
+// (dump_debounce 50 ms, dump_max_wait 1 s — internal/config): the same stack
+// as the fast arm, but the dump is the production persistfile store at a
+// file in the benchmark's temp directory, so the measured span INCLUDES
+// encode + fsync + rotate. An unacked report fails the run, as in the fast
+// arm.
+var benchDefaultProfile = benchProfile{
+	name:     "default",
+	debounce: 50 * time.Millisecond,
+	maxWait:  time.Second,
+	realDump: true,
+}
+
+// benchProfiles is the two-arm table decision 14.3 requires: one benchmarked
+// profile per dump configuration the product documents, both through the one
+// shared body (benchConfirmationLatency).
+var benchProfiles = []benchProfile{benchFastProfile, benchDefaultProfile}
+
+// BenchmarkConfirmationLatency benchmarks both documented dump profiles
+// through one shared body. Each arm's conditions are stated on its profile;
+// the fast arm keeps the exact knobs and in-memory dump the "~10 ms" claim
+// cites, the default arm the operator knobs against a real filesystem dump.
+func BenchmarkConfirmationLatency(b *testing.B) {
+	for _, profile := range benchProfiles {
+		b.Run(profile.name, func(b *testing.B) {
+			benchConfirmationLatency(b, profile)
+		})
+	}
+}
+
+// benchConfirmationLatency is the one measured body both arms run: a
+// background burst writer on node A's store (the author-notification path —
+// store.Set plus NotifyLocalWrite, the scenarioWrite precedent — so the
+// burst cadence never serializes on dump confirmation) for the whole
+// measured window while each iteration performs one gRPC Set with
+// WaitForReplication through the real wait seam. The measured span is
+// submission to acked report; accumulated totals are reported as
+// latency-ns/op plus max-latency-ns (whitespace-free units), and
 // p50-ms/p99-ms give the same per-op spans' distribution (TEST-10: measured
 // durations, no self-pacing in the loop — the background burst's ~1ms
-// cadence is the workload the bound must hold under), and ns/op stays
-// visible for the write itself.
-func BenchmarkConfirmationLatency(b *testing.B) {
+// cadence is the workload the bound must hold under), while ns/op stays
+// visible for the write itself. The fast arm's dump is in-memory, so its
+// span excludes dump-file work; the default arm's is persistfile, so its
+// span includes encode + fsync + rotate.
+func benchConfirmationLatency(b *testing.B, profile benchProfile) {
+	b.Helper()
 	portA := integrationUDPPort(b)
 	portB := integrationUDPPort(b)
 	probeLoopbackBroadcast(b, portB)
@@ -81,9 +156,16 @@ func BenchmarkConfirmationLatency(b *testing.B) {
 		clock.NewClock(time.Now, 0, 0, time.Minute),
 		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
 	)
-	eng := persist.New(storeA, &fakeDumpStore{}, persist.Config{
-		Debounce:    time.Millisecond,
-		MaxWait:     50 * time.Millisecond,
+	// The dump implementation is the profile's: the fast arm keeps the
+	// in-memory fake (no file I/O in its span), the default arm the
+	// production file store at a file in this run's temp directory.
+	dumps := port.DumpStore(&fakeDumpStore{})
+	if profile.realDump {
+		dumps = persistfile.New(filepath.Join(b.TempDir(), benchDumpFile))
+	}
+	eng := persist.New(storeA, dumps, persist.Config{
+		Debounce:    profile.debounce,
+		MaxWait:     profile.maxWait,
 		OnConfirmed: hub.Confirm,
 	})
 	engCtx, cancelEng := context.WithCancel(b.Context())
