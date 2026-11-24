@@ -1,6 +1,10 @@
 package testutil //nolint:testpackage // the band table, the registry key and the ephemeral-range assertion are unexported implementation detail; an external test package cannot reach them.
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net"
 	"runtime"
 	"strconv"
 	"strings"
@@ -119,6 +123,75 @@ func TestRegistrySkipsTakenCandidate(t *testing.T) {
 	}
 	if picked == held {
 		t.Fatalf("UDPPort(t, %s) returned %d, already claimed: the picker must skip a taken candidate", band, picked)
+	}
+}
+
+// TestClaimSkipsClaimedCandidateWithoutProbing pins the claim-before-probe
+// order: a candidate already in the registry is skipped without a probe, so a
+// sibling picker can never transiently bind the port an owner is about to
+// use. The one-port band makes the draw deterministic.
+func TestClaimSkipsClaimedCandidateWithoutProbing(t *testing.T) {
+	t.Parallel()
+	band := Band{name: "claimed", lo: testBandLo + 40, hi: testBandLo + 41}
+	if reserve("udp4", band.lo) {
+		t.Fatalf("reserve(udp4, %d) = true, want false: the test must own the only candidate", band.lo)
+	}
+	t.Cleanup(func() { release("udp4", band.lo) })
+
+	probes := 0
+	probe := func(context.Context, string, int) (io.Closer, error) {
+		probes++
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	port, err := claimWith(band, "udp4", probe)
+	if err == nil {
+		t.Fatalf("claimWith(%s) = (%d, nil), want exhaustion: the only candidate is claimed", band, port)
+	}
+	if probes != 0 {
+		t.Fatalf("claimWith(%s) probed a claimed candidate %d time(s): claiming first is what keeps a picker's probe off an owner's port", band, probes)
+	}
+}
+
+// TestClaimReleasesOnProbeFailure pins the failure path: a candidate the
+// kernel refuses is released, so an off-suite holder cannot poison the claim
+// map for the rest of the run.
+func TestClaimReleasesOnProbeFailure(t *testing.T) {
+	t.Parallel()
+	band := Band{name: "probe-fail", lo: testBandLo + 50, hi: testBandLo + 51}
+	probe := func(context.Context, string, int) (io.Closer, error) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	port, err := claimWith(band, "udp4", probe)
+	if err == nil {
+		t.Fatalf("claimWith(%s) = (%d, nil), want exhaustion: the probe refuses", band, port)
+	}
+	if claimed("udp4", band.lo) {
+		t.Fatalf("claimWith(%s) left candidate %d claimed after a failed probe: a refused candidate must be released", band, band.lo)
+	}
+}
+
+// TestUDPPortIsImmediatelyBindable pins the allocator's promise to its
+// callers: once UDPPort returns, the port is free at the kernel, so the
+// owner's real bind cannot hit a leftover probe socket. It is the cheap
+// isolation test for the pick-to-bind class: a failing owner bind here means
+// the allocator leaked its probe, not that a sibling test took the port.
+func TestUDPPortIsImmediatelyBindable(t *testing.T) {
+	t.Parallel()
+	// The spare slice above the four package bands and below the ephemeral
+	// range; ten picks per run keep twenty parallel repetitions well inside
+	// its 500 ports.
+	band := Band{name: "owner-bind", lo: testBandLo + 100, hi: testBandLo + 600}
+	const picks = 10
+	for range picks {
+		port := UDPPort(t, band)
+		conn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", fmt.Sprintf("0.0.0.0:%d", port))
+		if err != nil {
+			t.Fatalf("owner bind of returned port %d failed: %v — the allocator's probe must be closed before it returns", port, err)
+		}
+		err = conn.Close()
+		if err != nil {
+			t.Fatalf("close owner bind of port %d: %v", port, err)
+		}
 	}
 }
 

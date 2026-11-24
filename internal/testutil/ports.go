@@ -2,12 +2,14 @@ package testutil
 
 // Port allocation for the socket-owning test packages. The window and its
 // four package bands sit strictly below the kernel's ephemeral range, so a
-// picked port is unreachable to every :0 bind; the picker holds a bind probe
-// while it claims the candidate, so no sibling picker in this process can
-// take it between pick and bind; and the bands are disjoint per package, so
-// separate test processes cannot collide either. The old throwaway-:0 picker
-// this replaces left a window between the bind that read the port and the
-// bind that advertised it — the pick-to-bind race class (08-RESEARCH F-4).
+// picked port is unreachable to every :0 bind; the picker claims the candidate
+// before its bind probe and holds the claim until the owning test's cleanup,
+// so no sibling picker can take it between pick and bind — nor probe, and so
+// transiently bind, a port an owner already holds; and the bands are disjoint
+// per package, so separate test processes cannot collide either. The old
+// throwaway-:0 picker this replaces left a window between the bind that read
+// the port and the bind that advertised it — the pick-to-bind race class
+// (08-RESEARCH F-4).
 
 import (
 	"context"
@@ -127,13 +129,24 @@ func pick(tb testing.TB, band Band, network string) int {
 	return port
 }
 
-// claim reserves one free port from band for network: up to portCandidates
-// random candidates, each bind-probed while the claim is still held, so a
-// returned port cannot be taken by a sibling picker between pick and bind.
-// The probe bind proves the port is free at the kernel; holding the claim
-// while it is open is what closes the window. A candidate held by an
-// off-suite process fails its probe and is skipped.
+// claim reserves one free port from band for network.
 func claim(band Band, network string) (int, error) {
+	return claimWith(band, network, probeBind)
+}
+
+// probeFunc is the bind probe claimWith uses: a socket held open on the
+// candidate, or the kernel's refusal.
+type probeFunc func(ctx context.Context, network string, port int) (io.Closer, error)
+
+// claimWith reserves one free port from band for network: up to
+// portCandidates random candidates, each claimed in the registry FIRST and
+// bind-probed while the claim is held. The order is the contract: claiming
+// before probing means no sibling picker can probe — and therefore
+// transiently bind — a candidate this picker is testing, and no picker can
+// probe a candidate an owner already holds, so an owner's later bind never
+// races a picker's throwaway probe. A candidate held by an off-suite process
+// fails its probe and its claim is released.
+func claimWith(band Band, network string, probe probeFunc) (int, error) {
 	if band.hi <= band.lo {
 		return 0, fmt.Errorf("%w: band %s has no candidate", errBandEmpty, band)
 	}
@@ -146,15 +159,15 @@ func claim(band Band, network string) (int, error) {
 	ctx := context.Background()
 	for range portCandidates {
 		candidate := band.lo + rand.IntN(band.hi-band.lo) //nolint:gosec // G404: the port draw is a convenience pick, never a security function.
-		probe, err := probeBind(ctx, network, candidate)
+		if reserve(network, candidate) {
+			continue
+		}
+		bound, err := probe(ctx, network, candidate)
 		if err != nil {
+			release(network, candidate)
 			continue
 		}
-		taken := reserve(network, candidate)
-		_ = probe.Close()
-		if taken {
-			continue
-		}
+		_ = bound.Close()
 		return candidate, nil
 	}
 	return 0, fmt.Errorf(
@@ -187,9 +200,18 @@ func probeBind(ctx context.Context, network string, port int) (io.Closer, error)
 	return conn, nil
 }
 
+// claimed reports whether a picker already holds network:port, without
+// changing the registry.
+func claimed(network string, port int) bool {
+	key := network + ":" + strconv.Itoa(port)
+	portClaims.mu.Lock()
+	defer portClaims.mu.Unlock()
+	return portClaims.taken[key]
+}
+
 // reserve records the network:port claim and reports whether a sibling picker
-// already held it. It must be called while the candidate's probe bind is
-// still held.
+// already held it. It must be called before the probe: the claim is what keeps
+// a sibling picker from probing the candidate while this picker binds it.
 func reserve(network string, port int) bool {
 	key := network + ":" + strconv.Itoa(port)
 	portClaims.mu.Lock()
