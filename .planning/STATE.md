@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 10
+current_plan: 11
 status: executing
-stopped_at: Completed 08-09-PLAN.md
-last_updated: "2026-11-24T19:43:13.726Z"
+stopped_at: Completed 08-10-PLAN.md
+last_updated: "2026-11-24T21:36:29.793Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: 8ee2999206c31345d6d48645cd61a7ebbf908052
+state_head: d89b1b48d98e36924f2adaf053c84fd2251b6604
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 92
+  completed_plans: 93
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 10
+Current Plan: 11
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -153,6 +153,7 @@ Progress: [████░░░░░░] 44%
 | Phase 8 P7 | 15min | 3 tasks | 3 files |
 | Phase 08 P08 | 6min | 3 tasks | 2 files |
 | Phase 08 P09 | 13min | 3 tasks | 5 files |
+| Phase 8 P10 | 17min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -509,6 +510,12 @@ Recent decisions affecting current work:
 - [Phase 08]: The 30 s first-wait budget is a harness start budget, not a product bound: the eight-slot spawn serializer lands first, servingDeadline still governs running-node polls, and exceeding 30 s is a finding rather than a reason to raise it.
 - [Phase 08]: exitStatus returns (bool, error) (revive's error-last rule) and the stand launcher dropped its proven-unused env parameter; no behavior changed.
 - [Phase 08]: A dead child is diagnosed through the error-returning awaitNodeServing core with a fatal requireNodeServing wrapper; TestMain_readinessDiagnosis asserts the first-poll diagnosis directly.
+- [Phase 8]: The shared port allocator claims a candidate before its bind probe; the owner's immediate-bind contract is pinned by a test, and the TEST-11 acceptance is green three runs in a row after the 08-06/08-09 follow-ups
+- [Phase 8]: Startup-gate bounds measure from the instant cmd.Start returns (spawnSem queue time is harness wait, not product startup), and the loopback-broadcast probe retries a bind/send failure on a fresh private-band port per the probeBroadcastForm policy
+- [Phase 8]: Measured rows publish the second of two green make perf runs at commit 9cdc0f1; each section carries the hardware block, the commit beside it (test binaries report vcs unknown) and the producing command.
+- [Phase 8]: Threshold anchors are formatted from internal/testutil constants (durations via .String(), rate via %.0f, ratios as '≤ %.1f×'), so a threshold change without a ledger change fails make test.
+- [Phase 8]: The amplification row is a workstation NVMe/ext4 result; the target-grade eMMC/SD gap stays named against the Spec open question #2 and is replaced, not annotated, if target media appears.
+- [Phase 8]: S-FAIL-15 is closed against TestRed_R02_burst, TestPerfBurstDistinctKeys and TestEngine_burstBoundedConfirmation; OPERATIONS keeps a memory summary plus a link, and PROJECT.md's latency claim carries its fast-profile conditions.
 
 ### Pending Todos
 
@@ -531,7 +538,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-24T19:43:13.294Z
-Stopped at: Completed 08-09-PLAN.md
+Last session: 2026-11-24T21:36:29.334Z
+Stopped at: Completed 08-10-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
