@@ -19,8 +19,10 @@ package stand //nolint:testpackage // the perf rows reuse the harness's and the 
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -355,4 +357,213 @@ func TestPerfDefaultProfileLatency(t *testing.T) { //nolint:paralleltest // wall
 	signalAndWaitExit(t, nodeB)
 	assertNoPanic(t, nodeA, "the default-profile node A")
 	assertNoPanic(t, nodeB, "the default-profile peer node B")
+}
+
+// perfDumpSize returns the main dump file's size in bytes — the generation
+// the amplification row multiplies by its dump count.
+func perfDumpSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat the dump %s: %v", path, err)
+	}
+	return info.Size()
+}
+
+// perfProcIO reads one numeric field from /proc/<pid>/io — the node process's
+// own I/O accounting, where write_bytes counts bytes the process caused to be
+// sent to the storage layer. An absent field or a non-numeric value fails by
+// name.
+func perfProcIO(t *testing.T, pid int, field string) uint64 {
+	t.Helper()
+	path := fmt.Sprintf("/proc/%d/io", pid)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		name, value, found := strings.Cut(line, ": ")
+		if !found || name != field {
+			continue
+		}
+		parsed, parseErr := strconv.ParseUint(value, 10, 64)
+		if parseErr != nil {
+			t.Fatalf("%s field %q = %q: %v", path, name, value, parseErr)
+		}
+		return parsed
+	}
+	t.Fatalf("%s carries no %q field", path, field)
+	return 0
+}
+
+// perfFailures sums the three labelled supkv_dumps_failures_total class
+// samples: the family renders one sample per class, never a total line, so a
+// healthy window is "the sum is unchanged" read from the same parser the
+// other metrics reads use.
+func perfFailures(t *testing.T, addr string) float64 {
+	t.Helper()
+	body := redMetricsBody(t, addr)
+	total := 0.0
+	for _, class := range []string{"disk_full", "permission", "other"} {
+		value, found := redMetricValue(body, `supkv_dumps_failures_total{class="`+class+`"}`)
+		if !found {
+			t.Fatalf("node %s /metrics carries no supkv_dumps_failures_total{class=%q} sample", addr, class)
+		}
+		total += value
+	}
+	return total
+}
+
+// perfDumpSnapshot is the amplification window's input tuple: the dump
+// attempt counter, the main dump file's size, the node process's write_bytes
+// and the summed failure classes. Its delta across the window is the whole
+// measurement, so a failure can be diagnosed from the logged tuple alone.
+type perfDumpSnapshot struct {
+	dumps      float64
+	dumpBytes  int64
+	writeBytes uint64
+	failures   float64
+}
+
+// perfTakeSnapshot reads the tuple from one node's live process and dump.
+func perfTakeSnapshot(t *testing.T, addr string, node *standNode, dumpPath string) perfDumpSnapshot {
+	t.Helper()
+	return perfDumpSnapshot{
+		dumps:      perfMetric(t, addr, "supkv_dumps_total"),
+		dumpBytes:  perfDumpSize(t, dumpPath),
+		writeBytes: perfProcIO(t, node.cmd.Process.Pid, "write_bytes"),
+		failures:   perfFailures(t, addr),
+	}
+}
+
+// TestPerfAmplification is PERF-03's measured row (D-03): disk-write
+// amplification = (Δ supkv_dumps_total × dump file size) / the logical bytes
+// the hot-key window's clients wrote, cross-checked against the named node's
+// /proc/<pid>/io write_bytes delta per successful dump. The method is the
+// documented five steps: a real-filesystem dump (a tmpfs/ramfs base is
+// refused by name), a fixed 10 000 x 1 KiB preload whose covering dump is
+// taken as the baseline, metrics and dump stat on both sides of an open-loop
+// 1 000 writes/s x 15 s window, and a healthy-window check that the failure
+// counters did not move (a failed attempt writes no generation, research
+// A12). Each dump streams one fresh generation, so bytes submitted per dump
+// must stay within testutil.PerfBytesPerDumpRatio of the dump size; the
+// amplification figure itself is published, not asserted.
+func TestPerfAmplification(t *testing.T) { //nolint:paralleltest // wall-clock write window: a parallel sibling sharing the machine would corrupt the measurement (file doc).
+	testutil.RequirePerf(t)
+	t.Log(testutil.HardwareBlock())
+
+	p := newStandPair(t)
+	p.dumpA = filepath.Join(testutil.PerfDumpDir(t), "dump.json")
+	p.dumpB = filepath.Join(testutil.PerfDumpDir(t), "dump.json")
+	dir := filepath.Dir(p.dumpA)
+	fsType := testutil.PerfDumpFSType(dir)
+	if fsType == "tmpfs" || fsType == "ramfs" {
+		t.Fatalf("SUPKV_PERF_DUMP_DIR=%q lies on %s: a memory-backed dump measures memory, not disk, "+
+			"so PERF-03's amplification row refuses it — point SUPKV_PERF_DUMP_DIR at a real filesystem "+
+			"(make perf uses $(CURDIR)/.tmp/perf)", os.Getenv("SUPKV_PERF_DUMP_DIR"), fsType)
+	}
+
+	metricsAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	syncLong := "--sync-interval=" + perfSyncIntervalLong.String()
+	nodeA := startStandNode(t, p, standNodeAID, syncLong, "--metrics-addr="+metricsAddr)
+	nodeB := startStandNode(t, p, standNodeBID, syncLong)
+	awaitServing(t, p.grpcA, servingDeadline)
+	awaitServing(t, p.grpcB, servingDeadline)
+	standMetricsReady(t, "http://"+metricsAddr+"/metrics")
+
+	// The fixed preload, then its covering dump and an empty unacked set:
+	// the baseline window then contains only the measured schedule's dumps.
+	preloadDumps := perfMetric(t, metricsAddr, "supkv_dumps_total")
+	preloadKeys := make([]string, redBurstKeys)
+	for i := range preloadKeys {
+		preloadKeys[i] = fmt.Sprintf(redBurstKeyFmt, i)
+	}
+	redSeedKeys(t, redSeedClients(t, p.grpcA), preloadKeys)
+	waitFor(t, perfPreloadWait, "the preload's covering dump and an empty replication unacked set",
+		redThrottled(func() bool {
+			body := redMetricsBody(t, metricsAddr)
+			dumps, dumpsFound := redMetricValue(body, "supkv_dumps_total")
+			unacked, unackedFound := redMetricValue(body, "supkv_replication_unacked_records")
+			return dumpsFound && unackedFound && dumps > preloadDumps && unacked == 0
+		}))
+
+	baseline := perfTakeSnapshot(t, metricsAddr, nodeA, p.dumpA)
+
+	// The send window's end anchors the replication drain exactly as the
+	// frozen burst row computes it.
+	total := redBurstRate * redBurstSeconds
+	interval := time.Second / time.Duration(redBurstRate)
+	sendEnd := time.Now().Add(time.Duration(total-1) * interval)
+
+	result := perfOpenLoop(t, p.grpcA)
+	if result.ok == 0 {
+		t.Fatalf("PERF-03 amplification: the hot-key window recorded no successful write "+
+			"(errors by code: %s) — the logical-byte denominator would be zero", perfErrorSummary(result.errs))
+	}
+	if len(result.errs) > 0 {
+		t.Logf("PERF-03 open-loop errors by code: %s (duration incl. drain %v)", perfErrorSummary(result.errs), result.elapsed)
+	}
+	waitFor(t, time.Until(sendEnd.Add(testutil.PerfBurstDrain+redBurstDrainMargin)), fmt.Sprintf(
+		"node A's unacked set empty within %v of the send window's end before the final amplification snapshot",
+		testutil.PerfBurstDrain,
+	), redThrottled(func() bool {
+		value, found := redMetricValue(redMetricsBody(t, metricsAddr), "supkv_replication_unacked_records")
+		return found && value == 0
+	}))
+
+	final := perfTakeSnapshot(t, metricsAddr, nodeA, p.dumpA)
+
+	// The method, in the order the failure messages name it: Δ dumps × dump
+	// size against the logical bytes the clients wrote, cross-checked against
+	// write_bytes per dump.
+	dumpsDelta := final.dumps - baseline.dumps
+	if dumpsDelta <= 0 {
+		t.Fatalf("PERF-03 amplification: no dump completed inside the window "+
+			"(dumps baseline %.0f, final %.0f; dump %s; write window %v at %d writes/s) — "+
+			"an empty window is a measurement failure, not a zero amplification",
+			baseline.dumps, final.dumps, p.dumpA, time.Duration(total-1)*interval, redBurstRate)
+	}
+	if final.failures != baseline.failures {
+		t.Fatalf("PERF-03 amplification: the failure counter moved inside the window "+
+			"(baseline %.0f, final %.0f) — a failed attempt writes no generation, so the "+
+			"size×count formula needs a healthy window (research A12)", baseline.failures, final.failures)
+	}
+	if final.writeBytes < baseline.writeBytes {
+		t.Fatalf("PERF-03 amplification: /proc/%d/io write_bytes went backwards (%d → %d) — "+
+			"the counter is monotone; the tuple is unusable",
+			nodeA.cmd.Process.Pid, baseline.writeBytes, final.writeBytes)
+	}
+
+	keyWidth := len(fmt.Sprintf(redBurstKeyFmt, 0))
+	logicalBytes := result.ok * int64(keyWidth+len(redSeedValue()))
+	dumpBytes := final.dumpBytes
+	writeBytesDelta := final.writeBytes - baseline.writeBytes
+	bytesPerDump := float64(writeBytesDelta) / dumpsDelta
+	amplification := dumpsDelta * float64(dumpBytes) / float64(logicalBytes)
+	bound := testutil.PerfBytesPerDumpRatio * float64(dumpBytes)
+
+	t.Logf("PERF-03 amplification: dumps-baseline=%.0f dumps-final=%.0f dumps-delta=%.0f "+
+		"dump-bytes-baseline=%d dump-bytes-final=%d write-bytes-baseline=%d write-bytes-final=%d "+
+		"write-bytes-delta=%d bytes-per-dump=%.0f bytes-per-dump-bound=%.0f logical-bytes=%d "+
+		"writes=%d key-bytes=%d value-bytes=%d amplification=%.2fx fs=%s dev=%s "+
+		"node-a-pid=%d node-b-pid=%d failures=%.0f",
+		baseline.dumps, final.dumps, dumpsDelta,
+		baseline.dumpBytes, final.dumpBytes, baseline.writeBytes, final.writeBytes,
+		writeBytesDelta, bytesPerDump, bound, logicalBytes,
+		result.ok, keyWidth, len(redSeedValue()), amplification, fsType, testutil.PerfDumpDevice(dir),
+		nodeA.cmd.Process.Pid, nodeB.cmd.Process.Pid, final.failures)
+
+	if bytesPerDump > bound {
+		t.Fatalf("PERF-03 amplification: bytes submitted per dump %.0f > "+
+			"testutil.PerfBytesPerDumpRatio (%.2f) × dump size (%d = %.0f bound) "+
+			"[method: (Δ dumps × dump size)/logical bytes = %.2fx; dumps=%.0f; logical-bytes=%d; "+
+			"write-bytes-delta=%d; fs=%s; dev=%s; race=off]",
+			bytesPerDump, testutil.PerfBytesPerDumpRatio, dumpBytes, bound, amplification,
+			dumpsDelta, logicalBytes, writeBytesDelta, fsType, testutil.PerfDumpDevice(dir))
+	}
+
+	signalAndWaitExit(t, nodeA)
+	signalAndWaitExit(t, nodeB)
+	assertNoPanic(t, nodeA, "the amplification node A")
+	assertNoPanic(t, nodeB, "the amplification peer node B")
 }
