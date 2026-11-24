@@ -1,27 +1,63 @@
 ---
-phase: 01-spec-reference-and-decisions
-updated: 2026-11-19T16:30:00Z
+phase: 01
+review: 01-REVIEW.md
+titles: json
+findings:
+  - id: WR-01
+    severity: warning
+    disposition: open
+    title: "ADR 0005 claims a registry linkage its own target rows do not contain"
+  - id: WR-02
+    severity: warning
+    disposition: open
+    title: "review-repl-api.md quotes the non-public Spec, contradicting REVIEW §0's publication-safety claim"
+  - id: WR-03
+    severity: warning
+    disposition: open
+    title: "Repro test comments use stale ENG/RPL finding IDs that contradict the published reports"
+  - id: IN-01
+    severity: info
+    disposition: open
+    title: "S-HLC-07 status violates the registry's declared enum and overstates the decision level"
+  - id: IN-02
+    severity: info
+    disposition: open
+    title: "REVIEW §0's guard-mechanism description is stale against the committed repo"
+  - id: IN-03
+    severity: info
+    disposition: open
+    title: "test-audit.md appendix inventories evidence files that are not committed"
+  - id: IN-04
+    severity: info
+    disposition: open
+    title: "Engine repro test count drift, and one committed \"test\" has no assertion"
+  - id: IN-05
+    severity: info
+    disposition: open
+    title: "REVIEW §16 correspondence table is partial and hides an ID crossing"
+  - id: IN-06
+    severity: info
+    disposition: open
+    title: "G-xx references resolve in no committed document"
+open: 9
 total: 9
+recorded: 2026-11-24T21:55:22.659Z
 ---
 
-# Code Review Disposition — Phase 01
-
-One row per finding from `01-REVIEW.md`. Edit the **Disposition** column by hand when triaging
-(`open` / `fixed` / `skipped` / `deferred`); put the reason in **Source**. This ledger is rebuilt
-from REVIEW.md on each review run — decisions recorded here are preserved.
+# Phase 01: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | ADR 0005 claims S-08-family registry rows cite it; the rows do not. Fix: add ADR 0005 to the Links cells of S-HLC-04, S-ALG-RC-05, S-ALG-ST-06, S-PROTO-18 — or reword the ADR claim. |
-| WR-02 | warning | open | review-repl-api.md carries translated Spec quotes in ~12 places, contradicting REVIEW §0's evidence-clean claim. Owner call: tighten §0's wording (evidence is paraphrase-free except this file) or paraphrase the file. |
-| WR-03 | warning | open | Repro test comments carry stale ENG/RPL IDs that disagree with the published reports. Fix target is Phase 9 (D-01, M-list) or a targeted comment sweep; tests are verbatim evidence, so annotate rather than rewrite. |
-| IN-01 | info | open | S-HLC-07 status `accepted-deviation(02-RESEARCH A2)` stretches the registry enum's `<ADR|14.x>` grammar. Registry-internal wording fix (Phase 1 artifact). |
-| IN-02 | info | open | REVIEW §0 names `.git/info/exclude` as the guard; the committed `.gitignore` line is the real guard. Review-payload annotation, Phase 9 scope. |
-| IN-03 | info | open | test-audit appendix lists artifacts partly uncommitted (`*.out` ignored). Review-payload annotation, Phase 9 scope. |
-| IN-04 | info | open | Engine repro test count drift (18 vs 21) and one assertion-less "test". Review-payload annotation, Phase 9 scope. |
-| IN-05 | info | open | REVIEW §16 correspondence table omits R-10…R-16/A-02…A-06 with an R-15↔RPL-17 / R-16↔RPL-16 crossing. Phase 9 scope. |
-| IN-06 | info | open | ~20 G-xx citations resolve in no committed document. Phase 9 scope (registry/anotation decision). |
+| WR-01 | warning | open | - |
+| WR-02 | warning | open | - |
+| WR-03 | warning | open | - |
+| IN-01 | info | open | - |
+| IN-02 | info | open | - |
+| IN-03 | info | open | - |
+| IN-04 | info | open | - |
+| IN-05 | info | open | - |
+| IN-06 | info | open | - |
 
-**Legend:** `open` — seen, untriaged · `fixed` — resolved (record the commit) · `skipped` — will
-not fix (say why) · `deferred` — postponed (name the phase; Phase 9 doc-fix sweep D-01 is the
-natural home for the review-payload items above).
+Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
+Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
+Re-running the gate keeps every row it can. A row the current review no longer reports is kept and its Source cell flagged, so a finding does not leave this record silently. ONE exception: when a finding id is REUSED by a different finding, the earlier decision cannot keep a row — the id is taken — and it is dropped. A RECORDED decision (anything but `open`) is named on the console when that happens; a row still at `open` is replaced silently, because `open` records no decision to lose.
