@@ -23,7 +23,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -42,6 +41,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 )
 
 // Harness constants: the wait deadlines with their poll cadence, the
@@ -71,23 +71,6 @@ const (
 	standHelloInterval = 100 * time.Millisecond
 	standSyncInterval  = 200 * time.Millisecond
 	standStartupGate   = time.Second
-)
-
-// The scenario UDP port window: strictly below the kernel's ephemeral
-// range (ip_local_port_range starts at 32768 on Linux), so no other
-// test's :0 bind can ever be issued there — a scenario's picked port is
-// unreachable to every rival socket until its nodes bind it, which
-// removes structurally the pick-to-bind race every free-port picker in
-// the shared ephemeral pool suffers under the parallel burst (the T-11
-// flake-class-1 mitigation; it must survive the harness move intact).
-// The band [27900, 28100) below the window is RESERVED for the fixed
-// documented ports of README.md and docs/EXAMPLES.md: the doc blocks bind
-// constants, so scenario picks must start above the band to stay
-// collision-free against the verbatim doc tests.
-const (
-	scenarioPortLo    = 28100
-	scenarioPortHi    = 32678
-	scenarioPortTries = 32
 )
 
 // standBuildTarget is the package path the build-once builder compiles:
@@ -172,62 +155,29 @@ func standBinary(t *testing.T) string {
 	return bin
 }
 
-// portRegistry is the scenario tests' port registry: the mutex-guarded
-// in-use set keeps parallel scenario siblings from picking each other's
-// ports during the pick-to-bind window. Entries live until the owning
-// test's cleanup, so a scenario's ports stay reserved across its restarts
-// too.
-type portRegistry struct {
-	mu    sync.Mutex
-	taken map[int]bool
-}
-
-var scenarioPorts = portRegistry{taken: make(map[int]bool)} //nolint:gochecknoglobals // the shared claim map is the registry contract itself; test infrastructure moved wholesale (D-03).
-
-// scenarioUDPPort picks one free UDP port from the private window: try
-// random candidates until one binds (anything off-suite holding a port
-// there just skips that candidate), claim it in the registry while STILL
-// holding the bind — the claim-then-release order closes the sibling race
-// — then release and hand the port to the test until its cleanup.
+// scenarioUDPPort returns one free UDP port from the stand's band inside the
+// private port window (testutil.StandBand: [28100, 29100), strictly below
+// the kernel's ephemeral range, so no other test's :0 bind is ever issued
+// there). The window sits above the [27900, 28100) reserve held for the
+// fixed documented ports of README.md and docs/EXAMPLES.md, so a scenario
+// pick stays collision-free against the verbatim doc tests. The shared
+// allocator claims the candidate while its bind probe is held and keys the
+// claim by network:port, which is what removes the pick-to-bind race
+// structurally (the T-11 flake-class-1 mitigation); the band is disjoint
+// from every other socket package's, so separate test processes cannot
+// collide either.
 func scenarioUDPPort(t *testing.T) int {
 	t.Helper()
-	for range scenarioPortTries {
-		candidate := scenarioPortLo + rand.IntN(scenarioPortHi-scenarioPortLo) //nolint:gosec // G404: the port pick is a convenience draw, not a security function.
-		conn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", fmt.Sprintf("0.0.0.0:%d", candidate))
-		if err != nil {
-			continue
-		}
-		scenarioPorts.mu.Lock()
-		taken := scenarioPorts.taken[candidate]
-		if !taken {
-			scenarioPorts.taken[candidate] = true
-		}
-		scenarioPorts.mu.Unlock()
-		_ = conn.Close()
-		if taken {
-			continue
-		}
-		t.Cleanup(func() {
-			scenarioPorts.mu.Lock()
-			delete(scenarioPorts.taken, candidate)
-			scenarioPorts.mu.Unlock()
-		})
-		return candidate
-	}
-	t.Fatalf("no free UDP port in the private window [%d, %d) after %d tries", scenarioPortLo, scenarioPortHi, scenarioPortTries)
-	return 0
+	return testutil.UDPPort(t, testutil.StandBand())
 }
 
-// freeTCPPort picks one free TCP port: bind a throwaway listener to :0,
-// read its port, close it.
+// freeTCPPort returns one free TCP port from the same stand band: the gRPC
+// and metrics listeners had the same pick-to-bind window, so they use the
+// same claim-while-held allocator (a TCP pick may share its number with a
+// UDP pick — the registry key includes the network).
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("bind throwaway port-picking listener: %v", err)
-	}
-	defer func() { _ = listener.Close() }()
-	return listener.Addr().(*net.TCPAddr).Port
+	return testutil.TCPPort(t, testutil.StandBand())
 }
 
 // logProbeSocket binds a wildcard udp4 socket with SO_REUSEADDR and

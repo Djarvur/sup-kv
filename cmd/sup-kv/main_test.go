@@ -46,6 +46,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 
 	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 )
 
 // Smoke-test constants: the wait deadlines with their poll cadence, the
@@ -124,29 +125,23 @@ func smokeBinary(t *testing.T) string {
 	return smokeBin
 }
 
-// freeTCPPort picks one free TCP port: bind a throwaway listener to :0,
-// read its port, close it.
+// freeTCPPort returns one free TCP port from cmd/sup-kv's band inside the
+// private port window (testutil.CmdBand: [29100, 30100), strictly below the
+// kernel's ephemeral range, so no other test's :0 bind is ever issued there
+// and the band is disjoint from every sibling package's). The gRPC and
+// metrics listeners had the same pick-to-bind window as the UDP slot; the
+// shared allocator claims the candidate while its bind probe is held, so no
+// parallel test in this process can take it between pick and bind.
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("bind throwaway port-picking listener: %v", err)
-	}
-	defer func() { _ = listener.Close() }()
-	return listener.Addr().(*net.TCPAddr).Port
+	return testutil.TCPPort(t, testutil.CmdBand())
 }
 
-// freeUDPPort picks one free UDP port: bind a throwaway wildcard socket to
-// :0, read its port, close it (the smoke_test.go picker).
+// freeUDPPort returns one free UDP port from the same cmd/sup-kv band, via
+// the shared claim-while-held allocator (testutil.UDPPort).
 func freeUDPPort(t *testing.T) int {
 	t.Helper()
-	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(t.Context(), "udp4", "0.0.0.0:0")
-	if err != nil {
-		t.Fatalf("bind throwaway port-picking socket: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	return conn.LocalAddr().(*net.UDPAddr).Port
+	return testutil.UDPPort(t, testutil.CmdBand())
 }
 
 // waitFor polls cond every pollEvery until it holds or the deadline — the

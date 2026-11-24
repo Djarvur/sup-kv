@@ -22,78 +22,28 @@ package main_test
 
 import (
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"os/exec"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/Djarvur/sup-kv/internal/testutil"
 )
 
-// The probe's UDP port window: strictly below the kernel's ephemeral range
-// (ip_local_port_range starts at 32768 on Linux), so no other test's :0
-// bind can ever be issued there — a picked port is unreachable to every
-// rival socket until the probe binds it, which removes structurally the
-// pick-to-bind race every free-port picker in the shared ephemeral pool
-// suffers under the parallel burst (the T-11 flake-class-1 mitigation).
-// The band [27900, 28100) below the window is RESERVED for the fixed
-// documented ports of README.md and docs/EXAMPLES.md: the doc blocks bind
-// constants, so probe picks must start above the band to stay
-// collision-free against the verbatim doc tests. The two-process scenario
-// suite that shared this registry moved to internal/stand (plan 02-02) —
-// the quickstart broadcast probe is this window's remaining cmd/sup-kv
-// consumer.
-const (
-	scenarioPortLo    = 28100
-	scenarioPortHi    = 32678
-	scenarioPortTries = 32
-)
-
-// portRegistry is the port picks' claim registry: the mutex-guarded
-// in-use set keeps parallel siblings from picking each other's ports
-// during the pick-to-bind window. Entries live until the owning test's
-// cleanup.
-type portRegistry struct {
-	mu    sync.Mutex
-	taken map[int]bool
-}
-
-var probePorts = portRegistry{taken: make(map[int]bool)}
-
-// scenarioUDPPort picks one free UDP port from the private window: try
-// random candidates until one binds (anything off-suite holding a port
-// there just skips that candidate), claim it in the registry while STILL
-// holding the bind — the claim-then-release order closes the sibling race
-// — then release and hand the port to the test until its cleanup.
+// scenarioUDPPort returns one free UDP port from cmd/sup-kv's band inside
+// the private port window (testutil.CmdBand: [29100, 30100), strictly below
+// the kernel's ephemeral range, so no other test's :0 bind is ever issued
+// there). The band sits above the [27900, 28100) reserve held for the fixed
+// documented ports of README.md and docs/EXAMPLES.md, so a probe pick stays
+// collision-free against the verbatim doc tests. The shared allocator claims
+// the candidate while its bind probe is held, so a parallel probe sibling
+// cannot take the port between pick and bind (the T-11 flake-class-1
+// mitigation; the stand's scenarios run in their own disjoint band).
 func scenarioUDPPort(t *testing.T) int {
 	t.Helper()
-	for range scenarioPortTries {
-		candidate := scenarioPortLo + rand.IntN(scenarioPortHi-scenarioPortLo)
-		conn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", fmt.Sprintf("0.0.0.0:%d", candidate))
-		if err != nil {
-			continue
-		}
-		probePorts.mu.Lock()
-		taken := probePorts.taken[candidate]
-		if !taken {
-			probePorts.taken[candidate] = true
-		}
-		probePorts.mu.Unlock()
-		_ = conn.Close()
-		if taken {
-			continue
-		}
-		t.Cleanup(func() {
-			probePorts.mu.Lock()
-			delete(probePorts.taken, candidate)
-			probePorts.mu.Unlock()
-		})
-		return candidate
-	}
-	t.Fatalf("no free UDP port in the private window [%d, %d) after %d tries", scenarioPortLo, scenarioPortHi, scenarioPortTries)
-	return 0
+	return testutil.UDPPort(t, testutil.CmdBand())
 }
 
 // probeAttempts bounds the fresh-port retries when a probe cannot even
