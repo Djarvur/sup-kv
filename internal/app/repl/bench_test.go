@@ -1,11 +1,14 @@
 package repl_test
 
-// The XPORT-06 key-count cost gate is a deterministic operation count: the
-// two inbound sync handlers must make a fixed number of consumer-seam store
-// calls per datagram at 50 000 stored keys exactly as at 1 000. Counting
-// operations instead of nanoseconds removes the host-load sensitivity the
-// wall-clock ratio gate had; the ns/op benchmarks in this file remain
-// measurement only (`make bench`/`make perf`), never the assertion.
+// The XPORT-06/PERF-05 cost gates in this file are deterministic operation
+// counts: the inbound sync handlers must make a fixed number of consumer-seam
+// store calls per datagram at 50 000 stored keys exactly as at 1 000, an idle
+// event-loop iteration must inspect zero pending entries at any pending-set
+// size, and a fresh-key local write or inbound replication must inspect zero
+// too. Counting operations instead of nanoseconds removes the host-load
+// sensitivity the two old wall-clock ratio gates had; the ns/op benchmarks in
+// this file remain measurement only (`make bench`/`make perf`), never the
+// assertion.
 
 import (
 	"fmt"
@@ -307,24 +310,21 @@ func assertSeededVersions(t *testing.T, name string, keys int, head []port.SyncE
 }
 
 // benchSmallUnacked and benchLargeUnacked are XPORT-02(1)'s acceptance pair:
-// the event-loop iteration cost at 10 and 10 000 unacked records may differ
-// by at most 2x.
+// the pending-entry inspection count per operation must be identical at 10 and
+// at 10 000 unacked records.
 const (
 	benchSmallUnacked = 10
 	benchLargeUnacked = 10_000
-
-	// benchUnackedMaxRatio is XPORT-02(1)'s hard acceptance bound, never
-	// relaxed.
-	benchUnackedMaxRatio = 2.0
 )
 
-// benchUnackedFixture builds the core under measurement with unacked pending
-// entries from one author and one known peer, so the retransmit scanner is
-// armed while every retry deadline stays in the future: the measured Advance
-// never emits, and the pending entries hold no Data by construction.
-func benchUnackedFixture(tb testing.TB, unacked int) *repl.Core {
+// newBenchPendingCore builds a core over a real store with unacked entries
+// from one author and one known peer, so the retransmit scanner is armed
+// while every retry deadline stays in the future: an idle Advance never
+// emits, and the entries hold no Data by construction. The peer also lets the
+// write path broadcast, which is the shape the write and apply gates measure.
+func newBenchPendingCore(tb testing.TB, unacked int) (*repl.Core, *stateStore) {
 	tb.Helper()
-	core, _ := newTestCore()
+	core, st := newTestCore()
 	var out port.Outbox
 	core.Advance(at(0), &out) // startup Hello + listing, before the measured loop
 	out.Drain()
@@ -336,6 +336,13 @@ func benchUnackedFixture(tb testing.TB, unacked int) *repl.Core {
 		core.NotifyLocalWrite(at(0), key, rec, core.PeerIDs(), &out)
 		out.Drain()
 	}
+	return core, st
+}
+
+// benchUnackedFixture is newBenchPendingCore when only the core is needed.
+func benchUnackedFixture(tb testing.TB, unacked int) *repl.Core {
+	tb.Helper()
+	core, _ := newBenchPendingCore(tb, unacked)
 	return core
 }
 
@@ -343,7 +350,9 @@ func benchUnackedFixture(tb testing.TB, unacked int) *repl.Core {
 // UnackedStats and PeerCount — over pending sets of 10 and 10 000 records.
 // The iteration is deliberately at a fixed virtual instant with every retry
 // deadline in the future, so the measured work is the timer/deadline/gauges
-// path only: no retransmission, no egress drain, no record lookup.
+// path only: no retransmission, no egress drain, no record lookup. The ns/op
+// number is measurement only: the flatness claim is the operation count in
+// TestCore_unackedCostFlat.
 func BenchmarkCoreEventLoop(b *testing.B) {
 	for _, unacked := range []int{benchSmallUnacked, benchLargeUnacked} {
 		b.Run(fmt.Sprintf("unacked=%d", unacked), func(b *testing.B) {
@@ -353,14 +362,13 @@ func BenchmarkCoreEventLoop(b *testing.B) {
 }
 
 // benchCoreEventLoop is the shared body of the event-loop benchmark and the
-// flatness gate's measurement.
+// idle flatness gate's fixture.
 func benchCoreEventLoop(b *testing.B, unacked int) {
 	b.Helper()
 	core := benchUnackedFixture(b, unacked)
 	now := at(time.Nanosecond)
 	var out port.Outbox
 	b.ReportAllocs()
-	b.ReportMetric(float64(unacked), "unacked")
 	b.ResetTimer()
 	for range b.N {
 		core.Advance(now, &out)
@@ -368,44 +376,153 @@ func benchCoreEventLoop(b *testing.B, unacked int) {
 		_ = core.UnackedStats(now)
 		_ = core.PeerCount()
 	}
+	// ReportMetric after ResetTimer: ResetTimer clears the extra metrics, so a
+	// metric reported before it would silently vanish from the result line.
+	b.ReportMetric(float64(unacked), "unacked")
 }
 
-// TestCore_unackedCostFlat is XPORT-02(1)'s executable acceptance: one
-// event-loop iteration costs at most 2x more at 10 000 unacked records than
-// at 10. Warm-up runs precede every measurement; a zero measurement fails by
-// name instead of skipping, and the failure names both ns/op values and the
-// ratio. The test stays sequential (no t.Parallel): it is a wall-clock ratio
-// gate, and running it beside the sibling benchmark test would measure
-// scheduler contention instead of the core.
-//
-//nolint:paralleltest // Wall-clock ratio gate: a parallel sibling benchmark would contaminate the measurement.
+// TestCore_unackedCostFlat is XPORT-02(1)'s deterministic acceptance: an idle
+// event-loop iteration inspects zero pending entries, at 10 and at 10 000
+// pending records. Advance pops only due heap items, so the count is flat by
+// construction; the gate makes a future whole-set scan on the timer path fail
+// by name instead of merely costing nanoseconds. No testing.Benchmark and no
+// wall clock are involved, so host load cannot move the verdict.
 func TestCore_unackedCostFlat(t *testing.T) {
-	measure := func(unacked int) float64 {
-		t.Helper()
-		testing.Benchmark(func(b *testing.B) {
-			b.Helper()
-			benchCoreEventLoop(b, unacked)
-		}) // warm-up
-		result := testing.Benchmark(func(b *testing.B) {
-			b.Helper()
-			benchCoreEventLoop(b, unacked)
-		})
-		if result.N == 0 {
-			t.Fatalf("unacked=%d: benchmark ran zero iterations", unacked)
-		}
-		nsPerOp := float64(result.NsPerOp())
-		if nsPerOp <= 0 {
-			t.Fatalf("unacked=%d: measured %v ns/op, want a positive measurement", unacked, result.NsPerOp())
-		}
-		return nsPerOp
+	t.Parallel()
+	small := idleAdvanceVisits(t, benchSmallUnacked)
+	large := idleAdvanceVisits(t, benchLargeUnacked)
+	assertZeroVisits(t, "an idle event-loop iteration", benchSmallUnacked, benchIterations, small)
+	assertZeroVisits(t, "an idle event-loop iteration", benchLargeUnacked, benchIterations, large)
+	if small != large {
+		t.Fatalf("an idle event-loop iteration inspected %d pending entries at %d unacked and %d at %d, want the identical count — the timer path must not scale with the pending set (XPORT-02)",
+			small, benchSmallUnacked, large, benchLargeUnacked)
 	}
-	small := measure(benchSmallUnacked)
-	large := measure(benchLargeUnacked)
-	ratio := large / small
-	t.Logf("core event loop: unacked=%d = %.1f ns/op, unacked=%d = %.1f ns/op, ratio %.2f",
-		benchSmallUnacked, small, benchLargeUnacked, large, ratio)
-	if ratio > benchUnackedMaxRatio {
-		t.Fatalf("core event loop: unacked=%d = %.1f ns/op vs unacked=%d = %.1f ns/op (ratio %.2f > %.1f) — iteration cost scales with the unacked set (XPORT-02)",
-			benchLargeUnacked, large, benchSmallUnacked, small, ratio, benchUnackedMaxRatio)
+}
+
+// idleAdvanceVisits runs benchIterations idle Advance+Drain iterations at one
+// fixed virtual instant — every retry deadline is still in the future — and
+// returns the pending-entry inspection delta.
+func idleAdvanceVisits(t *testing.T, unacked int) uint64 {
+	t.Helper()
+	core := benchUnackedFixture(t, unacked)
+	now := at(time.Nanosecond)
+	before := core.PendingVisits()
+	var out port.Outbox
+	for range benchIterations {
+		core.Advance(now, &out)
+		out.Drain()
+	}
+	return core.PendingVisits() - before
+}
+
+// TestCore_notifyWriteCostFlat is the write-path tripwire: benchIterations
+// fresh-key local writes inspect zero pending entries at both set sizes while
+// the pending count grows by exactly benchIterations. It passes on arrival —
+// 08-02's TestCore_pendingVisitsFreshKeyWrite is the RED evidence for this
+// path — and exists to stop a whole-set scan from returning on the write
+// path.
+func TestCore_notifyWriteCostFlat(t *testing.T) {
+	t.Parallel()
+	small := notifyWriteVisits(t, benchSmallUnacked)
+	large := notifyWriteVisits(t, benchLargeUnacked)
+	assertZeroVisits(t, "a fresh-key local write", benchSmallUnacked, benchIterations, small)
+	assertZeroVisits(t, "a fresh-key local write", benchLargeUnacked, benchIterations, large)
+	if small != large {
+		t.Fatalf("a fresh-key local write inspected %d pending entries at %d unacked and %d at %d, want the identical count — the write path must be key-local at any set size (XPORT-02/PERF-05)",
+			small, benchSmallUnacked, large, benchLargeUnacked)
+	}
+}
+
+// notifyWriteVisits drives benchIterations fresh-key writes through
+// NotifyLocalWrite and returns the pending-entry inspection delta, failing
+// unless the pending count grew by exactly that many entries.
+func notifyWriteVisits(t *testing.T, unacked int) uint64 {
+	t.Helper()
+	core := benchUnackedFixture(t, unacked)
+	beforeVisits := core.PendingVisits()
+	beforeCount := core.UnackedStats(at(0)).Count
+	var out port.Outbox
+	for i := range benchIterations {
+		key := fmt.Sprintf("bench/fresh-%06d", i)
+		rec := storage.Record{Version: version.PackVersion(testNowMs+int64(i), 0, localID)}
+		core.NotifyLocalWrite(at(0), key, rec, core.PeerIDs(), &out)
+		out.Drain()
+	}
+	if got := core.UnackedStats(at(0)).Count - beforeCount; got != benchIterations {
+		t.Fatalf("benchIterations fresh-key writes over %d unacked records grew the pending count by %d, want %d", unacked, got, benchIterations)
+	}
+	return core.PendingVisits() - beforeVisits
+}
+
+// TestCore_applyRemoteCostFlat is the apply-path tripwire: benchIterations
+// inbound DataReplication datagrams for fresh keys inspect zero pending
+// entries at both set sizes, and every apply installs its record. It passes
+// on arrival — 08-02's TestCore_pendingVisitsFreshKeyApply is the RED
+// evidence for this path — and exists to stop the whole-set displacement scan
+// from returning.
+func TestCore_applyRemoteCostFlat(t *testing.T) {
+	t.Parallel()
+	small := applyRemoteVisits(t, benchSmallUnacked)
+	large := applyRemoteVisits(t, benchLargeUnacked)
+	assertZeroVisits(t, "an inbound replication for a fresh key", benchSmallUnacked, benchIterations, small)
+	assertZeroVisits(t, "an inbound replication for a fresh key", benchLargeUnacked, benchIterations, large)
+	if small != large {
+		t.Fatalf("an inbound replication for a fresh key inspected %d pending entries at %d unacked and %d at %d, want the identical count — the apply path must be key-local at any set size (XPORT-02/PERF-05)",
+			small, benchSmallUnacked, large, benchLargeUnacked)
+	}
+}
+
+// applyRemoteVisits drives benchIterations wire-valid DataReplication
+// datagrams for fresh keys through the production entry point and returns the
+// pending-entry inspection delta. replFrom recomputes the record checksum, so
+// the validation pipeline accepts each datagram instead of discarding it as
+// malformed, and the store read proves the apply really landed.
+func applyRemoteVisits(t *testing.T, unacked int) uint64 {
+	t.Helper()
+	core, st := newBenchPendingCore(t, unacked)
+	before := core.PendingVisits()
+	var out port.Outbox
+	for i := range benchIterations {
+		key := fmt.Sprintf("bench/apply-%06d", i)
+		ver := version.PackVersion(testNowMs+int64(unacked)+int64(i)+1, 0, peerID1)
+		core.HandleDatagram(at(0), replFrom(peerID1, key, storage.Record{Version: ver, Data: []byte("v")}), &out)
+		out.Drain()
+		installed, err := st.store.Get(key)
+		if err != nil || installed.Version != ver {
+			t.Fatalf("apply %d of %q over %d unacked records: store holds (%x, %v), want the applied version %x", i, key, unacked, installed.Version[:], err, ver[:])
+		}
+	}
+	return core.PendingVisits() - before
+}
+
+// TestCore_pendingVisitsRepeatedKey proves the visit counter is connected to
+// the real write loops: a newer-version repeated write inspects exactly two
+// pending entries — the tracked-version guard read and the supersession read —
+// and documents the only nonzero hot-path count.
+func TestCore_pendingVisitsRepeatedKey(t *testing.T) {
+	t.Parallel()
+	core := benchUnackedFixture(t, benchSmallUnacked)
+	key := "bench/repeat"
+	var out port.Outbox
+	older := version.PackVersion(testNowMs, 0, localID)
+	core.NotifyLocalWrite(at(0), key, storage.Record{Version: older, Data: []byte("one")}, core.PeerIDs(), &out)
+	out.Drain()
+	before := core.PendingVisits()
+	newer := version.PackVersion(testNowMs+1, 0, localID)
+	core.NotifyLocalWrite(at(0), key, storage.Record{Version: newer, Data: []byte("two")}, core.PeerIDs(), &out)
+	out.Drain()
+	if got := core.PendingVisits() - before; got != 2 {
+		t.Fatalf("a newer-version repeated write over %d unacked records inspected %d pending entries, want exactly 2 (the tracked-version guard read plus the supersession read) — a count of 0 would mean the counter is not wired to the real write loops",
+			benchSmallUnacked, got)
+	}
+}
+
+// assertZeroVisits fails naming the claim, the operation count, the set size
+// and the observed pending-entry inspections.
+func assertZeroVisits(t *testing.T, claim string, unacked, ops int, got uint64) {
+	t.Helper()
+	if got != 0 {
+		t.Fatalf("%s over %d unacked records inspected %d pending entries across %d operations, want 0 (XPORT-02/PERF-05: the path must be key-local at any set size)",
+			claim, unacked, got, ops)
 	}
 }
