@@ -8,7 +8,8 @@ package repl_test
 // too. Counting operations instead of nanoseconds removes the host-load
 // sensitivity the two old wall-clock ratio gates had; the ns/op benchmarks in
 // this file remain measurement only (`make bench`/`make perf`), never the
-// assertion.
+// assertion. The one wall-clock ratio left is PERF-05's paired absent/live
+// test, which runs only under `make perf`.
 
 import (
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 )
 
 const (
@@ -42,11 +44,16 @@ const (
 	// 50 000 records stays cheap, large enough to be a real record.
 	benchDataBytes = 16
 
-	// benchIterations is the fixed operation count the key-count gate runs:
-	// large enough that a per-key loop over the store would be visible in the
-	// count, small enough that the gate finishes in about a second under the
-	// race detector.
+	// benchIterations is the fixed operation count the deterministic gates
+	// run: large enough that a per-key loop over the store or the pending set
+	// would be visible in the count, small enough that the gate finishes in
+	// about a second under the race detector.
 	benchIterations = 1_000
+
+	// benchNotifyValueBytes is PERF-05's absent/live value size: 1 KiB, the
+	// size D-05 names, large enough that the notification's Data clone is a
+	// real share of the per-op cost.
+	benchNotifyValueBytes = 1 << 10
 )
 
 // benchFixture builds the core under measurement over a store seeded with
@@ -240,7 +247,8 @@ func TestCore_keyCountCostFlat(t *testing.T) {
 		assertStoreCalls(t, handler.name, benchSmallKeys, small, handler.want)
 		assertStoreCalls(t, handler.name, benchLargeKeys, large, handler.want)
 		if small != large {
-			t.Fatalf("%s: %d stored keys made %+v seam calls, %d stored keys made %+v — the vector must be identical at both sizes; a difference is a per-key loop over the store (XPORT-06)",
+			t.Fatalf("%s: %d stored keys made %+v seam calls, %d stored keys made %+v — "+
+				"the vector must be identical at both sizes; a difference is a per-key loop over the store (XPORT-06)",
 				handler.name, benchSmallKeys, small, benchLargeKeys, large)
 		}
 	}
@@ -391,10 +399,11 @@ func TestCore_unackedCostFlat(t *testing.T) {
 	t.Parallel()
 	small := idleAdvanceVisits(t, benchSmallUnacked)
 	large := idleAdvanceVisits(t, benchLargeUnacked)
-	assertZeroVisits(t, "an idle event-loop iteration", benchSmallUnacked, benchIterations, small)
-	assertZeroVisits(t, "an idle event-loop iteration", benchLargeUnacked, benchIterations, large)
+	assertZeroVisits(t, "an idle event-loop iteration", benchSmallUnacked, small)
+	assertZeroVisits(t, "an idle event-loop iteration", benchLargeUnacked, large)
 	if small != large {
-		t.Fatalf("an idle event-loop iteration inspected %d pending entries at %d unacked and %d at %d, want the identical count — the timer path must not scale with the pending set (XPORT-02)",
+		t.Fatalf("an idle event-loop iteration inspected %d pending entries at %d unacked and %d at %d, "+
+			"want the identical count — the timer path must not scale with the pending set (XPORT-02)",
 			small, benchSmallUnacked, large, benchLargeUnacked)
 	}
 }
@@ -425,10 +434,11 @@ func TestCore_notifyWriteCostFlat(t *testing.T) {
 	t.Parallel()
 	small := notifyWriteVisits(t, benchSmallUnacked)
 	large := notifyWriteVisits(t, benchLargeUnacked)
-	assertZeroVisits(t, "a fresh-key local write", benchSmallUnacked, benchIterations, small)
-	assertZeroVisits(t, "a fresh-key local write", benchLargeUnacked, benchIterations, large)
+	assertZeroVisits(t, "a fresh-key local write", benchSmallUnacked, small)
+	assertZeroVisits(t, "a fresh-key local write", benchLargeUnacked, large)
 	if small != large {
-		t.Fatalf("a fresh-key local write inspected %d pending entries at %d unacked and %d at %d, want the identical count — the write path must be key-local at any set size (XPORT-02/PERF-05)",
+		t.Fatalf("a fresh-key local write inspected %d pending entries at %d unacked and %d at %d, "+
+			"want the identical count — the write path must be key-local at any set size (XPORT-02/PERF-05)",
 			small, benchSmallUnacked, large, benchLargeUnacked)
 	}
 }
@@ -464,10 +474,11 @@ func TestCore_applyRemoteCostFlat(t *testing.T) {
 	t.Parallel()
 	small := applyRemoteVisits(t, benchSmallUnacked)
 	large := applyRemoteVisits(t, benchLargeUnacked)
-	assertZeroVisits(t, "an inbound replication for a fresh key", benchSmallUnacked, benchIterations, small)
-	assertZeroVisits(t, "an inbound replication for a fresh key", benchLargeUnacked, benchIterations, large)
+	assertZeroVisits(t, "an inbound replication for a fresh key", benchSmallUnacked, small)
+	assertZeroVisits(t, "an inbound replication for a fresh key", benchLargeUnacked, large)
 	if small != large {
-		t.Fatalf("an inbound replication for a fresh key inspected %d pending entries at %d unacked and %d at %d, want the identical count — the apply path must be key-local at any set size (XPORT-02/PERF-05)",
+		t.Fatalf("an inbound replication for a fresh key inspected %d pending entries at %d unacked and %d at %d, "+
+			"want the identical count — the apply path must be key-local at any set size (XPORT-02/PERF-05)",
 			small, benchSmallUnacked, large, benchLargeUnacked)
 	}
 }
@@ -512,17 +523,158 @@ func TestCore_pendingVisitsRepeatedKey(t *testing.T) {
 	core.NotifyLocalWrite(at(0), key, storage.Record{Version: newer, Data: []byte("two")}, core.PeerIDs(), &out)
 	out.Drain()
 	if got := core.PendingVisits() - before; got != 2 {
-		t.Fatalf("a newer-version repeated write over %d unacked records inspected %d pending entries, want exactly 2 (the tracked-version guard read plus the supersession read) — a count of 0 would mean the counter is not wired to the real write loops",
+		t.Fatalf("a newer-version repeated write over %d unacked records inspected %d pending entries, "+
+			"want exactly 2 (the tracked-version guard read plus the supersession read) — a count of 0 would "+
+			"mean the counter is not wired to the real write loops",
 			benchSmallUnacked, got)
 	}
 }
 
-// assertZeroVisits fails naming the claim, the operation count, the set size
-// and the observed pending-entry inspections.
-func assertZeroVisits(t *testing.T, claim string, unacked, ops int, got uint64) {
+// assertZeroVisits fails naming the claim, the run length, the set size and
+// the observed pending-entry inspections.
+func assertZeroVisits(t *testing.T, claim string, unacked int, got uint64) {
 	t.Helper()
 	if got != 0 {
 		t.Fatalf("%s over %d unacked records inspected %d pending entries across %d operations, want 0 (XPORT-02/PERF-05: the path must be key-local at any set size)",
-			claim, unacked, got, ops)
+			claim, unacked, got, benchIterations)
+	}
+}
+
+// BenchmarkNotifyWriteCost measures PERF-05's two write-notification arms in
+// one benchmark. Conditions, stated once: benchLargeUnacked entries (10 000)
+// of 1 KiB records are pending before the timer starts; the absent arm knows
+// no peer, so its pending set grows by one entry per iteration and every
+// write broadcasts to nobody; the live arm knows peerID1 and follows each
+// fresh-key write with that key's Ack, so the measured entry drains and the
+// pending set stays at the seeded size. pending-visits/op is 0 in both arms
+// after XPORT-02 — the arms differ in the broadcast/Ack work, not in a
+// pending scan. The ns/op number is measurement only; D-05's bound lives in
+// TestPerfAbsentPeerWriteCost under `make perf`.
+func BenchmarkNotifyWriteCost(b *testing.B) {
+	b.Run("absent", func(b *testing.B) {
+		benchNotifyWriteAbsent(b)
+	})
+	b.Run("live", func(b *testing.B) {
+		benchNotifyWriteLive(b)
+	})
+}
+
+// benchNotifyWriteAbsent drives the no-peer arm: one fresh-key
+// NotifyLocalWrite per iteration, with the pending set growing for the whole
+// run (that growth is the absent-peer condition under test). It returns the
+// measured pending-visits/op.
+func benchNotifyWriteAbsent(b *testing.B) float64 {
+	b.Helper()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	out.Drain()
+	seedBenchPending(b, core, benchLargeUnacked, &out)
+	before := core.PendingVisits()
+	data := make([]byte, benchNotifyValueBytes)
+	ver := version.PackVersion(testNowMs, 0, localID)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		key := fmt.Sprintf("bench/notify-absent-%06d", i)
+		core.NotifyLocalWrite(at(0), key, storage.Record{Version: ver, Data: data}, core.PeerIDs(), &out)
+		out.Drain()
+	}
+	b.StopTimer()
+	if got := core.UnackedStats(at(0)).Count; got != benchLargeUnacked+b.N {
+		b.Fatalf("absent arm: pending count = %d after %d writes, want the seeded %d plus one per write (%d)", got, b.N, benchLargeUnacked, benchLargeUnacked+b.N)
+	}
+	return reportVisitsPerOp(b, core.PendingVisits()-before)
+}
+
+// benchNotifyWriteLive drives the one-known-peer arm: one fresh-key
+// NotifyLocalWrite followed by that key's Ack from peerID1, so the measured
+// entry drains and the seeded pending set stays fixed. Acks travel through the
+// same driver-goroutine calls, so the measurement stays sequential. It
+// returns the measured pending-visits/op.
+func benchNotifyWriteLive(b *testing.B) float64 {
+	b.Helper()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out)
+	out.Drain()
+	seedBenchPending(b, core, benchLargeUnacked, &out)
+	before := core.PendingVisits()
+	data := make([]byte, benchNotifyValueBytes)
+	ver := version.PackVersion(testNowMs, 0, localID)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		key := fmt.Sprintf("bench/notify-live-%06d", i)
+		core.NotifyLocalWrite(at(0), key, storage.Record{Version: ver, Data: data}, core.PeerIDs(), &out)
+		core.HandleDatagram(at(0), ackFrom(peerID1, key, ver), &out)
+		out.Drain()
+	}
+	b.StopTimer()
+	if got := core.UnackedStats(at(0)).Count; got != benchLargeUnacked {
+		b.Fatalf("live arm: pending count = %d after %d write+Ack pairs, want the seeded %d — the measured entry must drain, never accumulate", got, b.N, benchLargeUnacked)
+	}
+	return reportVisitsPerOp(b, core.PendingVisits()-before)
+}
+
+// seedBenchPending seeds core with unacked pending entries of 1 KiB records,
+// one per fresh key, through the local-write path — the PERF-05 fixture. The
+// versions stay inside the fixture's domain (millisecond offset, counter 0)
+// and under the 60 s drift-warn window.
+func seedBenchPending(tb testing.TB, core *repl.Core, unacked int, out *port.Outbox) {
+	tb.Helper()
+	data := make([]byte, benchNotifyValueBytes)
+	for i := range unacked {
+		key := fmt.Sprintf("bench/seed-%06d", i)
+		ver := version.PackVersion(testNowMs+int64(i), 0, localID)
+		core.NotifyLocalWrite(at(0), key, storage.Record{Version: ver, Data: data}, core.PeerIDs(), out)
+		out.Drain()
+	}
+}
+
+// reportVisitsPerOp reports visits/b.N as pending-visits/op and returns it;
+// b.N is never zero for a benchmark body the framework ran.
+func reportVisitsPerOp(b *testing.B, visits uint64) float64 {
+	b.Helper()
+	perOp := float64(visits) / float64(b.N)
+	b.ReportMetric(perOp, "pending-visits/op")
+	return perOp
+}
+
+// TestPerfAbsentPeerWriteCost is PERF-05's paired ratio gate (D-05): the
+// absent-peer write path may cost at most testutil.PerfAbsentPeerRatio times
+// the live-peer path, both measured back to back in this one process at the
+// stated conditions (10 000 pending 1 KiB records, one known peer for the live
+// arm). It runs only under `make perf`; inside `make test` it SKIPs, because a
+// wall-clock ratio belongs to the operator-facing threshold run and never to
+// the always-on gate.
+//
+//nolint:paralleltest // Wall-clock ratio gate: both arms are measured back to back in one process, so a parallel sibling would contaminate the numbers.
+func TestPerfAbsentPeerWriteCost(t *testing.T) {
+	testutil.RequirePerf(t)
+	block := testutil.HardwareBlock()
+	t.Log(block)
+	var absentVisits, liveVisits float64
+	absent := testing.Benchmark(func(b *testing.B) {
+		b.Helper()
+		absentVisits = benchNotifyWriteAbsent(b)
+	})
+	live := testing.Benchmark(func(b *testing.B) {
+		b.Helper()
+		liveVisits = benchNotifyWriteLive(b)
+	})
+	absentNs := float64(absent.NsPerOp())
+	liveNs := float64(live.NsPerOp())
+	if liveNs <= 0 {
+		t.Fatalf("PERF-05 live-peer arm measured %.1f ns/op, want a positive measurement — the ratio would be meaningless", liveNs)
+	}
+	ratio := absentNs / liveNs
+	t.Logf("PERF-05 absent-peer write cost: absent %.1f ns/op (%.2f pending-visits/op), live %.1f ns/op (%.2f pending-visits/op), ratio %.2f (bound %.1f) [unacked=%d, 1 KiB records, %s]",
+		absentNs, absentVisits, liveNs, liveVisits, ratio, testutil.PerfAbsentPeerRatio, benchLargeUnacked, block)
+	if ratio > testutil.PerfAbsentPeerRatio {
+		t.Fatalf("PERF-05 absent-peer write cost = %.1f ns/op vs live %.1f ns/op (ratio %.2f > %.1f) [unacked=%d, 1 KiB records, D-05]",
+			absentNs, liveNs, ratio, testutil.PerfAbsentPeerRatio, benchLargeUnacked)
 	}
 }
