@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 9
+current_plan: 10
 status: executing
-stopped_at: Completed 08-08-PLAN.md
-last_updated: "2026-11-24T19:28:30.747Z"
+stopped_at: Completed 08-09-PLAN.md
+last_updated: "2026-11-24T19:43:13.726Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: e1a056481c29f0f2b4456d8427d2462952f668e4
+state_head: 8ee2999206c31345d6d48645cd61a7ebbf908052
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 91
+  completed_plans: 92
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 9
+Current Plan: 10
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -152,6 +152,7 @@ Progress: [████░░░░░░] 44%
 | Phase 08 P03 | 7min | 2 tasks | 2 files |
 | Phase 8 P7 | 15min | 3 tasks | 3 files |
 | Phase 08 P08 | 6min | 3 tasks | 2 files |
+| Phase 08 P09 | 13min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -505,6 +506,9 @@ Recent decisions affecting current work:
 - [Phase 08]: Confirmation-latency profiles are data over one body: only the knobs and dump implementation differ, so the fast arm's cited 1 ms/50 ms + in-memory-dump conditions cannot drift.
 - [Phase 08]: TestPerfFastProfileLatency wraps the shared body, not the benchmark table, because testing.Benchmark's Extra map is per-B: sub-benchmark metrics never reach the parent result.
 - [Phase 08]: All four benchmark metrics are required by key name in the gate; the 25 ms/100 ms fast-profile bounds stay the documented values and are not retuned to the measured 2.64 ms/4.82 ms.
+- [Phase 08]: The 30 s first-wait budget is a harness start budget, not a product bound: the eight-slot spawn serializer lands first, servingDeadline still governs running-node polls, and exceeding 30 s is a finding rather than a reason to raise it.
+- [Phase 08]: exitStatus returns (bool, error) (revive's error-last rule) and the stand launcher dropped its proven-unused env parameter; no behavior changed.
+- [Phase 08]: A dead child is diagnosed through the error-returning awaitNodeServing core with a fatal requireNodeServing wrapper; TestMain_readinessDiagnosis asserts the first-poll diagnosis directly.
 
 ### Pending Todos
 
@@ -527,7 +531,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-24T19:28:30.329Z
-Stopped at: Completed 08-08-PLAN.md
+Last session: 2026-11-24T19:43:13.294Z
+Stopped at: Completed 08-09-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
