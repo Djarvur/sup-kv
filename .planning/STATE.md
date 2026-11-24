@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 8
 current_phase_name: Performance
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 08-03-PLAN.md
-last_updated: "2026-11-24T19:01:13.009Z"
+stopped_at: Completed 08-07-PLAN.md
+last_updated: "2026-11-24T19:18:13.049Z"
 last_activity: 2026-11-23
 last_activity_desc: Phase 7 complete, transitioned to Phase 8
-state_head: 5513fcd0f4db09aade0c15a48778e280fc589670
+state_head: 21310333073405bcb29ab0b2a68b9a78a311dd10
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 94
-  completed_plans: 89
+  completed_plans: 90
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 8 — Performance
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-23 — Phase 7 complete, transitioned to Phase 8
@@ -150,6 +150,7 @@ Progress: [████░░░░░░] 44%
 | Phase 08 P05 | 15min | 3 tasks | 2 files |
 | Phase 08 P06 | 9min | 3 tasks | 9 files |
 | Phase 08 P03 | 7min | 2 tasks | 2 files |
+| Phase 8 P7 | 15min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -497,6 +498,9 @@ Recent decisions affecting current work:
 - [Phase 08]: Four disjoint per-package bands below the kernel's ephemeral range plus a network:port claim held across the bind probe replace every private picker; both duplicate registries (scenarioPorts, probePorts) are deleted
 - [Phase 08]: Each dumpNotify scenario run owns one testing/synctest bubble created in the subtest body; assertions run on the captured result after bubble exit, and two same-seed runs use two bubbles so the first engine cannot outlive its run.
 - [Phase 08]: The chunker test pins cap(chunks[0]) == len(entries), per-chunk capacity bounded by entries remaining and adjacent chunks never sharing a backing array; teeth proved by temporary budget-hint (2729 vs 3) and cur[:0] mutations reverted byte-identically, since the WR-06 fix predates the plan.
+- [Phase 8]: LatencyPercentiles is the one nearest-rank primitive (pinned by a 1..100 ms sample); the default-profile row measured p50 584 ms / p99 1.074 s at 1000.1 writes/s on ext4 against the 750/1500 ms bounds.
+- [Phase 8]: Disk-write amplification is published as 14.36x (15 dumps x 14.98 MB vs 15.65 MB logical), bytes-per-dump 1.0001x the dump file; a tmpfs/ramfs base fails by name before any measurement.
+- [Phase 8]: The memory points gate only the value-dominated 60 KiB row: RSS 280 MB against the 1.006 GB tripwire and dump-cycle peak growth 19.6 MB against the 122.9 MB PerfDumpPeakLiveRatio bound.
 
 ### Pending Todos
 
@@ -519,7 +523,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-24T19:01:12.435Z
-Stopped at: Completed 08-03-PLAN.md
+Last session: 2026-11-24T19:18:12.638Z
+Stopped at: Completed 08-07-PLAN.md
 Resume file: None
 Next action: start plan 07-07 (`/gsd:execute-phase 7` continues the phase)
