@@ -189,29 +189,15 @@ count; a sweep error is one WARN and never aborts the load.
 
 ## Memory model
 
-A dump cycle's peak live heap is one state copy plus one record line. The
-engine takes exactly one `Records()` deep copy — the map plus every
-record's cloned value — and streams it through the adapter's 64 KiB
-buffered writer one encoded record line at a time. The only other live
-buffer is the record line being encoded, whose base64 expansion is at most
-about 1.34 times the configured value limit, so the encoded dump is never
-materialized as a second buffer. The kernel page cache that holds the
-written file is not process heap and is excluded from this model. Peak
-live therefore stays near one state size, not the two-plus of an
-encode-into-bytes design.
-
-One residual pause remains, and it is stated rather than claimed away:
-`Records()` clones every value while holding the store's read lock, so
-writers are paused for one state-sized copy at snapshot time. Eliminating
-that pause needs a copy-on-write view of the store and is residual work,
-not a property this model claims.
-
-Peak live and allocation churn are different numbers. `B/op` from the
-benchmark measures everything allocated over a cycle — the deep copy, then
-one line's worth per record, each line garbage as soon as it is written —
-and so reads higher (roughly 1.4 times the state size in total
-allocations) than the peak-live figure above. The bound this runbook states
-is peak live: one copy, plus one record line, plus the 64 KiB writer.
+A dump cycle takes exactly one `Records()` deep copy and streams one encoded
+record line at a time through the adapter's 64 KiB buffered writer, so the
+encoded generation is never materialized as a second buffer. One residual
+pause remains, and it is stated rather than claimed away: `Records()` clones
+every value while holding the store's read lock, so writers are paused for
+one state-sized copy at snapshot time; eliminating it needs a copy-on-write
+view of the store and is residual work, not a property this model claims.
+The formula, the measured state→RSS points and the dump-transient gate live
+in [docs/PERFORMANCE.md](PERFORMANCE.md#memory-model).
 
 ## Read semantics
 
