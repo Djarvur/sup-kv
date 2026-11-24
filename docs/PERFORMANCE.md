@@ -166,9 +166,10 @@ per-dump check confirms the other half — `write_bytes` per dump equals the dum
 hardware is not attached to this workstation. This row is therefore a workstation NVMe/SSD
 result and is **not** target-grade: no number above is quoted as the appliance's amplification,
 and the fast profile's dump cadence is exactly what would make target-media write endurance the
-next question. `docs/SPEC-DEVIATIONS.md` records the gap against the Spec open question #2. If
-a target-grade eMMC/SD device is ever attached, rerun this same row on it and replace the table —
-do not annotate it.
+next question. The gap itself is recorded here, against Spec open question #2; the deviation
+registry indexes Spec statements, so it carries no separate row for an open question.
+If a target-grade eMMC/SD device is ever attached, rerun this same row on it and replace the
+table — do not annotate it.
 
 hardware: CPU=Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz; logical=16; RAM=62.7 GiB; load=4.67 5.77 6.85; root-disk=/dev/mapper/ubuntu--vg-ubuntu--lv (ext4,rotational=unknown); go=linux/amd64 go1.27.4; module=github.com/Djarvur/sup-kv (vcs unknown, unknown); race=off; GOMAXPROCS=16
 
