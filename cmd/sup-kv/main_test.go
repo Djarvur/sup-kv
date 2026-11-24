@@ -211,6 +211,10 @@ type smokeNode struct {
 	exited     chan struct{}
 	exitMu     sync.Mutex
 	exitResult error
+	// startedAt is the instant cmd.Start returned. Startup-bound
+	// measurements begin here, so time spent queued for a spawnSem slot is
+	// harness queueing, never product startup.
+	startedAt time.Time
 }
 
 // outputCapture is the stderr seam smokeNode holds: the plain bytes.Buffer
@@ -286,12 +290,14 @@ func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, ar
 	if err != nil {
 		t.Fatalf("start %s %v: %v", bin, args, err)
 	}
+	startedAt := time.Now()
 	node := &smokeNode{
-		cmd:    cmd,
-		stdout: stdout,
-		stderr: stderr,
-		exit:   make(chan error, 1),
-		exited: make(chan struct{}),
+		cmd:       cmd,
+		stdout:    stdout,
+		stderr:    stderr,
+		exit:      make(chan error, 1),
+		exited:    make(chan struct{}),
+		startedAt: startedAt,
 	}
 	// The reaper stores the Wait result before closing exited: the channel
 	// closure fences the field, so exitDiagnosis can read a completed child
@@ -973,7 +979,6 @@ func TestMain_startupGateEmptySelection(t *testing.T) {
 		udpPort := freeUDPPort(t)
 		addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
 		const normalGate, emptyGate = 50 * time.Millisecond, 1500 * time.Millisecond
-		started := time.Now()
 		node := startNode(t, bin, nil,
 			"--node-id=1",
 			"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
@@ -990,7 +995,7 @@ func TestMain_startupGateEmptySelection(t *testing.T) {
 			_, ok, _ := healthAnswer(t, addr)
 			return ok
 		})
-		if elapsed := time.Since(started); elapsed < startupGateSelectionProbe {
+		if elapsed := time.Since(node.startedAt); elapsed < startupGateSelectionProbe {
 			time.Sleep(startupGateSelectionProbe - elapsed)
 		}
 		// healthAnswer documents ok=false as a transient transport error
@@ -1050,14 +1055,15 @@ func TestMain_startupGateEmptySelection(t *testing.T) {
 
 		// The restart loads the record, so the normal gate governs: 300 ms
 		// leaves room for process start plus the 50 ms gate while staying far
-		// below the empty backstop a broken selection would choose.
-		started := time.Now()
+		// below the empty backstop a broken selection would choose. The clock
+		// starts at process start, not at the startNode call, so a spawnSem
+		// queue wait is never mistaken for slow product startup.
 		node := startNode(t, bin, nil, append(baseFlags,
 			"--startup-gate="+normalGate.String(),
 			"--startup-gate-empty="+emptyGate.String(),
 		)...)
 		requireNodeServing(t, node, addr)
-		if elapsed := time.Since(started); elapsed > startupGateSeededBound {
+		if elapsed := time.Since(node.startedAt); elapsed > startupGateSeededBound {
 			t.Fatalf("the seeded node opened %v after launch, want within %v (the normal gate, not the %v empty backstop)",
 				elapsed, startupGateSeededBound, emptyGate)
 		}
@@ -1908,29 +1914,31 @@ func logProbeSocket(bindAddr string) (*net.UDPConn, error) {
 // two-node log tests need — a datagram sent to the loopback broadcast
 // address reaches the socket bound to the destination port (loopback
 // broadcast fan-out is a Linux-only kernel behavior; macOS lo0 carries no
-// BROADCAST flag — the wait_integration_test.go probe, D-12) — and skips
-// loudly naming what was probed when it is missing. The env-validation half
-// of the logging contract stays proven on every platform.
-func probeLoopbackBroadcast(t *testing.T, port int) {
+// BROADCAST flag — the wait_integration_test.go probe, D-12). A bind or send
+// failure is returned so the caller can retry on a fresh port; a read timeout
+// skips loudly naming what was probed, because that is the platform verdict.
+// The env-validation half of the logging contract stays proven on every
+// platform.
+func probeLoopbackBroadcast(t *testing.T, port int) error {
 	t.Helper()
 	rx, err := logProbeSocket(fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
-		t.Fatalf("probe rx bind: %v", err)
+		return fmt.Errorf("probe rx bind: %w", err)
 	}
 	defer func() { _ = rx.Close() }()
 	tx, err := logProbeSocket("0.0.0.0:0")
 	if err != nil {
-		t.Fatalf("probe tx bind: %v", err)
+		return fmt.Errorf("probe tx bind: %w", err)
 	}
 	defer func() { _ = tx.Close() }()
 	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
 	_, err = tx.WriteToUDP([]byte("sup-kv log smoke probe"), dst)
 	if err != nil {
-		t.Fatalf("probe send to %s: %v", dst, err)
+		return fmt.Errorf("probe send to %s: %w", dst, err)
 	}
 	err = rx.SetReadDeadline(time.Now().Add(logProbeWait))
 	if err != nil {
-		t.Fatalf("probe read deadline: %v", err)
+		return fmt.Errorf("probe read deadline: %w", err)
 	}
 	buf := make([]byte, 64)
 	for {
@@ -1943,7 +1951,27 @@ func probeLoopbackBroadcast(t *testing.T, port int) {
 			)
 		}
 		if n > 0 {
-			return
+			return nil
+		}
+	}
+}
+
+// probeLoopbackPort picks a private-band port and proves the loopback
+// broadcast capability on it. A bind or send failure on one candidate is the
+// pick-to-bind race class the allocator's private window narrows but cannot
+// erase against a transient off-suite holder; like probeBroadcastForm, the
+// probe retries on a fresh port instead of reporting the race as a capability
+// verdict. A persistent failure still fails the test.
+func probeLoopbackPort(t *testing.T) int {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		port := freeUDPPort(t)
+		err := probeLoopbackBroadcast(t, port)
+		if err == nil {
+			return port
+		}
+		if attempt >= probeAttempts {
+			t.Fatalf("loopback-broadcast probe could not bind a fresh port in %d attempts: %v", probeAttempts, err)
 		}
 	}
 }
@@ -1988,8 +2016,8 @@ func TestLog_jsonDefault(t *testing.T) {
 	t.Parallel()
 	bin := smokeBinary(t)
 
-	portA, portB := freeUDPPort(t), freeUDPPort(t)
-	probeLoopbackBroadcast(t, portB)
+	portA := freeUDPPort(t)
+	portB := probeLoopbackPort(t)
 	nodeA, nodeB := startLogPair(t, bin, nil, portA, portB)
 
 	waitFor(t, logEventDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
@@ -2042,8 +2070,8 @@ func TestLog_formatText(t *testing.T) {
 	t.Parallel()
 	bin := smokeBinary(t)
 
-	portA, portB := freeUDPPort(t), freeUDPPort(t)
-	probeLoopbackBroadcast(t, portB)
+	portA := freeUDPPort(t)
+	portB := probeLoopbackPort(t)
 	nodeA, nodeB := startLogPair(t, bin, []string{"SUPKV_LOG_FORMAT=text"}, portA, portB)
 
 	waitFor(t, logEventDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
