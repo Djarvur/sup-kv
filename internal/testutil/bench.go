@@ -8,6 +8,11 @@
 // internal/app/internal/testutil, while TEST-10's three benchmarks must
 // share one percentile implementation. The internal/app-internal testutil
 // re-exports the reporter for its own consumers.
+//
+// It also holds the socket-owning test packages' one port allocator
+// (ports.go): disjoint per-package bands below the kernel's ephemeral range
+// plus a claim held across the bind probe, so a picked port cannot be taken
+// between pick and bind by a sibling test or by another test process.
 package testutil
 
 import (

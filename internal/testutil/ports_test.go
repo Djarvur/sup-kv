@@ -94,7 +94,8 @@ func TestRegistryKeysByNetwork(t *testing.T) {
 	}
 	t.Cleanup(func() { release("tcp", tcpPort) })
 
-	if _, err := claim(band, "udp4"); err == nil {
+	_, err = claim(band, "udp4")
+	if err == nil {
 		t.Fatalf("a second udp4 claim of %d succeeded: the registry must key by network:port", udpPort)
 	}
 }
@@ -128,13 +129,16 @@ func TestEphemeralRangeAssertion(t *testing.T) {
 	t.Parallel()
 	bands := []Band{StandBand(), CmdBand(), UDPReplBand(), GRPCApiBand()}
 	for _, band := range bands {
-		if err := ephemeralOK(defaultLinuxLow, band); err != nil {
+		err := ephemeralOK(defaultLinuxLow, band)
+		if err != nil {
 			t.Fatalf("ephemeralOK(%d, %s) = %v, want nil: the whole window sits below the default ephemeral range", defaultLinuxLow, band, err)
 		}
-		if err := ephemeralOK(band.hi, band); err == nil {
+		err = ephemeralOK(band.hi, band)
+		if err == nil {
 			t.Fatalf("ephemeralOK(%d, %s) = nil, want an error: a low bound at the band's upper edge reaches into %s", band.hi, band, band)
 		}
-		if err := ephemeralOK(band.hi+1, band); err != nil {
+		err = ephemeralOK(band.hi+1, band)
+		if err != nil {
 			t.Fatalf("ephemeralOK(%d, %s) = %v, want nil: one port above the band is still sound", band.hi+1, band, err)
 		}
 	}
@@ -143,7 +147,8 @@ func TestEphemeralRangeAssertion(t *testing.T) {
 		return
 	}
 	for _, band := range bands {
-		if err := checkEphemeral(band); err != nil {
+		err := checkEphemeral(band)
+		if err != nil {
 			t.Fatalf("checkEphemeral(%s) on this host: %v — the host's ip_local_port_range must sit strictly above the private window", band, err)
 		}
 	}
