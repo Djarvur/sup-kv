@@ -2,9 +2,11 @@
 
 ## Conventions
 
-- Go version: as pinned in `go.mod` (`go 1.27`). Do not raise it without an ADR.
-- Run `make lint` and `make test` (`go tool golangci-lint run ./...` and
-  `go test -race ./...`) before pushing; CI runs the same targets.
+- Go version: as pinned in `go.mod` (`go 1.27.4`). Do not raise it without an ADR.
+- Run `make lint` and `make test` before pushing (`make lint` = `go tool golangci-lint config
+  verify` plus `go tool golangci-lint run ./...`; `make test` = `go test -race -cover ./...`).
+  CI runs the same tools directly — ci.yml calls the tools, not make targets — and additionally
+  runs `go vet`, the buf lint/format/breaking gates and the `go mod tidy` diff.
 - Deviations from go-ultimate: three, recorded below with reasons.
 
 ### Project deviations
@@ -45,7 +47,8 @@
 - `api/supkvapi/v1/` — the public API schema: `supkvapi.proto` and its
   generated Go package `supkvapi`. It is the client-facing surface and stays
   importable from another module (`github.com/Djarvur/sup-kv/api/supkvapi/v1`);
-  the replication proto under `internal/udprepl/replproto/` remains internal.
+  the replication proto under `internal/udprepl/replproto/supkv/v1` remains
+  internal.
 - `cmd/sup-kv/` — the single binary; `main()` parses (via `internal/config`),
   handles help/version, installs logging and calls `run`, the tested
   lifecycle seam; signals and the shutdown order live in `run`/`shutdown`.
@@ -56,6 +59,27 @@
   `internal/udprepl`) and deliberately lives outside the `internal/app`
   no-I/O rule: it reads the environment and validates the adapters' datagram
   ceiling, which the lint gate's `sup-kv-app-no-io` must not cover.
+- `internal/app/` — pure decision core, five packages: `internal/app/version`
+  (RFC 9562 record versions), `internal/app/clock` (hybrid logical clock),
+  `internal/app/storage` (the LWW-Element-Map store, consuming the
+  consumer-side `Clock` interface declared in `storage`), `internal/app/persist`
+  (the dump/snapshot engine over the store) and `internal/app/repl` (the
+  replication decision core); no I/O, enforced by the lint gate. Two harness
+  packages sit beside them: `internal/app/internal/simnet` (the
+  discrete-event simulator network) and `internal/app/internal/testutil` (the
+  shared property-test generators).
+- `internal/port/` — port/interface definitions; stdlib-only imports,
+  enforced by the lint gate.
+- `internal/testutil/` — the module-wide test harness (the shared benchmark
+  percentile reporter and the claim-while-held port allocator) for the
+  socket-owning packages.
+- Adapters — four, all under `internal/`: `internal/grpcapi` (the gRPC API
+  adapter, with its generated mirror `internal/grpcapi/apiproto/supkvapi/v1`),
+  `internal/udprepl` (the UDP replication adapter), `internal/persistfile`
+  (the filesystem dump/snapshot adapter) and `internal/metrics` (the in-repo
+  Prometheus text exporter). `internal/stand` is the real-socket test
+  harness — an internal package outside the adapter set, like
+  `internal/config`.
 - `examples/client/` — a separate Go module (`examples/client/go.mod`, module
   path `example.com/sup-kv-client`, deliberately outside the root module's
   prefix, with a `replace` to the root) that imports only the public API
@@ -63,26 +87,16 @@
   makes Go's internal rule reject an `internal/` import from the example; the
   depguard rule `sup-kv-public-api-no-internal` remains the enforced boundary
   inside the repository.
-- `internal/app/` — pure decision core, split into three packages:
-  `version` (RFC 9562 record versions), `clock` (hybrid logical clock) and
-  `storage` (LWW-Element-Map store, consuming the consumer-side `Clock`
-  interface declared in `storage`); no I/O, enforced by the lint gate.
-  `internal/app/internal/testutil` holds the shared property-test
-  generators.
-- `internal/port/` — port/interface definitions; stdlib-only imports,
-  enforced by the lint gate.
-- Adapter packages under `internal/` appear with the phases that need them;
-  do not create empty adapter directories.
 
 ## Dependency policy
 
-- The shipped runtime graph is intentionally minimal: Phase 1 carries **zero
-  direct runtime requires**. gRPC and protobuf enter `go.mod` in the phases
-  that first use them. The client-facing API schema under `api/` is public —
-  its generated Go package is the supported client entry point — while the
-  replication proto under `internal/udprepl/replproto/` stays internal.
-- The `tool` directives (golangci-lint v2.15.0, govulncheck v1.9.0) drag
-  ~200 `// indirect` requires into `go.mod`/`go.sum`. This is the accepted
-  reading of "zero-dependency" (D-03): it binds **direct runtime requires**
-  only — the shipped build graph stays empty. Tools are always invoked via
-  `go tool <name>`, never `tools.go`, never bare `go install`.
+- The shipped runtime graph is intentionally minimal: the two direct runtime
+  requires are `google.golang.org/grpc` and `google.golang.org/protobuf` —
+  the API layer and the wire encoding. Phase 1 carried none; gRPC and
+  protobuf entered `go.mod` in the phases that first used them. The accepted
+  reading of "zero-dependency" (D-03) binds **direct runtime requires** only,
+  then and now: no runtime dependency beyond the API layer is admitted.
+- The `tool` directives are seven — `buf`, `grpcurl`, `golangci-lint`, `goreleaser`, `govulncheck`, `protoc-gen-go`, `protoc-gen-go-grpc` — dragging ~500 `// indirect` requires into `go.mod`/`go.sum`; the shipped build graph stays empty of runtime code regardless. Tools are always invoked via `go tool <name>`, never `tools.go`, never bare `go install`.
+- The client-facing API schema under `api/` is public — its generated Go
+  package is the supported client entry point — while the replication proto
+  under `internal/udprepl/replproto/supkv/v1` stays internal.
