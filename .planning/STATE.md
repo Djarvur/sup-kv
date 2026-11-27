@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: 6
+current_plan: 7
 status: executing
-stopped_at: Completed 09-05-PLAN.md
-last_updated: "2026-11-27T23:26:48.350Z"
+stopped_at: Completed 09-06-PLAN.md
+last_updated: "2026-11-27T23:48:30.436Z"
 last_activity: 2026-11-28
-last_activity_desc: Plan 09-04 executed — the deviation registry closed (22 flips, full citation resweep), the registry gate landed, and the master M-assignment recorded
-state_head: 009ae91a476aff2e6d37e636d49c90c7d3ed3f14
+last_activity_desc: Plan 09-06 executed — docs/API.md completed as the full integrator reference (per-RPC sections in proto order with mapper-derived error tables, Watch contract, latency-model link, key-prefix convention, caveats, client patterns) and the pending section flipped to forbidden phrases
+state_head: b0886484e1ccbfda49df5ba842fe03517032d9af
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 105
-  completed_plans: 99
+  completed_plans: 100
 ---
 
 # Project State
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 9 (Documentation and Release) — EXECUTING
-Current Plan: 6
+Current Plan: 7
 Total Plans in Phase: 11
 Status: Ready to execute
-Last activity: 2026-11-28 — Plan 09-03 executed (stack docs as-built and machine-audited; six hygiene rows closed)
+Last activity: 2026-11-28 — Plan 09-06 executed (docs/API.md completed as the full integrator reference: per-RPC sections in proto order with mapper-derived error tables, the Watch contract, the latency-model link, key-prefix convention, caveats and client patterns; the pending section flipped to forbidden phrases)
 
-Progress: [█████████░] 91%
+Progress: [█████████▊] 95%
 
 ## Performance Metrics
 
@@ -161,6 +161,7 @@ Progress: [█████████░] 91%
 | Phase 9 P3 | 30min | 3 tasks | 11 files |
 | Phase 09 P04 | 35 min | 3 tasks | 3 files |
 | Phase 09 P05 | 10 min | 3 tasks | 4 files |
+| Phase 09 P06 | 23 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -544,6 +545,9 @@ Recent decisions affecting current work:
 - [Phase 09]: citation re-derivation was symbol-extent based across all 167 rows: ~70 drifted citations beyond the New-3 seeds corrected (core.go growth, the persist scheduler/engine split, the watch hub, loader.go Open), and S-PAR-01..04 re-cited to the registered flag names - the 06-10 lesson is now a permanent gate (TestSpecDeviationsLinksResolve, 720 checks) — research pitfall 3; the gate walks every Links cell under a 250-check vacuity floor
 - [Phase 09]: [Phase 09]: 09-05 retained TestOperationsDocFamilies beside the new two-directional check: the structured check is stronger per family (type + label values against Snapshot) but section-scoped, while the whole-doc exporter grep still covers family mentions in runbooks, Monitoring and the failure table — the deletion bar (equal or stronger coverage) is not met — [Phase 09]: 09-05 retained TestOperationsDocFamilies beside the new two-directional check: the structured check is stronger per family (type + label values against Snapshot) but section-scoped, while the whole-doc exporter grep still covers family mentions in runbooks, Monitoring and the failure table — the deletion bar (equal or stronger coverage) is not met
 - [Phase 09]: [Phase 09]: 09-05's vocabulary source builds zero-returning source closures mirroring the exporter's own zeroSources() helper because metrics.Snapshot(metrics.Sources{}) would panic on the nil accessors; the complete-catalog rule (all label values render at zero state) is the check's real foundation, and the supkv_ vacuity floor is 23 — the exporter's true family count, not the plan's miscounted 24 — [Phase 09]: 09-05's vocabulary source builds zero-returning source closures mirroring the exporter's own zeroSources() helper because metrics.Snapshot(metrics.Sources{}) would panic on the nil accessors; the complete-catalog rule (all label values render at zero state) is the check's real foundation, and the supkv_ vacuity floor is 23 — the exporter's true family count, not the plan's miscounted 24
+- [Phase 09]: 09-06's per-RPC reference mirrors the proto at test time — the schema declares seven RPCs, not the plan's nine (SetIfAbsent is Set's create_if_absent variant, WaitForReplication is Set/Delete's wait fields), so the vacuity floor is 7; the order check is exact-equality over parsed rpc declarations, so the reference and the schema cannot silently diverge
+- [Phase 09]: 09-06's error tables factor the every-RPC facts into the RPC reference intro (gate-closed Unavailable before any validation; transport ResourceExhausted at MaxRecvBytes) and carry honest absences — List and Watch have no Internal row because no engine or watch-failure path exists, while the snapshot tables carry classifySaveError's classified faults (ResourceExhausted/PermissionDenied) plus the mapper's totality fallback
+- [Phase 09]: 09-06's pending flip moves the five pending-section literals into the whitespace-normalized apiDocForbidden table and rewrites the Errors section's pending-pointer sentence (it carried two of them) — "keep every existing section intact" yields to the flip prohibition; raw anchor literals must sit on one doc line, so mandated literals are reflowed contiguous while whitespace normalization stays with the forbidden table
 
 ### Pending Todos
 
@@ -566,7 +570,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-27T23:26:46.144Z
-Stopped at: Completed 09-05-PLAN.md
+Last session: 2026-11-27T23:48:46.000Z
+Stopped at: Completed 09-06-PLAN.md
 Resume file: None
-Next action: Execute 09-04-PLAN.md (the registry sweep)
+Next action: Execute 09-07-PLAN.md (the deployment story)
