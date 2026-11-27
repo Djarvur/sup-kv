@@ -45,6 +45,16 @@ const operationsDocPath = "../../docs/OPERATIONS.md"
 // exit table, the reachable drift direction (received version leads), the
 // startup drift_warn/max_clock_lead relation, the four routed core counters,
 // the unbound_listing label and the current-RSS definition.
+//
+// The Phase 9 rows (09-05) pin the completed operator reference: the failure
+// table's section heading, the seven runbook titles, the metrics reference
+// and log catalog headings, the honest no-metric cell, the conditional
+// datagram-loss bound (M-06 — the unconditional sentence is forbidden
+// below), the three trust-model absences (M-15), the two proven-claim sites'
+// named tests (M-05) and the CONFIGURATION.md pointer (M-07). The metrics
+// reference, the log catalog and the failure table's evidence columns carry
+// their own two-directional machine checks in metrics_catalog_test.go; these
+// anchors pin the mandated facts those checks do not.
 var operationsAnchors = []struct {
 	literal string
 	pins    string
@@ -116,6 +126,26 @@ var operationsAnchors = []struct {
 	{"supkv_dump_records_discarded_total", "the load-time discard family — checksum/version/value_limit/malformed labels"},
 	{"supkv_dumps_failures_total", "the dump failure-class family — disk_full/permission/other labels"},
 	{"supkv_dumps_unconfirmed_total", "the unconfirmed-write counter — a confirmation timeout is not a dump error"},
+	// The Phase 9 (09-05) rows: the completed operator reference.
+	{"## Failure behaviour", "the Spec's 18-row failure-behavior table — S-FAIL-01..18 keyed in registry order by TestOperationsFailureTable"},
+	{"## Runbook: dump failure and full disk", "runbook 2 of 8 — the dump-failure/full-disk runbook in the clock-drift shape"},
+	{"## Runbook: missing peer", "runbook 3 of 8 — the peer-timeout eviction runbook"},
+	{"## Runbook: growing unconfirmed set", "runbook 4 of 8 — the unacked-backlog runbook"},
+	{"## Runbook: write conflict", "runbook 5 of 8 — the merges_conflicts_total runbook"},
+	{"## Runbook: incompatible versions", "runbook 6 of 8 — the bad_proto_version runbook"},
+	{"## Runbook: corrupted dump", "runbook 7 of 8 — the .corrupt-/load-outcome runbook"},
+	{"## Runbook: duplicate node_id", "runbook 8 of 8 — the duplicate_node_id runbook (clock drift remains the first)"},
+	{"## Metrics reference", "the typed metrics reference — checked against metrics.Snapshot in both directions by TestMetricsReferenceCatalog"},
+	{"## Log-message catalog", "the complete literal level matrix — checked against main.go's call sites by TestOperationsLogCatalog"},
+	{"none — log only", "the honest no-metric cell — the table never invents a metric to fill a cell"},
+	{"delivery opportunity falls inside the ladder's window", "the M-06 conditional datagram-loss bound — recovery is bounded by the ladder, not unconditionally by ack_timeout_max"},
+	{"partition-heal bound's territory", "the M-06 clause naming where sustained loss is bounded instead"},
+	{"no authorization", "the second of the three absences the trust model states together (M-15)"},
+	{"no transport security", "the third absence (M-15) — plaintext wire and gRPC listener"},
+	{"the only TLS surface", "the optional metrics-endpoint mTLS triple is the only TLS surface (M-15)"},
+	{"TestBound_lossWithinAckTimeoutMax", "M-05: the datagram-loss bound's named test at the first proven-claim site"},
+	{"TestScenario_farAhead", "M-05: the far-ahead drift claim's named test at the second proven-claim site"},
+	{"docs/CONFIGURATION.md", "the M-07 pointer from the one-point validation prose to the flag reference"},
 }
 
 // operationsForbidden pins the claims this phase's corrections removed: a
@@ -131,6 +161,9 @@ var operationsForbidden = []struct {
 	{"Nothing is logged about the outcome itself", "the Main load now logs one INFO `Dump load` record carrying outcome=main"},
 	{"failed-final-dump exit code 1", "a failed final dump exits with code 3; exit code 1 means startup or a Serve error"},
 	{"dump open", "a dump-path/load problem is a load outcome, not a fatal startup stage — the node starts, and a failed final dump exits 3"},
+	// 09-05 (M-06): the unconditional bound sentence the conditional wording
+	// replaced — recovery is bounded by the ladder's window only.
+	{"bounds recovery at `ack_timeout_max` (default 5s)", "the unconditional M-06 sentence 09-05 replaced — sustained loss past the ladder's window is the partition-heal bound's territory"},
 }
 
 // TestOperationsDoc is the DOCS-02 drift guard: docs/OPERATIONS.md must
