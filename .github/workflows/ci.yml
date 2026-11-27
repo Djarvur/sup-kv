@@ -35,15 +35,16 @@ jobs:
       # `run` silently ignores unknown top-level config keys (T-01-01): schema-check
       # the vendored strict config with the same pinned binary before linting.
       - run: go tool golangci-lint config verify
-      # Buf schema gates: proto lint + format + guarded breaking vs origin/master,
+      # Buf schema gates: proto lint + format + breaking vs origin/master,
       # all via the go.mod-pinned `go tool buf` binary (same as the Makefile targets).
-      # The guard is required because buf v1.75 exits 1 on a proto-less against-ref
-      # (probe-verified) while supkv.proto is not yet on origin/master — it
-      # self-destructs the moment PR #31 merges and every later PR gets the full
-      # FILE-policy comparison; the .git-dir against-input avoids any private-repo
+      # supkv.proto is on origin/master (landed with the Phase-6 PR), so buf
+      # breaking compares every PR's proto against it — the real FILE-policy
+      # wire-schema comparison; the .git-dir against-input avoids any private-repo
       # token plumbing the remote-https form would need (D-08, whose permitted
       # .git#branch fallback shape is refined here by the explicit remote-tracking
-      # refspec for determinism).
+      # refspec for determinism). The cat-file probe in the recipe below is the
+      # pre-Phase-6 guard left in place — plan 09-07 owns the next ci.yml
+      # change, so the M-49 fix touched the comments only.
       - name: Buf proto schema gates (lint, format, breaking vs origin/master)
         run: |
           go tool buf lint

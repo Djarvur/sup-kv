@@ -96,8 +96,9 @@ type Conflict struct {
 
 // Clock is the version source the store consumes: Tick stamps local writes,
 // Update absorbs received readings. The concrete clock (internal/app/clock)
-// satisfies it; tests may substitute fakes. Declared consumer-side here —
-// per D-03, internal/port holds no interfaces.
+// satisfies it; tests may substitute fakes. Declared consumer-side here so
+// the store never imports the concrete clock — the port interfaces live in
+// internal/port.
 type Clock interface {
 	Tick() (l int64, counter uint16, drift time.Duration)
 	Update(remoteL int64, remoteC uint16) (l int64, counter uint16, drift time.Duration)

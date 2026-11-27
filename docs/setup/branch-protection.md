@@ -42,10 +42,19 @@ gh api --method POST repos/Djarvur/sup-kv/rulesets --input docs/setup/ruleset.js
 ## Verify (read side)
 
 ```bash
-gh api repos/Djarvur/sup-kv/rulesets \
-  --jq '.[] | select(.name == "protect master") | {name, enforcement, rules: [.rules[].type]}'
+gh api repos/Djarvur/sup-kv/rulesets/27576625 \
+  --jq '{name, enforcement, rules: [.rules[].type]}'
 # Must show: enforcement "active" and rule types
 # ["pull_request", "required_status_checks", "non_fast_forward", "deletion"]
+```
+
+The by-id form is the verified one (M-51): the list endpoint's objects carry
+no `rules` key, so a select-over-the-list query fails with
+`cannot iterate over: null`. Executed 2026-11-28, the command above printed
+exactly:
+
+```json
+{"enforcement":"active","name":"protect master","rules":["pull_request","required_status_checks","non_fast_forward","deletion"]}
 ```
 
 Prove enforcement after applying: attempt a trivial direct push to `master` from a

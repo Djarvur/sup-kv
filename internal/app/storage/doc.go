@@ -2,10 +2,11 @@
 // I/O-free library over records versioned by the sibling version package
 // and stamped by a clock supplied by the caller through the consumer-side
 // Clock interface declared here — the concrete clock (internal/app/clock)
-// satisfies it and tests may substitute fakes; per D-03, internal/port
-// holds no interfaces. The lint gate forbids networking, filesystem,
-// syscall and gRPC/protobuf imports here — see the sup-kv-app-no-io
-// depguard rule in .golangci.yml.
+// satisfies it and tests may substitute fakes; declaring the interface on
+// the consuming side keeps the store free of the concrete clock's import,
+// while the port interfaces (dump, replication) live in internal/port. The
+// lint gate forbids networking, filesystem, syscall and gRPC/protobuf
+// imports here — see the sup-kv-app-no-io depguard rule in .golangci.yml.
 //
 // The store is a Last-Write-Wins-Element-Map CRDT: per key, the record with
 // the greater full version.RecordVersion wins on merge, so merge is

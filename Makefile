@@ -1,4 +1,9 @@
-.PHONY: lint test bench bench-smoke perf race-soak red-run generate build client-example proto buf-lint buf-format buf-breaking release release-snapshot
+.PHONY: help lint test bench bench-smoke perf race-soak red-run generate build client-example proto buf-lint buf-format buf-breaking release release-snapshot
+
+## help: list every target from its `## target:` help comment — the comments
+## are the data source, so a target documented there shows up here (M-52).
+help:
+	@grep -E '^## [a-z-]+:' $(MAKEFILE_LIST) | sed 's/^## //'
 
 # Version stamping for the build target (D-18): version from git describe,
 # commit from the short sha, "dev" when git is unavailable.
@@ -153,17 +158,12 @@ buf-format:
 	go tool buf format -w
 
 ## buf-breaking: FILE-policy wire-schema comparison against origin/master.
-## The guard is required because buf v1.75 errors (exit 1) on a proto-less
-## against-ref instead of passing, while supkv.proto is not on origin/master
-## yet (probe-verified); it self-destructs the moment the proto lands there
-## and every later run does the real comparison (D-08).
+## supkv.proto is on origin/master (landed with the Phase-6 PR), so every
+## run does the real comparison: buf breaking compares the working tree's
+## proto against origin/master (D-08).
 buf-breaking:
 	git fetch origin master
-	@if git cat-file -e refs/remotes/origin/master:internal/udprepl/replproto/supkv/v1/supkv.proto; then \
-		go tool buf breaking --against '.git#ref=refs/remotes/origin/master'; \
-	else \
-		echo "buf breaking deferred: supkv.proto not on origin/master yet (D-08 guard)"; \
-	fi
+	go tool buf breaking --against '.git#ref=refs/remotes/origin/master'
 
 ## release: cut the release from the pushed v* tag via the go.mod-pinned
 ## goreleaser tool directive (never a downloaded action binary): 4-target

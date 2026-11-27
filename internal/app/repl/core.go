@@ -396,9 +396,10 @@ func (c Config) normalized() Config {
 // cost compile-impossible (XPORT-06). The concrete engine (internal/app/persist
 // wrapping storage.Store — its ApplyRemote is the remote-apply seam plan
 // 04-06 shipped) and tests adapting storage.Store through a Merge-delegating
-// wrapper both satisfy it. Declared
-// consumer-side here, per the storage.Clock precedent — internal/port holds
-// no interfaces.
+// wrapper both satisfy it. Declared consumer-side here, per the
+// storage.Clock precedent: the core consumes the interface without importing
+// the concrete engine — the port interfaces (DumpStore, Message) live in
+// internal/port.
 type StateStore interface {
 	// ApplyRemote joins rec under key by the store's LWW merge and reports
 	// the displaced versions and the clock drift, exactly like a local
