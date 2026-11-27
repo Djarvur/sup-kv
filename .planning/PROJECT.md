@@ -134,4 +134,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-19 — milestone v1.1 started (input: v1.0 review at `docs/reviews/2026-11-19-v1.0/`, owner decisions 14.1–14.11 accepted 2026-11-19)*
+*Last updated: 2026-11-27 — verification batch complete: phases 1-6 and 8 verified passed (stale VERIFICATION.md regenerated for all seven), phase 9 next*
