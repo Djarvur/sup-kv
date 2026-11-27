@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 09-04-PLAN.md
-last_updated: "2026-11-27T22:59:05.233Z"
+stopped_at: Completed 09-05-PLAN.md
+last_updated: "2026-11-27T23:26:48.350Z"
 last_activity: 2026-11-28
 last_activity_desc: Plan 09-04 executed — the deviation registry closed (22 flips, full citation resweep), the registry gate landed, and the master M-assignment recorded
-state_head: b018465d235cf115a9486228e208d070ac70aaf4
+state_head: 009ae91a476aff2e6d37e636d49c90c7d3ed3f14
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 105
-  completed_plans: 98
+  completed_plans: 99
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 9 (Documentation and Release) — EXECUTING
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-28 — Plan 09-03 executed (stack docs as-built and machine-audited; six hygiene rows closed)
@@ -160,6 +160,7 @@ Progress: [█████████░] 91%
 | Phase 9 P2 | 18min | 2 tasks | 3 files |
 | Phase 9 P3 | 30min | 3 tasks | 11 files |
 | Phase 09 P04 | 35 min | 3 tasks | 3 files |
+| Phase 09 P05 | 10 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -541,6 +542,8 @@ Recent decisions affecting current work:
 - [Phase 09]: the milestone exit criterion is zero unclosed rows, not zero non-implemented rows: deferred-v2(SNAP-01) and the two accepted-deviation rows stay permanent, and S-FAIL-15 still carried its unclosed status cell so it flipped with the other 21 — research pitfall 2; the grep-count verify (167 rows, one fixed-in-v1.1 token) is the proof
 - [Phase 09]: TestSpecDeviationsBurstRow's status anchor was re-pointed from fixed-in-v1.1(PERF-02) to implemented - the Phase-8 anchor froze the pre-sweep status this plan's own exit criterion removes; its purpose (the row cites the shipped tests and bounds) is unchanged — Rule-1 deviation: the plan assumed S-FAIL-15 was already status-flipped; only its summary gloss was
 - [Phase 09]: citation re-derivation was symbol-extent based across all 167 rows: ~70 drifted citations beyond the New-3 seeds corrected (core.go growth, the persist scheduler/engine split, the watch hub, loader.go Open), and S-PAR-01..04 re-cited to the registered flag names - the 06-10 lesson is now a permanent gate (TestSpecDeviationsLinksResolve, 720 checks) — research pitfall 3; the gate walks every Links cell under a 250-check vacuity floor
+- [Phase 09]: [Phase 09]: 09-05 retained TestOperationsDocFamilies beside the new two-directional check: the structured check is stronger per family (type + label values against Snapshot) but section-scoped, while the whole-doc exporter grep still covers family mentions in runbooks, Monitoring and the failure table — the deletion bar (equal or stronger coverage) is not met — [Phase 09]: 09-05 retained TestOperationsDocFamilies beside the new two-directional check: the structured check is stronger per family (type + label values against Snapshot) but section-scoped, while the whole-doc exporter grep still covers family mentions in runbooks, Monitoring and the failure table — the deletion bar (equal or stronger coverage) is not met
+- [Phase 09]: [Phase 09]: 09-05's vocabulary source builds zero-returning source closures mirroring the exporter's own zeroSources() helper because metrics.Snapshot(metrics.Sources{}) would panic on the nil accessors; the complete-catalog rule (all label values render at zero state) is the check's real foundation, and the supkv_ vacuity floor is 23 — the exporter's true family count, not the plan's miscounted 24 — [Phase 09]: 09-05's vocabulary source builds zero-returning source closures mirroring the exporter's own zeroSources() helper because metrics.Snapshot(metrics.Sources{}) would panic on the nil accessors; the complete-catalog rule (all label values render at zero state) is the check's real foundation, and the supkv_ vacuity floor is 23 — the exporter's true family count, not the plan's miscounted 24
 
 ### Pending Todos
 
@@ -563,7 +566,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-27T22:59:03.959Z
-Stopped at: Completed 09-04-PLAN.md
+Last session: 2026-11-27T23:26:46.144Z
+Stopped at: Completed 09-05-PLAN.md
 Resume file: None
 Next action: Execute 09-04-PLAN.md (the registry sweep)
