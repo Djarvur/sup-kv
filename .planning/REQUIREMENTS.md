@@ -171,7 +171,7 @@
 ### Documentation & Release
 
 - [ ] **DOCS-01**: All 52 documented mismatches (M-01…M-52) are closed by a doc or code fix (D-01)
-- [ ] **DOCS-02**: `docs/CONFIGURATION.md` covers every flag and env var — defaults, units, ranges, relations, "must match on all nodes"; a test iterates registered flags against the table (D-02)
+- [x] **DOCS-02**: `docs/CONFIGURATION.md` covers every flag and env var — defaults, units, ranges, relations, "must match on all nodes"; a test iterates registered flags against the table (D-02)
 - [ ] **DOCS-03**: `docs/DEPLOYMENT.md` + systemd unit — two-board topology, bind/broadcast address choice, ports, `node_id`, paths and permissions, sizes, time sync, upgrade and compatibility, node replacement; the unit runs in CI and ships in the release archives (D-03)
 - [ ] **DOCS-04**: Failure-behavior table (the Spec's 18 rows: symptom → behavior → recovery → metric → log line) and runbooks for dump failure/full disk, missing peer, growing unconfirmed set, write conflict, incompatible versions, corrupted dump, duplicate `node_id`; every row references a metric or log line that exists in the binary (D-04)
 - [ ] **DOCS-05**: `docs/API.md` — per-RPC semantics and code tables; Watch contract; write-latency model; consistency caveats; key-prefix convention; `Unavailable` handling; client last-value cache pattern; how to obtain the proto; Go client example (D-05, with APIS-06)
@@ -282,7 +282,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERF-05 | Phase 8 | Complete |
 | PERF-06 | Phase 8 | Complete |
 | DOCS-01 | Phase 9 | Pending |
-| DOCS-02 | Phase 9 | Pending |
+| DOCS-02 | Phase 9 | Complete |
 | DOCS-03 | Phase 9 | Pending |
 | DOCS-04 | Phase 9 | Pending |
 | DOCS-05 | Phase 9 | Pending |

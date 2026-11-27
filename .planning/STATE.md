@@ -4,13 +4,13 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: Not started
+current_plan: 2
 status: executing
-stopped_at: Phase 9 context gathered
-last_updated: "2026-11-27T21:07:44.025Z"
-last_activity: 2026-11-25
-last_activity_desc: Phase 8 complete, transitioned to Phase 9
-state_head: 866f7060b841dc5bdc91a83b60106511b1a0578c
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-11-27T21:34:32.266Z"
+last_activity: 2026-11-28
+last_activity_desc: Phase 9 execution started
+state_head: f502b0c1fb595457e9328ce30ef01dd86e0c04de
 progress:
   total_phases: 9
   completed_phases: 8
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 
 ## Current Position
 
-Phase: 9 (Documentation and Release) — READY TO EXECUTE
-Current Plan: Not started
+Phase: 9 (Documentation and Release) — EXECUTING
+Current Plan: 2
 Total Plans in Phase: 11
 Status: Ready to execute
-Last activity: 2026-11-25 — Phase 8 complete, transitioned to Phase 9
+Last activity: 2026-11-28 — Phase 9 execution started
 
 Progress: [█████████░] 89%
 
@@ -156,6 +156,7 @@ Progress: [█████████░] 89%
 | Phase 08 P09 | 13min | 3 tasks | 5 files |
 | Phase 8 P10 | 17min | 3 tasks | 5 files |
 | Phase 8 P11 | 20min | 2 tasks | 0 files |
+| Phase 09 P1 | 10min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -521,6 +522,9 @@ Recent decisions affecting current work:
 - [Phase 8]: Phase-8 gate made no task commit: files_modified is empty, no source changed and every gate passed on the committed tree (the 01-04/07-11 precedent); the record is 08-11-SUMMARY.md
 - [Phase 8]: The plan's deterministic-gate package list omitted ./internal/stand/, where TestPerfBurstBoundsMatchRedContract lives (internal/stand/perf_test.go:247); it was run explicitly in its own package in addition to the verbatim command - more coverage, never a narrower run
 - [Phase 8]: Two external planning-only commits (c0a5266, a27d62b) landed during the gate; the source tree stayed byte-identical to the dispatched HEAD d64d189 (git diff --stat excluding .planning empty), so the gate results stand and this plan's own source commits are zero
+- [Phase 09]: the --help capture is authoritative over the research prose — research section 4 rounded the registered surface to 22 flags; the clean-env --help capture shows 23 registered flags plus the five env-only knobs, and the plan's own assumption makes the live capture the source — the >=22 vacuity guard holds and M-07's doc half covers all 23
+- [Phase 09]: dump_debounce <= dump_max_wait is documented as the dump cycle's intended relation the validator does not enforce — internal/config/validate.go's 12-rule catalog contains no debounce-vs-max-wait rule, so CONFIGURATION.md states the honest semantics (a smaller max-wait truncates every quiet window at the deadline) instead of inventing a startup rule
+- [Phase 09]: M-07's doc half is closed by docs/CONFIGURATION.md with the OPERATIONS cross-link deferred to plan 09-05 — all registered flags and defaults are documented and machine-checked in both directions by TestConfigurationDoc; the OPERATIONS-side link edit belongs to the plan that owns OPERATIONS.md, and the two-half disposition is recorded here and in 09-01-SUMMARY.md
 
 ### Pending Todos
 
@@ -543,7 +547,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-27T19:11:51.847Z
-Stopped at: Phase 9 context gathered
+Last session: 2026-11-27T21:34:31.652Z
+Stopped at: Completed 09-01-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 9` (Phase 9 has no plans yet)
