@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 09-03-PLAN.md
-last_updated: "2026-11-28T01:22:00.000Z"
+stopped_at: Completed 09-04-PLAN.md
+last_updated: "2026-11-27T22:59:05.233Z"
 last_activity: 2026-11-28
-last_activity_desc: Plan 09-03 executed — stack docs as-built and machine-audited, six hygiene rows closed
-state_head: af1e3ebf0a5b1454fd4197093465a186c2e05152
+last_activity_desc: Plan 09-04 executed — the deviation registry closed (22 flips, full citation resweep), the registry gate landed, and the master M-assignment recorded
+state_head: b018465d235cf115a9486228e208d070ac70aaf4
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 105
-  completed_plans: 96
+  completed_plans: 98
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 9 (Documentation and Release) — EXECUTING
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-28 — Plan 09-03 executed (stack docs as-built and machine-audited; six hygiene rows closed)
@@ -159,6 +159,7 @@ Progress: [█████████░] 91%
 | Phase 09 P1 | 10min | 3 tasks | 3 files |
 | Phase 9 P2 | 18min | 2 tasks | 3 files |
 | Phase 9 P3 | 30min | 3 tasks | 11 files |
+| Phase 09 P04 | 35 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -536,6 +537,10 @@ Recent decisions affecting current work:
 - [Phase 9]: 09-03: M-40's SetReadBuffer advice is verified-then-kept — internal/udprepl/socket.go sets SO_RCVBUF/SO_SNDBUF and reads the kernel values back (XPORT-05), so the research advice became accurate when Phase 3 shipped
 - [Phase 9]: 09-03: M-51 is an executed claim — the by-id ruleset command ran 2026-11-28 and printed exactly the documented shape, recorded verbatim in branch-protection.md; M-23's Go half is verify-then-delete (zero journal survivors in storage/repl production comments)
 - [Phase 9]: 09-03: M-49's split — the Makefile buf-breaking recipe lost its dead pre-Phase-6 probe branch (real comparison proven green) while ci.yml got comment-only edits per the plan's 09-07 ownership constraint; the leftover probe carries an honest comment
+- [Phase 09]: the registry gate excludes the preamble by construction: rows are lines whose normalized form starts "| S-" and the status check parses the fourth cell, so the vocabulary line's identical fixed-in-v1.1( token can never count as a row — T-09-11 (a gate that counts the preamble can never pass)
+- [Phase 09]: the milestone exit criterion is zero unclosed rows, not zero non-implemented rows: deferred-v2(SNAP-01) and the two accepted-deviation rows stay permanent, and S-FAIL-15 still carried its unclosed status cell so it flipped with the other 21 — research pitfall 2; the grep-count verify (167 rows, one fixed-in-v1.1 token) is the proof
+- [Phase 09]: TestSpecDeviationsBurstRow's status anchor was re-pointed from fixed-in-v1.1(PERF-02) to implemented - the Phase-8 anchor froze the pre-sweep status this plan's own exit criterion removes; its purpose (the row cites the shipped tests and bounds) is unchanged — Rule-1 deviation: the plan assumed S-FAIL-15 was already status-flipped; only its summary gloss was
+- [Phase 09]: citation re-derivation was symbol-extent based across all 167 rows: ~70 drifted citations beyond the New-3 seeds corrected (core.go growth, the persist scheduler/engine split, the watch hub, loader.go Open), and S-PAR-01..04 re-cited to the registered flag names - the 06-10 lesson is now a permanent gate (TestSpecDeviationsLinksResolve, 720 checks) — research pitfall 3; the gate walks every Links cell under a 250-check vacuity floor
 
 ### Pending Todos
 
@@ -558,7 +563,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-28T01:22:00Z
-Stopped at: Completed 09-03-PLAN.md
+Last session: 2026-11-27T22:59:03.959Z
+Stopped at: Completed 09-04-PLAN.md
 Resume file: None
 Next action: Execute 09-04-PLAN.md (the registry sweep)
