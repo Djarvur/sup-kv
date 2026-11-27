@@ -141,7 +141,9 @@ transport send ceiling cover any page the server produces.
 
 ## Errors
 
-The table below covers every mapper code and the List validation constants (the List RPC section names its two page-size/page-token messages); the exhaustive per-RPC failure table is Phase 9/DOCS-05. The mapper is
+The table below covers every mapper code and the handler validation
+constants; each section of the [RPC reference](#rpc-reference) states which
+of these codes that RPC's inputs can produce. The mapper is
 total: an error that matches no row still answers a fixed status, so no
 internal detail can escape through the response path. The table is the
 contract, and the row order is part of it — the first match wins.
@@ -315,11 +317,291 @@ promises one. This is the accepted placement of ADR 0007 (review decision
 14.7); the pattern is documented here and implemented with the consumer's
 library, not in sup-kv.
 
-## What Phase 9 adds
+## RPC reference
 
-This page is the phase-owned half of the API contract. The rest belongs to
-Phase 9's DOCS-05 work and is deliberately not claimed complete here: the full
-per-RPC failure table (every RPC against every error, rather than this page's
-mapper-level table), the write-latency model, and the key-prefix convention.
-Treat those sections as pending until Phase 9 lands them; this document claims
-only the sections it states.
+The sections below appear in the schema's own declaration order — the order
+`supkvapi.v1.SupKVService` declares its rpcs in
+`api/supkvapi/v1/supkvapi.proto` — and cover every RPC the schema declares,
+so the reference and the proto cannot silently diverge (the order is
+machine-checked). Each section states the
+RPC's semantics and an error table of exactly the codes that RPC's inputs
+can produce per the server's total mapping (see [Errors](#errors)). Three
+facts hold for every RPC and are factored out here rather than repeated per
+table:
+
+- **The startup gate comes first.** While it is closed, every data RPC —
+  reads and writes alike — answers `Unavailable`
+  (`startup gate: waiting for first sync round or startup_gate`) before any
+  validation, so even an empty key surfaces `Unavailable`, not
+  `InvalidArgument`, until the gate opens; health reports `NOT_SERVING` for
+  the same window. The tables below state what each RPC's inputs can produce
+  once the gate is open.
+- **A request over the transport receive ceiling is a transport verdict.**
+  Any request larger than `MaxRecvBytes` is rejected with `ResourceExhausted`
+  before the handler runs — a different answer from the handler's own
+  `InvalidArgument` rejections, and the layer that spoke is visible in the
+  code. The ceiling is documented once in
+  [Transport and health](#transport-and-health).
+- **Caller cancellation is transport behavior.** The caller's own context
+  cancellation and deadline always end an RPC with `Canceled` or
+  `DeadlineExceeded`, independent of the tables below.
+
+### Get
+
+`Get` returns the live record for one key — the full record (key, 16-byte
+RFC 9562 `version`, `value` bytes, `deleted` flag) in one round trip. An
+absent or tombstoned key is `NotFound`, never an empty success. `Get` does
+not enforce the key-length ceiling: validation is write-side only, so
+pre-upgrade records under longer keys stay readable.
+
+A key a peer's complete listing named but whose value has not arrived
+locally is its own answer: the key provably exists somewhere in the cluster,
+so claiming `NotFound` would lie — see
+[Consistency caveats](#consistency-caveats).
+
+#### Errors
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `InvalidArgument` | `key must not be empty` | an empty key |
+| `NotFound` | `key not found` | the key is absent or tombstoned locally |
+| `Unavailable` | `startup gate: key is listed by a peer but its value has not arrived` | the key is listed by a peer but its value has not arrived (rule 14.5(6)) |
+| `Internal` | `internal error` | the totality fallback: an unclassified engine error is logged once and answered with the constant — no internal detail crosses the wire |
+
+### Set
+
+`Set` writes `value` under `key` and returns only after the engine confirmed
+the write on disk — a nil error means a dump containing the record
+completed, so a confirmed write is never lost. The response carries the
+stored record's 16-byte `version`. `create_if_absent` turns the write into
+the create-if-absent variant: it refuses with `AlreadyExists` for any
+existing record — tombstone included — and for a key a peer's complete
+listing named, before any engine call (the peer already owns the key; a
+local create would overwrite it).
+
+`wait_for_replication` asks the server to wait after the confirmed write for
+the replication Acks and to decorate the response with the aggregate report
+(`acked`, `acked_count`, `total_peers`); it never changes the write outcome
+and is bounded per request by `wait_timeout_ms` — the full contract is in
+[wait_for_replication](#wait_for_replication), and the wait reports an
+honest false rather than failing. A write the engine installed but whose
+covering dump failed still replicates (the record is in memory and is
+notified before the error) while the RPC answers `Unavailable`.
+
+#### Errors
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `InvalidArgument` | `key must not be empty` | an empty key |
+| `InvalidArgument` | `key length N exceeds the maximum of 1024 bytes (the limit is measured in bytes)` | a key over the 1 024-byte ceiling |
+| `InvalidArgument` | `value exceeds the maximum allowed size` | a value over the effective `--value-max-bytes` limit |
+| `AlreadyExists` | `key already exists` | `create_if_absent` for any existing record (tombstone included) or for a key a peer's complete listing named |
+| `Unavailable` | `dump failed; write not confirmed` | the engine installed the write but its covering dump failed (the write stays in memory and replicates) |
+| `Unavailable` | `write not confirmed before the confirmation timeout` | the covering dump outlived the confirmation timeout |
+| `Unavailable` | `persist engine closed` | the engine is closed (process shutdown) |
+| `Internal` | `internal error` | the totality fallback for an unclassified engine error |
+
+### Delete
+
+`Delete` writes a fresh-version tombstone for one key and returns only after
+the engine confirmed the tombstone on disk — a delete is a write. The
+response carries the tombstone's `version`. A missing or already-tombstoned
+key surfaces `NotFound`: a delete of nothing happened, and no version is
+burned. The wait fields carry the same meaning as on `Set`.
+
+#### Errors
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `InvalidArgument` | `key must not be empty` | an empty key |
+| `InvalidArgument` | `key length N exceeds the maximum of 1024 bytes (the limit is measured in bytes)` | a key over the 1 024-byte ceiling — a tombstone for an unwritable key would be its own unsendable record |
+| `NotFound` | `key not found` | the key is absent or already tombstoned |
+| `Unavailable` | `dump failed; write not confirmed` | the engine installed the tombstone but its covering dump failed (it stays in memory and replicates) |
+| `Unavailable` | `write not confirmed before the confirmation timeout` | the covering dump outlived the confirmation timeout |
+| `Unavailable` | `persist engine closed` | the engine is closed (process shutdown) |
+| `Internal` | `internal error` | the totality fallback for an unclassified engine error |
+
+### List
+
+`List` returns the live (non-tombstoned) keys under `prefix` — the empty
+prefix matches every key — in byte-wise lexicographic ascending order. The
+two modes and the position token are specified in
+[List pagination](#list-pagination); tombstones are never listed.
+
+#### Errors
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `InvalidArgument` | `invalid page size` | a negative `page_size`, or a non-empty `page_token` without a positive `page_size` (the legacy listing has no page to continue) |
+| `InvalidArgument` | `invalid page token` | an undecodable token, or one whose decoded key exceeds the dump format's record-line ceiling |
+
+Past the gate, the only failures are the request's own: the listing has no
+engine error path, so the table carries no `Internal` row — that absence is
+deliberate, not an omission.
+
+### Watch
+
+`Watch` subscribes to changes under `prefix` (the empty prefix matches every
+key) and is the only server-streaming RPC. The stream is the snapshot
+followed by the live change feed; the durability mechanics, ordering and
+buffer policy are specified in [Watch](#watch), and the API-level guarantee
+in [Watch contract](#watch-contract).
+
+#### Errors
+
+A healthy stream does not fail: the only server-initiated way a live stream
+ends is shutdown, with `Unavailable` — never `OK` — and there is no
+`Internal` or other watch-failure path. A stream that ends without one of
+the codes below ended because the client went away.
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `Unavailable` | `watch hub is shutting down` | the server is shutting down — every stream ends with this status, and a subscriber that arrives after shutdown began gets the same verdict |
+| `ResourceExhausted` | `watch subscriber overwhelmed; resubscribe` | this subscriber's event buffer or the hub's pending bound overflowed; resubscribe and re-snapshot, losing nothing |
+| `Unimplemented` | `watch requires a hub; construct the server through NewServer` | a server constructed without a Watch hub |
+
+### SnapshotCreate
+
+`SnapshotCreate` forces the current dump to complete — every confirmed write
+is on disk — then byte-copies that finished dump under `name` (see
+[Snapshots](#snapshots)). A create is a write: it is gated like one, and a
+flush failure aborts with nothing copied.
+
+#### Errors
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `InvalidArgument` | `invalid snapshot name` | a name outside the closed charset `[A-Za-z0-9._-]` or the 1..64 length bound — validated before any filesystem touch |
+| `FailedPrecondition` | `no dump on disk to snapshot` | no main dump exists on disk to copy |
+| `Unavailable` | `dump failed; write not confirmed` | the forced dump failed (nothing is copied) |
+| `Unavailable` | `write not confirmed before the confirmation timeout` | the forced dump outlived the confirmation timeout |
+| `Unavailable` | `persist engine closed` | the engine is closed (process shutdown) |
+| `ResourceExhausted` | `disk full` | the copy's filesystem work was classified as disk-full |
+| `PermissionDenied` | `permission denied` | the copy's filesystem work was classified as permission |
+| `Internal` | `internal error` | the totality fallback for an unclassified filesystem fault |
+
+### SnapshotLoad
+
+`SnapshotLoad` replays the named snapshot as ordinary writes with fresh
+versions — a full rollback, not a merge; the replay, the rollback walk and
+the broadcast semantics are specified in [Snapshots](#snapshots). The call
+returns only after one final dump covering the whole replay, and the result
+replicates like any write burst.
+
+#### Errors
+
+| Code | Message | Raised when |
+|------|---------|-------------|
+| `InvalidArgument` | `invalid snapshot name` | a name outside the closed charset — validated before any filesystem touch |
+| `NotFound` | `snapshot not found` | the named snapshot is absent from disk |
+| `DataLoss` | `snapshot does not decode cleanly` | the snapshot is readable at generation level but at least one record line was discarded (checksum, version, value-limit or malformed class) — the load is refused before any change |
+| `Unavailable` | `dump failed; write not confirmed` | the final confirming dump failed (the replayed state is in memory and still replicates) |
+| `Unavailable` | `write not confirmed before the confirmation timeout` | the final dump outlived the confirmation timeout |
+| `Unavailable` | `persist engine closed` | the engine is closed (process shutdown) |
+| `PermissionDenied` | `permission denied` | the snapshot file is unreadable due to filesystem permissions |
+| `Internal` | `internal error` | the totality fallback for an unclassified read fault |
+
+## Watch contract
+
+The [Watch](#watch) section specifies the mechanics; this is the API-level
+guarantee an integrator builds on:
+
+- **The cut is exact.** The stream is snapshot-then-live with one boundary:
+  every key's state at subscribe time arrives in the snapshot, and every
+  install after the cut arrives exactly once as a live event — nothing
+  between the snapshot's keys and the first live event can be missed or
+  doubled.
+- **Local changes are announced only after they are durable.** A live event
+  is released only once the dump confirmation that made the change durable
+  has completed; a write whose dump failed stays pending until a covering
+  dump succeeds. What the live feed announces is always on disk.
+- **Pending delivery is bounded, and overload is loud.** The hub holds
+  pending events within a fixed bound; past it — or past a subscriber's own
+  event buffer — every affected stream ends with `ResourceExhausted`
+  (`watch subscriber overwhelmed; resubscribe`) instead of a silent drop.
+  The bounded pending queue is what keeps a slow subscriber from growing the
+  hub's memory without limit, and a resubscribing client re-snapshots and
+  loses nothing.
+- **Shutdown ends every stream with `Unavailable`, never `OK`** — a dying
+  node must not look like a clean end of the change feed — and a subscriber
+  that arrives after shutdown began gets the same verdict.
+- **Health never returns to SERVING.** Shutdown flips the health endpoint to
+  `NOT_SERVING` one-way: a late gate resolver cannot resurrect a serving
+  verdict, so an orchestrator acting on health never sends traffic to a
+  dying node twice.
+
+## Write-latency model
+
+A client write returns only after a dump containing it completed, so write
+latency is a property of the dump policy — the debounce window and the
+full dump's duration — not of the RPC path alone. Under sustained write
+flow the quiet window never arrives, so the dump fires at `dump_max_wait`
+and each write waits for that dump, while a single sequential writer is a
+different shape that pays the debounce on every write. The model, both
+profiles' conditions and every measured figure live in
+[docs/PERFORMANCE.md](PERFORMANCE.md) — that ledger is the one copy, and
+this section deliberately carries no numbers.
+
+## Key-prefix convention
+
+The key-prefix convention: services that share a cluster keep their keys
+under one '/'-prefixed namespace each — `myapp/config/...`,
+`myapp/state/...` — so concurrent services never collide and `List`/`Watch`
+prefixes line up with ownership. The convention is enforced by documentation,
+not by the store: the store's map is deliberately
+prefix-agnostic and treats a key as an opaque string up to the 1 024-byte
+ceiling, because per-prefix policy (namespaced deletion, prefix-scoped
+permissions) is a different product, and the convention costs the store
+nothing while giving consumers a collision-free namespace. A consumer that
+skips the convention still works — it just shares one flat namespace with
+every other service on the cluster.
+
+## Consistency caveats
+
+- **Last-writer-wins is the whole conflict story.** Concurrent writes to one
+  key resolve deterministically by record version — every replica converges
+  to the same winner, never per-replica divergence — and a merge loser is an
+  ordinary overwrite, not an error the API reports. Per-key atomicity is the
+  only atomicity: there are no multi-key transactions.
+- **Read-your-writes holds on the writing node.** Reads are local and
+  uncoordinated: a write confirmed by node A is immediately visible to reads
+  on A — read-your-writes is node-local, never cluster-wide. A client that
+  must read what it just wrote keeps talking to the node it wrote to.
+- **Cross-node visibility is bounded, not immediate.** A write reaches peers
+  within the convergence bounds — one round trip normally, bounded by
+  `ack_timeout_max` under loss and by the sync cadence after a partition
+  heals. The bounds and the read semantics live in
+  [docs/OPERATIONS.md](OPERATIONS.md).
+- **A listed-but-unarrived key reads as Unavailable, not NotFound.** Between
+  a peer's complete listing arriving and the listed key's value landing
+  locally, a `Get` of that key answers `Unavailable`
+  (`startup gate: key is listed by a peer but its value has not arrived`,
+  rule 14.5(6)): the key provably exists somewhere in the cluster, so
+  claiming absence would lie. Treat the window as retry-with-backoff, never
+  as absence.
+
+## Client patterns
+
+Two integrator patterns close this reference: the cache a client keeps
+itself, and obtaining the proto.
+
+**The last-read-value cache is consumer-library territory.** A consumer that
+must keep answering through a sup-kv outage keeps its own last-read-value
+cache: the last value it read per key, served as a fallback while the node
+is unreachable. sup-kv does not ship it — no node writes a client-side cache
+and no RPC promises one (ADR 0007, decision 14.7, the accepted placement;
+see [Consumer library territory](#consumer-library-territory)). The
+consumer's library owns the pattern: what to keep, when to refresh it from a
+`Get` or a `Watch` event, and when to serve the fallback.
+
+**Obtaining the proto.** The schema is public and versioned in this
+repository — [Public proto](#public-proto) carries the import table. In
+short: the source is `api/supkvapi/v1/supkvapi.proto`, the generated Go
+package `github.com/Djarvur/sup-kv/api/supkvapi/v1` is committed beside it
+(so a Go client imports it directly, no code generation), and gRPC server
+reflection is always on for non-Go clients. The runnable working example is
+the `examples/client` module — a separate Go module
+(`example.com/sup-kv-client`, deliberately outside the root module's prefix,
+with a `replace` to this repository) that imports only the public package,
+demonstrates `Set` with `wait_for_replication`, `Get`, paged `List` and
+`Watch`, and builds in CI.
