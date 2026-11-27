@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 09-02-PLAN.md
-last_updated: "2026-11-27T21:52:36.868Z"
+stopped_at: Completed 09-03-PLAN.md
+last_updated: "2026-11-28T01:22:00.000Z"
 last_activity: 2026-11-28
-last_activity_desc: Phase 9 execution started
-state_head: 8a201cd8a9537093fd40ee154cf3875ecce7cd52
+last_activity_desc: Plan 09-03 executed — stack docs as-built and machine-audited, six hygiene rows closed
+state_head: af1e3ebf0a5b1454fd4197093465a186c2e05152
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 105
-  completed_plans: 95
+  completed_plans: 96
 ---
 
 # Project State
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 9 (Documentation and Release) — EXECUTING
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 11
 Status: Ready to execute
-Last activity: 2026-11-28 — Phase 9 execution started
+Last activity: 2026-11-28 — Plan 09-03 executed (stack docs as-built and machine-audited; six hygiene rows closed)
 
-Progress: [█████████░] 89%
+Progress: [█████████░] 91%
 
 ## Performance Metrics
 
@@ -158,6 +158,7 @@ Progress: [█████████░] 89%
 | Phase 8 P11 | 20min | 2 tasks | 0 files |
 | Phase 09 P1 | 10min | 3 tasks | 3 files |
 | Phase 9 P2 | 18min | 2 tasks | 3 files |
+| Phase 9 P3 | 30min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -530,6 +531,11 @@ Recent decisions affecting current work:
 - [Phase 9]: 09-02: the example dumps show the as-built data encodings the plan gloss missed - a tombstone is data:null and a live empty value is data:"" (a zero-length non-nil []byte renders as the empty base64 string), so the two edge shapes are distinguishable by the deleted flag alone — The scratch generator output exposed the distinction; the doc documents both shapes explicitly because the dump grammar must not claim one null shape for both
 - [Phase 9]: 09-02: the dump loader does not validate the UUIDv7 layout or a future bound at load (class=version is hex/16-byte only) - the plan "version layout/future" gloss belongs to the replication receive path, and FORMATS.md documents the split — decodeRecord has no version.Validate call; the plan own grounding rule (the code wins over the research gloss) applied, and the doc cross-references the replication-side layout/future checks
 - [Phase 9]: 09-02: the rejection-class enumeration rides reflect.TypeFor[persist.DecodeStats]() instead of parsing codec.go source - the real class set is the type own fields, immune to source reformatting — The plan acceptance asks for the real classes not a hand list; the exported type is the codec contract surface, and a class the codec adds or removes without a doc edit fails the test
+- [Phase 9]: 09-03: the stack audit is bidirectional and derived at test time — expected values are parsed from go.mod (go directive, tool block) and `go list ./...`, so a dependency or package change without a doc edit fails make test in both directions (doc-cited-but-absent and present-but-undocumented)
+- [Phase 9]: 09-03: the tool-directive inventory is line-scoped — the audit parses only lines naming the tool directives, so AGENTS.md's dependency policy and the CLAUDE.md stack table each keep the complete seven-name list on one source line and prose backticks never count
+- [Phase 9]: 09-03: M-40's SetReadBuffer advice is verified-then-kept — internal/udprepl/socket.go sets SO_RCVBUF/SO_SNDBUF and reads the kernel values back (XPORT-05), so the research advice became accurate when Phase 3 shipped
+- [Phase 9]: 09-03: M-51 is an executed claim — the by-id ruleset command ran 2026-11-28 and printed exactly the documented shape, recorded verbatim in branch-protection.md; M-23's Go half is verify-then-delete (zero journal survivors in storage/repl production comments)
+- [Phase 9]: 09-03: M-49's split — the Makefile buf-breaking recipe lost its dead pre-Phase-6 probe branch (real comparison proven green) while ci.yml got comment-only edits per the plan's 09-07 ownership constraint; the leftover probe carries an honest comment
 
 ### Pending Todos
 
@@ -552,7 +558,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-27T21:52:36.571Z
-Stopped at: Completed 09-02-PLAN.md
+Last session: 2026-11-28T01:22:00Z
+Stopped at: Completed 09-03-PLAN.md
 Resume file: None
-Next action: `/gsd:plan-phase 9` (Phase 9 has no plans yet)
+Next action: Execute 09-04-PLAN.md (the registry sweep)

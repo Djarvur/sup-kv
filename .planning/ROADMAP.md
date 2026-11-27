@@ -356,10 +356,10 @@ Plans:
   2. Operational references are complete and anchored to the binary: the Spec's 18-row failure-behavior table (symptom → behavior → recovery → metric → log line) and runbooks for dump failure/full disk, missing peer, growing unconfirmed set, write conflict, incompatible versions, corrupted dump and duplicate `node_id` — every row references a metric or log line that exists in the binary; a metrics reference and log-message catalog are cross-checked by a test; `docs/FORMATS.md` defines the dump grammar, checksum and envelope with a byte-identical encode test
   3. API and as-built documentation land: `docs/API.md` with per-RPC semantics, code tables, Watch contract, write-latency model and client patterns (with APIS-06); the as-built architecture description and spec-deviation table close the Phase 1 registry with no unclosed rows (milestone exit criterion); `AGENTS.md`/`.claude/CLAUDE.md` stack sections match `go.mod` and `go list ./...`
   4. Every "proven" claim names its test and doc drift breaks CI (`TestOperationsDoc` verifies against the binary); the macOS quickstart pair works; darwin is demoted to development-only in README and release archives (14.10); CONTRIBUTING, SECURITY, ADR index, simulator guide, release procedure and benchmark results land; phase/decision numbers are scrubbed from proto comments and CHANGELOG; the branch-protection ruleset check command works as written; the v1.1 release ships
-**Plans**: 1/11 plans executed
+**Plans**: 3/11 plans executed
 - [x] 09-01-PLAN.md
-- [ ] 09-02-PLAN.md
-- [ ] 09-03-PLAN.md
+- [x] 09-02-PLAN.md
+- [x] 09-03-PLAN.md
 - [ ] 09-04-PLAN.md
 - [ ] 09-05-PLAN.md
 - [ ] 09-06-PLAN.md
@@ -391,4 +391,4 @@ Phases execute in numeric order: 1 → 2 → … → 9 (v1.1; v1.0's phases 1-7 
 | 6. API and Semantics | v1.1 | 13/13 | Complete | 2026-11-23 |
 | 7. Observability and Configuration | v1.1 | 11/11 | Complete | 2026-11-23 |
 | 8. Performance | v1.1 | 11/11 | Complete    | 2026-11-25 |
-| 9. Documentation and Release | v1.1 | 1/11 | In Progress | - |
+| 9. Documentation and Release | v1.1 | 3/11 | In Progress | - |
