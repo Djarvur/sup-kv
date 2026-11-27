@@ -175,7 +175,7 @@
 - [ ] **DOCS-03**: `docs/DEPLOYMENT.md` + systemd unit — two-board topology, bind/broadcast address choice, ports, `node_id`, paths and permissions, sizes, time sync, upgrade and compatibility, node replacement; the unit runs in CI and ships in the release archives (D-03)
 - [ ] **DOCS-04**: Failure-behavior table (the Spec's 18 rows: symptom → behavior → recovery → metric → log line) and runbooks for dump failure/full disk, missing peer, growing unconfirmed set, write conflict, incompatible versions, corrupted dump, duplicate `node_id`; every row references a metric or log line that exists in the binary (D-04)
 - [ ] **DOCS-05**: `docs/API.md` — per-RPC semantics and code tables; Watch contract; write-latency model; consistency caveats; key-prefix convention; `Unavailable` handling; client last-value cache pattern; how to obtain the proto; Go client example (D-05, with APIS-06)
-- [ ] **DOCS-06**: `docs/FORMATS.md` — dump grammar with example, checksum definition, rejection rules, format-version policy; envelope and messages, CRC coverage, record-version layout, manual decoding; a test encodes a fixed set byte-identical to the example (D-06)
+- [x] **DOCS-06**: `docs/FORMATS.md` — dump grammar with example, checksum definition, rejection rules, format-version policy; envelope and messages, CRC coverage, record-version layout, manual decoding; a test encodes a fixed set byte-identical to the example (D-06)
 - [ ] **DOCS-07**: Metrics reference (type, labels, exact meaning, recommended alert) and a log-message catalog; a test cross-checks exported families and labels (D-07)
 - [ ] **DOCS-08**: As-built architecture description and the spec-deviation table (with SPEC-01); `AGENTS.md` and `.claude/CLAUDE.md` stack sections match `go.mod` and `go list ./...` (D-08)
 - [ ] **DOCS-09**: Every "proven" claim names its test; `TestOperationsDoc` verifies against the binary; example health waits do not match `NOT_SERVING`; the macOS quickstart pair works; a metric rename or default change without a doc update breaks CI (D-09)
@@ -286,7 +286,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DOCS-03 | Phase 9 | Pending |
 | DOCS-04 | Phase 9 | Pending |
 | DOCS-05 | Phase 9 | Pending |
-| DOCS-06 | Phase 9 | Pending |
+| DOCS-06 | Phase 9 | Complete |
 | DOCS-07 | Phase 9 | Pending |
 | DOCS-08 | Phase 9 | Pending |
 | DOCS-09 | Phase 9 | Pending |

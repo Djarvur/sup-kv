@@ -81,7 +81,7 @@
     {
       "number": "9",
       "name": "Documentation and Release",
-      "status": "pending"
+      "status": "in_progress"
     }
   ],
   "next": {
@@ -89,5 +89,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 9 of 9 · executing"
   },
-  "updated_at": "2026-11-27T21:33:56.979Z"
+  "updated_at": "2026-11-27T21:52:11.573Z"
 }

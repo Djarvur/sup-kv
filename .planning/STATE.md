@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 09-01-PLAN.md
-last_updated: "2026-11-27T21:34:32.266Z"
+stopped_at: Completed 09-02-PLAN.md
+last_updated: "2026-11-27T21:52:36.868Z"
 last_activity: 2026-11-28
 last_activity_desc: Phase 9 execution started
-state_head: f502b0c1fb595457e9328ce30ef01dd86e0c04de
+state_head: 8a201cd8a9537093fd40ee154cf3875ecce7cd52
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 105
-  completed_plans: 94
+  completed_plans: 95
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 9 (Documentation and Release) — EXECUTING
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-28 — Phase 9 execution started
@@ -157,6 +157,7 @@ Progress: [█████████░] 89%
 | Phase 8 P10 | 17min | 3 tasks | 5 files |
 | Phase 8 P11 | 20min | 2 tasks | 0 files |
 | Phase 09 P1 | 10min | 3 tasks | 3 files |
+| Phase 9 P2 | 18min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -525,6 +526,10 @@ Recent decisions affecting current work:
 - [Phase 09]: the --help capture is authoritative over the research prose — research section 4 rounded the registered surface to 22 flags; the clean-env --help capture shows 23 registered flags plus the five env-only knobs, and the plan's own assumption makes the live capture the source — the >=22 vacuity guard holds and M-07's doc half covers all 23
 - [Phase 09]: dump_debounce <= dump_max_wait is documented as the dump cycle's intended relation the validator does not enforce — internal/config/validate.go's 12-rule catalog contains no debounce-vs-max-wait rule, so CONFIGURATION.md states the honest semantics (a smaller max-wait truncates every quiet window at the deadline) instead of inventing a startup rule
 - [Phase 09]: M-07's doc half is closed by docs/CONFIGURATION.md with the OPERATIONS cross-link deferred to plan 09-05 — all registered flags and defaults are documented and machine-checked in both directions by TestConfigurationDoc; the OPERATIONS-side link edit belongs to the plan that owns OPERATIONS.md, and the two-half disposition is recorded here and in 09-01-SUMMARY.md
+- [Phase 9]: 09-02: the fixed record set uses node 0x5060 - the plan 48-bit literal 0x102030405060 cannot fit the version layout 16-bit NodeID domain, and doc and test share the tuple — PackVersion takes a uint16 node id (RFC 9562 rand_b high 16 bits); the plan gloss is a Rule-1 correction recorded in the summary and in the test comment
+- [Phase 9]: 09-02: the example dumps show the as-built data encodings the plan gloss missed - a tombstone is data:null and a live empty value is data:"" (a zero-length non-nil []byte renders as the empty base64 string), so the two edge shapes are distinguishable by the deleted flag alone — The scratch generator output exposed the distinction; the doc documents both shapes explicitly because the dump grammar must not claim one null shape for both
+- [Phase 9]: 09-02: the dump loader does not validate the UUIDv7 layout or a future bound at load (class=version is hex/16-byte only) - the plan "version layout/future" gloss belongs to the replication receive path, and FORMATS.md documents the split — decodeRecord has no version.Validate call; the plan own grounding rule (the code wins over the research gloss) applied, and the doc cross-references the replication-side layout/future checks
+- [Phase 9]: 09-02: the rejection-class enumeration rides reflect.TypeFor[persist.DecodeStats]() instead of parsing codec.go source - the real class set is the type own fields, immune to source reformatting — The plan acceptance asks for the real classes not a hand list; the exported type is the codec contract surface, and a class the codec adds or removes without a doc edit fails the test
 
 ### Pending Todos
 
@@ -547,7 +552,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-27T21:34:31.652Z
-Stopped at: Completed 09-01-PLAN.md
+Last session: 2026-11-27T21:52:36.571Z
+Stopped at: Completed 09-02-PLAN.md
 Resume file: None
 Next action: `/gsd:plan-phase 9` (Phase 9 has no plans yet)
