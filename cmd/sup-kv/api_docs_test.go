@@ -7,11 +7,15 @@ package main_test
 // wait_for_replication semantics and the two List pagination modes; Task 2
 // extends the table with the error table, the Watch durability contract, the
 // snapshot full rollback, the transport/health envelope and the
-// consumer-library boundary. HONEST SCOPE: this is a presence/anchor guard —
-// deleting a section, renaming a heading or dropping a mandated statement
-// fails the normal test gate; the truth of each statement against the code is
-// the phase verification's manual read-through, not something a substring
-// check can establish.
+// consumer-library boundary. The phase-9 DOCS-05 extension (09-06) replaces
+// the pending tail: TestAPIDocPerRPCSections mirrors the public proto's own
+// declaration order, the anchors pin the new sections, and the literals that
+// pinned the pending section are now forbidden phrases. HONEST SCOPE: this is
+// a presence/anchor guard — deleting a section, renaming a heading or
+// dropping a mandated statement fails the normal test gate; the truth of each
+// statement (and of every per-RPC error table's rows) against the code is the
+// phase verification's manual read-through, not something a substring check
+// can establish.
 
 import (
 	"os"
@@ -122,27 +126,189 @@ var apiDocAnchors = []struct {
 	{"14.7", "the owner decision that settled it"},
 	{"not a server feature", "the binary ships no last-read-value cache"},
 
-	// The explicit Phase 9 split (never claimed complete here).
-	{"## What Phase 9 adds", "the Phase 9 remainder section heading"},
-	{"DOCS-05", "the requirement that owns the remainder"},
-	{"per-RPC failure table", "Phase 9's full failure table"},
-	{"write-latency model", "Phase 9's latency model"},
-	{"key-prefix convention", "Phase 9's prefix convention"},
+	// The completed integrator reference (DOCS-05): the pending section's
+	// replacement. The rows below pin the phase-9 sections exactly like the
+	// rows above pin the phase-6 contract; the literals that pinned the
+	// pending section itself moved to apiDocForbidden.
+	{"## RPC reference", "the per-RPC reference section heading — the pending section's replacement"},
+	{"in the schema's own declaration order", "the reference mirrors the proto's RPC declaration order"},
+	{"## Watch contract", "the API-level Watch guarantee section heading"},
+	{"snapshot-then-live", "the exact cut is stated as the API-level guarantee"},
+	{"bounded pending", "the pending queue's bound and its shed policy are part of the guarantee"},
+	{"## Write-latency model", "the latency-model section heading"},
+	{"docs/PERFORMANCE.md", "the one-ledger link: the model's figures live in PERFORMANCE.md, never here"},
+	{"## Key-prefix convention", "the key-prefix convention section heading"},
+	{"enforced by documentation", "the prefix convention binds by documentation, not by the store"},
+	{"## Consistency caveats", "the consistency-caveats section heading"},
+	{"read-your-writes", "the writing node serves read-your-writes"},
+	{"Unavailable, not NotFound", "the listed-but-unarrived window answers Unavailable (rule 14.5(6))"},
+	{"## Client patterns", "the client-patterns section heading"},
+	{"last-read-value cache", "the cache pattern named where the integrator guidance lives"},
+	{"obtaining the proto", "the proto-obtainment guidance in the client patterns"},
+	{"api/supkvapi/v1/supkvapi.proto", "the proto source a client obtains the schema from"},
+	{"examples/client", "the runnable client example module"},
+	{"example.com/sup-kv-client", "the example module's own module path — the importability proof"},
 }
 
-// TestAPIDoc fails when docs/API.md is absent or loses any mandated anchor:
-// the contract document is a published artifact, so its sections are pinned
-// against drift by the same gate that guards the code.
-func TestAPIDoc(t *testing.T) {
-	t.Parallel()
+// apiDocForbidden carries the pending-section literals the phase-9 extension
+// flipped (09-06): they pinned `## What Phase 9 adds` until the real sections
+// it promised replaced it, so their return would regress the contract.
+// Matching is whitespace-normalized on both sides, per the operations-test
+// idiom — line wrapping is not a way to keep a stale claim alive.
+var apiDocForbidden = []struct {
+	phrase string
+	why    string
+}{
+	{"What Phase 9 adds", "the pending section is replaced by the RPC reference; its return would regress the contract"},
+	{"Treat those sections as pending", "the pending disclaimer is gone — the document claims the sections it states"},
+	{"per-RPC failure table", "the pending deliverable's old name; the shipped section is the RPC reference with per-RPC error tables"},
+	{"DOCS-05", "planning vocabulary stays out of the published contract"},
+}
+
+// readAPIDoc reads the doc under guard from the repo — the file is the input,
+// never a fixture copy.
+func readAPIDoc(t *testing.T) string {
+	t.Helper()
 	raw, err := os.ReadFile(apiDocPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", apiDocPath, err)
 	}
-	doc := string(raw)
+	return string(raw)
+}
+
+// TestAPIDoc fails when docs/API.md is absent, carries a forbidden
+// pending-section claim, or loses any mandated anchor: the contract document
+// is a published artifact, so its sections are pinned against drift by the
+// same gate that guards the code. The forbidden check runs first, so a
+// returned pending section is named even while sections are also missing.
+func TestAPIDoc(t *testing.T) {
+	t.Parallel()
+	doc := readAPIDoc(t)
+	normalized := strings.Join(strings.Fields(doc), " ")
+	for _, f := range apiDocForbidden {
+		phrase := strings.Join(strings.Fields(f.phrase), " ")
+		if strings.Contains(normalized, phrase) {
+			t.Fatalf("%s still contains the stale claim %q — %s", apiDocPath, f.phrase, f.why)
+		}
+	}
 	for _, a := range apiDocAnchors {
 		if !strings.Contains(doc, a.literal) {
 			t.Fatalf("%s does not contain %q — %s", apiDocPath, a.literal, a.pins)
+		}
+	}
+}
+
+// apiProtoPath is the public schema the RPC reference must mirror, relative to
+// this package's directory — the repo file is the input, never a fixture copy.
+const apiProtoPath = "../../api/supkvapi/v1/supkvapi.proto"
+
+// apiDocMinRPCs is the vacuity floor for the schema parse: the proto declares
+// seven RPCs today (Get, Set, Delete, List, Watch, SnapshotCreate,
+// SnapshotLoad — SetIfAbsent is Set's create_if_absent variant and
+// WaitForReplication is Set/Delete's wait fields, never separate RPCs). A
+// parse below the floor means the parser or the schema drifted, and the order
+// check below would pass vacuously.
+const apiDocMinRPCs = 7
+
+// protoRPCs parses the service SupKVService block's rpc declarations in
+// source order. The parse is structural, not a full protobuf parse: a line
+// opens the service block, a lone closing brace ends it, and `rpc Name(`
+// lines inside declare the RPCs.
+func protoRPCs(t *testing.T, proto string) []string {
+	t.Helper()
+	var (
+		rpcs      []string
+		inService bool
+	)
+	for line := range strings.SplitSeq(proto, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "service SupKVService {"):
+			inService = true
+		case inService && trimmed == "}":
+			return rpcs
+		case inService && strings.HasPrefix(trimmed, "rpc "):
+			name, _, _ := strings.Cut(strings.TrimPrefix(trimmed, "rpc "), "(")
+			name = strings.TrimSpace(name)
+			if name == "" {
+				t.Fatalf("%s: an rpc declaration without a name — %q", apiProtoPath, trimmed)
+			}
+			rpcs = append(rpcs, name)
+		}
+	}
+	t.Fatalf("%s: the SupKVService block never closes — the schema parse found no end", apiProtoPath)
+	return nil // unreachable
+}
+
+// TestAPIDocPerRPCSections fails when the RPC reference does not mirror the
+// public schema: every rpc the proto declares must have a `### <Name>` section
+// inside `## RPC reference`, the section headings must be exactly the schema's
+// declarations in the schema's own order (a missing RPC, an extra section or a
+// reordered one all fail — the reference and the schema cannot silently
+// diverge), and each section must carry its error table. HONEST SCOPE: the
+// check pins section presence, order and the `#### Errors` marker; the truth
+// of each table's rows against the mapper is the phase verification's manual
+// read-through, the same disclosure the anchor test makes.
+func TestAPIDocPerRPCSections(t *testing.T) {
+	t.Parallel()
+	protoRaw, err := os.ReadFile(apiProtoPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", apiProtoPath, err)
+	}
+	rpcs := protoRPCs(t, string(protoRaw))
+	if len(rpcs) < apiDocMinRPCs {
+		t.Fatalf("%s: the schema parse found %d rpcs, below the floor of %d — the parse or the schema drifted and the order check would pass vacuously",
+			apiProtoPath, len(rpcs), apiDocMinRPCs)
+	}
+	sections := docSections(readAPIDoc(t))
+	reference, ok := sections["## RPC reference"]
+	if !ok {
+		t.Fatalf("%s carries no %q section — the per-RPC reference in the schema's own declaration order (%s)",
+			apiDocPath, "## RPC reference", strings.Join(rpcs, ", "))
+	}
+
+	// Split the section into its `### ` subsections, keeping declaration
+	// order; `#### ` sub-headings stay inside their section's body.
+	var (
+		order   []string
+		bodies  = make(map[string]string)
+		current string
+		text    strings.Builder
+	)
+	flush := func() {
+		if current != "" {
+			order = append(order, current)
+			bodies[current] = text.String()
+		}
+		current = ""
+		text.Reset()
+	}
+	for line := range strings.SplitSeq(reference, "\n") {
+		if strings.HasPrefix(line, "### ") {
+			flush()
+			current = strings.TrimSpace(strings.TrimPrefix(line, "### "))
+			continue
+		}
+		if current != "" {
+			text.WriteString(line)
+			text.WriteByte('\n')
+		}
+	}
+	flush()
+
+	if len(order) != len(rpcs) {
+		t.Fatalf("%s: the RPC reference carries %d sections, the schema declares %d rpcs — the reference and the schema have diverged (schema order: %s; doc order: %s)",
+			apiDocPath, len(order), len(rpcs), strings.Join(rpcs, ", "), strings.Join(order, ", "))
+	}
+	for i := range rpcs {
+		if order[i] != rpcs[i] {
+			t.Fatalf("%s: the RPC reference's section %d is %q, the schema's declaration %d is %q — the reference must follow the proto's declaration order",
+				apiDocPath, i+1, order[i], i+1, rpcs[i])
+		}
+	}
+	for _, rpc := range rpcs {
+		if !strings.Contains(bodies[rpc], "#### Errors") {
+			t.Fatalf("the %s section carries no %q error-table marker — every RPC's section must state the codes its inputs can produce", rpc, "#### Errors")
 		}
 	}
 }
