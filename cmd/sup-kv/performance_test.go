@@ -335,7 +335,7 @@ func TestSpecDeviationsBurstRow(t *testing.T) {
 		literal string
 		pins    string
 	}{
-		{"fixed-in-v1.1(PERF-02)", "the status that records this phase's closure"},
+		{"implemented", "the status that records the row's closure (the 09-04 registry sweep flipped it; the unclosed fixed-in-v1.1(PERF-02) form is gone)"},
 		{"TestRed_R02_burst", "the frozen red contract's burst scenario"},
 		{"TestPerfBurstDistinctKeys", "the operator-runnable distinct-key burst row"},
 		{"TestEngine_burstBoundedConfirmation", "the deterministic dump-cadence proof"},
