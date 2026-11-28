@@ -228,7 +228,10 @@ func TestArchitectureDocDivisionOfLabor(t *testing.T) {
 		}
 	}
 	if !pointer {
-		t.Errorf("%s carries no line pointing at AGENTS.md for the conventions — ARCHITECTURE.md is the as-built deep description and AGENTS.md stays the conventions contract; each names the other instead of duplicating it", architectureDocPath)
+		t.Errorf(
+			"%s carries no line pointing at AGENTS.md for the conventions — the as-built description and the conventions contract name each other instead of duplicating",
+			architectureDocPath,
+		)
 	}
 
 	agents, err := os.ReadFile(agentsDocPath)
