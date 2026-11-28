@@ -308,17 +308,29 @@ var examplesAssertions = []struct {
 	title  string
 	expect []string
 }{
-	{title: "Start the demo pair", expect: []string{"SERVING"}},
+	// The demo-pair and health rows assert the QUOTED answer shape —
+	// "status": "SERVING" — not the bare SERVING substring, because the
+	// health endpoint answers from construction with NOT_SERVING until the
+	// gate opens, and NOT_SERVING contains SERVING as a substring (M-17).
+	{title: "Start the demo pair", expect: []string{`"status": "SERVING"`}},
 	{title: "Discover the API", expect: []string{"supkvapi.v1.SupKVService"}},
 	{title: "Read a missing key", expect: []string{"NotFound"}},
 	{title: "Write and read", expect: []string{"demo/hello", "c3VwLWt2"}},
+	// The create-if-absent block sits AFTER the Write and read block in the
+	// doc on purpose — the walkthrough's own state machine makes the outcome
+	// deterministic there: demo/hello exists (the write above), so the
+	// create_if_absent refusal is AlreadyExists by the doc's state, not by
+	// luck, and the refused write stores nothing, so every later block's
+	// state (the two live demo/ keys of Delete and list, the Watch snapshot)
+	// is exactly what it was before the block (M-19, Pitfall 5).
+	{title: "Create if absent", expect: []string{"AlreadyExists", "key already exists"}},
 	// The wait entry's substrings are the REAL grpcurl bytes: pretty-printed
 	// JSON with camelCase protojson names ("acked": true, ackedCount,
 	// totalPeers) — captured from a run, not hand-written (Pitfall 3/5).
 	{title: "Wait for replication", expect: []string{`"acked": true`, "ackedCount", "totalPeers"}},
 	{title: "Delete and list", expect: []string{"demo/wait"}},
 	{title: "Watch a stream", expect: []string{"demo/live"}},
-	{title: "Check health", expect: []string{"SERVING"}},
+	{title: "Check health", expect: []string{`"status": "SERVING"`}},
 	{title: "Snapshot round-trip", expect: []string{"{}"}},
 	{title: "Stop the pair", expect: []string{"demo pair stopped"}},
 }

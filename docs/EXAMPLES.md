@@ -11,6 +11,14 @@ run in order and share one running pair of nodes and one working directory —
 work top to bottom the first time; the pair starts in the first block and
 stays up until the last one cleans it up.
 
+**Platform.** This walkthrough is CI-verified on Linux — the marked blocks run
+verbatim in the Linux CI cells, and the demo pair talks over loopback broadcast
+(`127.255.255.255`), which is Linux-only. darwin replication is untested: macOS
+is development-only ([ADR 0010](adr/0010-darwin-development-only.md)) — building
+and unit tests stay supported, replication on darwin does not — so on macOS the
+pair's nodes start but never find each other, and the cross-node reads below
+have no darwin evidence behind them.
+
 ## Prerequisites
 
 Two tools on your `PATH`:
@@ -58,8 +66,8 @@ sup-kv --node-id 2 --bind-addr 0.0.0.0:28002 --broadcast-addr 127.255.255.255:28
 # first sync round, or the demo's pinned 2s empty-disk gate — a node with data
 # on disk opens on the 1s startup gate).
 for i in $(seq 1 50); do
-  if grpcurl -plaintext -d '{}' 127.0.0.1:28011 grpc.health.v1.Health/Check 2>/dev/null | grep -q SERVING \
-    && grpcurl -plaintext -d '{}' 127.0.0.1:28012 grpc.health.v1.Health/Check 2>/dev/null | grep -q SERVING; then
+  if grpcurl -plaintext -d '{}' 127.0.0.1:28011 grpc.health.v1.Health/Check 2>/dev/null | grep -q '"SERVING"' \
+    && grpcurl -plaintext -d '{}' 127.0.0.1:28012 grpc.health.v1.Health/Check 2>/dev/null | grep -q '"SERVING"'; then
     break
   fi
   sleep 0.2
@@ -90,7 +98,8 @@ grpcurl -plaintext 127.0.0.1:28011 list
 grpcurl -plaintext 127.0.0.1:28011 describe supkvapi.v1.SupKVService
 ```
 
-The listing names the three services a node serves (output from a real run):
+The listing names the four services a node serves — the sup-kv service,
+standard health, and the two gRPC reflection services (output from a real run):
 
 ```
 grpc.health.v1.Health
@@ -177,6 +186,40 @@ The `Get` on node B returns the full record, value still base64:
   }
 }
 ```
+
+### Create if absent
+
+<!-- examples-verify -->
+```bash
+# Set has a create-if-absent variant: create_if_absent turns the write into
+# a create — for any existing record, tombstone included, it refuses with
+# AlreadyExists instead of overwriting. This block sits after the write
+# above on purpose: demo/hello exists, so the refusal is deterministic, and
+# the refused write stores nothing, so the walkthrough's state is unchanged.
+# grpcurl exits non-zero on RPC errors, so capture the output and assert.
+grpcurl -plaintext -d '{"key":"demo/hello","value":"c3VwLWt2","create_if_absent":true}' \
+  127.0.0.1:28011 supkvapi.v1.SupKVService/Set >exists.out 2>&1 || true
+grep -q AlreadyExists exists.out && grep -q "key already exists" exists.out && cat exists.out
+```
+
+The refusal (output from a real run):
+
+```
+ERROR:
+  Code: AlreadyExists
+  Message: key already exists
+```
+
+The error surface is small, and every code is documented with its
+raised-when table in [docs/API.md](API.md): `NotFound` (absent or tombstoned
+key), `AlreadyExists` (the refusal above), `InvalidArgument` (empty key, an
+oversize key, or a value over the `--value-max-bytes` limit),
+`Unavailable` while the interface is closed — every data RPC answers it
+before any validation until the startup gate opens (the first sync round or
+the gate timeout) — and on a dump failure (the write stays in memory and
+replicates), and `ResourceExhausted` for the transport ceilings: a request
+larger than `MaxRecvBytes` (the envelope, key and value-limit sum shaped by
+the UDP datagram bound) is rejected there, before any handling.
 
 ### Wait for replication
 
@@ -361,18 +404,26 @@ grpcurl -plaintext -d '{}' 127.0.0.1:28011 grpc.health.v1.Health/Check
 Snapshots are named copies of a node's confirmed dump — a recovery point
 you can restore by name. `SnapshotCreate` copies the current confirmed dump
 under a name (it lands next to the dump file, in `supkv-ex-a.json.snapshots/`);
-`SnapshotLoad` is a **full rollback**, not an additive replay: it replays the
-named snapshot with fresh versions, deletes the live keys absent from the snapshot
-with fresh tombstones, and those rollback tombstones replicate to
-peers like any write, so the restored state wins by normal last-write-wins.
-Both are gated like writes.
+`SnapshotLoad` is a **full rollback**, not an additive replay (the full
+contract is [docs/API.md](API.md) ## Snapshots): the snapshot's keys replay
+as ordinary writes with **fresh versions**, and every current live key
+**absent from the snapshot is deleted** with a fresh tombstone, so the
+snapshot's key set becomes the store's key set. The replayed records and
+the rollback tombstones broadcast to peers like any write, so the restored
+state wins by normal last-write-wins. This example loads the snapshot it
+just created, and every key is already identical — an immediate reload
+after a create replays as a **whole-restore no-op**: nothing changes,
+nothing is broadcast, and the responses are empty. Both RPCs are gated
+like writes.
 
 <!-- examples-verify -->
 ```bash
 # Copy the confirmed dump under a name...
 grpcurl -plaintext -d '{"name":"demo-snap"}' 127.0.0.1:28011 \
   supkvapi.v1.SupKVService/SnapshotCreate
-# ...and replay it back as ordinary writes (empty responses: {} both times).
+# ...and replay it back. This load immediately follows the create, so every
+# key is already identical: a whole-restore no-op — no record replays, no
+# live key is deleted, nothing broadcasts, and both responses are empty {}.
 grpcurl -plaintext -d '{"name":"demo-snap"}' 127.0.0.1:28011 \
   supkvapi.v1.SupKVService/SnapshotLoad
 ```
