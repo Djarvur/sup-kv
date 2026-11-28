@@ -94,6 +94,46 @@ jobs:
           go test -race ./...
           go mod tidy
           git diff --exit-code go.mod go.sum
+      # The deployment unit (M-16, deploy/sup-kv.service) is verified where
+      # systemd exists: on the two Linux cells the freshly built binary is
+      # installed at the unit's ExecStart path (passwordless sudo),
+      # systemd-analyze verify checks the unit (a missing ExecStart binary is
+      # caught by the install above), and the smoke below runs the unit's
+      # ExecStart ARGUMENT LIST with loopback overrides — production binds
+      # 0.0.0.0:7900 and broadcasts to the LAN segment broadcast
+      # (192.168.1.255 in the unit), which CI must never emit, so the four
+      # addresses go to loopback doc-band ports and the dump path to /tmp,
+      # while every other flag and value stays the unit's, verbatim. The
+      # smoke also pins --startup-gate-empty 2s because a fresh smoke node
+      # has an empty disk (the unit's production node loads a dump and opens
+      # on the 1s --startup-gate). The macos-15 cell skips (no systemd), the
+      # cross cell skips by the !matrix.cross guard above, and the check-run
+      # contexts and the matrix stay untouched — a matrix change would be a
+      # ruleset change.
+      - name: systemd unit verify (deploy/sup-kv.service, Linux cells)
+        if: ${{ !matrix.cross && runner.os == 'Linux' }}
+        run: |
+          go build -o /tmp/sup-kv-ci ./cmd/sup-kv/
+          sudo install -m 0755 /tmp/sup-kv-ci /usr/local/bin/sup-kv
+          systemd-analyze verify deploy/sup-kv.service
+      - name: ExecStart-args smoke (deploy/sup-kv.service, Linux cells)
+        if: ${{ !matrix.cross && runner.os == 'Linux' }}
+        run: |
+          /usr/local/bin/sup-kv --node-id 1 --bind-addr 127.0.0.1:27910 --broadcast-addr 127.0.0.1:27910 --dump-path /tmp/sup-kv-smoke.json --grpc-addr 127.0.0.1:27911 --metrics-addr 127.0.0.1:27912 --startup-gate-empty 2s &
+          pid=$!
+          serving=""
+          for i in $(seq 1 50); do
+            if go tool grpcurl -plaintext -d '{}' 127.0.0.1:27911 grpc.health.v1.Health/Check 2>/dev/null | grep -q '"SERVING"'; then serving=1; break; fi
+            sleep 0.2
+          done
+          if [ "$serving" != 1 ]; then
+            echo "the unit's ExecStart argument list never reached SERVING"
+            kill -TERM "$pid" 2>/dev/null || true
+            exit 1
+          fi
+          kill -TERM "$pid"
+          wait "$pid"
+          test "$?" -eq 0
 
   # Dedicated nested-module job: examples/client is a separate Go module, so
   # the root `go list ./...`/`go test ./...` graph never visits it (that
