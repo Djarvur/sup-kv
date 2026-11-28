@@ -31,7 +31,7 @@ const (
 // Envelope is the outer frame of every replication datagram. run_id is 16
 // bytes; crc32 is the IEEE CRC32 over body — corruption detection only per
 // the accepted trust model, never tamper protection; body is the marshaled
-// Body, decoded by the receiver only after the CRC gate passes (D-02).
+// Body, decoded by the receiver only after the CRC gate passes.
 type Envelope struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ProtoVersion  uint32                 `protobuf:"varint,1,opt,name=proto_version,json=protoVersion,proto3" json:"proto_version,omitempty"`
@@ -109,7 +109,7 @@ func (x *Envelope) GetBody() []byte {
 }
 
 // Body wraps exactly one protocol message in its oneof; the adapter maps
-// every field onto the port structs (D-01).
+// every field onto the port structs.
 type Body struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
