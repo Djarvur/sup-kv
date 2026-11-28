@@ -61,6 +61,7 @@ const provenClaimsFloor = 3
 // enough for the verdict to be meaningful. Failures name the file, the line
 // and the bare claim word, so the fix is a one-paragraph edit.
 func TestProvenClaims(t *testing.T) {
+	t.Parallel()
 	total := 0
 	for _, path := range provenDocPaths {
 		raw, err := os.ReadFile(path)

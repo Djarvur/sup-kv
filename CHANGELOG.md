@@ -16,9 +16,13 @@ coordination, and a write confirmed to a client is never lost.
 ### Added
 
 - LWW-Element-Map engine with HLC/UUIDv7 record versions, proven by property
-  tests: merge is commutative, associative and idempotent (tombstones
-  included), and byte-wise version comparison equals `(l, counter, NodeID)`
-  order with no clock synchronization (Phase 2)
+  tests (`TestMerge_laws`, `TestMerge_lawsTombstones` and `TestProp_mergeSmallSpace`
+  in `internal/app/storage/merge_test.go` and
+  `internal/app/storage/prop_small_space_test.go`; the byte-wise order by
+  `TestVersion_byteOrder` in `internal/app/version/version_test.go`): merge is
+  commutative, associative and idempotent (tombstones included), and byte-wise
+  version comparison equals `(l, counter, NodeID)` order with no clock
+  synchronization (Phase 2)
 - Atomic human-readable JSON dumps with a `.prev` fallback chain, the
   write-confirmed-after-dump guarantee (an acknowledged write is always on
   disk) and named snapshots that restore as ordinary replicating writes
@@ -26,7 +30,9 @@ coordination, and a write confirmed to a client is never lost.
 - UDP broadcast replication — Hello discovery, DataReplication/Ack with
   exponential-backoff retransmission, chunked DataSync anti-entropy — with
   convergence bounds proven by a deterministic seeded simulator under a
-  lossy/duplicating/reordering/partitioning virtual network (Phase 4)
+  lossy/duplicating/reordering/partitioning virtual network
+  (`TestBound_normalOneRTT`, `TestBound_lossWithinAckTimeoutMax` and
+  `TestBound_partitionHeal` in `internal/app/repl/sim_bound_test.go`) (Phase 4)
 - gRPC API: Get, Set (including create-if-absent), Delete, List and Watch
   with an exact snapshot-then-live cut, startup gate, standard health
   checking, `wait_for_replication` and snapshot create/load (Phase 5)
