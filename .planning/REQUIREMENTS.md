@@ -178,7 +178,7 @@
 - [x] **DOCS-06**: `docs/FORMATS.md` — dump grammar with example, checksum definition, rejection rules, format-version policy; envelope and messages, CRC coverage, record-version layout, manual decoding; a test encodes a fixed set byte-identical to the example (D-06)
 - [x] **DOCS-07**: Metrics reference (type, labels, exact meaning, recommended alert) and a log-message catalog; a test cross-checks exported families and labels (D-07)
 - [x] **DOCS-08**: As-built architecture description and the spec-deviation table (with SPEC-01); `AGENTS.md` and `.claude/CLAUDE.md` stack sections match `go.mod` and `go list ./...` (D-08)
-- [ ] **DOCS-09**: Every "proven" claim names its test; `TestOperationsDoc` verifies against the binary; example health waits do not match `NOT_SERVING`; the macOS quickstart pair works; a metric rename or default change without a doc update breaks CI (D-09)
+- [x] **DOCS-09**: Every "proven" claim names its test; `TestOperationsDoc` verifies against the binary; example health waits do not match `NOT_SERVING`; the macOS quickstart pair works; a metric rename or default change without a doc update breaks CI (D-09)
 - [ ] **DOCS-10**: `CONTRIBUTING.md`, `SECURITY.md`, `docs/ARCHITECTURE.md`, ADR index, simulator guide (seed replay, adding a scenario), release procedure, benchmark results with hardware; darwin demoted to development-only in README and release archives (14.10); dump and metrics setup in the deployment guide (14.3, 14.8); phase/decision numbers removed from proto comments and CHANGELOG; the ruleset check command in `docs/setup/branch-protection.md` works as written (D-10)
 
 ## v2 Requirements
@@ -289,7 +289,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DOCS-06 | Phase 9 | Complete |
 | DOCS-07 | Phase 9 | Complete |
 | DOCS-08 | Phase 9 | Complete |
-| DOCS-09 | Phase 9 | Pending |
+| DOCS-09 | Phase 9 | Complete |
 | DOCS-10 | Phase 9 | Pending | |
 
 **Coverage:**
