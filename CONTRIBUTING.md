@@ -86,3 +86,6 @@ archives, checksums and SBOMs, and the GitHub Release body from
 proves the whole artifact pipeline with no tag and no publishing — run it
 and see it green before any tag is pushed. `make release` is the same
 pipeline's local invocation; the tag on merged `master` is what publishes.
+The step-by-step executed procedure — snapshot, archive inspection, the
+one-way tag, and the release verification — is
+[docs/setup/release-procedure.md](docs/setup/release-procedure.md).
