@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"runtime"
 	"syscall"
 )
 
@@ -90,17 +91,38 @@ func WithAddressReuse() Option {
 // for address reuse does it set SO_REUSEADDR through a pre-bind Control hook;
 // production resolves the zero options, so a second process binding the same
 // address fails with EADDRINUSE and can never silently split the node's
-// unicast traffic between two sockets (XPORT-09, T-3-34). SO_BROADCAST is
-// deliberately absent: Go sets it on every datagram socket (RESEARCH
-// Pattern 7), and setting it here would only disguise that the reuse option
-// is the sole socket-option concern.
+// unicast traffic between two sockets (XPORT-09, T-3-34). darwin additionally
+// needs SO_REUSEPORT: its kernel refuses a second live UDP bind with
+// SO_REUSEADDR alone, so the test-only same-port topology sets both there —
+// Linux keeps SO_REUSEADDR only, because SO_REUSEPORT would let the kernel
+// load-balance unicast datagrams between the two sockets and split the
+// stand's reply traffic. SO_BROADCAST is deliberately absent: Go sets it on
+// every datagram socket (RESEARCH Pattern 7), and setting it here would only
+// disguise that the reuse option is the sole socket-option concern.
+// setReuseOptions sets the address-reuse socket options for the test-only
+// same-port topology: SO_REUSEADDR everywhere, plus SO_REUSEPORT on darwin —
+// its kernel refuses a second live UDP bind with SO_REUSEADDR alone. Linux
+// keeps SO_REUSEADDR only: SO_REUSEPORT would let the kernel load-balance
+// unicast datagrams between the shared-port sockets and split the stand's
+// reply traffic.
+func setReuseOptions(fd int) error {
+	err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "darwin" {
+		return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, socketReusePort, 1)
+	}
+	return nil
+}
+
 func listenDatagram(bindAddr string, o options) (*net.UDPConn, error) {
 	var lc net.ListenConfig
 	if o.addressReuse {
 		var opErr error
 		lc.Control = func(_, _ string, c syscall.RawConn) error {
 			err := c.Control(func(fd uintptr) {
-				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				opErr = setReuseOptions(int(fd))
 			})
 			if err != nil {
 				return fmt.Errorf("socket control: %w", err)
