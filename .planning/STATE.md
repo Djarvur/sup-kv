@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: 9
+current_plan: 10
 status: executing
-stopped_at: Completed 09-08-PLAN.md
-last_updated: "2026-11-28T00:41:43.843Z"
+stopped_at: Completed 09-09-PLAN.md
+last_updated: "2026-11-28T01:03:02.596Z"
 last_activity: 2026-11-28
-last_activity_desc: Plan 09-08 executed — the proven-claim rule became a CI gate (TestProvenClaims over README/OPERATIONS/CHANGELOG: word-boundary scan, paragraph scope, vacuity floor; RED named five bare sites, all fixed by naming bound tests) and the newcomer pages closed their M rows: README's Install-from-release section, quickstart cleanup, macOS derive-line truth, the ADR-0010 darwin demotion and M-31's crossed-ports wording; EXAMPLES' quoted SERVING waits, four-service listing, the create_if_absent→AlreadyExists block with the Unavailable/ResourceExhausted error prose, the full-rollback restore text and the Linux platform note
-state_head: d45a95723b6d3b2840162ed895a8d058d4bf00f1
+last_activity_desc: "Plan 09-08 executed — the proven-claim rule became a CI gate (TestProvenClaims over README/OPERATIONS/CHANGELOG: word-boundary scan, paragraph scope, vacuity floor; RED named five bare sites, all fixed by naming bound tests) and the newcomer pages closed their M rows: README's Install-from-release section, quickstart cleanup, macOS derive-line truth, the ADR-0010 darwin demotion and M-31's crossed-ports wording; EXAMPLES' quoted SERVING waits, four-service listing, the create_if_absent→AlreadyExists block with the Unavailable/ResourceExhausted error prose, the full-rollback restore text and the Linux platform note"
+state_head: 19cd9711f74b3a9ea90daf66ee4b4be7ad36af8f
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 105
-  completed_plans: 102
+  completed_plans: 103
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 9 (Documentation and Release) — EXECUTING
-Current Plan: 9
+Current Plan: 10
 Total Plans in Phase: 11
 Status: Ready to execute
 Last activity: 2026-11-28 — Plan 09-08 executed (the proven-claim gate TestProvenClaims landed RED-then-GREEN over README/OPERATIONS/CHANGELOG with the vacuity floor; README closes M-01…M-05 + M-31 + the 14.10 darwin demotion per ADR 0010 with the macOS quickstart pair kept; EXAMPLES closes M-17…M-21 with the new create_if_absent→AlreadyExists block, the Unavailable/ResourceExhausted error prose, the full-rollback restore text and the Linux platform note; CHANGELOG's 1.0.0 proven bullets name their tests)
@@ -164,6 +164,7 @@ Progress: [█████████▊] 96%
 | Phase 09 P06 | 23 min | 2 tasks | 3 files |
 | Phase 09 P07 | 35 min | 4 tasks | 5 files |
 | Phase 09 P08 | 40min | 3 tasks | 5 files |
+| Phase 09 P09 | 13min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -557,6 +558,7 @@ Recent decisions affecting current work:
 - [Phase 09]: M-31 is closed by 09-08 although the plan task text omitted it — the master M-assignment (09-04-SUMMARY, the table 09-11 greps) assigns it to 09-08, and the README edit set already owned the quickstart prose (crossed ports named as the same-host trick; the CI darwin cross-compile cell stated) — Skipping it would leave a master-table row unowned-closed at the milestone completeness check; the fix is a two-sentence README edit inside the plan's declared file scope
 - [Phase 09]: Both SERVING assertion rows flip to the quoted '"status": "SERVING"' shape, not just the Start row — audit M-17 flagged both examples_test.go rows as NOT_SERVING-satisfiable — Fixing one row would leave exactly the weakness threat T-09-23 mitigates (a health wait satisfied by a not-yet-serving node); the quoted shape is strictly stronger and TestExamplesDoc stays green
 - [Phase 09]: requirements.ready-ids reported DOCS-01 and DOCS-10 ready despite unfinished declaring siblings (09-09/09-10/09-11, no summaries) — the #2388 documented rule won and the premature Complete flips were reverted by hand; DOCS-09 stayed Complete (only sibling declarer 09-05 has a summary, all its clauses landed) — Later plans (09-09/09-10/09-11) must re-evaluate DOCS-01/DOCS-10 at their own close-out; the REQUIREMENTS.md checkboxes and phase table are the authoritative state, currently Pending for both
+- [Phase 09]: Plan 09-09 executed — the maintainer docs landed machine-guarded: TestArchitectureDocPackages (every go list ./... package named in docs/ARCHITECTURE.md, six depguard rule IDs, 19-package floor), TestADRIndex (bidirectional frontmatter-derived file↔row correspondence over 0001–0012, numeric order, rows link files) and TestArchitectureDocDivisionOfLabor (the AGENTS pointer, provenance never restated) went RED-then-GREEN; the five new docs carry M-29's parameter-surface half and M-30's architecture half with CONFIGURATION.md/API.md pointers; CONTRIBUTING points at AGENTS.md and defers the release pointer to 09-10; SECURITY.md mirrors OPERATIONS' three absences verbatim with the private-advisory disclosure path; the DOCS-10 benchmark-results coverage check found no gap (5 hardware blocks, every section with its producing command); the 09-03 deferred second architecture pointer landed in .claude/CLAUDE.md — the maintainer docs are machine-bound to the live repo so doc drift fails make test — guards derived at test time (go list ./..., ADR frontmatter), never hand-typed inventories
 
 ### Pending Todos
 
@@ -579,7 +581,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-28T00:40:13.248Z
-Stopped at: Completed 09-08-PLAN.md
+Last session: 2026-11-28T01:03:00.029Z
+Stopped at: Completed 09-09-PLAN.md
 Resume file: None
 Next action: Execute 09-09-PLAN.md (ARCHITECTURE.md, ADR index, simulator guide, CONTRIBUTING, SECURITY)
