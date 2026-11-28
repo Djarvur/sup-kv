@@ -75,7 +75,7 @@ Conventions are established: `AGENTS.md` is the canonical conventions file — t
 
 ## Architecture
 
-The architecture is mapped in `AGENTS.md`'s Layout section: the package inventory (five `internal/app` packages plus the harness packages), the four adapters, the port boundary and the depguard rules that hold it. The write path, the event loops and the concurrency model are documented in the packages' own doc comments.
+The architecture is mapped in `AGENTS.md`'s Layout section: the package inventory (five `internal/app` packages plus the harness packages), the four adapters, the port boundary and the depguard rules that hold it. The as-built deep description — the full `go list ./...` package graph, the six enforced boundary rule IDs, the parameter surface, the data-flow paths and the client-interop conventions — is `docs/ARCHITECTURE.md`, machine-bound to the live package graph by `TestArchitectureDocPackages`. The write path, the event loops and the concurrency model are documented in the packages' own doc comments.
 <!-- GSD:architecture-end -->
 
 <!-- GSD:skills-start source:skills/ -->
