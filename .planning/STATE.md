@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: 10
+current_plan: 11
 status: executing
-stopped_at: Completed 09-09-PLAN.md
-last_updated: "2026-11-28T01:03:02.596Z"
+stopped_at: Completed 09-10-PLAN.md
+last_updated: "2026-11-28T01:24:23.328Z"
 last_activity: 2026-11-28
-last_activity_desc: "Plan 09-08 executed — the proven-claim rule became a CI gate (TestProvenClaims over README/OPERATIONS/CHANGELOG: word-boundary scan, paragraph scope, vacuity floor; RED named five bare sites, all fixed by naming bound tests) and the newcomer pages closed their M rows: README's Install-from-release section, quickstart cleanup, macOS derive-line truth, the ADR-0010 darwin demotion and M-31's crossed-ports wording; EXAMPLES' quoted SERVING waits, four-service listing, the create_if_absent→AlreadyExists block with the Unavailable/ResourceExhausted error prose, the full-rollback restore text and the Linux platform note"
-state_head: 19cd9711f74b3a9ea90daf66ee4b4be7ad36af8f
+last_activity_desc: "Plan 09-10 executed — the release mechanics landed: the hand-written CHANGELOG 1.1.0 entry with the seven (Phase N) suffixes scrubbed and the compare footers updated (TestProvenClaims green); both protos comment-scrubbed (DOC-21) with supkv.pb.go regenerated as a comment-only diff and buf gates green; .goreleaser.yaml demoted to goos:[linux] per ADR 0010/D-06 with the archive files: contract shipping docs/DEPLOYMENT.md + deploy/sup-kv.service and the sliced release header verified offline against the real CHANGELOG.md; syft v1.54.0 provisioned checksum-verified before the first green snapshot (2 Linux archives, no darwin, checksums + SBOMs); the seven-step release-procedure doc with THE ONE-WAY tag step reserved for 09-11; Q-09 dead-code verified at zero survivors"
+state_head: 10e2ade7705e6e05ff7b497dca8a8ddcddbe6edc
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 105
-  completed_plans: 103
+  completed_plans: 104
 ---
 
 # Project State
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 9 (Documentation and Release) — EXECUTING
-Current Plan: 10
+Current Plan: 11
 Total Plans in Phase: 11
 Status: Ready to execute
-Last activity: 2026-11-28 — Plan 09-08 executed (the proven-claim gate TestProvenClaims landed RED-then-GREEN over README/OPERATIONS/CHANGELOG with the vacuity floor; README closes M-01…M-05 + M-31 + the 14.10 darwin demotion per ADR 0010 with the macOS quickstart pair kept; EXAMPLES closes M-17…M-21 with the new create_if_absent→AlreadyExists block, the Unavailable/ResourceExhausted error prose, the full-rollback restore text and the Linux platform note; CHANGELOG's 1.0.0 proven bullets name their tests)
+Last activity: 2026-11-28 — Plan 09-10 executed (the hand-written CHANGELOG 1.1.0 entry with the (Phase N) scrub, TestProvenClaims green; both protos comment-scrubbed with the pb.go regenerated comment-only; .goreleaser.yaml demoted to Linux-only archives per ADR 0010/D-06 carrying DEPLOYMENT.md + the systemd unit, the sliced release header verified offline; the snapshot gate green with checksum-verified syft v1.54.0; the release-procedure doc with the one-way tag step reserved for 09-11; Q-09 dead-code verified at zero survivors)
 
-Progress: [█████████▊] 96%
+Progress: [█████████▉] 99%
 
 ## Performance Metrics
 
@@ -165,6 +165,7 @@ Progress: [█████████▊] 96%
 | Phase 09 P07 | 35 min | 4 tasks | 5 files |
 | Phase 09 P08 | 40min | 3 tasks | 5 files |
 | Phase 09 P09 | 13min | 3 tasks | 8 files |
+| Phase 09 P10 | 18 min | 4 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -559,6 +560,12 @@ Recent decisions affecting current work:
 - [Phase 09]: Both SERVING assertion rows flip to the quoted '"status": "SERVING"' shape, not just the Start row — audit M-17 flagged both examples_test.go rows as NOT_SERVING-satisfiable — Fixing one row would leave exactly the weakness threat T-09-23 mitigates (a health wait satisfied by a not-yet-serving node); the quoted shape is strictly stronger and TestExamplesDoc stays green
 - [Phase 09]: requirements.ready-ids reported DOCS-01 and DOCS-10 ready despite unfinished declaring siblings (09-09/09-10/09-11, no summaries) — the #2388 documented rule won and the premature Complete flips were reverted by hand; DOCS-09 stayed Complete (only sibling declarer 09-05 has a summary, all its clauses landed) — Later plans (09-09/09-10/09-11) must re-evaluate DOCS-01/DOCS-10 at their own close-out; the REQUIREMENTS.md checkboxes and phase table are the authoritative state, currently Pending for both
 - [Phase 09]: Plan 09-09 executed — the maintainer docs landed machine-guarded: TestArchitectureDocPackages (every go list ./... package named in docs/ARCHITECTURE.md, six depguard rule IDs, 19-package floor), TestADRIndex (bidirectional frontmatter-derived file↔row correspondence over 0001–0012, numeric order, rows link files) and TestArchitectureDocDivisionOfLabor (the AGENTS pointer, provenance never restated) went RED-then-GREEN; the five new docs carry M-29's parameter-surface half and M-30's architecture half with CONFIGURATION.md/API.md pointers; CONTRIBUTING points at AGENTS.md and defers the release pointer to 09-10; SECURITY.md mirrors OPERATIONS' three absences verbatim with the private-advisory disclosure path; the DOCS-10 benchmark-results coverage check found no gap (5 hardware blocks, every section with its producing command); the 09-03 deferred second architecture pointer landed in .claude/CLAUDE.md — the maintainer docs are machine-bound to the live repo so doc drift fails make test — guards derived at test time (go list ./..., ADR frontmatter), never hand-typed inventories
+- [Phase 09]: 09-10 archives files: is an explicit list (README.md, LICENSE, CHANGELOG.md, docs/DEPLOYMENT.md, deploy/sup-kv.service) because defining files: replaces goreleaser v2's default license*/readme*/changelog* globs — verified in the pinned v2.20.2 archive pipe source (archive.go:83-89, defaults apply only when files is empty); explicit entries keep the archive paths predictable — the DOC-05 archive contract needs the deployment artifacts beside the defaults and relying on default-glob coexistence would have been unverified behavior
+- [Phase 09]: 09-10 release header slices the [1.1.0] section via the planning-proven template (split binds to strings.Split, content first — verified in the pinned tmpl.go) with the two version markers documented in the file as the next release's bump points; the offline text/template render over the real CHANGELOG.md produced exactly the 1.1.0 section, so the whole-file fallback was never needed — the old whole-file header's own comment promised the slice from the second release on; DOC-24 forbids [Unreleased] in the body and the recorded render output is the shape 09-11's release-body check must match
+- [Phase 09]: 09-10 syft v1.54.0 provisioned before the first snapshot as a checksum-verified GitHub-release download into $HOME/.local/bin (mirrors release.yml's anchore/sbom-action/download-syft@v0.24.3 pin); --skip=sbom never used — checksums.txt hashes the SBOM files — the sboms pipe shells out to syft and the machine had none; a package-manager install would violate the T-09-SC no-npm/pip/cargo disposition, and the checksum-verified download is the same provisioning shape CI gets from the pinned action
+- [Phase 09]: 09-10 DOCS-01/DOCS-10 REQUIREMENTS flips stay Pending despite requirements.ready-ids reporting both ready — the #2388 shared-ID gate is applied per the recorded premature-flip precedent because 09-11 also declares both and has no summary; the last declaring plan's close-out re-evaluates — the maintainer hand-reverted the 09-08 close-out's premature Complete flips and recorded that later plans must re-evaluate at their own close-out; flipping now would repeat the exact mistake while 09-11's release clauses are still open
+- [Phase 09]: 09-10 CONTRIBUTING.md gains the release-procedure pointer although the plan's files_modified omitted it — 09-09's recorded decision states the pointer is deferred to this plan; verified first that no Go test pins CONTRIBUTING.md content (Rule-2 classed deviation, recorded in 09-10-SUMMARY) — skipping it would leave the cross-plan contract unfulfilled and the procedure doc undiscoverable from the dev-loop doc
+- [Phase 09]: 09-10 Q-09 dead-code verification recorded (D-09/XPORT-13 closure evidence) — five probes, zero survivors: lastLocal 0, ownHandle 0, func Parse in internal/app/persist 0, the cover identifier 0 (five surviving grep lines are comment prose using the verb per research section 8's identifier-vs-prose distinction), fsync_darwin.go gone; verify-then-record, no deletions — Phase 3's rewrites already removed the targets, so the expected zero-survivor state is the evidence; inventing deletions would fabricate history
 
 ### Pending Todos
 
@@ -581,7 +588,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-28T01:03:00.029Z
-Stopped at: Completed 09-09-PLAN.md
+Last session: 2026-11-28T01:22:06.085Z
+Stopped at: Completed 09-10-PLAN.md
 Resume file: None
-Next action: Execute 09-09-PLAN.md (ARCHITECTURE.md, ADR index, simulator guide, CONTRIBUTING, SECURITY)
+Next action: Execute 09-11-PLAN.md (the final release plan: gates on master, the snapshot re-run, the one-way v1.1.0 tag behind its publication checkpoint, release-body verification)
