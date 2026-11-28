@@ -1,0 +1,45 @@
+# sup-kv replicated key-value node — the working systemd unit (M-16).
+#
+# Install: docs/DEPLOYMENT.md ## systemd unit (binary at /usr/local/bin/sup-kv,
+# this file at /etc/systemd/system/sup-kv.service, a dedicated sup-kv user).
+# Every flag below is a documented row in docs/CONFIGURATION.md and every
+# non-default value is stated in docs/DEPLOYMENT.md ## systemd unit;
+# cmd/sup-kv/deployment_test.go (TestDeploymentUnitConsistency) fails the
+# build when this file and that pair of references drift apart.
+
+[Unit]
+Description=sup-kv replicated key-value node
+Documentation=https://github.com/Djarvur/sup-kv/blob/master/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sup-kv
+StateDirectory=sup-kv
+# One node per board. The values are a working LAN example, not universal
+# defaults: --node-id 1 stands in for this board's identity and MUST be unique
+# on the segment (give every board its own), --broadcast-addr 192.168.1.255 is
+# a /24 segment's broadcast address (adapt it to your segment), and the
+# replication bind is the wildcard so the board receives its peers' broadcast
+# datagrams. docs/DEPLOYMENT.md ## systemd unit explains each argument.
+ExecStart=/usr/local/bin/sup-kv --node-id 1 --bind-addr 0.0.0.0:7900 --broadcast-addr 192.168.1.255:7900 --dump-path /var/lib/sup-kv/supkv.json --grpc-addr 0.0.0.0:7901 --metrics-addr 127.0.0.1:7902
+# Exit codes (docs/OPERATIONS.md ## Lifecycle and exit codes): 1 is a startup
+# or Serve failure and 3 a failed final dump — both are failures systemd
+# restarts. Exit code 2 is a configuration error: restarting it would loop
+# forever on the same bad arguments, so it is held.
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=2
+# Optional knobs (docs/CONFIGURATION.md ## Environment-only (no flag)):
+# the structured log level and the metrics endpoint's mTLS certificate triple —
+# the three certificate paths are all-or-nothing. With none set the metrics
+# listener serves plaintext on the address given; the ExecStart keeps it on
+# loopback, and the triple is how a scraper reaches it from another host.
+#Environment=SUPKV_LOG_LEVEL=info
+#Environment=SUPKV_METRICS_CERT=/etc/sup-kv/metrics-cert.pem
+#Environment=SUPKV_METRICS_KEY=/etc/sup-kv/metrics-key.pem
+#Environment=SUPKV_METRICS_CLIENT_CA=/etc/sup-kv/metrics-ca.pem
+
+[Install]
+WantedBy=multi-user.target
