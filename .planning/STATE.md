@@ -4,18 +4,18 @@ milestone: v1.1
 milestone_name: Spec Compliance and Resilience
 current_phase: 9
 current_phase_name: Documentation and Release
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 09-06-PLAN.md
-last_updated: "2026-11-27T23:48:30.436Z"
+stopped_at: Completed 09-07-PLAN.md
+last_updated: "2026-11-28T00:18:00.000Z"
 last_activity: 2026-11-28
-last_activity_desc: Plan 09-06 executed — docs/API.md completed as the full integrator reference (per-RPC sections in proto order with mapper-derived error tables, Watch contract, latency-model link, key-prefix convention, caveats, client patterns) and the pending section flipped to forbidden phrases
-state_head: b0886484e1ccbfda49df5ba842fe03517032d9af
+last_activity_desc: Plan 09-07 executed — the deployment story landed (docs/DEPLOYMENT.md with the two-board topology, 14.3/14.8 setup sections and two marked executable blocks; deploy/sup-kv.service with the exit-code-aware restart policy; the deployment doc-block/unit-consistency tests; the CI systemd-analyze verify + ExecStart-args smoke in the existing gate job)
+state_head: 44b7ad16cb115b7d3a40ad8e2f2587c061fa875f
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 105
-  completed_plans: 100
+  completed_plans: 101
 ---
 
 # Project State
@@ -30,12 +30,12 @@ See: .planning/PROJECT.md (updated 2026-11-19)
 ## Current Position
 
 Phase: 9 (Documentation and Release) — EXECUTING
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 11
 Status: Ready to execute
-Last activity: 2026-11-28 — Plan 09-06 executed (docs/API.md completed as the full integrator reference: per-RPC sections in proto order with mapper-derived error tables, the Watch contract, the latency-model link, key-prefix convention, caveats and client patterns; the pending section flipped to forbidden phrases)
+Last activity: 2026-11-28 — Plan 09-07 executed (the deployment story landed: docs/DEPLOYMENT.md covering the two-board topology end to end with the 14.3/14.8 dump and metrics setup sections and two marked executable blocks; deploy/sup-kv.service with Restart=on-failure + RestartPreventExitStatus=2; the deployment doc-block/unit-consistency tests; the CI verify + smoke steps in the existing gate job with check-run names untouched — M-16 closed)
 
-Progress: [█████████▊] 95%
+Progress: [█████████▊] 96%
 
 ## Performance Metrics
 
@@ -162,6 +162,7 @@ Progress: [█████████▊] 95%
 | Phase 09 P04 | 35 min | 3 tasks | 3 files |
 | Phase 09 P05 | 10 min | 3 tasks | 4 files |
 | Phase 09 P06 | 23 min | 2 tasks | 3 files |
+| Phase 09 P07 | 35 min | 4 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -548,6 +549,9 @@ Recent decisions affecting current work:
 - [Phase 09]: 09-06's per-RPC reference mirrors the proto at test time — the schema declares seven RPCs, not the plan's nine (SetIfAbsent is Set's create_if_absent variant, WaitForReplication is Set/Delete's wait fields), so the vacuity floor is 7; the order check is exact-equality over parsed rpc declarations, so the reference and the schema cannot silently diverge
 - [Phase 09]: 09-06's error tables factor the every-RPC facts into the RPC reference intro (gate-closed Unavailable before any validation; transport ResourceExhausted at MaxRecvBytes) and carry honest absences — List and Watch have no Internal row because no engine or watch-failure path exists, while the snapshot tables carry classifySaveError's classified faults (ResourceExhausted/PermissionDenied) plus the mapper's totality fallback
 - [Phase 09]: 09-06's pending flip moves the five pending-section literals into the whitespace-normalized apiDocForbidden table and rewrites the Errors section's pending-pointer sentence (it carried two of them) — "keep every existing section intact" yields to the flip prohibition; raw anchor literals must sit on one doc line, so mandated literals are reflowed contiguous while whitespace normalization stays with the forbidden table
+- [Phase 09]: 09-07's unit consistency is doc-anchored, not help-anchored — TestDeploymentUnitConsistency compares every ExecStart flag against docs/CONFIGURATION.md's parsed table rows and requires each non-default value stated in DEPLOYMENT.md via a boundary-exact `--flag value` regex, so the demo's `--node-id 11` can never satisfy a check for the unit's `--node-id 1`, and a usage error (exit 2) is structurally excluded from the restart loop by RestartPreventExitStatus=2 (M-16)
+- [Phase 09]: 09-07's node-id is the 16-bit integer the binary parses, not the plan's 16-hex gloss (a base-0 uint64 rejects the literal with exit 2) — the unit carries --node-id 1 and the CI smoke runs the unit's value; the unit's metrics listener stays loopback plaintext per OPERATIONS' own guidance with the SUPKV_METRICS_* mTLS triple documented as the beyond-loopback path
+- [Phase 09]: 09-07's CI leg joins the gate job's Linux cells under `!matrix.cross && runner.os == 'Linux'` with a documented override delta (four addresses to loopback doc-band ports, dump path to /tmp, --startup-gate-empty 2s pinned for the fresh empty-disk node) — the job-key count vs HEAD and the additive-diff guard keep the five check-run contexts and the matrix byte-identical; the unit's ExecStart is one line so the plan's single-line grep guards hold while the consistency parser joins continuations either way
 
 ### Pending Todos
 
@@ -570,7 +574,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-27T23:48:46.000Z
-Stopped at: Completed 09-06-PLAN.md
+Last session: 2026-11-28T00:18:00.000Z
+Stopped at: Completed 09-07-PLAN.md
 Resume file: None
-Next action: Execute 09-07-PLAN.md (the deployment story)
+Next action: Execute 09-08-PLAN.md (the proven-claims sweep and the EXAMPLES/README polish)
