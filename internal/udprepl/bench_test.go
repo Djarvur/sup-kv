@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/version"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 )
 
 // benchBurstPace is the ~1ms write cadence of the D-13 burst shape (~1000
@@ -45,9 +46,13 @@ var benchBurstValue = []byte("bench-burst-value-over-real-udp-0123456789")
 // are written on node A at the ~1ms burst cadence through the author's
 // notification path (scenarioWrite), then the run waits — inside the
 // measured window — until node B serves every key under its exact written
-// version. Reports writes/s (b.N over the write-start-to-convergence span)
-// and max-unacked, the largest pending-entry backlog node A's core mirror
-// showed during the burst — the backlog shape of the run, not a threshold.
+// version. Reports writes/s (b.N over the write-start-to-convergence span),
+// max-unacked, the largest pending-entry backlog node A's core mirror
+// showed during the burst, and p50-ms/p99-ms of each write's own
+// author-side span (TEST-10: per-op durations from the measured loop; the
+// ~1ms cadence is the burst's workload shape — the ticker paces the writes
+// being measured, it does not throttle the measurement). The backlog is the
+// shape of the run, not a threshold.
 func BenchmarkReplicationBurst(b *testing.B) {
 	cfg := scenarioTimers(nil) // quiet Log: repl.Config.normalized substitutes a no-op
 	a, nodeB, _ := startScenarioPair(b, cfg, cfg)
@@ -65,10 +70,13 @@ func BenchmarkReplicationBurst(b *testing.B) {
 	b.ResetTimer()
 	ticker := time.NewTicker(benchBurstPace)
 	start := time.Now()
+	durations := make([]time.Duration, 0, b.N)
 	var maxUnacked int
 	for i := range b.N {
 		<-ticker.C
+		opStart := time.Now()
 		vers[i] = scenarioWrite(b, a, keys[i], benchBurstValue)
+		durations = append(durations, time.Since(opStart))
 		if backlog := a.adapter.UnackedStats().Count; backlog > maxUnacked {
 			maxUnacked = backlog
 		}
@@ -83,7 +91,9 @@ func BenchmarkReplicationBurst(b *testing.B) {
 		return true
 	})
 	elapsed := time.Since(start)
+	b.StopTimer()
 
+	testutil.ReportLatencyPercentiles(b, durations)
 	b.ReportMetric(float64(b.N)/elapsed.Seconds(), "writes/s")
 	b.ReportMetric(float64(maxUnacked), "max-unacked")
 }

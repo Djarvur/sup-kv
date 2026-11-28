@@ -18,29 +18,36 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // Sync-budget test constants: the fixed wall-clock millisecond (the D-02
 // seam), the wired node, the design-default chunk budget (docs/IDEA.md
 // §Parameters), and the oversized-key length whose own core-side estimate
-// (len+24+64) exceeds the budget.
+// (len+24) alone exceeds the budget.
 const (
 	wireNowMs       = int64(1730000000000)
 	wireNodeID      = uint16(7)
 	wireBudget      = 1400
 	wireOversizeLen = 1400
+
+	// wireListingStep is the multi-chunk drain's virtual step: above the
+	// jittered listing spacing at the 500/s default (2ms + 10%), so each
+	// Advance crosses exactly one listing pacer slot.
+	wireListingStep = 3 * time.Millisecond
 )
 
 // wireGraduatedLens are the eight graduated key lengths whose per-entry
-// estimates (len+24) sum to exactly 1336: with the 64-byte chunk overhead
-// the first emitted chunk closes at exactly the 1400-byte budget — the
-// tightest chunk the estimator can build, and therefore the one whose real
-// encoded size proves the estimate's slack.
-var wireGraduatedLens = [8]int{100, 130, 160, 140, 120, 150, 170, 174}
+// estimates (len+24) sum to exactly 1112: with the 96-byte chunk overhead
+// (envelope, DataSync framing and the completeness header) the first emitted
+// chunk closes at exactly the 1400-byte budget — the tightest chunk the
+// estimator can build, and therefore the one whose real encoded size proves
+// the estimate's slack.
+var wireGraduatedLens = [8]int{96, 126, 156, 136, 116, 146, 166, 170}
 
 // wireStateStore adapts *storage.Store to repl.StateStore — the Phase 4
-// consumer seam — by delegating both methods.
+// consumer seam — by delegating the core's four methods.
 type wireStateStore struct{ store *storage.Store }
 
 // ApplyRemote joins one replicated record through the store's LWW merge.
@@ -48,8 +55,22 @@ func (s wireStateStore) ApplyRemote(key string, rec storage.Record) ([]storage.C
 	return s.store.Merge(key, rec)
 }
 
-// Records returns the full snapshot, tombstones included.
-func (s wireStateStore) Records() map[string]storage.Record { return s.store.Records() }
+// Version returns the stored version for key, tombstones included.
+func (s wireStateStore) Version(key string) (version.RecordVersion, bool) {
+	return s.store.Version(key)
+}
+
+// Lookup returns the stored record for key, tombstones included.
+func (s wireStateStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s wireStateStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
+
+// Observe absorbs one received version into the store's clock.
+func (s wireStateStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s wireStateStore) Generation() uint64 { return s.store.Generation() }
 
 // wireGraduatedKey returns the i-th sorted graduated key of keyLen bytes
 // (the repl-side chunking test's construction).
@@ -97,17 +118,28 @@ func TestSync_chunkWireBudget(t *testing.T) {
 		t.Fatalf("store Set(oversized key): %v", err)
 	}
 
-	core := repl.New(wireNodeID, repl.NewRunID(), "n7", st, repl.Config{})
+	core := repl.New(wireNodeID, repl.NewRunID(), st, repl.Config{})
 	var out port.Outbox
-	core.Advance(now, &out)
 	var syncs []port.DataSync
-	for _, ob := range out.Drain() {
-		if !ob.Broadcast {
-			continue
+	collect := func(drained []port.Outbound) {
+		for _, ob := range drained {
+			if !ob.Broadcast {
+				continue
+			}
+			if msg, ok := ob.Msg.(port.DataSync); ok {
+				syncs = append(syncs, msg)
+			}
 		}
-		if msg, ok := ob.Msg.(port.DataSync); ok {
-			syncs = append(syncs, msg)
-		}
+	}
+	// The listing pacer emits one datagram per interval (D-01), so the
+	// three-chunk startup round completes across successive Advances.
+	advance := now
+	core.Advance(advance, &out)
+	collect(out.Drain())
+	for core.QueuedSends() > 0 {
+		advance = advance.Add(wireListingStep)
+		core.Advance(advance, &out)
+		collect(out.Drain())
 	}
 	if len(syncs) != 3 {
 		t.Fatalf("the startup sync emitted %d chunks, want 3 (at-budget, follow-up, oversized)", len(syncs))
@@ -122,12 +154,17 @@ func TestSync_chunkWireBudget(t *testing.T) {
 		}
 		if len(sync.Entries) == 1 && sync.Entries[0].Key == wireOversizedKey() {
 			sawOversized = true
-			// One datagram carrying exactly the one oversized entry — its
-			// own unavoidable minimum: re-encoding that single-entry
-			// DataSync directly must yield the identical size (nothing
-			// piggybacked, nothing split off), and the budget is exceeded
-			// by exactly the entry's own excess.
-			minimum, err := encodeDatagram(wireNodeID, runID, port.DataSync{Entries: sync.Entries})
+			// One datagram carrying exactly the one oversized entry under the
+			// same completeness header — its own unavoidable minimum. Both
+			// datagrams have the same shape (identical sync_id, chunk_index
+			// and chunk_count), so the size comparison isolates the entry, and
+			// the budget is exceeded by exactly the entry's own excess.
+			minimum, err := encodeDatagram(wireNodeID, runID, port.DataSync{
+				SyncID:     sync.SyncID,
+				ChunkIndex: sync.ChunkIndex,
+				ChunkCount: sync.ChunkCount,
+				Entries:    sync.Entries,
+			})
 			if err != nil {
 				t.Fatalf("encode the oversized single-entry chunk: %v", err)
 			}

@@ -11,6 +11,14 @@ run in order and share one running pair of nodes and one working directory —
 work top to bottom the first time; the pair starts in the first block and
 stays up until the last one cleans it up.
 
+**Platform.** This walkthrough is CI-verified on Linux — the marked blocks run
+verbatim in the Linux CI cells, and the demo pair talks over loopback broadcast
+(`127.255.255.255`), which is Linux-only. darwin replication is untested: macOS
+is development-only ([ADR 0010](adr/0010-darwin-development-only.md)) — building
+and unit tests stay supported, replication on darwin does not — so on macOS the
+pair's nodes start but never find each other, and the cross-node reads below
+have no darwin evidence behind them.
+
 ## Prerequisites
 
 Two tools on your `PATH`:
@@ -50,15 +58,16 @@ broadcast address instead.
 # Node A: node-id 1, UDP 28001 broadcasting to node B's 28002, gRPC on 28011,
 # dump file in the current directory.
 sup-kv --node-id 1 --bind-addr 0.0.0.0:28001 --broadcast-addr 127.255.255.255:28002 \
-  --grpc-addr 127.0.0.1:28011 --dump-path supkv-ex-a.json & echo $! > ex-a.pid
+  --grpc-addr 127.0.0.1:28011 --dump-path supkv-ex-a.json --startup-gate-empty 2s & echo $! > ex-a.pid
 # Node B: the mirror — UDP 28002 broadcasting to 28001, gRPC on 28012.
 sup-kv --node-id 2 --bind-addr 0.0.0.0:28002 --broadcast-addr 127.255.255.255:28001 \
-  --grpc-addr 127.0.0.1:28012 --dump-path supkv-ex-b.json & echo $! > ex-b.pid
+  --grpc-addr 127.0.0.1:28012 --dump-path supkv-ex-b.json --startup-gate-empty 2s & echo $! > ex-b.pid
 # Bounded wait: a node answers health once its startup gate has opened (the
-# first sync round or the 1s default startup gate).
+# first sync round, or the demo's pinned 2s empty-disk gate — a node with data
+# on disk opens on the 1s startup gate).
 for i in $(seq 1 50); do
-  if grpcurl -plaintext -d '{}' 127.0.0.1:28011 grpc.health.v1.Health/Check 2>/dev/null | grep -q SERVING \
-    && grpcurl -plaintext -d '{}' 127.0.0.1:28012 grpc.health.v1.Health/Check 2>/dev/null | grep -q SERVING; then
+  if grpcurl -plaintext -d '{}' 127.0.0.1:28011 grpc.health.v1.Health/Check 2>/dev/null | grep -q '"SERVING"' \
+    && grpcurl -plaintext -d '{}' 127.0.0.1:28012 grpc.health.v1.Health/Check 2>/dev/null | grep -q '"SERVING"'; then
     break
   fi
   sleep 0.2
@@ -89,7 +98,8 @@ grpcurl -plaintext 127.0.0.1:28011 list
 grpcurl -plaintext 127.0.0.1:28011 describe supkvapi.v1.SupKVService
 ```
 
-The listing names the three services a node serves (output from a real run):
+The listing names the four services a node serves — the sup-kv service,
+standard health, and the two gRPC reflection services (output from a real run):
 
 ```
 grpc.health.v1.Health
@@ -177,6 +187,40 @@ The `Get` on node B returns the full record, value still base64:
 }
 ```
 
+### Create if absent
+
+<!-- examples-verify -->
+```bash
+# Set has a create-if-absent variant: create_if_absent turns the write into
+# a create — for any existing record, tombstone included, it refuses with
+# AlreadyExists instead of overwriting. This block sits after the write
+# above on purpose: demo/hello exists, so the refusal is deterministic, and
+# the refused write stores nothing, so the walkthrough's state is unchanged.
+# grpcurl exits non-zero on RPC errors, so capture the output and assert.
+grpcurl -plaintext -d '{"key":"demo/hello","value":"c3VwLWt2","create_if_absent":true}' \
+  127.0.0.1:28011 supkvapi.v1.SupKVService/Set >exists.out 2>&1 || true
+grep -q AlreadyExists exists.out && grep -q "key already exists" exists.out && cat exists.out
+```
+
+The refusal (output from a real run):
+
+```
+ERROR:
+  Code: AlreadyExists
+  Message: key already exists
+```
+
+The error surface is small, and every code is documented with its
+raised-when table in [docs/API.md](API.md): `NotFound` (absent or tombstoned
+key), `AlreadyExists` (the refusal above), `InvalidArgument` (empty key, an
+oversize key, or a value over the `--value-max-bytes` limit),
+`Unavailable` while the interface is closed — every data RPC answers it
+before any validation until the startup gate opens (the first sync round or
+the gate timeout) — and on a dump failure (the write stays in memory and
+replicates), and `ResourceExhausted` for the transport ceilings: a request
+larger than `MaxRecvBytes` (the envelope, key and value-limit sum shaped by
+the UDP datagram bound) is rejected there, before any handling.
+
 ### Wait for replication
 
 <!-- examples-verify -->
@@ -209,33 +253,76 @@ from a real run):
 ```
 
 `ackedCount` counts the peers that Acked within the timeout; `totalPeers`
-is the peers the writing node knew when the write landed. A `false` acked
-means a peer did not confirm in time — the write still stands on the writer
-and keeps retransmitting.
+is the peer set captured once at write acceptance — a peer discovered
+during the wait never joins it. A `false` acked means a peer did not confirm
+in time — the write still stands on the writer and keeps retransmitting.
+With zero known peers at write time the answer is immediate: `acked=false`
+with `ackedCount` and `totalPeers` at zero (both omitted by grpcurl),
+because nothing was awaited and nothing was acknowledged.
 
 ### Delete and list
 
 <!-- examples-verify -->
 ```bash
+# List is one method with two modes. page_size > 0 asks for a bounded page
+# of records: the page's keys plus the same entries with their values, and
+# nextPageToken naming the last examined key while the listing continues.
+# Page 1 (page_size 1) over the two live demo/ keys stops at demo/hello.
+grpcurl -plaintext -d '{"prefix":"demo/","page_size":1}' 127.0.0.1:28011 \
+  supkvapi.v1.SupKVService/List >page1.out
+grep -q demo/hello page1.out && grep -q nextPageToken page1.out
+# Resume strictly after that position (the token is the raw-URL base64 of
+# demo/hello): page 2 carries the last key and an empty nextPageToken — the
+# end signal, which grpcurl omits.
+grpcurl -plaintext -d '{"prefix":"demo/","page_size":1,"page_token":"ZGVtby9oZWxsbw"}' \
+  127.0.0.1:28011 supkvapi.v1.SupKVService/List >page2.out
+grep -q demo/wait page2.out && ! grep -q nextPageToken page2.out
 # Delete demo/hello — a delete is a write: fresh version, replicates like
 # one, and leaves a tombstone.
 grpcurl -plaintext -d '{"key":"demo/hello"}' 127.0.0.1:28011 \
   supkvapi.v1.SupKVService/Delete
-# List every live key under the prefix — demo/hello is gone (tombstoned),
-# demo/wait remains. The final line proves both: the first grep demands
-# demo/wait, the inverted grep demands demo/hello absent, then the listing
-# prints.
+# An unset page_size keeps the legacy all-keys listing: every live key in
+# one response, keys only — no records, no token. demo/hello is gone
+# (tombstoned), demo/wait remains.
 grpcurl -plaintext -d '{"prefix":"demo/"}' 127.0.0.1:28011 \
   supkvapi.v1.SupKVService/List >list.out
-grep -q demo/wait list.out && ! grep -q '"demo/hello"' list.out && cat list.out
+grep -q demo/wait list.out && ! grep -q '"demo/hello"' list.out && \
+  cat page1.out page2.out list.out
 ```
 
-The delete answers with the tombstone's version; the listing carries the
-one live key (output from a real run):
+Page 1 carries `demo/hello` as a record with its value and the position
+token naming the key after it; the resumed page carries `demo/wait` with an
+empty token, the end of the listing. The delete answers with the tombstone's
+version, and the legacy listing carries keys only (output from a real run):
 
 ```
 {
   "version": "AaHppjFfcACAAEAAAAAAAA=="
+}
+{
+  "keys": [
+    "demo/hello"
+  ],
+  "records": [
+    {
+      "key": "demo/hello",
+      "version": "AaHppeNZcACAAEAAAAAAAA==",
+      "value": "c3VwLWt2"
+    }
+  ],
+  "nextPageToken": "ZGVtby9oZWxsbw"
+}
+{
+  "keys": [
+    "demo/wait"
+  ],
+  "records": [
+    {
+      "key": "demo/wait",
+      "version": "AaHppi5DcACAAEAAAAAAAA==",
+      "value": "c3VwLWt2"
+    }
+  ]
 }
 {
   "keys": [
@@ -317,16 +404,26 @@ grpcurl -plaintext -d '{}' 127.0.0.1:28011 grpc.health.v1.Health/Check
 Snapshots are named copies of a node's confirmed dump — a recovery point
 you can restore by name. `SnapshotCreate` copies the current confirmed dump
 under a name (it lands next to the dump file, in `supkv-ex-a.json.snapshots/`);
-`SnapshotLoad` replays the named snapshot as ordinary writes with fresh
-versions, so the restore replicates to peers and wins by normal
-last-write-wins. Both are gated like writes.
+`SnapshotLoad` is a **full rollback**, not an additive replay (the full
+contract is [docs/API.md](API.md) ## Snapshots): the snapshot's keys replay
+as ordinary writes with **fresh versions**, and every current live key
+**absent from the snapshot is deleted** with a fresh tombstone, so the
+snapshot's key set becomes the store's key set. The replayed records and
+the rollback tombstones broadcast to peers like any write, so the restored
+state wins by normal last-write-wins. This example loads the snapshot it
+just created, and every key is already identical — an immediate reload
+after a create replays as a **whole-restore no-op**: nothing changes,
+nothing is broadcast, and the responses are empty. Both RPCs are gated
+like writes.
 
 <!-- examples-verify -->
 ```bash
 # Copy the confirmed dump under a name...
 grpcurl -plaintext -d '{"name":"demo-snap"}' 127.0.0.1:28011 \
   supkvapi.v1.SupKVService/SnapshotCreate
-# ...and replay it back as ordinary writes (empty responses: {} both times).
+# ...and replay it back. This load immediately follows the create, so every
+# key is already identical: a whole-restore no-op — no record replays, no
+# live key is deleted, nothing broadcasts, and both responses are empty {}.
 grpcurl -plaintext -d '{"name":"demo-snap"}' 127.0.0.1:28011 \
   supkvapi.v1.SupKVService/SnapshotLoad
 ```

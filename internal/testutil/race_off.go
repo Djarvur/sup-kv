@@ -1,0 +1,8 @@
+//go:build !race
+
+package testutil
+
+// RaceEnabled reports whether this test binary was built with the race
+// detector: the race_off.go side of the build-tag pair, compiled without it.
+// It answers a constant, so no test body probes the runtime to decide it.
+func RaceEnabled() bool { return false }

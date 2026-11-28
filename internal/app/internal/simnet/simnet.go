@@ -8,26 +8,34 @@
 // (the internal/app/internal/testutil precedent); unlike testutil its
 // directory name does not match the no-test-libs-in-prod glob, so the
 // non-test files here must not import Go's testing package — assertions live
-// only in _test.go files. The package starts no goroutines, takes no locks
-// and never reads a wall clock or sleeps: virtual time is the only time
-// (D-06/D-07, RESEARCH Pitfall 9), every time value is built from
-// [time.UnixMilli] arithmetic — no monotonic reading anywhere (the D-02 seam
-// discipline) — and every random draw flows through the one rng injected at
-// construction, drawn at send time, so the same seed reproduces the whole
-// run byte for byte.
+// only in _test.go files. The package starts no goroutines and never reads a
+// wall clock or sleeps: virtual time is the only time (D-06/D-07, RESEARCH
+// Pitfall 9), every time value is built from [time.UnixMilli] arithmetic — no
+// monotonic reading anywhere (the D-02 seam discipline) — and every random
+// draw flows through the one rng injected at construction, drawn at send
+// time, so the same seed reproduces the whole run byte for byte. The
+// scheduler alone takes a lock: the dump engine arms its timers from its own
+// goroutine through the slice's scheduling methods (the PERSIST-12 seam), so
+// [Scheduler.Schedule], [Scheduler.ScheduleAfter] and [Scheduler.Now] are
+// safe from any goroutine while [Scheduler.RunUntil] stays the single
+// driver.
 package simnet
 
 import (
 	"container/heap"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 )
 
@@ -81,7 +89,12 @@ func (h *eventHeap) Pop() any {
 // virtual time in Schedule-call (insertion) order, the tie-break contract
 // same-seed determinism is built on. Now advances only as RunUntil executes
 // events; nothing here reads a wall clock, sleeps or launches a goroutine.
+// The lock makes the scheduling surface safe for the dump engine's own
+// goroutine (PERSIST-12): RunUntil stays the single driver, and it releases
+// the lock around each callback so a handler may schedule (the network
+// does exactly that).
 type Scheduler struct {
+	mu   sync.Mutex
 	now  time.Time
 	seq  uint64
 	pend eventHeap
@@ -97,42 +110,97 @@ func NewScheduler(start time.Time) *Scheduler {
 // virtual time is simply due: the next RunUntil covering its time executes
 // it, ordered before any later-time event.
 func (s *Scheduler) Schedule(t time.Time, fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.seq++
 	heap.Push(&s.pend, event{at: t, seq: s.seq, fn: fn})
+}
+
+// ScheduleAfter books fn at the current virtual time plus d and returns the
+// instant it is due — the one-call form the injected After seam needs, so
+// computing the instant and enqueueing it cannot be split by another
+// goroutine advancing the clock.
+func (s *Scheduler) ScheduleAfter(d time.Duration, fn func()) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at := s.now.Add(d)
+	s.seq++
+	heap.Push(&s.pend, event{at: at, seq: s.seq, fn: fn})
+	return at
 }
 
 // RunUntil executes every event with (Time, Seq) at or before t, in that
 // total order, advancing the virtual clock to each event's time before it
 // runs — so handlers observe exactly the event's scheduled time. Events
 // scheduled by executed events (network deliveries at now+delay, timer
-// pumps) join the same order and fire inside this same call whenever their
-// time is at or before t. Afterwards the clock rests at t whether or not any
-// event ran.
+// pumps, the injected engine timers) join the same order and fire inside
+// this same call whenever their time is at or before t. Afterwards the
+// clock rests at t whether or not any event ran.
 func (s *Scheduler) RunUntil(t time.Time) {
-	for s.pend.Len() > 0 && !s.pend[0].at.After(t) {
+	for {
+		s.mu.Lock()
+		if s.pend.Len() == 0 || s.pend[0].at.After(t) {
+			s.now = t
+			s.mu.Unlock()
+			return
+		}
 		ev := heap.Pop(&s.pend).(event)
 		s.now = ev.at
+		s.mu.Unlock()
 		ev.fn()
 	}
-	s.now = t
 }
 
 // Now returns the current virtual time.
-func (s *Scheduler) Now() time.Time { return s.now }
+func (s *Scheduler) Now() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.now
+}
 
 // Policy is the fault-injection profile, pure data injected by each test:
-// drop and duplicate probabilities, the one-way delay draw and the partition
-// predicate. A nil Delay means zero delay and a nil Partition means nothing
-// is ever blocked (the fixed-delay profile of the bound tests and the
-// loss-free default). simnet draws randomness only through the injected rng,
-// at send time, in a fixed draw order — drop, then duplicate, then each
+// drop and duplicate probabilities, the one-way delay draw, the partition
+// predicate, the optional datagram size gate (SizeOf over MaxDatagramBytes)
+// and the optional record-announcement latency (AnnounceDelay). A nil Delay
+// means zero delay and a nil Partition means nothing is ever blocked (the
+// fixed-delay profile of the bound tests and the loss-free default); a nil
+// SizeOf, a non-positive MaxDatagramBytes and a nil AnnounceDelay disable
+// their extensions — the zero Policy reproduces the pre-extension behavior
+// bit for bit. simnet draws randomness only through the injected rng, at
+// send time, in a fixed draw order — drop, then duplicate, then each
 // delivery's delay — so the same seed reproduces every fate decision
-// (D-06/D-07).
+// (D-06/D-07); the size gate and the announcement latency are pure
+// functions of the message (no rng, no wall clock) and the receive budget is
+// plain state consulted at delivery time (SetRecvBudget).
 type Policy struct {
 	DropProb  float64
 	DupProb   float64
 	Delay     func(rng *rand.Rand) time.Duration
 	Partition func(from, to string, now time.Time) bool
+
+	// SizeOf, when non-nil, measures a message's simulated datagram size in
+	// bytes — the test layer injects the real encoder's length here (the Q2
+	// resolution: the replproto encode stays test-side, so this file's
+	// import block remains stdlib + internal/app + internal/port). With a
+	// positive MaxDatagramBytes it gates scheduleDelivery: a message
+	// measuring over the ceiling is refused before it is ever scheduled —
+	// counted in FaultStats.OversizeRefused and dropped, never delivered
+	// (the message-too-long refusal of a real UDP path, F2c).
+	SizeOf func(msg port.Message) int
+
+	// MaxDatagramBytes is the size gate's ceiling in bytes; only a positive
+	// value arms the gate (see SizeOf), so the zero disables it.
+	MaxDatagramBytes int
+
+	// AnnounceDelay, when non-nil, returns the extra virtual latency a
+	// record announcement — a port.DataReplication, the write-path
+	// broadcast and the DataRequest/sync answers alike — waits beyond the
+	// drawn one-way delay, mirroring production's dump-then-broadcast order
+	// (the DataReplication is broadcast after the dump is confirmed,
+	// RESULTS.md §4). simnet consults it only for DataReplication messages
+	// and adds the returned latency to the delivery delay. Pure function of
+	// the message — no rng, no wall clock.
+	AnnounceDelay func(msg port.Message) time.Duration
 }
 
 // delay draws one one-way delay (nil policy Delay: zero).
@@ -151,13 +219,24 @@ func (p Policy) blocked(from, to string, now time.Time) bool {
 // FaultStats counts the fault injector's observed classes (the coverage
 // teeth the chaos test asserts on): sends dropped at send time, sends
 // duplicated into two deliveries, deliveries arriving after a later-sent
-// sibling of the same directed pair, and sends blocked by the partition
-// predicate.
+// sibling of the same directed pair, sends blocked by the partition
+// predicate, deliveries refused past the recipient's receive budget
+// (SetRecvBudget), and messages refused by the size gate before scheduling
+// (Policy.SizeOf over Policy.MaxDatagramBytes).
 type FaultStats struct {
 	Dropped     uint64
 	Duplicated  uint64
 	Reordered   uint64
 	Partitioned uint64
+
+	// RecvBudgetRefused counts deliveries dropped at their delivery time
+	// because the recipient's receive budget (SetRecvBudget) was exhausted
+	// — the receive-side drop behavior of a real socket.
+	RecvBudgetRefused uint64
+
+	// OversizeRefused counts messages the size gate refused before they
+	// were ever scheduled (Policy.SizeOf over Policy.MaxDatagramBytes).
+	OversizeRefused uint64
 }
 
 // netNode is one registered cluster member: the envelope identity (node id,
@@ -184,7 +263,10 @@ type pairKey struct{ from, to string }
 // INCLUDING the sender (own echo is real; plan 01's OwnEcho class fires in
 // simulation too), one independent fate draw per recipient, in registration
 // order. Registered nodes iterate a slice, never a map, so fan-out order —
-// and therefore rng draw order — is deterministic.
+// and therefore rng draw order — is deterministic. A per-recipient receive
+// budget (SetRecvBudget) models a real socket's receive-side drop behavior:
+// a delivery due past its recipient's budget is refused at fire time and
+// counted, never delivered.
 type Network struct {
 	sched      *Scheduler
 	rng        *rand.Rand
@@ -193,6 +275,7 @@ type Network struct {
 	byHandle   map[string]int
 	sendSeq    map[pairKey]uint64
 	lastByPair map[pairKey]uint64
+	recvBudget map[string]int
 	faults     FaultStats
 	pending    int
 	trace      strings.Builder
@@ -208,6 +291,7 @@ func NewNetwork(sched *Scheduler, rng *rand.Rand, policy Policy) *Network {
 		byHandle:   make(map[string]int),
 		sendSeq:    make(map[pairKey]uint64),
 		lastByPair: make(map[pairKey]uint64),
+		recvBudget: make(map[string]int),
 	}
 }
 
@@ -231,6 +315,32 @@ func (n *Network) Reregister(nodeID uint16, runID [16]byte, handle string, deliv
 	}
 	n.nodes[i] = netNode{id: nodeID, runID: runID, handle: handle, deliver: deliver}
 	return true
+}
+
+// SetRecvBudget caps the datagrams nodeID may accept: every delivered
+// datagram decrements the remaining budget at its delivery time, and a
+// delivery due once the budget is exhausted is refused — counted in
+// FaultStats.RecvBudgetRefused and dropped, never delivered (the
+// receive-side drop behavior of a real socket whose buffer or rate budget
+// is exhausted, TEST-06). A zero or negative maxDeliveries refuses
+// everything. The cap keys the node's handle, so it survives a ReplaceNode
+// restart (the socket address the budget models outlives the process behind
+// it) and is read live at each fire time — a budget set between the
+// scheduling and the fire of a delivery still governs that delivery.
+// Setting the budget is test-facing plain state; an unregistered node id is
+// a driving test's mistake and panics.
+//
+// Determinism contract: as SetClockOffset — plain harness state, consumes
+// no rng draws and schedules no events, so for any fixed sequence of calls
+// the event stream stays a pure function of the seed.
+func (n *Network) SetRecvBudget(nodeID uint16, maxDeliveries int) {
+	for i := range n.nodes {
+		if n.nodes[i].id == nodeID {
+			n.recvBudget[n.nodes[i].handle] = maxDeliveries
+			return
+		}
+	}
+	panic(fmt.Sprintf("simnet: Network.SetRecvBudget: node id %d is not registered", nodeID))
 }
 
 // Send injects one datagram from fromHandle toward toHandle (D-06/D-07): a
@@ -281,12 +391,39 @@ func (n *Network) Broadcast(fromHandle string, msg port.Message) {
 // pair's reorder observation updates (a delivery whose send sequence is older
 // than the pair's highest delivered sequence arrives after a later-sent
 // sibling — Pitfall 1's measurable), the tuple joins the ordered trace, and
-// the recipient's delivery function receives the decoded datagram.
+// the recipient's delivery function receives the decoded datagram. Three
+// policy extensions join the path additively, each off in the zero Policy:
+// the size gate (SizeOf over MaxDatagramBytes) refuses an oversize message
+// before it is ever scheduled — counted in FaultStats.OversizeRefused,
+// dropped, never booked (the message-too-long refusal of a real UDP path);
+// the announcement latency (AnnounceDelay on a port.DataReplication) joins
+// the drawn one-way delay, mirroring production's dump-then-broadcast order;
+// and at fire time the recipient's receive budget is consulted first — past
+// it the delivery is refused (FaultStats.RecvBudgetRefused, the message
+// dropped, never delivered) and a delivered one decrements the budget (the
+// receive-side drop behavior of a real socket, SetRecvBudget).
 func (n *Network) scheduleDelivery(from, to netNode, msg port.Message, seq uint64, delay time.Duration) {
+	if n.policy.SizeOf != nil && n.policy.MaxDatagramBytes > 0 && n.policy.SizeOf(msg) > n.policy.MaxDatagramBytes {
+		n.faults.OversizeRefused++
+		return
+	}
 	pair := pairKey{from: from.handle, to: to.handle}
+	total := delay
+	if n.policy.AnnounceDelay != nil {
+		if ann, ok := msg.(port.DataReplication); ok {
+			total += n.policy.AnnounceDelay(ann)
+		}
+	}
 	n.pending++
-	n.sched.Schedule(n.sched.Now().Add(delay), func() {
+	n.sched.Schedule(n.sched.Now().Add(total), func() {
 		n.pending--
+		if budget, ok := n.recvBudget[to.handle]; ok {
+			if budget <= 0 {
+				n.faults.RecvBudgetRefused++
+				return
+			}
+			n.recvBudget[to.handle] = budget - 1
+		}
 		if seq < n.lastByPair[pair] {
 			n.faults.Reordered++
 		} else {
@@ -318,15 +455,19 @@ func (n *Network) TraceDigest() string { return n.trace.String() }
 
 // LoggedWrite is one captured cluster write — the model input the caller's
 // pointwise-supremum store merges over (merge order is irrelevant,
-// CORE-06).
+// CORE-06); a Cluster.Delete captures its tombstone here with Rec.Deleted
+// true, no separate flag needed.
 type LoggedWrite struct {
 	Key string
 	Rec storage.Record
 }
 
-// nodeStore adapts *storage.Store to repl.StateStore by delegating both
+// nodeStore adapts *storage.Store to repl.StateStore by delegating its
 // methods — the plan 04-01 test precedent (the persist engine's ApplyRemote
-// seam lands with plan 04-06).
+// seam lands with plan 04-06). The three read methods are the store's
+// tombstone-visible view: the core's sync paths consume it instead of a
+// whole-store snapshot (XPORT-06). Observe makes every simulated node absorb
+// listing versions into its clock, so simulator drift matches production.
 type nodeStore struct{ store *storage.Store }
 
 // ApplyRemote joins one replicated record through the store's LWW merge.
@@ -334,8 +475,20 @@ func (s nodeStore) ApplyRemote(key string, rec storage.Record) ([]storage.Confli
 	return s.store.Merge(key, rec)
 }
 
-// Records returns the full snapshot, tombstones included.
-func (s nodeStore) Records() map[string]storage.Record { return s.store.Records() }
+// Version returns the stored version for key, tombstones included.
+func (s nodeStore) Version(key string) (version.RecordVersion, bool) { return s.store.Version(key) }
+
+// Lookup returns the stored record for key, tombstones included.
+func (s nodeStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s nodeStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
+
+// Observe absorbs one received version into the store's clock.
+func (s nodeStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s nodeStore) Generation() uint64 { return s.store.Generation() }
 
 // simRunID returns nodeID's run identifier: fresh per node (no two cluster
 // members share one) and derived deterministically — the simulator admits no
@@ -367,7 +520,7 @@ type clusterNode struct {
 // author sequence (D-05). Each node's store clock reads the scheduler's
 // virtual time plus the node's mutable offset slot (SetClockOffset — the
 // wall-clock seam), and the remembered cfg rebuilds nodes for the restart
-// seams (ReplaceNode, AddNode).
+// seams (ReplaceNode, ReplaceNodeWithState, AddNode).
 type Cluster struct {
 	sched   *Scheduler
 	net     *Network
@@ -421,7 +574,7 @@ func (c *Cluster) newClusterNode(i int, nodeID uint16, runID [16]byte) clusterNo
 		runID:  runID,
 		handle: handle,
 		store:  store,
-		core:   repl.New(nodeID, runID, handle, nodeStore{store: store}, c.cfg),
+		core:   repl.New(nodeID, runID, nodeStore{store: store}, c.cfg),
 	}
 }
 
@@ -469,11 +622,54 @@ func (c *Cluster) ReplaceNode(i int, runID [16]byte, offset time.Duration) {
 	c.sched.Schedule(c.sched.Now(), func() { c.drive(i, c.sched.Now()) })
 }
 
+// ReplaceNodeWithState restarts node i onto preserved state: the node keeps
+// its id and handle but boots a new store seeded with records and a new core
+// announcing runID, with its clock offset set to offset — the
+// restart-with-preserved-state shape (TEST-06: F14's replaced node carrying
+// the dump's records, seeding its create-if-absent defaults). The records
+// merge into the fresh store through the production load path's join
+// (store.Merge, the persist.Open mergeRecords shape) in sorted-key order —
+// the fixed order is the map-iteration guard the determinism contract needs,
+// and the merges ride the clock's receive rule, so the replacement's HLC
+// watermark dominates every seeded version before its first local write (the
+// VERS-04 restart property through the merge path). Tombstones seed exactly
+// like live records. A seed record over the store's design-default value
+// limit is a driving test's mistake and panics (the checkIndex/Reregister
+// convention). The wiring is ReplaceNode's verbatim: the in-place node swap,
+// the network registration replaced through Reregister (datagrams already in
+// flight from the old run still carry the old run id), the timer-generation
+// supersession, and the startup drive pump scheduled at the current virtual
+// time — the new run's Hello and DataSync fire on the next RunUntil.
+//
+// Determinism contract: plain harness state — the seeded merges consume no
+// rng draws and schedule no events beyond the drive tick, so the event
+// stream stays a pure function of the seed.
+func (c *Cluster) ReplaceNodeWithState(i int, runID [16]byte, offset time.Duration, records map[string]storage.Record) {
+	c.checkIndex(i, "ReplaceNodeWithState")
+	gen := c.nodes[i].timerGen + 1
+	c.offsets[i] = offset
+	replacement := c.newClusterNode(i, c.nodes[i].id, runID)
+	for _, key := range slices.Sorted(maps.Keys(records)) {
+		_, _, err := replacement.store.Merge(key, records[key])
+		if err != nil {
+			panic(fmt.Sprintf("simnet: Cluster.ReplaceNodeWithState: seeding %q on node %d: %v", key, replacement.id, err))
+		}
+	}
+	replacement.timerGen = gen
+	c.nodes[i] = replacement
+	if !c.net.Reregister(replacement.id, runID, replacement.handle, func(in port.InboundDatagram) {
+		c.deliver(i, in)
+	}) {
+		panic(fmt.Sprintf("simnet: Cluster.ReplaceNodeWithState: handle %q of node %d is not registered", replacement.handle, replacement.id))
+	}
+	c.sched.Schedule(c.sched.Now(), func() { c.drive(i, c.sched.Now()) })
+}
+
 // AddNode boots one fresh cluster member: the next node id with its derived
 // handle and a deterministically derived fresh run id, over an empty store
 // whose clock starts at the scheduler's virtual time plus offset — the
-// empty-disk join shape (a brand-new node reconciling through the periodic
-// rounds, never a targeted listing). It returns the new node's index
+// empty-disk join shape (a brand-new node reconciling through the first-Hello
+// targeted listing and the periodic rounds). It returns the new node's index
 // (nodes keep index = node_id-1). Determinism contract: as SetClockOffset —
 // the derived identity draws no randomness, so the event stream stays a
 // pure function of the seed.
@@ -508,6 +704,7 @@ func (c *Cluster) deliver(i int, in port.InboundDatagram) {
 	var out port.Outbox
 	c.nodes[i].core.HandleDatagram(now, in, &out)
 	c.route(i, out.Drain())
+	out.DrainResults() // the result stream is ignored in simulation, but never accumulated.
 	c.drive(i, now)
 }
 
@@ -535,6 +732,7 @@ func (c *Cluster) drive(i int, now time.Time) {
 		var out port.Outbox
 		deadline := c.nodes[i].core.Advance(now, &out)
 		c.route(i, out.Drain())
+		out.DrainResults() // Advance emits no results today; the drain keeps the contract total.
 		if !deadline.After(now) {
 			continue
 		}
@@ -564,15 +762,102 @@ func (c *Cluster) route(i int, outbound []port.Outbound) {
 
 // Write performs the production author sequence on node i at the scheduler's
 // current virtual time (D-05): the store Set, then the core NotifyLocalWrite
-// carrying the written record, capturing the (key, record) pair into the
-// write log. Call RunUntil first to place the write in virtual time.
+// carrying the written record and the node's current peer ids — the
+// write-time snapshot the production handler captures before its engine write
+// (A-01), read sorted from Core.PeerIDs so a same-seed replay stays
+// deterministic — capturing the (key, record) pair into the write log. Call
+// RunUntil first to place the write in virtual time.
+//
+// A rejected Set — an oversize value, the ErrValueTooLarge class — is a
+// driving test's mistake, not a protocol condition: it panics naming the
+// operation, key and node, because a silently dropped write would make every
+// model comparison against the write log lie (02-REVIEW WR-02). An
+// out-of-range node index is the same class of mistake and panics through
+// checkIndex.
 func (c *Cluster) Write(i int, key string, data []byte) storage.Record {
+	c.checkIndex(i, "Write")
 	now := c.sched.Now()
-	_, _, _ = c.nodes[i].store.Set(key, data)
-	rec := c.nodes[i].store.Records()[key]
+	_, _, err := c.nodes[i].store.Set(key, data)
+	if err != nil {
+		panic(fmt.Sprintf("simnet: Cluster.Write: Set %q on node %d: %v", key, i, err))
+	}
+	rec, ok := c.nodes[i].store.Lookup(key)
+	if !ok {
+		panic(fmt.Sprintf("simnet: Cluster.Write: Lookup %q on node %d after a successful Set: record missing", key, i))
+	}
 	var out port.Outbox
-	c.nodes[i].core.NotifyLocalWrite(now, key, rec, &out)
+	c.nodes[i].core.NotifyLocalWrite(now, key, rec, c.nodes[i].core.PeerIDs(), &out)
 	c.route(i, out.Drain())
+	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
+	c.drive(i, now)
+	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
+	return rec
+}
+
+// Delete performs the production author sequence for a deletion on node i at
+// the scheduler's current virtual time (D-05): the store Delete writes a
+// fresh-version tombstone that merges like any write, the core
+// NotifyLocalWrite carries the tombstone record and the node's current peer
+// ids (the same write-time capture shape as Write, A-01) through the same
+// pending/wait-set path a write takes (Deleted=true crosses the wire per
+// message), and the (key, tombstone) pair joins the write log — Rec.Deleted
+// true, the pointwise-supremum model needs no separate flag. A missing or
+// already-tombstoned key is storage.ErrNotFound and changes nothing: a
+// no-op delete writes nothing and burns no version (the store.Delete
+// contract). Call RunUntil first to place the delete in virtual time. The
+// written tombstone is read back with the store's point Lookup — never a
+// whole-store Records() copy — and an out-of-range node index panics through
+// checkIndex, the same harness convention as Write.
+//
+// Determinism contract: as Write — the delete runs at the current virtual
+// time and every emission routes through the network's seeded rng; the seam
+// adds no randomness source, so the event stream stays a pure function of
+// the seed.
+func (c *Cluster) Delete(i int, key string) (storage.Record, error) {
+	c.checkIndex(i, "Delete")
+	now := c.sched.Now()
+	_, _, err := c.nodes[i].store.Delete(key)
+	if err != nil {
+		return storage.Record{}, err
+	}
+	rec, ok := c.nodes[i].store.Lookup(key)
+	if !ok {
+		panic(fmt.Sprintf("simnet: Cluster.Delete: Lookup %q on node %d after a successful delete: record missing", key, i))
+	}
+	var out port.Outbox
+	c.nodes[i].core.NotifyLocalWrite(now, key, rec, c.nodes[i].core.PeerIDs(), &out)
+	c.route(i, out.Drain())
+	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
+	c.drive(i, now)
+	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
+	return rec, nil
+}
+
+// NotifyInstalled announces the record already installed under key on node i
+// — the persist engine's write-confirmation seam (PERSIST-12, the research
+// D-11 addition): the production author notification runs exactly as in
+// Write — NotifyLocalWrite, the outbox route, the result drain, the drive
+// loop — and the (key, record) pair joins the write log, but the store is
+// never Set again. The engine stamped and installed the record itself, so a
+// second Set would burn a fresh version and replace the record the
+// confirmation covered. A key with no stored record is a driving test's
+// mistake and panics, the Write/Lookup convention.
+//
+// Determinism contract: as Write — the notification runs at the current
+// virtual time and every emission routes through the network's seeded rng;
+// the seam adds no randomness source, so the event stream stays a pure
+// function of the seed.
+func (c *Cluster) NotifyInstalled(i int, key string) storage.Record {
+	c.checkIndex(i, "NotifyInstalled")
+	now := c.sched.Now()
+	rec, ok := c.nodes[i].store.Lookup(key)
+	if !ok {
+		panic(fmt.Sprintf("simnet: Cluster.NotifyInstalled: Lookup %q on node %d: record missing", key, i))
+	}
+	var out port.Outbox
+	c.nodes[i].core.NotifyLocalWrite(now, key, rec, c.nodes[i].core.PeerIDs(), &out)
+	c.route(i, out.Drain())
+	out.DrainResults() // tracked-write results stay unused in simulation; the stream never accumulates.
 	c.drive(i, now)
 	c.writes = append(c.writes, LoggedWrite{Key: key, Rec: rec})
 	return rec

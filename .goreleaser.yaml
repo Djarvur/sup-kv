@@ -1,5 +1,5 @@
-# Release pipeline (D-09): 4-target archives + checksums.txt + per-archive
-# SBOMs + a GitHub Release whose header pulls from CHANGELOG.md. Run by the
+# Release pipeline (D-09): archives + checksums.txt + per-archive SBOMs + a
+# GitHub Release whose header is sliced from CHANGELOG.md. Run by the
 # go.mod-pinned tool directive (goreleaser v2.20.2 via `go tool goreleaser`,
 # .github/workflows/release.yml) — never a downloaded action binary.
 #
@@ -10,13 +10,19 @@
 # {{ .Version }} (tag minus v) was rejected: two identities for one release.
 # The commit slot uses {{ .ShortCommit }}, same shape as the Makefile's
 # `git rev-parse --short HEAD` stamp.
+#
+# darwin demotion (ADR 0010 / decision 14.10): the release archives are
+# Linux-only (x86_64 + arm64) — darwin leaves the asset set at v1.1.0. The
+# demotion moves release assets, not buildability: darwin stays buildable as
+# a development-only platform and .github/workflows/ci.yml keeps both darwin
+# legs (the macos-15 native gate and the darwin-amd64 cross build/vet).
 version: 2
 
 builds:
   - id: sup-kv
     main: ./cmd/sup-kv
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux]
     goarch: [amd64, arm64]
     ldflags:
       - -X main.version={{ .Tag }} -X main.commit={{ .ShortCommit }}
@@ -33,14 +39,31 @@ sboms:
 archives:
   - name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ title .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+    # Defining files: replaces goreleaser's default license*/readme*/changelog*
+    # globs (the defaults apply only when files is empty), so the defaults are
+    # listed explicitly beside the deployment artifacts and the archive paths
+    # are predictable: README.md, LICENSE and CHANGELOG.md at the archive
+    # root, the deployment guide under docs/, the systemd unit under deploy/
+    # (DOC-05's tar tzf acceptance).
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - docs/DEPLOYMENT.md
+      - deploy/sup-kv.service
 
 release:
   # The v2.20.2 schema: header is a plain template string — the historical
   # `header.from_file` map form was removed in the v2 line (verified against
-  # the pinned module's config schema and tmpl func map). mustReadFile
-  # (a built-in template func) makes the WHOLE CHANGELOG.md the Release
-  # header — uncurated, acceptable while releases are few (v1.0.0 carries a
-  # single entry); from the second release on, slice the current-version
-  # section instead of shipping every prior entry plus the [Unreleased]
-  # skeleton. Fails loudly if CHANGELOG.md is missing.
-  header: '{{ mustReadFile "CHANGELOG.md" }}'
+  # the pinned module's config schema and tmpl func map). The template below
+  # slices the current-version section out of CHANGELOG.md so the GitHub
+  # Release body carries neither the [Unreleased] skeleton nor any prior
+  # release section (DOC-24). The func map binds `split` to
+  # `strings.Split(s, sep)` — content first, heading marker second — so
+  # $p1[1] is everything after the `## [1.1.0]` heading and $p2[0] is that
+  # text up to the next `\n## [` section heading; printf re-attaches the
+  # heading marker. Fails loudly if CHANGELOG.md is missing.
+  # BUMP POINTS: on the next release replace both version markers — the
+  # `## [1.1.0]` split marker and the `\n## [1.0.0]` stop marker — with the
+  # new current-version heading and the version it demotes.
+  header: '{{ $full := mustReadFile "CHANGELOG.md" }}{{ $p1 := split $full "## [1.1.0]" }}{{ $p2 := split (index $p1 1) "\n## [1.0.0]" }}{{ printf "## [1.1.0]%s" (index $p2 0) }}'

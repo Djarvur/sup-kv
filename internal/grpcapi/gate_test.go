@@ -2,6 +2,7 @@ package grpcapi_test
 
 import (
 	"bytes"
+	"context"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -12,10 +13,10 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
 )
 
@@ -53,17 +54,36 @@ func newGateServer(t *testing.T, opts grpcapi.ServerOptions) *testHarness {
 	return buildTestServer(t, testServerConfig{gate: opts})
 }
 
-// TestGate_writesUnavailableReadsOK proves the API-04 gate from the closed
-// side: with the sync fake never flipping and the StartupGate backstop an
-// hour away, Set and Delete return Unavailable — the gate check is the
-// handlers' first statement, so even an empty key surfaces Unavailable,
-// not InvalidArgument — while Get, List and a Watch subscription are
-// served normally. The Watch row rides a record applied through the engine
-// seam: peers' writes merging during the gate is exactly the window
-// API-04's read service exists for, and the subscriber must see them.
-func TestGate_writesUnavailableReadsOK(t *testing.T) {
+// assertWatchCode checks the status code a Watch subscription ends with: a
+// server-streaming call may surface the handler's rejection either from the
+// call itself or from the first receive, and both are the same verdict. The
+// bounded receive keeps a mis-behaving handler from hanging the test.
+func assertWatchCode(t *testing.T, ts *testHarness, what string, want codes.Code) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), gateWait)
+	defer cancel()
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{})
+	if err != nil {
+		assertCode(t, what, err, want)
+		return
+	}
+	_, err = stream.Recv()
+	assertCode(t, what, err, want)
+}
+
+// TestGate_readsAndWritesUnavailable proves the API-04/D-01 gate from the
+// closed side: with the sync fake never flipping and the StartupGate
+// backstop an hour away, every data RPC — Get, List, Watch, Set, Delete,
+// SnapshotCreate, SnapshotLoad — answers Unavailable, and health mirrors
+// the closed state as NOT_SERVING (API-06). The non-nil ListedKey seam
+// claims every key is listed and changes nothing: the gate check is the
+// handlers' first statement, before any listing knowledge or request
+// validation.
+func TestGate_readsAndWritesUnavailable(t *testing.T) {
 	t.Parallel()
-	ts := newGateServer(t, closedGateOptions())
+	opts := closedGateOptions()
+	opts.ListedKey = func(string) bool { return true }
+	ts := newGateServer(t, opts)
 	ctx := t.Context()
 
 	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gate/a", Value: []byte("v")})
@@ -71,37 +91,137 @@ func TestGate_writesUnavailableReadsOK(t *testing.T) {
 	if status.Convert(err).Message() != "startup gate: waiting for first sync round or startup_gate" {
 		t.Fatalf("Set during the gate message: want the gate wording, got %q", status.Convert(err).Message())
 	}
-	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "", Value: []byte("v")})
-	assertCode(t, "Set empty key during the gate", err, codes.Unavailable)
 	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "gate/a"})
 	assertCode(t, "Delete during the gate", err, codes.Unavailable)
 
 	_, err = ts.client.Get(ctx, &apiproto.GetRequest{Key: "gate/a"})
-	assertCode(t, "Get during the gate", err, codes.NotFound)
-	list, err := ts.client.List(ctx, &apiproto.ListRequest{})
+	assertCode(t, "Get during the gate", err, codes.Unavailable)
+	_, err = ts.client.List(ctx, &apiproto.ListRequest{})
+	assertCode(t, "List during the gate", err, codes.Unavailable)
+	assertWatchCode(t, ts, "Watch during the gate", codes.Unavailable)
+
+	_, err = ts.client.SnapshotCreate(ctx, &apiproto.SnapshotCreateRequest{Name: "gated"})
+	assertCode(t, "SnapshotCreate during the gate", err, codes.Unavailable)
+	_, err = ts.client.SnapshotLoad(ctx, &apiproto.SnapshotLoadRequest{Name: "gated"})
+	assertCode(t, "SnapshotLoad during the gate", err, codes.Unavailable)
+
+	resp, err := ts.health.Check(ctx, &healthpb.HealthCheckRequest{})
 	if err != nil {
-		t.Fatalf("List during the gate: want OK, got error: %v", err)
+		t.Fatalf("Check during the gate: want OK, got error: %v", err)
 	}
-	if keys := list.GetKeys(); len(keys) != 0 {
-		t.Fatalf("List during the gate: want no keys, got %v", keys)
+	if resp.GetStatus() != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("health during the gate: want NOT_SERVING, got %v", resp.GetStatus())
+	}
+}
+
+// TestGate_emptyKeyStillUnavailable proves the gate check precedes request
+// validation: a Get with an empty key while closed is Unavailable, not
+// InvalidArgument — the A7 empty-key check runs only past the gate.
+func TestGate_emptyKeyStillUnavailable(t *testing.T) {
+	t.Parallel()
+	ts := newGateServer(t, closedGateOptions())
+	ctx := t.Context()
+
+	_, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: ""})
+	assertCode(t, "Get empty key during the gate", err, codes.Unavailable)
+}
+
+// TestGate_openRestoresReads proves the open side: once the sync flip opens
+// the gate, Get and List serve the engine's answers again — including the
+// records peers merged during the closed window.
+func TestGate_openRestoresReads(t *testing.T) {
+	t.Parallel()
+	var sync atomic.Bool
+	ts := newGateServer(t, grpcapi.ServerOptions{
+		SyncArrived: sync.Load,
+		StartupGate: gateTestNeverBackstop,
+	})
+	ctx := t.Context()
+
+	_, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: "gate/restored"})
+	assertCode(t, "Get before the gate opens", err, codes.Unavailable)
+	_, err = ts.client.List(ctx, &apiproto.ListRequest{})
+	assertCode(t, "List before the gate opens", err, codes.Unavailable)
+
+	peer := storage.Record{
+		Version: version.PackVersion(time.Now().UnixMilli()+2, 0, 0x0BBB),
+		Data:    []byte("restored"),
+	}
+	_, _, err = ts.engine.ApplyRemote("gate/restored", peer)
+	if err != nil {
+		t.Fatalf("ApplyRemote while the gate is closed: want nil, got error: %v", err)
 	}
 
-	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{})
+	sync.Store(true)
+	awaitGateOpen(t, ts)
+
+	get, err := ts.client.Get(ctx, &apiproto.GetRequest{Key: "gate/restored"})
 	if err != nil {
-		t.Fatalf("Watch during the gate: want OK, got error: %v", err)
+		t.Fatalf("Get after the gate opens: want OK, got error: %v", err)
 	}
-	nowMs := time.Now().UnixMilli()
-	peer := storage.Record{Version: version.PackVersion(nowMs+2, 0, 0x0BBB), Data: []byte("peer-write")}
-	_, _, err = ts.engine.ApplyRemote("gate/peer", peer)
+	if !bytes.Equal(get.GetRecord().GetValue(), []byte("restored")) {
+		t.Fatalf("Get after the gate opens: want %q, got %q", "restored", get.GetRecord().GetValue())
+	}
+	list, err := ts.client.List(ctx, &apiproto.ListRequest{})
 	if err != nil {
-		t.Fatalf("ApplyRemote during the gate: want nil, got error: %v", err)
+		t.Fatalf("List after the gate opens: want OK, got error: %v", err)
 	}
-	ev := recvEvent(t, stream)
-	if ev.GetRecord().GetKey() != "gate/peer" ||
-		!bytes.Equal(ev.GetRecord().GetValue(), []byte("peer-write")) {
-		t.Fatalf("watch event during the gate = (%s, %q), want (gate/peer, peer-write)",
-			ev.GetRecord().GetKey(), ev.GetRecord().GetValue())
+	if keys := list.GetKeys(); len(keys) != 1 || keys[0] != "gate/restored" {
+		t.Fatalf("List after the gate opens: want [gate/restored], got %v", keys)
 	}
+}
+
+// TestServer_gateOpenListedRace pins Pitfall 2's structural guarantee: the
+// adapter publishes completeness and the listed key set in one atomic
+// snapshot, so a create_if_absent issued immediately after health reports
+// SERVING is already blocked by the listed set — no window exists in which
+// the gate is open but the keys are invisible (F14's back door).
+func TestServer_gateOpenListedRace(t *testing.T) {
+	t.Parallel()
+
+	// One immutable publication carries both answers, exactly like the
+	// adapter's listing mirror: readers load the same pointer for
+	// completeness and membership.
+	type listingMirror struct {
+		complete bool
+		keys     map[string]struct{}
+	}
+	var mirror atomic.Pointer[listingMirror]
+
+	ts := buildTestServer(t, testServerConfig{
+		gate: grpcapi.ServerOptions{
+			SyncArrived: func() bool {
+				m := mirror.Load()
+				return m != nil && m.complete
+			},
+			StartupGate: gateTestNeverBackstop,
+		},
+		listedKey: func(key string) bool {
+			m := mirror.Load()
+			if m == nil || !m.complete {
+				return false
+			}
+			_, ok := m.keys[key]
+			return ok
+		},
+	})
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "race/key", Value: []byte("local"), CreateIfAbsent: true,
+	})
+	assertCode(t, "create_if_absent before the gate opens", err, codes.Unavailable)
+
+	// The peer's complete listing arrives: one store publishes the gate's
+	// completeness and the key membership together, and the resolver's next
+	// poll opens the gate on that same snapshot.
+	mirror.Store(&listingMirror{complete: true, keys: map[string]struct{}{"race/key": {}}})
+	awaitGateOpen(t, ts)
+
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{
+		Key: "race/key", Value: []byte("local"), CreateIfAbsent: true,
+	})
+	assertCode(t, "create_if_absent immediately after the gate opens", err, codes.AlreadyExists)
 }
 
 // TestGate_opensOnSync proves the sync half of the opening rule: with the
@@ -138,6 +258,11 @@ func TestGate_opensOnSync(t *testing.T) {
 // parallel load (a naive "Set before" assertion races the very 50ms
 // deadline under test); after the release the fake answers false forever,
 // so SERVING and the succeeding Set can only be the backstop's work.
+//
+// Decision 14.6 (ADR 0006): an empty-disk node waits longer for a peer —
+// startup_gate_empty is the Phase 4 (PROTO-02) extension of this decision;
+// the uniform backstop asserted here is the current shape the extension
+// lengthens for the empty case.
 func TestGate_opensOnTimeout(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
@@ -158,6 +283,72 @@ func TestGate_opensOnTimeout(t *testing.T) {
 	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "gate/timeout", Value: []byte("v")})
 	if err != nil {
 		t.Fatalf("Set after the backstop elapsed: want OK, got error: %v", err)
+	}
+}
+
+// TestGate_openReason pins the D-01 gate-open narration: the resolver's one
+// opening callback carries the reason — "sync" when a complete listing
+// arrived, "backstop" when StartupGate elapsed — and fires exactly once,
+// after the gate CAS and the health flip (the succeeding Set proves both).
+func TestGate_openReason(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sync", func(t *testing.T) {
+		t.Parallel()
+		var sync atomic.Bool
+		reasons := make(chan string, 2)
+		ts := newGateServer(t, grpcapi.ServerOptions{
+			SyncArrived: sync.Load,
+			StartupGate: gateTestNeverBackstop,
+			OnGateOpen:  func(reason string) { reasons <- reason },
+		})
+		time.AfterFunc(gateSyncFlipDelay, func() { sync.Store(true) })
+		awaitGateOpen(t, ts)
+		assertOneGateReason(t, reasons, "sync")
+		_, err := ts.client.Set(t.Context(), &apiproto.SetRequest{Key: "gate/reason", Value: []byte("v")})
+		if err != nil {
+			t.Fatalf("Set after the gate opened on sync: want OK, got error: %v", err)
+		}
+	})
+
+	t.Run("backstop", func(t *testing.T) {
+		t.Parallel()
+		reasons := make(chan string, 2)
+		ts := newGateServer(t, grpcapi.ServerOptions{
+			SyncArrived: func() bool { return false },
+			StartupGate: gateTestBackstop,
+			OnGateOpen:  func(reason string) { reasons <- reason },
+		})
+		awaitGateOpen(t, ts)
+		assertOneGateReason(t, reasons, "backstop")
+		_, err := ts.client.Set(t.Context(), &apiproto.SetRequest{Key: "gate/reason", Value: []byte("v")})
+		if err != nil {
+			t.Fatalf("Set after the gate opened on the backstop: want OK, got error: %v", err)
+		}
+	})
+}
+
+// gateReasonGrace is the window assertOneGateReason holds open after the one
+// callback: the gate CAS makes a second one impossible, so the window only
+// has to outlast the resolver's own return.
+const gateReasonGrace = 100 * time.Millisecond
+
+// assertOneGateReason waits for the one opening callback, requires its
+// reason, and then proves the CAS kept it single-shot.
+func assertOneGateReason(t *testing.T, reasons <-chan string, want string) {
+	t.Helper()
+	select {
+	case got := <-reasons:
+		if got != want {
+			t.Fatalf("gate-open reason = %q, want %q", got, want)
+		}
+	case <-time.After(gateWait):
+		t.Fatalf("no gate-open callback within %v, want reason %q", gateWait, want)
+	}
+	select {
+	case extra := <-reasons:
+		t.Fatalf("the gate-open callback fired more than once (extra reason %q)", extra)
+	case <-time.After(gateReasonGrace):
 	}
 }
 
@@ -193,6 +384,62 @@ func TestHealth_reflectsGate(t *testing.T) {
 	if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
 		t.Fatalf("health after the gate opens: want SERVING, got %v", resp.GetStatus())
 	}
+}
+
+// healthOneWaySetKey is the key the one-way test writes to prove the gate
+// opened: a successful Set is observable proof that openGate ran, hence that
+// its health flip was attempted after Shutdown.
+const healthOneWaySetKey = "health/one-way"
+
+// TestHealth_shutdownIsOneWay proves the shutdown half of the health
+// contract (D-05, APIS-05, T-06-23, RESEARCH Pitfall 9): the gate resolver's
+// backstop can fire after shutdown began, and its SERVING flip must be
+// ignored. The test calls Shutdown twice (the call is idempotent) before the
+// 50 ms backstop elapses, waits for the backstop by observing a successful
+// Set — the write proves openGate ran, so the late status flip was attempted
+// — and then requires health to still read NOT_SERVING.
+func TestHealth_shutdownIsOneWay(t *testing.T) {
+	t.Parallel()
+
+	ts := buildTestServer(t, testServerConfig{
+		gate: grpcapi.ServerOptions{
+			SyncArrived: func() bool { return false },
+			StartupGate: gateTestBackstop,
+		},
+	})
+	ctx := t.Context()
+
+	ts.api.Shutdown()
+	ts.api.Shutdown()
+
+	waitFor(t, gateWait, "the startup-gate backstop to open the gate", func() bool {
+		_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: healthOneWaySetKey, Value: []byte("v")})
+		return err == nil
+	})
+
+	resp, err := ts.health.Check(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("health Check after Shutdown and the late backstop: want OK, got error: %v", err)
+	}
+	if got := resp.GetStatus(); got != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("health after Shutdown: want NOT_SERVING even though the backstop opened the gate, got %v", got)
+	}
+}
+
+// TestHealth_backstopWithoutShutdownServes is the control for the one-way
+// test: the same 50 ms backstop harness without a prior Shutdown reaches
+// SERVING, so the one-way assertion observes a real ignored transition
+// rather than a gate that never opens.
+func TestHealth_backstopWithoutShutdownServes(t *testing.T) {
+	t.Parallel()
+
+	ts := buildTestServer(t, testServerConfig{
+		gate: grpcapi.ServerOptions{
+			SyncArrived: func() bool { return false },
+			StartupGate: gateTestBackstop,
+		},
+	})
+	awaitGateOpen(t, ts)
 }
 
 // newFileServer builds the snapshot-test harness: a real persistfile

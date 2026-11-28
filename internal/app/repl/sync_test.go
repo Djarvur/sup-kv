@@ -21,7 +21,7 @@ import (
 // default rate — ⌊1s/500⌋ = 2ms, docs/IDEA.md §Parameters — the key no
 // test store ever holds (REPL-04's silence row), the design-default sync
 // interval (IDEA §Parameters), and the oversized-key length whose own
-// estimate (len+24+64) exceeds the 1400-byte chunk budget.
+// estimate (len+24) alone exceeds the 1400-byte chunk budget.
 const (
 	responseSpacing = 2 * time.Millisecond
 	keyUnknown      = "cfg/never-written"
@@ -30,10 +30,11 @@ const (
 )
 
 // graduatedKeyLens are the eight graduated key lengths whose per-entry
-// estimates (len+24) sum to exactly 1336: with the 64-byte chunk overhead
-// the first chunk closes at exactly the 1400-byte budget (probe #15's
-// at-boundary case).
-var graduatedKeyLens = [8]int{100, 130, 160, 140, 120, 150, 170, 174}
+// estimates (len+24) sum to exactly 1112: with the 96-byte chunk overhead
+// (the envelope, the DataSync framing and the completeness header) the first
+// chunk closes at exactly the 1400-byte budget (probe #15's at-boundary
+// case).
+var graduatedKeyLens = [8]int{96, 126, 156, 136, 116, 146, 166, 170}
 
 // requestFrom builds a decoded DataRequest datagram from peerID (REPL-04:
 // unicast "send me this key").
@@ -70,8 +71,8 @@ func recordsEqual(a, b storage.Record) bool {
 // emits nothing, ever. The requester is never Hello'd first: a stranger's
 // DataRequest is still protocol traffic from a live node, so the reply goes
 // to the datagram's source handle regardless of peer-table membership. One
-// Records() snapshot serves each handler call — the discipline the Task 2/3
-// sync paths reuse.
+// point Lookup serves each handler call — the tombstone-visible view
+// discipline the sync paths share.
 func TestDataRequest_replyAndSilence(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -262,7 +263,7 @@ func graduatedKey(i, keyLen int) string {
 }
 
 // oversizedKey returns the sorted-last key whose own estimate
-// (len+24+64 = 1488) already exceeds the 1400-byte budget — it must ship
+// (len+24 = 1424) already exceeds the 1400-byte budget — it must ship
 // alone as one oversized chunk, never dropped, never split.
 func oversizedKey() string {
 	return "z" + strings.Repeat("y", oversizedKeyLen-1)
@@ -283,6 +284,37 @@ func dataSyncs(drained []port.Outbound) []port.DataSync {
 	return syncs
 }
 
+// listingDrainStep is the drain loop's virtual step: comfortably above the
+// jittered listing spacing at the 500/s default (2ms + 10% = 2.2ms), so each
+// Advance crosses exactly one pacer slot. It is also far below every other
+// timer (Hello 1s, sync 30s), so the loops never trip an unrelated firing.
+const listingDrainStep = 3 * time.Millisecond
+
+// advanceDrain advances core at now — firing any due timer — and then keeps
+// advancing in listingDrainStep increments until every core queue is empty,
+// returning every drained outbound message. The listing pacer emits one
+// datagram per interval (D-01), so a multi-chunk round completes across
+// several Advances; the caller sees the whole round's emissions in order.
+func advanceDrain(core *repl.Core, out *port.Outbox, now time.Time) []port.Outbound {
+	core.Advance(now, out)
+	drained := out.Drain()
+	for core.QueuedSends() > 0 {
+		now = now.Add(listingDrainStep)
+		core.Advance(now, out)
+		drained = append(drained, out.Drain()...)
+	}
+	return drained
+}
+
+// oversizedKeyN returns a distinct key whose own estimate (len+24 = 1424)
+// already exceeds the 1400-byte chunk budget, so it ships alone as one
+// oversized chunk; n orders the keys in byte order. The multi-chunk listing
+// fixtures (pacing and rotation) are built from it.
+func oversizedKeyN(n int) string {
+	prefix := fmt.Sprintf("z%03d", n)
+	return prefix + strings.Repeat("y", oversizedKeyLen-len(prefix))
+}
+
 // allSyncEntries concatenates the chunks' entries in chunk order.
 func allSyncEntries(syncs []port.DataSync) []port.SyncEntry {
 	var entries []port.SyncEntry
@@ -290,6 +322,18 @@ func allSyncEntries(syncs []port.DataSync) []port.SyncEntry {
 		entries = append(entries, sync.Entries...)
 	}
 	return entries
+}
+
+// syncEntryKeySequence returns every chunk's entries' keys in chunk order —
+// the rotated-round probe: an all-oversized fixture yields one key per
+// chunk, so the sequence is the round's start-chunk order.
+func syncEntryKeySequence(syncs []port.DataSync) []string {
+	entries := allSyncEntries(syncs)
+	keys := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		keys = append(keys, entry.Key)
+	}
+	return keys
 }
 
 // syncEntryKeys returns the chunk's keys in order.
@@ -332,9 +376,10 @@ func listingFrom(snap map[string]storage.Record) []port.SyncEntry {
 // within sync_chunk_bytes — the chunk filled to exactly the budget closes,
 // the entry that would cross it opens the next chunk, and a single entry
 // whose own estimate exceeds the budget ships alone as one oversized
-// chunk, never dropped, never split (A4: chunks are self-sufficient, no
-// continuation state). An empty store still emits one zero-entry listing
-// (probe #7: an empty listing is a valid sync round).
+// chunk, never dropped, never split. Every chunk is independently
+// comparable; completeness travels in the round header, never inside the
+// chunk. An empty store still emits one zero-entry listing (probe #7: an
+// empty listing is a complete sync round).
 func TestSync_chunking(t *testing.T) {
 	t.Parallel()
 	t.Run("exact-budget close, boundary crossing and the oversized single entry", func(t *testing.T) {
@@ -363,8 +408,7 @@ func TestSync_chunking(t *testing.T) {
 		}
 		want := listingFrom(st.Records())
 
-		core.Advance(now0, &out)
-		syncs := dataSyncs(out.Drain())
+		syncs := dataSyncs(advanceDrain(core, &out, now0))
 		if len(syncs) != 3 {
 			t.Fatalf("startup sync emitted %d chunks, want 3 (at-budget, follow-up, oversized)", len(syncs))
 		}
@@ -373,7 +417,7 @@ func TestSync_chunking(t *testing.T) {
 			wantFirst = append(wantFirst, graduatedKey(i, graduatedKeyLens[i]))
 		}
 		if got := syncEntryKeys(syncs[0]); !slices.Equal(got, wantFirst) {
-			t.Fatalf("the at-budget chunk holds %d keys, want exactly the first %d graduated keys (64 + sum(len+24) = 1400)", len(got), len(wantFirst))
+			t.Fatalf("the at-budget chunk holds %d keys, want exactly the first %d graduated keys (96 + sum(len+24) = 1400)", len(got), len(wantFirst))
 		}
 		if got := syncEntryKeys(syncs[1]); !slices.Equal(got, []string{graduatedKey(8, 50), graduatedKey(9, 50)}) {
 			t.Fatalf("the follow-up chunk holds %v, want the two keys that crossed the budget boundary", got)
@@ -390,7 +434,7 @@ func TestSync_chunking(t *testing.T) {
 		t.Parallel()
 		now0 := at(0)
 		core1, st := newTestCore()
-		core2 := repl.New(localID, testRunID(localID), handleFor(localID), st, repl.Config{})
+		core2 := repl.New(localID, testRunID(localID), st, repl.Config{})
 		var out port.Outbox
 		for i, keyLen := range graduatedKeyLens {
 			_, _, err := st.store.Set(graduatedKey(i, keyLen), []byte("v"))
@@ -399,20 +443,19 @@ func TestSync_chunking(t *testing.T) {
 			}
 		}
 
-		core1.Advance(now0, &out)
-		first := dataSyncs(out.Drain())
+		first := dataSyncs(advanceDrain(core1, &out, now0))
 		if len(first) != 1 {
 			t.Fatalf("the first build emitted %d chunks, want 1 over the eight graduated keys", len(first))
 		}
-		core2.Advance(now0, &out)
-		second := dataSyncs(out.Drain())
+		second := dataSyncs(advanceDrain(core2, &out, now0))
 		if !dataSyncsEqual(first, second) {
 			t.Fatalf("two fresh-snapshot builds diverged: %v vs %v — a map-iteration order leaked into the chunk sequence", first, second)
 		}
 		// The timer rebuild over the same core takes another fresh snapshot
-		// sync_interval later and must reproduce the same sequence.
-		core1.Advance(now0.Add(syncInterval), &out)
-		third := dataSyncs(out.Drain())
+		// one sync_interval plus the positive-only jitter envelope later and
+		// must reproduce the same chunk sequence (one chunk here, so the
+		// round rotation is trivial).
+		third := dataSyncs(advanceDrain(core1, &out, now0.Add(syncInterval+syncInterval/10)))
 		if !dataSyncsEqual(first, third) {
 			t.Fatalf("the timer rebuild diverged from the startup build: %v vs %v", first, third)
 		}
@@ -465,21 +508,243 @@ func TestSync_triggers(t *testing.T) {
 			t.Fatalf("Advance at t0+%v emitted %d DataSync messages before the sync interval elapsed, want 0", off, len(syncs))
 		}
 	}
-	// The at-boundary tick — lastSync+sync_interval exactly — fires it.
-	core.Advance(now0.Add(syncInterval), &out)
+	// The timer never fires before the configured interval (the positive-only
+	// jitter half): one nanosecond before the boundary emits nothing.
+	core.Advance(now0.Add(syncInterval-time.Nanosecond), &out)
+	if syncs := dataSyncs(out.Drain()); len(syncs) != 0 {
+		t.Fatalf("Advance one nanosecond before t0+%v emitted %d DataSync messages, want 0", syncInterval, len(syncs))
+	}
+	// And the positive jitter is at most a tenth of the interval, so the
+	// boundary tick plus that envelope fires exactly one listing round.
+	atBound := now0.Add(syncInterval + syncInterval/10)
+	core.Advance(atBound, &out)
 	if syncs := dataSyncs(out.Drain()); len(syncs) != 1 {
-		t.Fatalf("the at-boundary Advance at t0+%v emitted %d DataSync messages, want exactly 1", syncInterval, len(syncs))
+		t.Fatalf("the at-boundary Advance at t0+%v emitted %d DataSync messages, want exactly 1", syncInterval+syncInterval/10, len(syncs))
 	}
 }
 
-// TestSync_syncArrived proves the startup gate's sync half (API-04, the A1
-// reading): SyncArrived() is false until the first received DataSync
-// datagram — our own startup listing emission does not count, only a
-// receipt, and an unrelated Hello receipt does not either — flips true on
-// the first received DataSync chunk (an empty listing is a valid chunk:
-// chunks are self-sufficient, the protocol carries no completeness state,
-// and the startup_gate timeout is the backstop), and stays true through
-// further unrelated events, never resetting.
+// TestSync_pacing proves the listing pacer (D-01/R-01): a 40-chunk listing
+// drains one datagram per Advance at the floor(1s/rate) interval inside the
+// deterministic +-10% jitter envelope — never a whole-set burst — and the
+// first chunk of an idle queue is immediate (the nextListingAt clamp). The
+// fixture is 40 oversized keys, so the store really produces 40 chunks.
+func TestSync_pacing(t *testing.T) {
+	t.Parallel()
+	const (
+		rate   = 500
+		chunks = 40
+	)
+	now0 := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	for i := range chunks {
+		_, _, err := st.store.Set(oversizedKeyN(i), []byte("v"))
+		if err != nil {
+			t.Fatalf("store Set(oversized key %d): %v", i, err)
+		}
+	}
+	core.Advance(now0, &out)
+	if got := len(dataSyncs(out.Drain())); got != 1 {
+		t.Fatalf("the startup Advance emitted %d listing chunks, want exactly 1 — one datagram per interval, the first immediate", got)
+	}
+	interval := time.Second / rate
+	minSpacing := interval - interval/10
+	maxSpacing := interval + interval/10
+	emittedAt := []time.Duration{0}
+	now := now0
+	for len(emittedAt) < chunks {
+		next := core.Advance(now, &out)
+		got := dataSyncs(out.Drain())
+		if len(got) > 1 {
+			t.Fatalf("Advance at t0+%v emitted %d listing chunks, want at most one datagram per call", now.Sub(now0), len(got))
+		}
+		if len(got) == 1 {
+			emittedAt = append(emittedAt, now.Sub(now0))
+		}
+		if core.QueuedSends() == 0 {
+			break
+		}
+		if !next.After(now) {
+			t.Fatalf("Advance at t0+%v returned deadline %v, want strictly future", now.Sub(now0), next.Sub(now0))
+		}
+		now = next
+	}
+	if len(emittedAt) != chunks {
+		t.Fatalf("the round emitted %d chunks, want %d", len(emittedAt), chunks)
+	}
+	for i := 1; i < len(emittedAt); i++ {
+		spacing := emittedAt[i] - emittedAt[i-1]
+		if spacing < minSpacing || spacing > maxSpacing {
+			t.Fatalf("chunk %d emitted %v after chunk %d, want within [%v, %v] — the jittered floor(1s/%d) interval",
+				i, spacing, i-1, minSpacing, maxSpacing, rate)
+		}
+	}
+}
+
+// TestPaced_sendCounting pins the paced-send counter's event: it counts
+// datagrams handed to the Outbox by the pacers, never queue insertions
+// (T-3-41). The discriminator is the startup listing — the whole rotated
+// round is enqueued by one trigger, but only the first chunk has left — so
+// an enqueue-counting counter would already read the chunk count while the
+// correct one reads 1. Driving the round to completion proves the final
+// total equals the datagrams emitted, and one DataRequest reply proves the
+// egress pacer increments the same counter.
+func TestPaced_sendCounting(t *testing.T) {
+	t.Parallel()
+	const chunks = 12
+	now0 := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	for i := range chunks {
+		_, _, err := st.store.Set(oversizedKeyN(i), []byte("v"))
+		if err != nil {
+			t.Fatalf("store Set(oversized key %d): %v", i, err)
+		}
+	}
+
+	core.Advance(now0, &out)
+	emitted := len(dataSyncs(out.Drain()))
+	if emitted != 1 {
+		t.Fatalf("the startup Advance emitted %d listing chunks, want exactly 1", emitted)
+	}
+	if got, want := core.PacedSends(), uint64(1); got != want {
+		t.Fatalf("PacedSends() = %d after the startup Advance, want %d — the counter must count the one emission, not the %d enqueues", got, want, chunks)
+	}
+	if got, want := core.QueuedSends(), chunks-1; got != want {
+		t.Fatalf("QueuedSends() = %d after the startup Advance, want %d queued chunks", got, want)
+	}
+
+	now := now0
+	for emitted < chunks {
+		next := core.Advance(now, &out)
+		emitted += len(dataSyncs(out.Drain()))
+		if core.QueuedSends() == 0 {
+			break
+		}
+		if !next.After(now) {
+			t.Fatalf("Advance at t0+%v returned deadline %v, want strictly future", now.Sub(now0), next.Sub(now0))
+		}
+		now = next
+	}
+	if emitted != chunks {
+		t.Fatalf("the round emitted %d DataSync chunks, want %d", emitted, chunks)
+	}
+	if got := core.PacedSends(); got != uint64(emitted) {
+		t.Fatalf("PacedSends() = %d after the round, want %d — the number of datagrams emitted", got, emitted)
+	}
+
+	// The egress pacer shares the counter: a DataRequest for a held key
+	// enqueues one reply and the next Advance emits it.
+	_, _, err := st.store.Set(keyAlpha, []byte("v"))
+	if err != nil {
+		t.Fatalf("store Set(%q): %v", keyAlpha, err)
+	}
+	core.HandleDatagram(now, requestFrom(peerID1, keyAlpha), &out)
+	out.Drain()
+	core.Advance(now, &out)
+	if got := len(unicasts(out.Drain())); got != 1 {
+		t.Fatalf("the DataRequest Advance drained %d unicasts, want exactly 1", got)
+	}
+	if got, want := core.PacedSends(), uint64(emitted+1); got != want {
+		t.Fatalf("PacedSends() = %d after the egress reply, want %d — the egress pacer must share the emission counter", got, want)
+	}
+}
+
+// TestSync_rotation proves the broadcast round rotation (D-01, research
+// Pattern 1): round r starts at chunk r % len(chunks), so two rounds over a
+// 4-chunk store emit rotated start orders and the same multiset — a fixed
+// tail in one round is at the head the next, which is what covers the whole
+// key space under systematic buffer loss. The fixture is four oversized
+// keys: one key per chunk, so the chunk sequence IS the key sequence.
+func TestSync_rotation(t *testing.T) {
+	t.Parallel()
+	const chunks = 4
+	now0 := at(0)
+	core, st := newTestCore()
+	var out port.Outbox
+	want := make([]string, 0, chunks)
+	for i := range chunks {
+		key := oversizedKeyN(i)
+		_, _, err := st.store.Set(key, []byte("v"))
+		if err != nil {
+			t.Fatalf("store Set(oversized key %d): %v", i, err)
+		}
+		want = append(want, key)
+	}
+
+	first := dataSyncs(advanceDrain(core, &out, now0))
+	if got := syncEntryKeySequence(first); !slices.Equal(got, want) {
+		t.Fatalf("round 0 emitted chunk start order %v, want the sorted chunk order %v", got, want)
+	}
+	second := dataSyncs(advanceDrain(core, &out, now0.Add(syncInterval+syncInterval/10)))
+	wantRotated := append(slices.Clone(want[1:]), want[0])
+	if got := syncEntryKeySequence(second); !slices.Equal(got, wantRotated) {
+		t.Fatalf("round 1 emitted chunk start order %v, want the one-chunk rotation %v (start = round %% len)", got, wantRotated)
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(syncEntryKeySequence(first))), slices.Sorted(slices.Values(syncEntryKeySequence(second)))) {
+		t.Fatalf("the two rounds cover different key multisets: %v vs %v — a rotation must reorder, never drop",
+			syncEntryKeySequence(first), syncEntryKeySequence(second))
+	}
+}
+
+// TestSync_listingBusy proves the one-in-flight rule (D-01, RESEARCH Pitfall
+// 3): a timer trigger that arrives while the previous broadcast listing is
+// still queued enqueues nothing, yet advances nextSync — Advance returns a
+// strictly future deadline (no livelock), and the queued chunk count falls by
+// exactly the one pacer slot this Advance drains. A re-enqueued round would
+// grow the queue by the round's chunk count instead.
+func TestSync_listingBusy(t *testing.T) {
+	t.Parallel()
+	const chunks = 40
+	core, st := newSyncCore(repl.Config{SyncInterval: 200 * time.Millisecond})
+	var out port.Outbox
+	for i := range chunks {
+		_, _, err := st.store.Set(oversizedKeyN(i), []byte("v"))
+		if err != nil {
+			t.Fatalf("store Set(oversized key %d): %v", i, err)
+		}
+	}
+	core.Advance(at(0), &out)
+	out.Drain()
+	queued := core.QueuedSends()
+	if queued != chunks-1 {
+		t.Fatalf("after the startup Advance QueuedSends() = %d, want %d (one chunk pacer-drained)", queued, chunks-1)
+	}
+
+	now := at(250 * time.Millisecond)
+	next := core.Advance(now, &out)
+	if got := len(dataSyncs(out.Drain())); got != 1 {
+		t.Fatalf("the busy-trigger Advance emitted %d listing chunks, want exactly the 1 pacer slot", got)
+	}
+	if !next.After(now) {
+		t.Fatalf("the busy-trigger Advance returned deadline %v, want strictly future — a skipped enqueue must still advance nextSync", next.Sub(at(0)))
+	}
+	if got := core.QueuedSends(); got != queued-1 {
+		t.Fatalf("after the busy trigger QueuedSends() = %d, want %d — the skip enqueued a second round", got, queued-1)
+	}
+}
+
+// TestSync_emptyListing proves the empty-store edge (probe #7): a store with
+// no records still announces itself with exactly one zero-entry DataSync on
+// the startup trigger, and the pacer adds no second datagram.
+func TestSync_emptyListing(t *testing.T) {
+	t.Parallel()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	syncs := dataSyncs(out.Drain())
+	if len(syncs) != 1 || len(syncs[0].Entries) != 0 {
+		t.Fatalf("an empty store emitted %d DataSync chunks with entry counts %v, want exactly one zero-entry listing",
+			len(syncs), len(allSyncEntries(syncs)))
+	}
+}
+
+// TestSync_syncArrived proves the startup gate's sync half (API-04,
+// PROTO-01): SyncArrived() is false until a COMPLETE listing arrives — our
+// own startup listing emission does not count, only a receipt, an unrelated
+// Hello receipt does not either, and no partial chunk does. A single-part
+// listing (here the empty one) completes the round and flips the flag; the
+// flag then stays true through further unrelated events, never resetting.
 func TestSync_syncArrived(t *testing.T) {
 	t.Parallel()
 	now := at(0)
@@ -501,13 +766,15 @@ func TestSync_syncArrived(t *testing.T) {
 		t.Fatal("SyncArrived() = true after a Hello receipt, want false")
 	}
 
-	// One received DataSync datagram — the empty listing chunk — flips it:
-	// any received chunk counts (A1), from any sender (the compare path
-	// never consults the peer table).
+	// One complete received listing — the single-part empty one — flips it:
+	// every chunk of the round is present. The sender must be a known peer
+	// identity (CR-01), so its Hello comes first.
+	core.HandleDatagram(now, helloFrom(peerID2), &out)
+	out.Drain()
 	core.HandleDatagram(now, syncFrom(peerID2), &out)
 	out.Drain()
 	if !core.SyncArrived() {
-		t.Fatal("SyncArrived() = false after a received DataSync datagram, want true")
+		t.Fatal("SyncArrived() = false after a complete DataSync listing, want true")
 	}
 
 	// Further unrelated events never reset it: a sync-timer Advance and
@@ -529,10 +796,121 @@ const (
 	keyTombstone = "cfg/tomb"
 )
 
-// syncFrom builds a decoded DataSync datagram from peerID carrying the
-// listing entries in the given (sender-sorted) order (REPL-05).
+// syncFrom builds a decoded single-part DataSync datagram from peerID — the
+// 1-of-1 header an honest sender stamps on a listing that fits one chunk
+// (count 1, index 1, no continuation): the shape every pre-existing
+// accepted-DataSync fixture carries so it reaches the compare path instead
+// of the header-validation discard. Multi-part tests build their own
+// datagrams with explicit sync ids and indices.
 func syncFrom(peerID uint16, entries ...port.SyncEntry) port.InboundDatagram {
-	return datagramFrom(peerID, port.DataSync{Entries: entries})
+	return datagramFrom(peerID, port.DataSync{SyncID: 1, ChunkIndex: 1, ChunkCount: 1, Entries: entries})
+}
+
+// chunkedListing builds chunks one datagram per part with the same syncID,
+// consecutive 1-based indices and the shared chunk count — the wire shape a
+// real multi-chunk round carries. Each part names one key whose version is
+// valid at the fixed test now, so the header and entries both pass
+// validation.
+func chunkedListing(peerID uint16, syncID uint64, chunks int) []port.InboundDatagram {
+	parts := make([]port.InboundDatagram, 0, chunks)
+	for i := range chunks {
+		parts = append(parts, datagramFrom(peerID, port.DataSync{
+			SyncID:     syncID,
+			ChunkIndex: uint32(i + 1),
+			ChunkCount: uint32(chunks),
+			Entries: []port.SyncEntry{{
+				Key:     fmt.Sprintf("cfg/part%d", i),
+				Version: version.PackVersion(testNowMs, uint16(i), peerID),
+			}},
+		}))
+	}
+	return parts
+}
+
+// TestSync_partialListingKeepsGateClosed proves the completeness contract
+// (PROTO-01, R-03): a three-chunk listing delivered in order leaves
+// SyncArrived and ListingComplete false after chunks 1 and 2 — the first
+// chunk is a PART, never the whole listing — and only the closing chunk
+// flips both.
+func TestSync_partialListingKeepsGateClosed(t *testing.T) {
+	t.Parallel()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out) // the listing's identity must be a learned peer (CR-01)
+	out.Drain()
+	parts := chunkedListing(peerID1, 44, 3)
+	for i, part := range parts {
+		core.HandleDatagram(at(0), part, &out)
+		out.Drain()
+		complete := i == len(parts)-1
+		if got := core.SyncArrived(); got != complete {
+			t.Fatalf("after chunk %d of 3 SyncArrived() = %v, want %v — completeness is every index 1..count, not first arrival", i+1, got, complete)
+		}
+		if got := core.ListingComplete(); got != complete {
+			t.Fatalf("after chunk %d of 3 ListingComplete() = %v, want %v", i+1, got, complete)
+		}
+	}
+}
+
+// TestSync_headerOutOfOrderAndDuplicate proves accumulation is an
+// index-set discipline (PROTO-01): the same three-chunk listing delivered
+// out of order (3, 1, 2) — with chunk 2 delivered twice — completes only when
+// all of 1..3 are present, and a duplicate chunk after completion neither
+// reopens nor breaks the state.
+func TestSync_headerOutOfOrderAndDuplicate(t *testing.T) {
+	t.Parallel()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out) // the listing's identity must be a learned peer (CR-01)
+	out.Drain()
+	parts := chunkedListing(peerID1, 45, 3)
+	feed := func(i int) {
+		t.Helper()
+		core.HandleDatagram(at(0), parts[i], &out)
+		out.Drain()
+	}
+	feed(2)
+	if core.SyncArrived() {
+		t.Fatal("SyncArrived() = true after only chunk 3 of 3, want false")
+	}
+	feed(0)
+	if core.SyncArrived() {
+		t.Fatal("SyncArrived() = true after chunks 3 and 1 of 3, want false — chunk 2 is still missing")
+	}
+	feed(1)
+	if !core.SyncArrived() {
+		t.Fatal("SyncArrived() = false after all three chunks (3, 1, 2), want true")
+	}
+	feed(1)
+	if !core.SyncArrived() {
+		t.Fatal("SyncArrived() = false after a duplicate chunk, want it sticky true")
+	}
+}
+
+// TestSync_emptyListingCompletes proves the empty-listing edge (PROTO-01):
+// an empty store announces itself as ONE chunk with count 1 and index 1, and
+// that single empty part completes the listing and opens the gate.
+func TestSync_emptyListingCompletes(t *testing.T) {
+	t.Parallel()
+	core, _ := newTestCore()
+	var out port.Outbox
+	core.Advance(at(0), &out)
+	out.Drain()
+	core.HandleDatagram(at(0), helloFrom(peerID1), &out) // the listing's identity must be a learned peer (CR-01)
+	out.Drain()
+	core.HandleDatagram(at(0), datagramFrom(peerID1, port.DataSync{SyncID: 46, ChunkIndex: 1, ChunkCount: 1}), &out)
+	out.Drain()
+	if !core.SyncArrived() || !core.ListingComplete() {
+		t.Fatalf("a one-chunk empty listing left SyncArrived/ListingComplete = %v/%v, want true/true — an empty listing is still a complete listing",
+			core.SyncArrived(), core.ListingComplete())
+	}
+	if got := len(core.ListedKeysSnapshot()); got != 0 {
+		t.Fatalf("an empty listing listed %d keys, want 0", got)
+	}
 }
 
 // newSyncCore returns the local node's core over a real store with cfg —
@@ -541,11 +919,29 @@ func syncFrom(peerID uint16, entries ...port.SyncEntry) port.InboundDatagram {
 func newSyncCore(cfg repl.Config) (*repl.Core, *stateStore) {
 	fixedNow := func() time.Time { return time.UnixMilli(testNowMs) }
 	st := &stateStore{store: storage.NewStore(localID, clock.NewClock(fixedNow, 0, 0, testDriftWarn), storage.Config{})}
-	return repl.New(localID, testRunID(localID), handleFor(localID), st, cfg), st
+	return repl.New(localID, testRunID(localID), st, cfg), st
+}
+
+// learnPeer sends one Hello from peerID1 through core and drains the targeted
+// listing its first-seen branch enqueues, returning the virtual instant the
+// drain stopped at. A received listing is bound to a peer-table row (CR-01),
+// so a fixture's Hello comes first; draining the listing keeps the queue
+// empty for tests whose later Advances pin exact per-slot emission counts.
+func learnPeer(core *repl.Core, now time.Time) time.Time {
+	var out port.Outbox
+	core.HandleDatagram(now, helloFrom(peerID1), &out)
+	out.Drain()
+	for core.QueuedSends() > 0 {
+		now = now.Add(time.Millisecond)
+		core.Advance(now, &out)
+		out.Drain()
+	}
+	return now
 }
 
 // TestSync_compare proves the DataSync receive path's per-key compare
-// (REPL-05): against ONE store snapshot, every listing entry compares by
+// (REPL-05): through the store's tombstone-visible per-entry version probe,
+// every listing entry compares by
 // the full record-version order — a key missing locally or a strictly
 // newer listing version queues a DataRequest, a strictly newer local
 // record queues a unicast exact-record DataReplication, equal versions
@@ -588,6 +984,7 @@ func TestSync_compare(t *testing.T) {
 		t.Fatalf("store Merge(%q): %v", keyTombstone, err)
 	}
 	snap := st.Records()
+	now = learnPeer(core, now)
 
 	listing := []port.SyncEntry{
 		{Key: keyAlpha, Version: version.PackVersion(testNowMs, 9, peerID1)},
@@ -656,6 +1053,7 @@ func TestSync_rateLimit(t *testing.T) {
 		var out port.Outbox
 		core.Advance(now, &out)
 		out.Drain()
+		now = learnPeer(core, now)
 		const k = 5
 		entries := make([]port.SyncEntry, 0, k)
 		for i := range k {
@@ -712,6 +1110,7 @@ func TestSync_rateLimit(t *testing.T) {
 		var out port.Outbox
 		core.Advance(now, &out)
 		out.Drain()
+		now = learnPeer(core, now)
 		entries := []port.SyncEntry{
 			{Key: "cfg/one", Version: version.PackVersion(testNowMs, 0, peerID1)},
 			{Key: "cfg/two", Version: version.PackVersion(testNowMs+1, 0, peerID1)},
@@ -769,6 +1168,7 @@ func TestSync_responseRateClamp(t *testing.T) {
 			var out port.Outbox
 			core.Advance(now, &out)
 			out.Drain()
+			now = learnPeer(core, now)
 			entries := []port.SyncEntry{
 				{Key: "cfg/clamp-a", Version: version.PackVersion(testNowMs, 0, peerID1)},
 				{Key: "cfg/clamp-b", Version: version.PackVersion(testNowMs+1, 0, peerID1)},

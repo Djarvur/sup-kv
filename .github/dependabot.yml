@@ -1,7 +1,8 @@
 # Dependabot version updates: gomod + github-actions, weekly, grouped minor+patch.
 # The tool graph is small — one grouped PR per week beats five.
-# (Dependabot ALERTS are GHAS-gated on this private repo and stay off until the
-# deferred public flip; version updates are active — see plan 01-03 SUMMARY.)
+# (The repository is public since 2026-11-18, so Dependabot ALERTS are active
+# alongside these version updates — the updates landed with plan 01-03, the
+# alerts came with the public flip.)
 version: 2
 updates:
   - package-ecosystem: gomod

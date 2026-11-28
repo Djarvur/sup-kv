@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/app/repl/ -v -run '^TestEgress_noValueRetention$'",
+  "exitCode": 1,
+  "output": "=== RUN   TestEgress_noValueRetention\n    egress_internal_test.go:254: enqueuing 256 answers over 61440-byte values allocated 16880056 bytes, want <= 1048576 — the queue pinned value copies (CR-02)\n--- FAIL: TestEgress_noValueRetention (0.05s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/app/repl\t0.061s\nFAIL",
+  "targetTest": "TestEgress_noValueRetention",
+  "targetFile": "internal/app/repl/egress_internal_test.go",
+  "expected": "Enqueuing 256 DataReplication answers over 60 KiB values copies no record Data into the queue, so the cumulative allocation stays under 1 MiB (the identity-only bound).",
+  "actual": "The queue allocated 16880056 bytes — one cloned 61440-byte value per present-key DataRequest, retained inside the queued message — over a 1 MiB bound.",
+  "semanticAssessment": "The target test executed and failed on its planned assertion: the identity-only retention bound. No build, fixture or discovery failure and no unrelated test failure; the single FAIL line is the target test itself."
+}

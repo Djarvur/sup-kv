@@ -3,7 +3,10 @@ package persist_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"maps"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -19,14 +22,31 @@ import (
 // fixture versions' clock readings.
 const (
 	codecPropertySteps = 500
-	maxRecordBytes     = 61440
 	oversizeBy         = 1
+	// dumpValueCeiling is the documented UDP datagram ceiling the dump
+	// format's line bound is sized from. Kept as a literal because this
+	// external test package cannot see the unexported maxDumpValueBytes.
+	dumpValueCeiling = 65507
 	// watermarkOrderScans re-scans the equal-counter fixture: map iteration
 	// order is random per call, so the law is asserted over many orders.
 	watermarkOrderScans = 100
 	// tornTailCut bytes off the dump's tail, landing the cut mid-JSON of the
 	// last record line — the torn-tail residue class.
 	tornTailCut = 10
+	// overlongLineBytes is a line length no supported writer can emit — far
+	// beyond the format-bound reader's buffer — proving the generation fault.
+	overlongLineBytes = 1 << 20
+	// The TEST-15 small (l, c, node) space — the same 3x3x3 box the storage
+	// merge property draws from (prop_small_space_test.go), so a counterexample
+	// in either suite reduces to the same short adjacent-version shape. Half
+	// the codec property's record versions come from here and the wide half
+	// stays the unchanged testutil draw.
+	smallSpaceLBase     = int64(1730000000000)
+	smallSpaceLRange    = 3
+	smallSpaceCRange    = 3
+	smallSpaceNodeRange = 3
+	smallSpaceKeyRange  = 3
+	smallSpaceRecords   = 8
 )
 
 // dumpLine is the test-side mirror of the codec's record line — the shape
@@ -90,52 +110,193 @@ func baseRecords() map[string]storage.Record {
 	}
 }
 
-// encodeRecords merges base with extras and encodes it.
+// encodeRecords merges base with extras and encodes it at the default value
+// limit.
 func encodeRecords(t *testing.T, extras map[string]storage.Record) []byte {
+	t.Helper()
+	return encodeRecordsAt(t, storage.ValueMaxBytes, extras)
+}
+
+// encodeRecordsAt merges base with extras and encodes it at limit. The
+// oversize-discard fixture passes a deliberately larger limit than its
+// decode so the encoder's tripwire cannot make the fixture unbuildable
+// (RESEARCH Pitfall 11): the dump must exist to prove Decode discards the
+// record.
+func encodeRecordsAt(t *testing.T, limit int, extras map[string]storage.Record) []byte {
 	t.Helper()
 	records := baseRecords()
 	maps.Copy(records, extras)
-	dump, err := persist.Encode(records)
+	dump, err := persist.Encode(records, limit)
 	if err != nil {
 		t.Fatalf("Encode() error = %v, want nil", err)
 	}
 	return dump
 }
 
-// TestCodec_roundTripProperty proves the full-map round-trip over 500
-// seeded random stores, tombstones included: Encode then Decode returns a
-// deep-equal map with nothing discarded, and re-encoding the decode output
-// yields bytes identical to the first encode — byte stability through the
-// round trip (PERS-01, D-06).
+// censusHeader renders a dump header line announcing count record lines —
+// the hand-built fixtures' control over the completeness census (PERSIST-03).
+func censusHeader(count int) string {
+	return fmt.Sprintf("{\"format_version\":1,\"record_count\":%d}\n", count)
+}
+
+// smallSpaceVersion returns a version drawn from TEST-15's tiny space: l in
+// {base, base+1, base+2}, counter 0..2, node 1..3.
+func smallSpaceVersion(rng *rand.Rand) version.RecordVersion {
+	return version.PackVersion(
+		smallSpaceLBase+int64(rng.IntN(smallSpaceLRange)),
+		uint16(rng.IntN(smallSpaceCRange)),
+		uint16(1+rng.IntN(smallSpaceNodeRange)),
+	)
+}
+
+// mixedVersion draws half the versions from the small space and half from the
+// unchanged wide testutil draw — the TEST-15 distribution.
+func mixedVersion(rng *rand.Rand) version.RecordVersion {
+	if rng.IntN(2) == 0 {
+		return smallSpaceVersion(rng)
+	}
+	return testutil.RandVersion(rng)
+}
+
+// payloadForVersion derives the record payload from the version alone: the
+// version bytes for a live record, a tombstone for every third first byte. Two
+// records with equal versions are therefore byte-identical — the same-write
+// premise the storage small-space property relies on.
+func payloadForVersion(ver version.RecordVersion) storage.Record {
+	if ver[0]%3 == 0 {
+		return storage.Record{Version: ver, Deleted: true}
+	}
+	return storage.Record{Version: ver, Data: ver[:]}
+}
+
+// mixedSpaceRecords returns a map drawn with the TEST-15 distribution: keys
+// from a three-key set and half the versions from the small (l, c, node)
+// space, every record sealed for the codec's checksum check.
+func mixedSpaceRecords(rng *rand.Rand) map[string]storage.Record {
+	records := make(map[string]storage.Record, smallSpaceRecords)
+	for range 1 + rng.IntN(smallSpaceRecords) {
+		key := fmt.Sprintf("codec-%d", rng.IntN(smallSpaceKeyRange))
+		records[key] = sealed(key, payloadForVersion(mixedVersion(rng)))
+	}
+	return records
+}
+
+// boundaryFixture seals one record per version under boundary-<i> keys, the
+// shape every version-boundary subtest round-trips.
+func boundaryFixture(versions []version.RecordVersion) map[string]storage.Record {
+	records := make(map[string]storage.Record, len(versions))
+	for i, ver := range versions {
+		key := fmt.Sprintf("boundary-%d", i)
+		records[key] = sealed(key, payloadForVersion(ver))
+	}
+	return records
+}
+
+// equalLVersions pins the equal-l class: one l, counters 0..2, one node.
+func equalLVersions(rng *rand.Rand) []version.RecordVersion {
+	base := smallSpaceLBase + int64(rng.IntN(smallSpaceLRange))
+	node := uint16(1 + rng.IntN(smallSpaceNodeRange))
+	versions := make([]version.RecordVersion, smallSpaceLRange)
+	for i := range versions {
+		versions[i] = version.PackVersion(base, uint16(i), node)
+	}
+	return versions
+}
+
+// equalLCounterVersions pins the equal-l-equal-c class: one l, one counter,
+// nodes 1..3 — the class only the node ID separates.
+func equalLCounterVersions(rng *rand.Rand) []version.RecordVersion {
+	base := smallSpaceLBase + int64(rng.IntN(smallSpaceLRange))
+	counter := uint16(rng.IntN(smallSpaceCRange))
+	versions := make([]version.RecordVersion, smallSpaceNodeRange)
+	for i := range versions {
+		versions[i] = version.PackVersion(base, counter, uint16(1+i))
+	}
+	return versions
+}
+
+// adjacentLVersions pins the adjacent-l class: l, l+1, l+2 with one counter
+// and one node.
+func adjacentLVersions(rng *rand.Rand) []version.RecordVersion {
+	base := smallSpaceLBase + int64(rng.IntN(smallSpaceLRange))
+	counter := uint16(rng.IntN(smallSpaceCRange))
+	node := uint16(1 + rng.IntN(smallSpaceNodeRange))
+	versions := make([]version.RecordVersion, smallSpaceLRange)
+	for i := range versions {
+		versions[i] = version.PackVersion(base+int64(i), counter, node)
+	}
+	return versions
+}
+
+// assertCodecRoundTrip asserts the full-map round trip over one generated map:
+// Encode then Decode returns the same records with nothing discarded, and
+// re-encoding the decode output reproduces the first bytes — byte stability
+// through the round trip (PERS-01, D-06).
+func assertCodecRoundTrip(t *testing.T, step int, records map[string]storage.Record) {
+	t.Helper()
+	dump, err := persist.Encode(records, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("step %d Encode() error = %v, want nil", step, err)
+	}
+	decoded, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("step %d Decode() error = %v, want nil (replay with the property seed above)",
+			step, err)
+	}
+	if stats.Total() != 0 {
+		t.Fatalf("step %d Decode() discarded = %d, want 0 (replay with the property seed above)",
+			step, stats.Total())
+	}
+	if !recordsEqual(decoded, records) {
+		t.Fatalf("step %d round trip changed the records (replay with the property seed above)", step)
+	}
+	again, err := persist.Encode(decoded, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("step %d re-Encode() error = %v, want nil", step, err)
+	}
+	if !bytes.Equal(again, dump) {
+		t.Fatalf("step %d re-encode is not byte-identical (replay with the property seed above)", step)
+	}
+}
+
+// TestCodec_roundTripProperty proves the full-map round-trip over 500 seeded
+// random maps per boundary class, tombstones included: Encode then Decode
+// returns a deep-equal map with nothing discarded, and re-encoding the decode
+// output yields bytes identical to the first encode — byte stability through
+// the round trip (PERS-01, D-06). The first subtest draws with TEST-15's
+// mixed distribution (half the versions from the small (l, c, node) space);
+// the other three pin the version-boundary classes the small space puts in
+// reach, so equal-l and adjacent-l collisions are explored deliberately.
 func TestCodec_roundTripProperty(t *testing.T) {
 	t.Parallel()
-	rng := testutil.NewRNG(t)
-	for step := range codecPropertySteps {
-		records := testutil.RandStore(rng).Records()
-		dump, err := persist.Encode(records)
-		if err != nil {
-			t.Fatalf("step %d Encode() error = %v, want nil", step, err)
+	t.Run("mixed small-space and wide draws round-trip byte-stably", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range codecPropertySteps {
+			assertCodecRoundTrip(t, step, mixedSpaceRecords(rng))
 		}
-		decoded, discarded, err := persist.Decode(dump)
-		if err != nil {
-			t.Fatalf("step %d Decode() error = %v, want nil (replay with the property seed above)",
-				step, err)
+	})
+	t.Run("equal-l boundaries round-trip byte-stably", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range codecPropertySteps {
+			assertCodecRoundTrip(t, step, boundaryFixture(equalLVersions(rng)))
 		}
-		if discarded != 0 {
-			t.Fatalf("step %d Decode() discarded = %d, want 0 (replay with the property seed above)",
-				step, discarded)
+	})
+	t.Run("equal-l-equal-c-different-node boundaries round-trip byte-stably", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range codecPropertySteps {
+			assertCodecRoundTrip(t, step, boundaryFixture(equalLCounterVersions(rng)))
 		}
-		if !recordsEqual(decoded, records) {
-			t.Fatalf("step %d round trip changed the records (replay with the property seed above)", step)
+	})
+	t.Run("adjacent-l boundaries round-trip byte-stably", func(t *testing.T) {
+		t.Parallel()
+		rng := testutil.NewRNG(t)
+		for step := range codecPropertySteps {
+			assertCodecRoundTrip(t, step, boundaryFixture(adjacentLVersions(rng)))
 		}
-		again, err := persist.Encode(decoded)
-		if err != nil {
-			t.Fatalf("step %d re-Encode() error = %v, want nil", step, err)
-		}
-		if !bytes.Equal(again, dump) {
-			t.Fatalf("step %d re-encode is not byte-identical (replay with the property seed above)", step)
-		}
-	}
+	})
 }
 
 // TestCodec_byteStability proves the deterministic shape of the dump:
@@ -145,11 +306,11 @@ func TestCodec_byteStability(t *testing.T) {
 	t.Parallel()
 	rng := testutil.NewRNG(t)
 	records := testutil.RandStore(rng).Records()
-	first, err := persist.Encode(records)
+	first, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("Encode() error = %v, want nil", err)
 	}
-	second, err := persist.Encode(records)
+	second, err := persist.Encode(records, storage.ValueMaxBytes)
 	if err != nil {
 		t.Fatalf("second Encode() error = %v, want nil", err)
 	}
@@ -168,11 +329,11 @@ func TestCodec_byteStability(t *testing.T) {
 
 // TestCodec_discardClasses proves the class separation of Pitfall 7 and the
 // hostile-input classes of Pitfall 8: checksum-faulty, malformed-version
-// and oversized records discard alone while their generation keeps loading,
-// Parse accepts a generation whose only fault is a bad record checksum, a
-// duplicate key is last-wins, an empty input is a generation-level fault,
-// and an unknown format_version makes the whole generation unreadable to
-// both Decode and Parse.
+// and oversized records discard alone while their generation keeps loading
+// (Decode's error stays nil for a generation whose only fault is a bad
+// record checksum), a duplicate key is last-wins, an empty input is a
+// generation-level fault, and an unknown format_version makes the whole
+// generation unreadable to Decode.
 func TestCodec_discardClasses(t *testing.T) {
 	t.Parallel()
 	victim := sealed("victim", storage.Record{Version: version.PackVersion(1002, 3, 1), Data: []byte("c-value")})
@@ -180,56 +341,50 @@ func TestCodec_discardClasses(t *testing.T) {
 		"victim", func(rec *dumpLine) { rec.Checksum++ })
 	malformed := rewriteLine(t, encodeRecords(t, map[string]storage.Record{"victim": victim}),
 		"victim", func(rec *dumpLine) { rec.Version = strings.Repeat("z", len(rec.Version)) })
-	oversize := bytes.Repeat([]byte("x"), maxRecordBytes+oversizeBy)
+	oversize := bytes.Repeat([]byte("x"), storage.ValueMaxBytes+oversizeBy)
 	bigVer := version.PackVersion(1003, 4, 1)
-	oversized := encodeRecords(t, map[string]storage.Record{
+	oversized := encodeRecordsAt(t, storage.ValueMaxBytes+oversizeBy, map[string]storage.Record{
 		"big": sealed("big", storage.Record{Version: bigVer, Data: oversize}),
 	})
 	tests := []struct {
 		name          string
 		dump          []byte
-		wantDiscarded int
-		wantParseErr  bool
+		wantStats     persist.DecodeStats
 		wantDecodeErr bool
 	}{
 		{
-			name:          "a tampered checksum discards only its record",
-			dump:          tampered,
-			wantDiscarded: 1,
+			name:      "a tampered checksum discards only its record",
+			dump:      tampered,
+			wantStats: persist.DecodeStats{Checksum: 1},
 		},
 		{
-			name:          "a non-hex record_version discards only its record",
-			dump:          malformed,
-			wantDiscarded: 1,
+			name:      "a non-hex record_version discards only its record",
+			dump:      malformed,
+			wantStats: persist.DecodeStats{Version: 1},
 		},
 		{
-			name:          "data over the envelope discards only its record",
-			dump:          oversized,
-			wantDiscarded: 1,
+			name:      "data over the envelope discards only its record",
+			dump:      oversized,
+			wantStats: persist.DecodeStats{ValueLimit: 1},
 		},
 		{
 			name:          "an unknown format_version is a generation-level fault",
 			dump:          []byte("{\"format_version\":999}\n"),
-			wantParseErr:  true,
 			wantDecodeErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := persist.Parse(tt.dump)
-			if (err != nil) != tt.wantParseErr {
-				t.Errorf("Parse() error = %v, want error=%t", err, tt.wantParseErr)
-			}
-			decoded, discarded, err := persist.Decode(tt.dump)
+			decoded, stats, err := persist.Decode(tt.dump, storage.ValueMaxBytes)
 			if (err != nil) != tt.wantDecodeErr {
 				t.Errorf("Decode() error = %v, want error=%t", err, tt.wantDecodeErr)
 			}
 			if tt.wantDecodeErr {
 				return
 			}
-			if discarded != tt.wantDiscarded {
-				t.Errorf("Decode() discarded = %d, want %d", discarded, tt.wantDiscarded)
+			if stats != tt.wantStats {
+				t.Errorf("Decode() stats = %+v, want %+v", stats, tt.wantStats)
 			}
 			if !recordsEqual(decoded, baseRecords()) {
 				t.Errorf("Decode() records = %v, want the surviving base records", decoded)
@@ -246,13 +401,18 @@ func TestCodec_discardClasses(t *testing.T) {
 		})
 		firstLines := strings.Split(strings.TrimSuffix(string(first), "\n"), "\n")
 		secondLines := strings.Split(strings.TrimSuffix(string(second), "\n"), "\n")
-		joined := []byte(strings.Join([]string{firstLines[0], firstLines[1], secondLines[1]}, "\n") + "\n")
-		decoded, discarded, err := persist.Decode(joined)
+		// The joined dump has two record lines, so its header announces two —
+		// a mismatch kept at the joined shape would be the census's
+		// incomplete-generation fault instead of the last-wins case.
+		joined := []byte(strings.Join([]string{
+			strings.TrimSuffix(censusHeader(2), "\n"), firstLines[1], secondLines[1],
+		}, "\n") + "\n")
+		decoded, stats, err := persist.Decode(joined, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Decode(joined) error = %v, want nil", err)
 		}
-		if discarded != 0 {
-			t.Errorf("Decode(joined) discarded = %d, want 0", discarded)
+		if stats.Total() != 0 {
+			t.Errorf("Decode(joined) discarded = %d, want 0", stats.Total())
 		}
 		want := map[string]storage.Record{
 			"dup": sealed("dup", storage.Record{Version: version.PackVersion(1005, 1, 1), Data: []byte("second")}),
@@ -263,28 +423,30 @@ func TestCodec_discardClasses(t *testing.T) {
 	})
 	t.Run("an empty input is a generation-level fault, not a valid empty dump", func(t *testing.T) {
 		t.Parallel()
-		err := persist.Parse(nil)
+		_, _, err := persist.Decode(nil, storage.ValueMaxBytes)
 		if err == nil {
-			t.Error("Parse(nil) = nil, want a generation-level error")
+			t.Error("Decode(nil) error = nil, want a generation-level error")
 		}
 	})
 	t.Run("a valid empty map encodes to a header-only dump that reloads empty", func(t *testing.T) {
 		t.Parallel()
-		dump, err := persist.Encode(make(map[string]storage.Record))
+		dump, err := persist.Encode(make(map[string]storage.Record), storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Encode(empty) error = %v, want nil", err)
 		}
-		decoded, discarded, err := persist.Decode(dump)
-		if err != nil || discarded != 0 || len(decoded) != 0 {
+		decoded, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 || len(decoded) != 0 {
 			t.Errorf("Decode(empty dump) = (%d records, %d discarded, %v), want empty, 0, nil",
-				len(decoded), discarded, err)
+				len(decoded), stats.Total(), err)
 		}
 	})
 }
 
 // TestWatermark_fullProperty proves the FULL watermark law (VERS-04): over
-// 500 seeded random stores the watermark equals an independent field-wise
-// max scan; the WR-01 fixture — a watermark record at (dumpMax,
+// 500 seeded random maps the watermark equals an independent field-wise
+// max scan — the maps drawn with TEST-15's mixed distribution, so half the
+// versions come from the small (l, c, node) space and equal-l boundaries are
+// explored deliberately; the WR-01 fixture — a watermark record at (dumpMax,
 // watermarkC) against an older-l record carrying a higher counter — yields
 // the exact (l, c) pair and not l alone or the global max counter; the
 // empty map yields (0, 0).
@@ -294,7 +456,7 @@ func TestWatermark_fullProperty(t *testing.T) {
 		t.Parallel()
 		rng := testutil.NewRNG(t)
 		for step := range codecPropertySteps {
-			records := testutil.RandStore(rng).Records()
+			records := mixedSpaceRecords(rng)
 			var wantL int64
 			var wantC uint16
 			for _, rec := range records {
@@ -358,28 +520,277 @@ func TestWatermark_equalCounterDomain(t *testing.T) {
 	}
 }
 
+// TestCodec_corruptLineIsolated proves the PERSIST-03 defining behavior: a
+// raw JSON syntax error on one record line loses exactly that record — the
+// sibling lines still load and the fault is counted — where a streaming
+// json.Decoder is permanently poisoned by the same syntax error and loses
+// the whole generation.
+func TestCodec_corruptLineIsolated(t *testing.T) {
+	t.Parallel()
+	dump := encodeRecords(t, map[string]storage.Record{
+		"mid": sealed("mid", storage.Record{Version: version.PackVersion(1007, 1, 1), Data: []byte("mid-value")}),
+	})
+	lines := strings.Split(strings.TrimSuffix(string(dump), "\n"), "\n")
+	// The middle record line (keep-a/keep-b sort before mid) is replaced with
+	// a line whose first byte cannot open a JSON object.
+	lines[2] = "!" + lines[2][1:]
+	corrupt := []byte(strings.Join(lines, "\n") + "\n")
+	decoded, stats, err := persist.Decode(corrupt, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Decode(corrupt line) error = %v, want nil — one bad line must not collapse the generation", err)
+	}
+	if stats.Malformed != 1 {
+		t.Errorf("Decode(corrupt line) Malformed = %d, want 1 (the malformed line)", stats.Malformed)
+	}
+	want := map[string]storage.Record{
+		"keep-a": sealed("keep-a", storage.Record{Version: version.PackVersion(1000, 1, 1), Data: []byte("a-value")}),
+		"mid":    sealed("mid", storage.Record{Version: version.PackVersion(1007, 1, 1), Data: []byte("mid-value")}),
+	}
+	if !recordsEqual(decoded, want) {
+		t.Errorf("Decode(corrupt line) records = %v, want the two intact siblings", decoded)
+	}
+}
+
+// legacyDumpHeader is a v1.0 header: no record_count, so the generation
+// takes the documented legacy read path with no completeness census.
+const legacyDumpHeader = "{\"format_version\":1}\n"
+
+// TestCodec_headerCensus proves the v1.1 completeness census and the legacy
+// read path (PERSIST-03, D-03): the writer announces its record count, fewer
+// record lines than the count is a generation-level fault (a cut at a line
+// boundary), more lines than the count is tolerated, a final unterminated
+// fragment must parse, and a v1.0 dump with no count has no census — a
+// line-boundary cut of one still loads, the documented compatibility
+// limitation.
+func TestCodec_headerCensus(t *testing.T) {
+	t.Parallel()
+	full := encodeRecords(t, map[string]storage.Record{
+		"census": sealed("census", storage.Record{Version: version.PackVersion(1008, 1, 1), Data: []byte("census-value")}),
+	})
+	lines := strings.Split(strings.TrimSuffix(string(full), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("encoded dump has %d lines, want 4 (header plus three records)", len(lines))
+	}
+	records := strings.Join(lines[1:], "\n")
+	cut := strings.Join(lines[1:len(lines)-1], "\n") // one record line short
+	atLimit := encodeRecords(t, map[string]storage.Record{
+		"limit": sealed("limit", storage.Record{
+			Version: version.PackVersion(1011, 1, 1),
+			Data:    bytes.Repeat([]byte("l"), storage.ValueMaxBytes),
+		}),
+	})
+	tests := []struct {
+		name        string
+		dump        []byte
+		wantErr     bool
+		wantRecords int
+	}{
+		{
+			name:    "fewer record lines than the announced count is an incomplete generation",
+			dump:    []byte(censusHeader(4) + cut + "\n"),
+			wantErr: true,
+		},
+		{
+			name:        "more record lines than the announced count is tolerated",
+			dump:        []byte(censusHeader(1) + records + "\n"),
+			wantRecords: 3,
+		},
+		{
+			name:    "a v1.1 line-boundary cut is an incomplete generation",
+			dump:    []byte(censusHeader(3) + cut + "\n"),
+			wantErr: true,
+		},
+		{
+			name:        "a legacy line-boundary cut loads every remaining line",
+			dump:        []byte(legacyDumpHeader + cut + "\n"),
+			wantRecords: 2,
+		},
+		{
+			name:        "a legacy header with no count loads every line",
+			dump:        []byte(legacyDumpHeader + records + "\n"),
+			wantRecords: 3,
+		},
+		{
+			name:        "a final unterminated fragment that parses and matches the count is accepted",
+			dump:        []byte(strings.TrimSuffix(string(full), "\n")),
+			wantRecords: 3,
+		},
+		{
+			name: "a header-only v1.1 dump with count zero loads empty",
+			dump: []byte(censusHeader(0)),
+		},
+		{
+			name: "a header-only legacy dump loads empty",
+			dump: []byte(legacyDumpHeader),
+		},
+		{
+			name:    "a line longer than the format maximum is a generation-level fault",
+			dump:    []byte(censusHeader(0) + strings.Repeat("x", overlongLineBytes) + "\n"),
+			wantErr: true,
+		},
+		{
+			name:        "a record at the configured limit parses",
+			dump:        atLimit,
+			wantRecords: 3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			decoded, stats, err := persist.Decode(tt.dump, storage.ValueMaxBytes)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Decode() error = %v, want error=%t", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if decoded != nil || stats != (persist.DecodeStats{}) {
+					t.Errorf("Decode() generation fault returned (%d records, %+v), want nil and zero stats",
+						len(decoded), stats)
+				}
+				return
+			}
+			if len(decoded) != tt.wantRecords {
+				t.Errorf("Decode() loaded %d records, want %d", len(decoded), tt.wantRecords)
+			}
+			if stats.Total() != 0 {
+				t.Errorf("Decode() discarded %d records, want none", stats.Total())
+			}
+		})
+	}
+}
+
+// TestCodec_escapedMaxKeyRoundTrip proves the format-bound reader holds the
+// near-worst-case legal record (T-5-03): a storage.MaxKeyBytes key made of
+// quote and control bytes listed with a full 61 440-byte value. The key's
+// JSON escaping expands it to roughly six bytes per input byte, a shape the
+// old record-line bound — datagram-expansion plus one key byte each — could
+// not hold and would fault as ErrBufferFull on a legal record.
+func TestCodec_escapedMaxKeyRoundTrip(t *testing.T) {
+	t.Parallel()
+	key := "\"" + strings.Repeat("\x01", storage.MaxKeyBytes-1)
+	data := bytes.Repeat([]byte("v"), storage.ValueMaxBytes)
+	dump, err := persist.Encode(map[string]storage.Record{
+		key: sealed(key, storage.Record{Version: version.PackVersion(1010, 1, 1), Data: data}),
+	}, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Encode(escaped max key) error = %v, want nil", err)
+	}
+	decoded, stats, err := persist.Decode(dump, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Decode(escaped max key) error = %v, want nil — a legal record must not fault the generation", err)
+	}
+	if stats.Total() != 0 {
+		t.Errorf("Decode(escaped max key) discarded = %d, want 0", stats.Total())
+	}
+	rec, ok := decoded[key]
+	if !ok {
+		t.Fatalf("Decode(escaped max key) lost the record: %d records loaded", len(decoded))
+	}
+	if !bytes.Equal(rec.Data, data) {
+		t.Errorf("Decode(escaped max key) data = %d bytes, want the full %d-byte value", len(rec.Data), len(data))
+	}
+}
+
+// TestCodec_shrunkLimitKeepsOtherRecords proves the line bound is a property
+// of the format, not of the current configuration (T-5-03): a dump written
+// at the default limit still reads with Decode(dump, 16), every record inside
+// the tiny limit loads, and the over-limit record is a counted ValueLimit
+// discard — never an ErrBufferFull generation fault.
+func TestCodec_shrunkLimitKeepsOtherRecords(t *testing.T) {
+	t.Parallel()
+	dump := encodeRecords(t, map[string]storage.Record{
+		"big": sealed("big", storage.Record{
+			Version: version.PackVersion(1009, 1, 1),
+			Data:    bytes.Repeat([]byte("b"), storage.ValueMaxBytes),
+		}),
+	})
+	decoded, stats, err := persist.Decode(dump, shrunkValueLimit)
+	if err != nil {
+		t.Fatalf("Decode(dump, %d) error = %v, want nil — the reader bound must not shrink with the limit",
+			shrunkValueLimit, err)
+	}
+	if stats.ValueLimit != 1 || stats.Total() != 1 {
+		t.Errorf("Decode(dump, %d) stats = %+v, want exactly one ValueLimit discard", shrunkValueLimit, stats)
+	}
+	if len(decoded) != 2 {
+		t.Errorf("Decode(dump, %d) loaded %d records, want the two records under the limit", shrunkValueLimit, len(decoded))
+	}
+	if _, ok := decoded["big"]; ok {
+		t.Error("Decode(dump, 16) loaded the over-limit record")
+	}
+	if got, ok := decoded["keep-a"]; !ok || string(got.Data) != "a-value" {
+		t.Errorf("Decode(dump, %d) keep-a = (%q, %t), want the intact small record", shrunkValueLimit, got.Data, ok)
+	}
+}
+
 // TestCodec_truncatedGenerationUnreadable pins the generation-level fault
 // class for a torn tail (PERS-02, D-02): a dump truncated mid-record is
-// unreadable as a whole generation — Parse rejects it, so Load's fallback
-// chain advances to .prev instead of serving the torn bytes, and Decode
-// errors rather than silently returning the records that preceded the tear.
-// The intact generation stays the control.
+// unreadable as a whole generation — Decode rejects it, so Load's fallback
+// chain advances to .prev instead of serving the torn bytes — and the
+// intact generation stays the control.
 func TestCodec_truncatedGenerationUnreadable(t *testing.T) {
 	t.Parallel()
 	dump := encodeRecords(t, map[string]storage.Record{
 		"tail": sealed("tail", storage.Record{Version: version.PackVersion(1006, 6, 1), Data: []byte("tail-value")}),
 	})
 	torn := dump[:len(dump)-tornTailCut]
-	err := persist.Parse(torn)
-	if err == nil {
-		t.Error("Parse(torn) = nil, want a generation-level error")
-	}
-	_, _, err = persist.Decode(torn)
+	_, _, err := persist.Decode(torn, storage.ValueMaxBytes)
 	if err == nil {
 		t.Error("Decode(torn) error = nil, want a generation-level error, not the records before the tear")
 	}
-	err = persist.Parse(dump)
+	_, _, err = persist.Decode(dump, storage.ValueMaxBytes)
 	if err != nil {
-		t.Errorf("Parse(intact) error = %v, want nil", err)
+		t.Errorf("Decode(intact) error = %v, want nil", err)
 	}
+}
+
+// TestCodec_encodeValueLimitGuard pins the IN-04 library guard: a
+// non-positive or over-ceiling value limit is rejected before the header
+// write, so an invalid configuration can never emit a partial generation —
+// the buffer stays empty and the error wraps storage.ErrValueTooLarge — while
+// a valid limit at the documented ceiling still writes a complete generation.
+func TestCodec_encodeValueLimitGuard(t *testing.T) {
+	t.Parallel()
+	records := map[string]storage.Record{
+		"guard": sealed("guard", storage.Record{Version: version.PackVersion(3001, 1, 1), Data: []byte("guard-value")}),
+	}
+
+	for _, tt := range []struct {
+		name  string
+		limit int
+	}{
+		{"a zero limit is rejected before any byte", 0},
+		{"a negative limit is rejected before any byte", -1},
+		{"one byte over the dump ceiling is rejected", dumpValueCeiling + 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			err := persist.EncodeTo(&buf, records, tt.limit)
+			if !errors.Is(err, storage.ErrValueTooLarge) {
+				t.Fatalf("EncodeTo(limit=%d) error = %v, want a wrap of storage.ErrValueTooLarge", tt.limit, err)
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("EncodeTo(limit=%d) wrote %d bytes before rejecting, want an empty buffer", tt.limit, buf.Len())
+			}
+		})
+	}
+
+	t.Run("the ceiling itself still writes a complete generation", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		err := persist.EncodeTo(&buf, records, dumpValueCeiling)
+		if err != nil {
+			t.Fatalf("EncodeTo(limit=%d) error = %v, want nil", dumpValueCeiling, err)
+		}
+		decoded, stats, err := persist.Decode(buf.Bytes(), dumpValueCeiling)
+		if err != nil {
+			t.Fatalf("Decode() of the written generation error = %v, want nil", err)
+		}
+		if stats.Total() != 0 {
+			t.Fatalf("Decode() stats = %+v, want no discarded record", stats)
+		}
+		if got := decoded["guard"]; string(got.Data) != "guard-value" {
+			t.Fatalf("Decode() guard = %q, want the written value", got.Data)
+		}
+	})
 }

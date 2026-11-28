@@ -1,0 +1,46 @@
+goos: linux
+goarch: arm64
+pkg: github.com/Djarvur/sup-kv/internal/app/persist
+BenchmarkDump10kKeys-16    	      73	  17553504 ns/op	   5147550 bytes/op	   5147550 dump-bytes	18937049 B/op	   40104 allocs/op
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/app/persist	2.093s
+goos: linux
+goarch: arm64
+pkg: github.com/Djarvur/sup-kv/internal/udprepl
+BenchmarkReplicationBurst-16    	     442	   2380774 ns/op	         4.000 max-unacked	       420.0 writes/s	   51880 B/op	     420 allocs/op
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/udprepl	1.351s
+goos: linux
+goarch: arm64
+pkg: github.com/Djarvur/sup-kv/internal/grpcapi
+BenchmarkConfirmationLatency-16    	     120	  10459524 ns/op	  10454268 latency-ns/op	  21738374 max-latency-ns	  692907 B/op	    3576 allocs/op
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/grpcapi	2.402s
+=== count=3
+goos: linux
+goarch: arm64
+pkg: github.com/Djarvur/sup-kv/internal/app/persist
+BenchmarkDump10kKeys-16    	      68	  17240965 ns/op	   5147550 bytes/op	   5147550 dump-bytes	18937710 B/op	   40105 allocs/op
+BenchmarkDump10kKeys-16    	      61	  18585397 ns/op	   5147550 bytes/op	   5147550 dump-bytes	18938314 B/op	   40106 allocs/op
+BenchmarkDump10kKeys-16    	      67	  18931888 ns/op	   5147550 bytes/op	   5147550 dump-bytes	18937496 B/op	   40105 allocs/op
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/app/persist	4.488s
+goos: linux
+goarch: arm64
+pkg: github.com/Djarvur/sup-kv/internal/udprepl
+BenchmarkReplicationBurst-16    	     525	   2291513 ns/op	         6.000 max-unacked	       436.4 writes/s	   60178 B/op	     445 allocs/op
+BenchmarkReplicationBurst-16    	     462	   2388521 ns/op	         4.000 max-unacked	       418.7 writes/s	   53388 B/op	     414 allocs/op
+BenchmarkReplicationBurst-16    	     475	   2348715 ns/op	         2.000 max-unacked	       425.8 writes/s	   53810 B/op	     421 allocs/op
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/udprepl	5.350s
+goos: linux
+goarch: arm64
+pkg: github.com/Djarvur/sup-kv/internal/grpcapi
+BenchmarkConfirmationLatency-16    	     124	   9476048 ns/op	   9474543 latency-ns/op	  14202012 max-latency-ns	  649578 B/op	    3345 allocs/op
+BenchmarkConfirmationLatency-16    	     130	   9100556 ns/op	   9099244 latency-ns/op	  13142758 max-latency-ns	  644259 B/op	    3356 allocs/op
+BenchmarkConfirmationLatency-16    	     133	   9418989 ns/op	   9417623 latency-ns/op	  14261763 max-latency-ns	  631703 B/op	    3228 allocs/op
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/grpcapi	6.778s
+=== fs:
+overlay         192G  134G   59G  70% /
+overlay on / type overlay (rw,relatime,lowerdir=/var/lib/docker/overlay2/l/6HRIL5372FJYNQNPE5GDL7KX5R:/var/lib/docker/overlay2/l/KNVR4DF5ZZ3FUCSKKQBZNMBOGL:/var/lib/docker/overlay2/l/HOMN26GQGSVCK3XLMICXXF6T3H:/var/lib/docker/overlay2/l/PWE24ZGPZH4TWTJHC676XN3P5T:/var/lib/docker/overlay2/l/X36VU7S5DKGQU4IDVRD73S4LKB:/var/lib/docker/overlay2/l/M5MQPZ53PQK3JPXMS6E5S6BSLF:/var/lib/docker/overlay2/l/2ULST6MY2BQ5FIV3ALRJ4U3ZQL:/var/lib/docker/overlay2/l/YCECPVPC3ONUSSWSHMW2SD3RDI,upperdir=/var/lib/docker/overlay2/17df5d472790075289a34a1ad10094e385349dba96e897eeef358b0e51443b5f/diff,workdir=/var/lib/docker/overlay2/17df5d472790075289a34a1ad10094e385349dba96e897eeef358b0e51443b5f/work)

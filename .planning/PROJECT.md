@@ -10,6 +10,21 @@ For service builders on small HA clusters (e.g. two management boards in one app
 
 Every node stays writable at all times with no coordination, and a write confirmed to a client is never lost.
 
+## Current Milestone: v1.1 Spec Compliance and Resilience
+
+**Goal:** Close the findings of the 2026-11-19 v1.0 review (`docs/reviews/2026-11-19-v1.0/`) — recovery and burst scenarios meet the stated bounds on real sockets, and every deviation from the Spec is either fixed in code or recorded in a deviation registry.
+
+**Target features:**
+- Spec deviation registry + owner decisions 14.1–14.11 as ADRs (S-12)
+- Stand & simulator as tests: F9/F9b/F14/burst/F2c automated on real Linux sockets; simulator gains datagram budgets, in-loop codec, dump delay, gate, restart-with-state, deletions; chaos test stabilized (T-01…T-16)
+- Transport: paced sync/retransmit sending, socket buffer setup, event-loop cost bounded, cheap key→version reads, key/value size bounds, received-version validation (R-01, R-02, R-06–R-09, R-11, R-14–R-16, Q-01, Q-02)
+- Protocol: interface closed until the full key list arrives, `startup_gate_empty` for empty disk, `DataSync` header (SyncID/ChunkIndex/ChunkCount), third Replication outcome, immediate sync for a newly seen peer, 3+-node behavior and tests (R-03–R-05, R-10, R-12, R-13, S-02, S-08)
+- Persistence: single source for the value limit, dump-load diagnostics, generation integrity, dirty-after-fallback, decaying dump retries, streaming encode (P-01–P-10, Q-03, Q-04, Q-06)
+- API & semantics: honest `wait_for_replication`, snapshot load as full rollback, error codes, `List` pagination, public proto package + Go client example in CI (A-01–A-06, S-01)
+- Observability & configuration: event logging, config validation, honest metric definitions incl. the conflict counter, exit codes (O-01–O-05, S-06, S-07)
+- Performance: benchmarks at defaults and at the fast-response profile with thresholds (PERF-01–PERF-06)
+- Documentation & release: D-01–D-10; darwin demoted to development-only (14.10)
+
 ## Requirements
 
 ### Validated
@@ -25,14 +40,14 @@ Every node stays writable at all times with no coordination, and a write confirm
 - ✓ **API** — Phase 5 (gRPC service: Get/Set/SetIfAbsent/Delete/List, Watch stream with exact snapshot-then-live cut, startup gate + standard health, `wait_for_replication`, snapshot RPCs)
 - ✓ **Tooling** — Phase 5 (single static binary, 19 flags with SUPKV_ env twins, `--version`, D-19 ordered graceful shutdown; systemd unit lands in Phase 7)
 - ✓ **Observability** — Phase 6 (opt-in mTLS metrics/debug endpoint with in-repo Prometheus text exporter at `/metrics` + expvar/pprof `/debug`; slog JSON default with SUPKV_LOG_LEVEL/FORMAT; OnDiscard seam with distinguishable discard classes and per-class counters; counter seams across repl/persist/udprepl)
-- ✓ **Testing (remaining)** — Phase 6 (TEST-04 failure-scenario suite: 9 deterministic simulator scenarios, real-socket two-node scenarios, 4 two-process exec scenarios on the real binary; TEST-05 benchmarks behind `make bench`: dump-10k, replication burst ~975 w/s, confirmation latency ~10ms under 1000 w/s load)
+- ✓ **Testing (remaining)** — Phase 6 (TEST-04 failure-scenario suite: 9 deterministic simulator scenarios, real-socket two-node scenarios, 4 two-process exec scenarios on the real binary; TEST-05 benchmarks behind `make bench`: dump-10k, replication burst ~975 w/s, confirmation latency measured under the fast profile — 1 ms debounce / 50 ms max-wait, in-memory dump, two loopback adapters, race off — by `BenchmarkConfirmationLatency`; the model and the default profile are in docs/PERFORMANCE.md)
 - ✓ **Docs, examples, release** — Phase 7 (README quickstart executed VERBATIM by CI incl. kill −9/restart convergence — Linux cell green, macOS leg a named loud-skip per ratified option-b; docs/OPERATIONS.md five trust-model statements machine-anchored + human-verified; docs/EXAMPLES.md 10 CI-executed grpcurl blocks over every RPC; CHANGELOG 1.0.0; goreleaser tool-directive pipeline — tag v1.0.0 → GitHub Release with 4 archives + SBOMs + checksums, shipped binary verified `sup-kv v1.0.0`)
 
 ### Active
 
 All Active requirements are hypotheses until shipped and validated.
 
-*(none — the v1.0 feature scope is fully delivered through Phase 6; Phase 7 is documentation, examples and release)*
+*(v1.1 requirements are defined in REQUIREMENTS.md — derived from the 2026-11-19 v1.0 review with its acceptance criteria carried verbatim; owner decisions 14.1–14.11 of the review are settled and not re-litigated)*
 
 ### Out of Scope
 
@@ -48,7 +63,7 @@ All Active requirements are hypotheses until shipped and validated.
 
 ## Context
 
-**The design is decided.** It comes from a reviewed architecture proposal (`docs/IDEA.md` — the authoritative, self-contained design document). Do not re-litigate it during planning; only implementation-level questions are open.
+**The design is decided.** It comes from a reviewed architecture proposal (`docs/IDEA.md` — the historical intent-at-start document; see the loud banner at its top and the as-built trio README, docs/OPERATIONS.md, docs/EXAMPLES.md). Do not re-litigate it during planning; only implementation-level questions are open.
 
 Decided design, in brief (full detail and parameter defaults in `docs/IDEA.md`):
 
@@ -119,4 +134,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-18 after v1.0 milestone (all 7 phases verified, v1.0.0 shipped and audited — milestone audit passed 7/7; Active empty; next milestone via /gsd-new-milestone)*
+*Last updated: 2026-11-27 — verification batch complete: phases 1-6 and 8 verified passed (stale VERIFICATION.md regenerated for all seven), phase 9 next*

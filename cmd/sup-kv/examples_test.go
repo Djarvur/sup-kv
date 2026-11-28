@@ -25,6 +25,7 @@ package main_test
 // failing block never leaks a node into the next one.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,6 +36,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // examplesMarker selects the fenced blocks of docs/EXAMPLES.md that CI
@@ -118,25 +120,45 @@ const (
 	keepSurvivors
 )
 
+// docBlockBudget bounds one verbatim doc block: the README/EXAMPLES
+// walkthroughs take single-digit seconds locally, so a minute per block is
+// generous headroom while a wedged node/grpcurl wait still fails with this
+// test's own deadline instead of the package-wide `go test` timeout — the
+// T-11 README-deadline flake class, where -count=20 multiplies every run
+// and a hang must not consume the whole soak. The effective deadline is
+// clamped 250ms inside t.Deadline() when the test has one (the
+// main_test.go waitFor pattern), so an explicit -timeout also wins.
+const docBlockBudget = time.Minute
+
 // runBashVerbatim executes one doc block with bash -e in dir: the block
 // arrives on stdin, combined stdout/stderr is captured and returned, and any
 // failure is fatal with the block and its output in the message — the doc's
-// commands must succeed exactly as a stranger would run them. Output is
-// captured to a file, not a pipe: a block's background node INHERITS the
-// bash-side descriptors, and with a pipe the exec package waits for every
-// writer to close before Run returns — a node the block left running (bash -e
-// aborts on the first failing command, before the block's own cleanup) would
-// hang the run until the test timeout. The bash runs as its own process
-// group and the group is SIGKILLed once bash has exited, so a failed block
-// cannot leak its node into the next run either way; the file is read after
-// the kill, when no writer is left, so its content is stable.
+// commands must succeed exactly as a stranger would run them. Each block is
+// bounded by docBlockBudget (clamped inside t.Deadline()): a wedged block
+// fails here, in its own run, with the block and captured output attached.
+// Output is captured to a file, not a pipe: a block's background node
+// INHERITS the bash-side descriptors, and with a pipe the exec package waits
+// for every writer to close before Run returns — a node the block left
+// running (bash -e aborts on the first failing command, before the block's
+// own cleanup) would hang the run until the test timeout. The bash runs as
+// its own process group and the group is SIGKILLed once bash has exited, so
+// a failed block cannot leak its node into the next run either way; the file
+// is read after the kill, when no writer is left, so its content is stable.
 func runBashVerbatim(t *testing.T, dir string, env []string, block, what string, survivors blockSurvivors) string {
 	t.Helper()
+	blockDeadline := time.Now().Add(docBlockBudget)
+	if hard, ok := t.Deadline(); ok {
+		if clamp := hard.Add(-hardDeadlineMargin); clamp.Before(blockDeadline) {
+			blockDeadline = clamp
+		}
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), blockDeadline)
+	defer cancel()
 	outFile, err := os.CreateTemp(t.TempDir(), "doc-block-output-*")
 	if err != nil {
 		t.Fatalf("create the output capture file: %v", err)
 	}
-	cmd := exec.CommandContext(t.Context(), "bash", "-e")
+	cmd := exec.CommandContext(ctx, "bash", "-e")
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin = strings.NewReader(block + "\n")
@@ -158,6 +180,10 @@ func runBashVerbatim(t *testing.T, dir string, env []string, block, what string,
 		t.Fatalf("read the captured output: %v", err)
 	}
 	out := string(raw)
+	ctxErr := ctx.Err()
+	if ctxErr != nil {
+		t.Fatalf("%s exceeded its doc-block deadline (%v): %v\n--- block ---\n%s\n--- output ---\n%s", what, docBlockBudget, ctxErr, block, out)
+	}
 	if runErr != nil {
 		t.Fatalf("%s failed: %v\n--- block ---\n%s\n--- output ---\n%s", what, runErr, block, out)
 	}
@@ -282,17 +308,29 @@ var examplesAssertions = []struct {
 	title  string
 	expect []string
 }{
-	{title: "Start the demo pair", expect: []string{"SERVING"}},
+	// The demo-pair and health rows assert the QUOTED answer shape —
+	// "status": "SERVING" — not the bare SERVING substring, because the
+	// health endpoint answers from construction with NOT_SERVING until the
+	// gate opens, and NOT_SERVING contains SERVING as a substring (M-17).
+	{title: "Start the demo pair", expect: []string{`"status": "SERVING"`}},
 	{title: "Discover the API", expect: []string{"supkvapi.v1.SupKVService"}},
 	{title: "Read a missing key", expect: []string{"NotFound"}},
 	{title: "Write and read", expect: []string{"demo/hello", "c3VwLWt2"}},
+	// The create-if-absent block sits AFTER the Write and read block in the
+	// doc on purpose — the walkthrough's own state machine makes the outcome
+	// deterministic there: demo/hello exists (the write above), so the
+	// create_if_absent refusal is AlreadyExists by the doc's state, not by
+	// luck, and the refused write stores nothing, so every later block's
+	// state (the two live demo/ keys of Delete and list, the Watch snapshot)
+	// is exactly what it was before the block (M-19, Pitfall 5).
+	{title: "Create if absent", expect: []string{"AlreadyExists", "key already exists"}},
 	// The wait entry's substrings are the REAL grpcurl bytes: pretty-printed
 	// JSON with camelCase protojson names ("acked": true, ackedCount,
 	// totalPeers) — captured from a run, not hand-written (Pitfall 3/5).
 	{title: "Wait for replication", expect: []string{`"acked": true`, "ackedCount", "totalPeers"}},
 	{title: "Delete and list", expect: []string{"demo/wait"}},
 	{title: "Watch a stream", expect: []string{"demo/live"}},
-	{title: "Check health", expect: []string{"SERVING"}},
+	{title: "Check health", expect: []string{`"status": "SERVING"`}},
 	{title: "Snapshot round-trip", expect: []string{"{}"}},
 	{title: "Stop the pair", expect: []string{"demo pair stopped"}},
 }
@@ -307,8 +345,16 @@ var examplesAssertions = []struct {
 // error text, and the Watch stream carries the live event key. grpcurl
 // omits zero-valued fields, so every asserted field is non-zero in the
 // example flow (the zero-valued shapes are documented in the doc's prose).
+//
+// The walkthrough is serialized on purpose: it drives bash -e plus the
+// `go tool grpcurl` shim and competes with this package's process-spawning
+// tests, so running it beside those siblings produced empty tool captures
+// under compile load (04-protocol/deferred-items.md). The per-block budget
+// (docBlockBudget) and the process-group reap still bound a genuinely
+// wedged block; only the explicit parallel marker is gone.
+//
+//nolint:paralleltest // serialized on purpose: the grpcurl walkthrough competes with the package's process-spawning tests and stalls under compile load (doc comment).
 func TestExamplesDoc(t *testing.T) {
-	t.Parallel()
 	raw, err := os.ReadFile(examplesDocPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", examplesDocPath, err)

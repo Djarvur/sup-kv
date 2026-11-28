@@ -1,0 +1,92 @@
+=== SEED 27 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=27 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 24 records, the pointwise-supremum model holds 25 — divergence after quiescence replay: SUPKV_SIM_SEED=27 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 69 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=69 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 0 holds 24 records, the pointwise-supremum model holds 25 — divergence after quiescence replay: SUPKV_SIM_SEED=69 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 85 FAILED
+--- FAIL: TestChaos_convergence (0.02s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=85 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 26 records, the pointwise-supremum model holds 27 — divergence after quiescence replay: SUPKV_SIM_SEED=85 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 104 FAILED
+--- FAIL: TestChaos_convergence (0.02s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=104 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 21 records, the pointwise-supremum model holds 21 — divergence after quiescence replay: SUPKV_SIM_SEED=104 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 136 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=136 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 0 holds 21 records, the pointwise-supremum model holds 22 — divergence after quiescence replay: SUPKV_SIM_SEED=136 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 160 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=160 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 22 records, the pointwise-supremum model holds 23 — divergence after quiescence replay: SUPKV_SIM_SEED=160 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 169 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=169 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 2 holds 24 records, the pointwise-supremum model holds 24 — divergence after quiescence replay: SUPKV_SIM_SEED=169 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 186 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=186 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 0 holds 23 records, the pointwise-supremum model holds 24 — divergence after quiescence replay: SUPKV_SIM_SEED=186 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 264 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=264 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 25 records, the pointwise-supremum model holds 26 — divergence after quiescence replay: SUPKV_SIM_SEED=264 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 276 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=276 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 3 holds 23 records, the pointwise-supremum model holds 24 — divergence after quiescence replay: SUPKV_SIM_SEED=276 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 279 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=279 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 0 holds 21 records, the pointwise-supremum model holds 22 — divergence after quiescence replay: SUPKV_SIM_SEED=279 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 340 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=340 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 2 holds 20 records, the pointwise-supremum model holds 21 — divergence after quiescence replay: SUPKV_SIM_SEED=340 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 355 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=355 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 2 holds 24 records, the pointwise-supremum model holds 25 — divergence after quiescence replay: SUPKV_SIM_SEED=355 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 356 FAILED
+--- FAIL: TestChaos_convergence (0.02s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=356 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 18 records, the pointwise-supremum model holds 19 — divergence after quiescence replay: SUPKV_SIM_SEED=356 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 376 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=376 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 24 records, the pointwise-supremum model holds 24 — divergence after quiescence replay: SUPKV_SIM_SEED=376 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 383 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=383 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 2 holds 26 records, the pointwise-supremum model holds 27 — divergence after quiescence replay: SUPKV_SIM_SEED=383 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 448 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=448 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 3 holds 22 records, the pointwise-supremum model holds 23 — divergence after quiescence replay: SUPKV_SIM_SEED=448 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 457 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=457 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 3 holds 23 records, the pointwise-supremum model holds 24 — divergence after quiescence replay: SUPKV_SIM_SEED=457 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 464 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=464 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 2 holds 26 records, the pointwise-supremum model holds 27 — divergence after quiescence replay: SUPKV_SIM_SEED=464 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 492 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=492 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 25 records, the pointwise-supremum model holds 25 — divergence after quiescence replay: SUPKV_SIM_SEED=492 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 573 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=573 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 23 records, the pointwise-supremum model holds 24 — divergence after quiescence replay: SUPKV_SIM_SEED=573 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 578 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=578 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 1 holds 20 records, the pointwise-supremum model holds 21 — divergence after quiescence replay: SUPKV_SIM_SEED=578 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+=== SEED 579 FAILED
+--- FAIL: TestChaos_convergence (0.01s)
+    sim_chaos_test.go:241: replay: SUPKV_SIM_SEED=579 go test ./internal/app/repl/ -run '^TestChaos_convergence$'
+    sim_chaos_test.go:250: node 3 holds 22 records, the pointwise-supremum model holds 24 — divergence after quiescence replay: SUPKV_SIM_SEED=579 go test ./internal/app/repl/ -run '^TestChaos_convergence$'

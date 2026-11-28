@@ -2,6 +2,7 @@ package persistfile
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -35,6 +36,15 @@ var (
 // store mutex, serialized against Save: the rotate window between a save's
 // two renames briefly leaves the main path absent, and a read landing
 // there would turn confirmed on-disk data into a spurious ErrNoDump.
+//
+// Every filesystem failure is classified with classifySaveError (D-03,
+// T-06-13): the errno knowledge stays in this adapter and the API mapper
+// consumes only port.FailureClassOf, so an ENOSPC or EACCES during the
+// snapshots-directory setup, the main-dump read or the atomic snapshot write
+// crosses the port as a class — never as path-bearing error text the mapper
+// would have to scrub. ErrNoDump passes through unchanged: it is the
+// adapter's own sentinel, not a filesystem fault, and the mapper pins it to
+// FailedPrecondition.
 func (f *FileStore) CreateSnapshot(name string) error {
 	err := validateName(name)
 	if err != nil {
@@ -43,15 +53,25 @@ func (f *FileStore) CreateSnapshot(name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	snapshotDir := f.path + snapshotDirSuffix
-	err = os.MkdirAll(snapshotDir, dirMode)
+	err = ensureDir(f.ops, snapshotDir)
 	if err != nil {
-		return err
+		return classifySaveError(err)
 	}
 	data, err := readMainDump(f.path)
 	if err != nil {
-		return err
+		if errors.Is(err, ErrNoDump) {
+			return err
+		}
+		return classifySaveError(err)
 	}
-	return saveAtomically(filepath.Join(snapshotDir, name), "", data)
+	// The snapshot copy is already one whole generation in memory — the
+	// read above — so the fill is a single Write of those bytes; behavior is
+	// the byte-identical copy the snapshot contract promises (D-10), now
+	// routed through the same streamed save path as a live dump.
+	return classifySaveError(saveAtomically(f.ops, filepath.Join(snapshotDir, name), "", func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	}))
 }
 
 // ReadSnapshot returns the named snapshot's bytes for codec decoding; a

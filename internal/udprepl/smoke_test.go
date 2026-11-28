@@ -13,6 +13,8 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
@@ -38,23 +40,17 @@ const (
 // smokeValue is the one replicated payload.
 var smokeValue = []byte("smoke-value-over-real-udp")
 
-// freeUDPPort picks one free UDP port: bind a throwaway wildcard socket to
-// :0, read its port, close it. Takes testing.TB so the benchmarks reuse the
-// same picker; the context is [context.Background] because the TB interface
-// carries no Context method (T and B grew one in Go 1.24; the shared
-// interface could not without breaking its implementers).
+// freeUDPPort returns one free UDP port from the udprepl band inside the
+// private port window (testutil.UDPReplBand: [30100, 31100), strictly below
+// the kernel's ephemeral range, so no other test's :0 bind is ever issued
+// there and the band is disjoint from every sibling package's). The shared
+// allocator claims the candidate while its bind probe is held, so no
+// parallel test in this process can take it between pick and bind. Takes
+// testing.TB so the benchmarks reuse the picker; the allocator's own
+// signature is testing.TB for the same reason.
 func freeUDPPort(tb testing.TB) int {
 	tb.Helper()
-	var lc net.ListenConfig
-	// tb.Context() does not exist (testing.TB carries no Context method,
-	// Go 1.24 added it to T and B only), so usetesting's suggested fix does
-	// not compile — the documented-nolint case.
-	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:0") //nolint:usetesting // suggestion does not compile on TB
-	if err != nil {
-		tb.Fatalf("bind throwaway port-picking socket: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	return conn.LocalAddr().(*net.UDPAddr).Port
+	return testutil.UDPPort(tb, testutil.UDPReplBand())
 }
 
 // smokeSocket binds a wildcard udp4 socket with SO_REUSEADDR and
@@ -187,8 +183,20 @@ func (s smokeStore) ApplyRemote(key string, rec storage.Record) ([]storage.Confl
 	return s.store.Merge(key, rec)
 }
 
-// Records returns the full snapshot, tombstones included.
-func (s smokeStore) Records() map[string]storage.Record { return s.store.Records() }
+// Version returns the stored version for key, tombstones included.
+func (s smokeStore) Version(key string) (version.RecordVersion, bool) { return s.store.Version(key) }
+
+// Lookup returns the stored record for key, tombstones included.
+func (s smokeStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s smokeStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
+
+// Observe absorbs one received version into the store's clock.
+func (s smokeStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s smokeStore) Generation() uint64 { return s.store.Generation() }
 
 // waitFor polls cond every pollInterval until it holds or the deadline —
 // the earlier of timeout and the test's own hard deadline minus a margin —
@@ -280,6 +288,11 @@ func probeBroadcastAddr(t *testing.T, port int, loopback *net.UDPAddr) *net.UDPA
 // peer (research Pitfall 3 — loopback broadcast fan-out is a Linux-only
 // kernel behavior; macOS lo0 lacks the BROADCAST flag).
 //
+// Both adapters opt in through [udprepl.WithAddressReuse]: the two nodes
+// share one wildcard port, which production construction deliberately
+// forbids (XPORT-09) because a shared port splits unicast between the two
+// sockets by the kernel's choice.
+//
 // The test deliberately NEVER asserts Ack or DataRequest or any unicast
 // delivery between the two same-host nodes: unicast to a port shared by
 // SO_REUSEADDR sockets is delivered to exactly ONE socket, the kernel's
@@ -297,11 +310,11 @@ func TestSmoke_twoNodesUDP(t *testing.T) {
 	cfg := repl.Config{Log: func(msg string) { t.Logf("%s", msg) }}
 	storeA := storage.NewStore(smokeNodeA, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
 	storeB := storage.NewStore(smokeNodeB, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
-	adapterA, err := udprepl.New(bind, broadcast.String(), smokeNodeA, smokeStore{storeA}, cfg)
+	adapterA, err := udprepl.New(bind, broadcast.String(), smokeNodeA, smokeStore{storeA}, cfg, udprepl.WithAddressReuse())
 	if err != nil {
 		t.Fatalf("node A adapter: %v", err)
 	}
-	adapterB, err := udprepl.New(bind, broadcast.String(), smokeNodeB, smokeStore{storeB}, cfg)
+	adapterB, err := udprepl.New(bind, broadcast.String(), smokeNodeB, smokeStore{storeB}, cfg, udprepl.WithAddressReuse())
 	if err != nil {
 		t.Fatalf("node B adapter: %v", err)
 	}
@@ -327,7 +340,7 @@ func TestSmoke_twoNodesUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node A store Get(%q): %v", smokeKey, err)
 	}
-	err = adapterA.NotifyLocalWrite(smokeKey, rec)
+	err = adapterA.NotifyLocalWrite(smokeKey, rec, false, nil)
 	if err != nil {
 		t.Fatalf("node A NotifyLocalWrite(%q): %v", smokeKey, err)
 	}

@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/app/persist/ -v -run '^TestCodec_corruptLineIsolated$'",
+  "exitCode": 1,
+  "output": "=== RUN   TestCodec_corruptLineIsolated\n=== PAUSE TestCodec_corruptLineIsolated\n=== CONT  TestCodec_corruptLineIsolated\n    codec_test.go:521: Decode(corrupt line) error = persist: dump record unreadable: invalid character '!' looking for beginning of value, want nil — one bad line must not collapse the generation\n--- FAIL: TestCodec_corruptLineIsolated (0.00s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/app/persist\t0.008s\nFAIL",
+  "targetTest": "TestCodec_corruptLineIsolated",
+  "targetFile": "internal/app/persist/codec_test.go",
+  "expected": "Decode returns the two intact records, one discarded malformed line and a nil error",
+  "actual": "Decode returns a generation-level error: persist: dump record unreadable: invalid character '!' looking for beginning of value",
+  "semanticAssessment": "Target test executed and failed on the planned assertion: the streaming json.Decoder rejects the whole generation on the syntax-corrupt middle line instead of isolating it. No build or fixture failure; the failure is the behavior PERSIST-03 removes."
+}

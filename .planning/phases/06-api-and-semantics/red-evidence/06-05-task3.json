@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/grpcapi/ -run '^TestListPage_maxKeySerializedBound$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestListPage_maxKeySerializedBound\n=== PAUSE TestListPage_maxKeySerializedBound\n=== CONT  TestListPage_maxKeySerializedBound\n    list_internal_test.go:97: listPage: want the byte budget to stop the page below 256, got 256 records\n--- FAIL: TestListPage_maxKeySerializedBound (0.06s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/grpcapi\t0.077s\nFAIL\n",
+  "targetTest": "TestListPage_maxKeySerializedBound",
+  "targetFile": "internal/grpcapi/list_internal_test.go",
+  "expected": "A page over 257 maximum-length keys stops on the serialized-byte budget below maxListPageSize, carries a token, and marshals within listPageByteBudget plus listEnvelopeOverheadBytes.",
+  "actual": "The Task-2 page walk had no byte budget, so the page returned all 256 requested records instead of stopping early; the test failed on the budget assertion before the size bound was reached.",
+  "semanticAssessment": "The target executed and failed on the planned assertion (want fewer than 256 records under the 6 MiB budget, got 256) and the package compiled. TestServer_listByteBudget separately fails on its planned assertion (a 120-record page over the budget came back without a token), while the two cost-independence tests pass deliberately: the legacy path already copies no value bytes and a one-entry page already costs one value. No fixture, discovery or unrelated failure is involved."
+}

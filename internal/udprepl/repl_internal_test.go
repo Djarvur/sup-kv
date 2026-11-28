@@ -6,11 +6,20 @@ package udprepl
 // dumpfile_internal_test.go precedent for the testpackage exemption).
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"hash/crc32"
+	"net"
+	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Djarvur/sup-kv/internal/app/clock"
+	"github.com/Djarvur/sup-kv/internal/app/repl"
+	"github.com/Djarvur/sup-kv/internal/app/storage"
+	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/port"
 	replproto "github.com/Djarvur/sup-kv/internal/udprepl/replproto/supkv/v1"
 )
@@ -60,3 +69,442 @@ func EncodeDatagramForTestVersion(msg port.Message, nodeID uint16, runID [16]byt
 	}
 	return datagram, nil
 }
+
+// The tracker-map tests are white-box on purpose: trackersMu and trackers
+// are unexported adapter state, and only a same-package test can observe the
+// map directly — including that Run NEVER inserts into it (XPORT-12).
+
+// The two wire identities the tracker tests exchange datagrams between.
+const (
+	trackerNodeA = uint16(21)
+	trackerNodeB = uint16(22)
+)
+
+var trackerRunIDB = [16]byte{0x72, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}
+
+// trackerStore adapts *storage.Store to repl.StateStore for these tests.
+type trackerStore struct{ store *storage.Store }
+
+// ApplyRemote joins one replicated record through the store's LWW merge.
+func (s trackerStore) ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error) {
+	return s.store.Merge(key, rec)
+}
+
+// Version returns the stored version for key, tombstones included.
+func (s trackerStore) Version(key string) (version.RecordVersion, bool) { return s.store.Version(key) }
+
+// Lookup returns the stored record for key, tombstones included.
+func (s trackerStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s trackerStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
+
+// Observe absorbs one received version into the store's clock.
+func (s trackerStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s trackerStore) Generation() uint64 { return s.store.Generation() }
+
+// newTrackerTestAdapter returns an adapter bound to a loopback ephemeral
+// port, with its socket closed by the test's cleanup. Run is started only by
+// the tests that need it.
+func newTrackerTestAdapter(t *testing.T) *Adapter {
+	t.Helper()
+	fixedNow := func() time.Time { return time.UnixMilli(1730000000000) }
+	store := storage.NewStore(trackerNodeA, clock.NewClock(fixedNow, 0, 0, 0), storage.Config{})
+	adapter, err := New("127.0.0.1:0", "127.255.255.255:1", trackerNodeA, trackerStore{store: store}, repl.Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.conn.Close() })
+	return adapter
+}
+
+// trackerCount reads the tracker-map length under its lock.
+func trackerCount(a *Adapter) int {
+	a.trackersMu.Lock()
+	defer a.trackersMu.Unlock()
+	return len(a.trackers)
+}
+
+// trackerPresent reports whether k's tracker exists under its lock.
+func trackerPresent(a *Adapter, k trackerKey) bool {
+	a.trackersMu.Lock()
+	defer a.trackersMu.Unlock()
+	return a.trackers[k] != nil
+}
+
+// awaitCondition polls cond until it holds or the test fails after two
+// seconds — the white-box twin of the external waitFor (this package cannot
+// import its own external test helpers).
+func awaitCondition(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// trackerSender dials the adapter's bound port once, so every datagram a
+// test sends shares one source handle — the core's duplicate-node_id
+// classifier treats a remembered run_id announcing from a NEW handle as a
+// misconfiguration and drops the datagram.
+func trackerSender(t *testing.T, adapter *Adapter) net.Conn {
+	t.Helper()
+	udpPort := adapter.conn.LocalAddr().(*net.UDPAddr).Port
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "udp4", fmt.Sprintf("127.0.0.1:%d", udpPort))
+	if err != nil {
+		t.Fatalf("dial adapter: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// sendTrackerDatagram encodes msg as nodeID's datagram and sends it over
+// the test's persistent sender socket.
+func sendTrackerDatagram(t *testing.T, conn net.Conn, msg port.Message, nodeID uint16, runID [16]byte) {
+	t.Helper()
+	datagram, err := encodeDatagram(nodeID, runID, msg)
+	if err != nil {
+		t.Fatalf("encode datagram: %v", err)
+	}
+	_, err = conn.Write(datagram)
+	if err != nil {
+		t.Fatalf("send datagram: %v", err)
+	}
+}
+
+// TestNotify_createsTrackerBeforeCore pins the load-bearing ordering
+// (XPORT-12): NotifyLocalWrite(track=true) creates the tracker synchronously
+// BEFORE the notification is enqueued, so the tracker exists before Run can
+// ever dequeue the write — a wait starting immediately after the call always
+// finds it. track=false creates none. A pre-Run tracked write captured zero
+// peers, so its wait is the honest zero-peer release; a tracked write
+// accepted after discovery captures the known peer and its Ack resolves
+// through the result stream. A tracked notify after Run exited reports
+// ErrRunLoopExited and leaves the map empty.
+func TestNotify_createsTrackerBeforeCore(t *testing.T) {
+	t.Parallel()
+	adapter := newTrackerTestAdapter(t)
+	key := "tracker/before-core"
+	ver := version.PackVersion(1730000000000, 0, trackerNodeA)
+	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, adapter.KnownPeerIDs())
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
+	}
+	// Run has not started: the tracker must already exist.
+	if !trackerPresent(adapter, trackerKey{key: key, version: ver}) {
+		t.Fatal("no tracker after NotifyLocalWrite(track=true) returned, want one created before the enqueue")
+	}
+	if got := trackerCount(adapter); got != 1 {
+		t.Fatalf("tracker map holds %d entries after one tracked notify, want 1", got)
+	}
+	// track=false creates no tracker.
+	untrackedKey := "tracker/untracked"
+	untrackedVer := version.PackVersion(1730000000000, 1, trackerNodeA)
+	notifyErr = adapter.NotifyLocalWrite(untrackedKey, storage.Record{Version: untrackedVer, Data: []byte("v")}, false, nil)
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(track=false): %v", notifyErr)
+	}
+	if trackerPresent(adapter, trackerKey{key: untrackedKey, version: untrackedVer}) {
+		t.Fatal("track=false created a tracker, want none")
+	}
+	if got := trackerCount(adapter); got != 1 {
+		t.Fatalf("tracker map holds %d entries after a track=false notify, want still 1", got)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		_ = adapter.Run(ctx)
+	}()
+	awaitCondition(t, "both queued writes to become tracked pending entries", func() bool {
+		return adapter.UnackedStats().Count == 2
+	})
+
+	// Discovery teaches the core B; one sender socket keeps B's handle
+	// stable across every datagram.
+	sender := trackerSender(t, adapter)
+	sendTrackerDatagram(t, sender, port.Hello{}, trackerNodeB, trackerRunIDB)
+	awaitCondition(t, "discovery to mirror KnownPeers == 1", func() bool {
+		return adapter.KnownPeers() == 1
+	})
+
+	// The pre-Run write's write-time capture was empty, so its wait is the
+	// honest zero-peer release — not an acknowledgement — and the tracker is
+	// gone afterwards.
+	acked, count := adapter.WaitReplicated(t.Context(), key, ver, 0, 0)
+	if acked || count != 0 {
+		t.Fatalf("pre-discovery wait report = (%v, %d), want the honest false (false, 0)", acked, count)
+	}
+	if trackerPresent(adapter, trackerKey{key: key, version: ver}) {
+		t.Fatal("the zero-peer release left its tracker behind, want the map entry deleted")
+	}
+
+	// A write accepted after discovery captures B in its promise set; B's
+	// Ack then resolves the tracker through the core's result stream.
+	postKey := "tracker/after-discovery"
+	postVer := version.PackVersion(1730000000000, 2, trackerNodeA)
+	notifyErr = adapter.NotifyLocalWrite(postKey, storage.Record{Version: postVer, Data: []byte("v")}, true, adapter.KnownPeerIDs())
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(post-discovery track=true): %v", notifyErr)
+	}
+	reports := make(chan replicationResult, 1)
+	go func() {
+		waitAcked, waitCount := adapter.WaitReplicated(t.Context(), postKey, postVer, 1, 2*time.Second)
+		reports <- replicationResult{acked: waitAcked, count: waitCount}
+	}()
+	sendTrackerDatagram(t, sender, port.Ack{Key: postKey, Version: postVer}, trackerNodeB, trackerRunIDB)
+	select {
+	case report := <-reports:
+		if !report.acked || report.count != 1 {
+			t.Fatalf("wait report = (%v, %d), want full coverage (true, 1)", report.acked, report.count)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitReplicated did not return through the result stream")
+	}
+	if got := trackerCount(adapter); got != 0 {
+		t.Fatalf("tracker map holds %d entries after the wait returned, want 0", got)
+	}
+
+	// A tracked notify after Run exited fails loudly and releases its
+	// just-created tracker.
+	cancel()
+	<-runDone
+	postVer = version.PackVersion(1730000000000, 3, trackerNodeA)
+	err := adapter.NotifyLocalWrite("tracker/after-run", storage.Record{Version: postVer, Data: []byte("v")}, true, adapter.KnownPeerIDs())
+	if !errors.Is(err, ErrRunLoopExited) {
+		t.Fatalf("post-Run tracked notify = %v, want ErrRunLoopExited", err)
+	}
+	if got := trackerCount(adapter); got != 0 {
+		t.Fatalf("a failed notify left %d trackers, want the map empty", got)
+	}
+}
+
+// replicationResult is one WaitReplicated outcome.
+type replicationResult struct {
+	acked bool
+	count uint32
+}
+
+// TestWaitReplicated_zeroPeersReleases pins the D-11 release point (the
+// 06-11 verdict): a zero-peer wait reports the honest (false, 0) immediately
+// — no peer was captured, so no peer acknowledged anything — and deletes the
+// tracker the write created at notify time. The zero-peer path never enters
+// the waiting loop, so this call is its only release.
+func TestWaitReplicated_zeroPeersReleases(t *testing.T) {
+	t.Parallel()
+	adapter := newTrackerTestAdapter(t)
+	key := "tracker/zero-peers"
+	ver := version.PackVersion(1730000000000, 0, trackerNodeA)
+	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, adapter.KnownPeerIDs())
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
+	}
+	// The notify-time creation is the release's precondition: the zero-peer
+	// path must delete exactly this tracker.
+	if !trackerPresent(adapter, trackerKey{key: key, version: ver}) {
+		t.Fatal("the tracked notify created no tracker, want one before the release call")
+	}
+	if got := trackerCount(adapter); got != 1 {
+		t.Fatalf("tracker map holds %d entries after the tracked notify, want 1", got)
+	}
+	acked, count := adapter.WaitReplicated(t.Context(), key, ver, 0, 0)
+	if acked || count != 0 {
+		t.Fatalf("zero-peer wait report = (%v, %d), want the honest false (false, 0)", acked, count)
+	}
+	if got := trackerCount(adapter); got != 0 {
+		t.Fatalf("zero-peer wait left %d trackers, want the map empty", got)
+	}
+}
+
+// TestWaitReplicated_trackerCapturedPeersOnly pins the tracker's promise-set
+// arithmetic (A-01, T-06-04): the tracker stores the captured slice it was
+// created with — both the total and the membership set — and counts a
+// ResultAck only when the peer is in that set. A matching Ack from an
+// outside peer still reaches the core's result stream (WR-01) but cannot
+// inflate the count, and a partial captured set can never be reported as
+// full coverage merely because a ResultDrained resolved the tracker. White
+// box: the results are injected directly through the adapter's drain so the
+// arithmetic is observed without a socket race.
+func TestWaitReplicated_trackerCapturedPeersOnly(t *testing.T) {
+	t.Parallel()
+
+	const stranger = uint16(99)
+
+	t.Run("an outside Ack cannot inflate the captured count", func(t *testing.T) {
+		t.Parallel()
+		adapter := newTrackerTestAdapter(t)
+		key := "tracker/captured-count"
+		ver := version.PackVersion(1730000000000, 0, trackerNodeA)
+		notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, []uint16{trackerNodeB})
+		if notifyErr != nil {
+			t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
+		}
+
+		var out port.Outbox
+		out.Ack(key, ver, stranger)     // outside the captured set: filtered.
+		out.Ack(key, ver, trackerNodeB) // the captured peer: counted.
+		out.Drained(key, ver)
+		adapter.applyResults(&out)
+
+		// The caller's total is deliberately the handler's larger view: the
+		// tracker's captured total (1) is authoritative, so the report is the
+		// honest full coverage of the one captured peer — not (true, 2) from
+		// the two Acknowledging ids.
+		acked, count := adapter.WaitReplicated(t.Context(), key, ver, 2, time.Second)
+		if !acked || count != 1 {
+			t.Fatalf("wait report = (%v, %d), want (true, 1) — the stranger Ack must not inflate the count", acked, count)
+		}
+		if got := trackerCount(adapter); got != 0 {
+			t.Fatalf("the wait left %d trackers, want the map empty", got)
+		}
+	})
+
+	t.Run("a partial captured set is never full coverage", func(t *testing.T) {
+		t.Parallel()
+		adapter := newTrackerTestAdapter(t)
+		key := "tracker/captured-partial"
+		ver := version.PackVersion(1730000000000, 0, trackerNodeA)
+		captured := []uint16{trackerNodeB, trackerNodeB + 1}
+		notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, captured)
+		if notifyErr != nil {
+			t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
+		}
+
+		var out port.Outbox
+		out.Ack(key, ver, stranger)    // outside the captured set: filtered.
+		out.Ack(key, ver, captured[0]) // one captured peer of two.
+		out.Drained(key, ver)
+		adapter.applyResults(&out)
+
+		acked, count := adapter.WaitReplicated(t.Context(), key, ver, 2, time.Second)
+		if acked || count != 1 {
+			t.Fatalf("wait report = (%v, %d), want the honest false (false, 1) — two captured peers, one captured Ack", acked, count)
+		}
+		if got := trackerCount(adapter); got != 0 {
+			t.Fatalf("the wait left %d trackers, want the map empty", got)
+		}
+	})
+}
+
+// TestWaitReplicated_timeoutReleases pins the timeout abandonment path: an
+// unresolved wait returns (false, 0) after the timeout and deletes its
+// tracker, so the map is bounded by concurrent waits (T-3-16).
+func TestWaitReplicated_timeoutReleases(t *testing.T) {
+	t.Parallel()
+	adapter := newTrackerTestAdapter(t)
+	key := "tracker/timeout"
+	ver := version.PackVersion(1730000000000, 0, trackerNodeA)
+	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, adapter.KnownPeerIDs())
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
+	}
+	acked, count := adapter.WaitReplicated(t.Context(), key, ver, 1, 20*time.Millisecond)
+	if acked || count != 0 {
+		t.Fatalf("timed-out wait report = (%v, %d), want the honest false (false, 0)", acked, count)
+	}
+	if got := trackerCount(adapter); got != 0 {
+		t.Fatalf("timed-out wait left %d trackers, want the map empty", got)
+	}
+}
+
+// TestWaitReplicated_ctxCancelReleases pins the cancellation abandonment
+// path: a wait whose context is already canceled returns (false, 0) without
+// polling and deletes its tracker.
+func TestWaitReplicated_ctxCancelReleases(t *testing.T) {
+	t.Parallel()
+	adapter := newTrackerTestAdapter(t)
+	key := "tracker/cancel"
+	ver := version.PackVersion(1730000000000, 0, trackerNodeA)
+	notifyErr := adapter.NotifyLocalWrite(key, storage.Record{Version: ver, Data: []byte("v")}, true, adapter.KnownPeerIDs())
+	if notifyErr != nil {
+		t.Fatalf("NotifyLocalWrite(track=true): %v", notifyErr)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	acked, count := adapter.WaitReplicated(ctx, key, ver, 1, time.Second)
+	if acked || count != 0 {
+		t.Fatalf("canceled wait report = (%v, %d), want the honest false (false, 0)", acked, count)
+	}
+	if got := trackerCount(adapter); got != 0 {
+		t.Fatalf("canceled wait left %d trackers, want the map empty", got)
+	}
+}
+
+// TestMirror_identicalListingFloodDoesNotRepublish pins the publication gate
+// (PROTO-01, T-4-05): the listing mirror is content-gated. After the first
+// complete listing the adapter's published pointer is captured; 100 further
+// identical complete listings leave that pointer — and the adapter's
+// generation field — unchanged, so an identical-listing flood costs no clone
+// and no republish, while SyncArrived and ListedKey keep answering true from
+// the retained snapshot. White-box because the pointer and the generation are
+// unexported adapter state.
+func TestMirror_identicalListingFloodDoesNotRepublish(t *testing.T) {
+	t.Parallel()
+	adapter := newTrackerTestAdapter(t)
+	now := time.UnixMilli(1730000000000)
+	entry := port.SyncEntry{Key: mirrorFloodKey, Version: version.PackVersion(1730000000000, 1, trackerNodeB)}
+	// The listing must arrive from a learned peer identity (CR-01): the
+	// peer's Hello teaches the row the listing's run_id is bound to.
+	hello := port.InboundDatagram{
+		Source:       "n22",
+		Status:       port.Decoded,
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeID:       trackerNodeB,
+		RunID:        trackerRunIDB,
+		Msg:          port.Hello{},
+	}
+	var out port.Outbox
+	adapter.core.HandleDatagram(now, hello, &out)
+	out.Drain()
+	in := port.InboundDatagram{
+		Source:       "n22",
+		Status:       port.Decoded,
+		ProtoVersion: repl.SupportedProtoVersion,
+		NodeID:       trackerNodeB,
+		RunID:        trackerRunIDB,
+		Msg: port.DataSync{
+			SyncID:     1,
+			ChunkIndex: 1,
+			ChunkCount: 1,
+			Entries:    []port.SyncEntry{entry},
+		},
+	}
+	adapter.core.HandleDatagram(now, in, &out)
+	out.Drain()
+	adapter.mirrorStats()
+	first := adapter.listing.Load()
+	if first == nil || !first.complete {
+		t.Fatalf("the first complete listing published no complete mirror (%v), want one pointer carrying complete=true", first)
+	}
+	if _, ok := first.keys[mirrorFloodKey]; !ok {
+		t.Fatalf("the published mirror lacks %q, want the listing's key visible in the same pointer", mirrorFloodKey)
+	}
+	gen := adapter.listingGen
+	for i := range 100 {
+		adapter.core.HandleDatagram(now, in, &out)
+		out.Drain()
+		adapter.mirrorStats()
+		if got := adapter.listing.Load(); got != first {
+			t.Fatalf("identical complete listing %d republished the mirror pointer %p -> %p, want no republish", i+1, first, got)
+		}
+		if genNow := adapter.listingGen; genNow != gen {
+			t.Fatalf("identical complete listing %d moved the adapter generation %d -> %d, want no move", i+1, gen, genNow)
+		}
+	}
+	if !adapter.SyncArrived() {
+		t.Fatal("SyncArrived() = false after the identical-listing flood, want true from the retained snapshot")
+	}
+	if !adapter.ListedKey(mirrorFloodKey) {
+		t.Fatalf("ListedKey(%q) = false after the flood, want true from the retained snapshot", mirrorFloodKey)
+	}
+}
+
+// mirrorFloodKey is the one key the identical-listing flood repeats.
+const mirrorFloodKey = "mirror/flood"

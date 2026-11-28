@@ -1,3 +1,9 @@
+> **HISTORICAL DOCUMENT — this file is the historical intent-at-start idea for sup-kv, NOT a description of current behavior.**
+> It is kept for the record: the design it narrates was written before implementation began,
+> and details have evolved since. For the system as built, read the as-built trio:
+> [README](../README.md), [docs/OPERATIONS.md](OPERATIONS.md), and [docs/EXAMPLES.md](EXAMPLES.md).
+> The as-built architecture description and docs/ARCHITECTURE.md land by Phase 9 of milestone v1.1.
+
 # sup-kv — Idea Document
 
 *Seed for `/gsd:new-project --auto @docs/IDEA.md`. Self-contained; describes the product,

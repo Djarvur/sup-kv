@@ -9,6 +9,8 @@ package version
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"time"
 )
 
 // RecordVersion is the 16-byte record version: an RFC 9562 UUIDv7 carrying
@@ -29,6 +31,21 @@ const (
 	tsMask      = 1<<48 - 1 // the 48-bit timestamp domain, proving l&tsMask non-negative.
 	nodeLsbDrop = 2         // the nodeID's low 2 bits live in octet 10.
 	fillerShift = 6         // octet 10 carries the nodeID tail in its top bits.
+)
+
+// Sentinel errors returned by [RecordVersion.Validate]. Callers match them
+// with [errors.Is], never identity comparison; the transport core maps them
+// onto its own wire discard classes (XPORT-04).
+var (
+	// ErrVersionLayout is returned when the 16 bytes are not an RFC 9562
+	// UUIDv7: the version nibble in octet 6 is not 7, or the variant bits in
+	// the top of octet 8 are not 0b10.
+	ErrVersionLayout = errors.New("version is not an RFC 9562 UUIDv7")
+
+	// ErrVersionFuture is returned when the unix_ts_ms reading lies beyond
+	// now plus the caller's max_clock_lead: the clock-poisoning vector
+	// Validate rejects before any clock call.
+	ErrVersionFuture = errors.New("version reading is beyond now plus the maximum clock lead")
 )
 
 // PackVersion packs a hybrid logical clock reading and node ID into the RFC
@@ -62,4 +79,43 @@ func (v RecordVersion) Unpack() (l int64, counter uint16, nodeID uint16) {
 // version and variant bits are constants.
 func (v RecordVersion) Compare(other RecordVersion) int {
 	return bytes.Compare(v[:], other[:])
+}
+
+// Validate reports whether v is an acceptable inbound record version at the
+// wall-clock instant now: an RFC 9562 UUIDv7 whose unix_ts_ms reading lies at
+// or before now+maxLead (XPORT-04; the inbound pipeline runs it before any
+// store or clock touch, so a crafted reading can never poison the hybrid
+// logical clock).
+//
+// The layout check accepts the version 7 nibble and the variant 0b10 bits and
+// nothing else. The 46 rand_b filler bits RFC 9562 leaves to the
+// implementation are deliberately NOT rejected: a conforming UUIDv7 minted by
+// another vendor may set them, and rejecting them would make the protocol
+// needlessly non-interoperable.
+//
+// A reading in the past is always accepted — the hybrid logical clock absorbs
+// it on merge. The future bound is exclusive only beyond now+maxLead: a
+// reading of exactly now+maxLead is accepted, one millisecond beyond is
+// rejected with ErrVersionFuture. The design default for maxLead is 2 m,
+// strictly above the 60 s drift-warn default: the shipped binary enforces
+// max_clock_lead >= drift_warn + 1 ms, so a received version may lead by more
+// than drift_warn and still be accepted — that gap is the drift WARN window.
+// A negative maxLead normalizes to zero. Milliseconds are the only precision
+// the layout carries, so a fractional now is truncated to its unix_ts_ms.
+//
+// Validate reads no clock (now is the caller's, the D-02 seam), allocates
+// nothing and is total: every one of the 2^128 bit patterns yields a verdict,
+// never a panic. The subtraction form of the future bound cannot overflow for
+// a 48-bit reading and an absurd maxLead.
+func (v RecordVersion) Validate(now time.Time, maxLead time.Duration) error {
+	if v[6]&0xF0 != uuidVerBits || v[8]&0xC0 != uuidVarBits {
+		return ErrVersionLayout
+	}
+	l, _, _ := v.Unpack()
+	nowMs := now.UnixMilli()
+	lead := max(maxLead.Milliseconds(), 0)
+	if l >= nowMs && l-nowMs > lead {
+		return ErrVersionFuture
+	}
+	return nil
 }

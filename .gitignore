@@ -3,6 +3,13 @@
 /bin/
 /dist/
 *.exe
+# `make client-example` runs `go build ./...` inside the nested module, which
+# writes the example's executable beside main.go. The name is the module path's
+# last element (example.com/sup-kv-client), so it follows that path's identity.
+/examples/client/sup-kv-client
+# The pre-WR-03 module path produced this name; keep ignoring it for stale
+# working trees.
+/examples/client/client
 
 # Locally built dev tools (the make proto plugin binary).
 .tmp/
@@ -30,3 +37,6 @@ Thumbs.db
 
 # Local environment
 .env
+
+# Non-public review material (upstream Spec; never committed)
+docs/reviews/2026-11-19-v1.0/internal/

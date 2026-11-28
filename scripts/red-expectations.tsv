@@ -1,0 +1,30 @@
+# red-expectations.tsv — the D-01 expectation table for scripts/red-runner.
+#
+# Provenance: the phase-02 red tests pin the 2026-11-19 v1.0 review's
+# Critical findings (REVIEW.md §5: R-01, R-02, R-03; §6: P-01); the phase
+# composition that fixes them, in order, is REVIEW.md §15 (red tests first,
+# transport/protocol/persistence fixes in Phases 3-5 under them).
+#
+# Format: one data row per red-gated test, tab-separated:
+#
+#   <test_name><TAB><expected>
+#
+# where <expected> is:
+#   red   — the test must FAIL while the defect it pins is unfixed; a skip
+#           event (env gate failed to open) or an absence is an ERROR;
+#   green — the fix has landed; a fail event is an ERROR (the flip IS this
+#           one-line change — never the runner script, never the test,
+#           per D-01).
+#
+# Keep the `grep -v '^#'` discipline for any future count gates over this
+# file: data rows carry exactly two tab-separated fields, no trailing
+# whitespace, no inline comments.
+#
+# Rows (append one per new red test; flip red->green when its fix lands):
+TestRed_R03_gateClosedUntilFullList	green
+TestRed_R01_pacedSync20k	green
+TestRed_R02_unackedDrain	green
+TestRed_R02_burst	green
+TestRed_R03_f14ReplacedNode	green
+TestRed_P01_valueLimit	green
+TestRed_P01_valueLimitEngine	green

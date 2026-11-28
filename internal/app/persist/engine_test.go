@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +24,7 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/persistfile"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // Tracer-test constants: the shared node ID and drift tolerance of the
@@ -233,6 +237,84 @@ func TestEngine_openEmptyStart(t *testing.T) {
 	}
 }
 
+// loadFixtureStore is the startup-load port.DumpStore fake: Load feeds one
+// pre-encoded generation through the caller's parse oracle exactly as the
+// file adapter does, so Open sees the records the fixture carries. The other
+// seam methods are never exercised by the load test.
+type loadFixtureStore struct {
+	dump []byte
+}
+
+// SaveStream is never called by the startup-load test; it reports success so
+// the fake stays a total DumpStore.
+func (*loadFixtureStore) SaveStream(_ func(io.Writer) error) error { return nil }
+
+// Load accepts the fixture when parse decodes it and reports the main
+// outcome; a fixture the oracle rejects is an unusable start, as the file
+// adapter reports.
+func (s *loadFixtureStore) Load(_ time.Time, parse func([]byte) error) port.LoadResult {
+	err := parse(s.dump)
+	if err != nil {
+		return port.LoadResult{
+			Outcome:    port.LoadUnusable,
+			Generation: port.GenMain,
+			Failures:   []port.GenerationFailure{{Candidate: port.GenMain, Cause: err}},
+		}
+	}
+	return port.LoadResult{Dump: s.dump, Outcome: port.LoadMain, Generation: port.GenMain}
+}
+
+// CreateSnapshot is never called by the startup-load test.
+func (*loadFixtureStore) CreateSnapshot(_ string) error { return errFakeSave }
+
+// ReadSnapshot is never called by the startup-load test.
+func (*loadFixtureStore) ReadSnapshot(_ string) ([]byte, error) { return nil, errFakeSave }
+
+// TestOpen_loadDoesNotFireTap proves the startup load is not a change feed
+// (Pitfall 8, T-06-20): Open merges every loaded record through the store,
+// and without the loading guard each merge fires the caller's OnChange tap —
+// with the Watch hub wired, the whole dump would be announced as live
+// changes and, on a clean Main load, never confirmed. The fixture is a real
+// encoded generation, so Open takes the production decode-and-merge path.
+func TestOpen_loadDoesNotFireTap(t *testing.T) {
+	t.Parallel()
+	nowMs := time.Now().UnixMilli()
+	verA := version.PackVersion(nowMs, 0, tracerNodeID)
+	verB := version.PackVersion(nowMs+1, 0, tracerNodeID)
+	dataA, dataB := []byte("a"), []byte("b")
+	records := map[string]storage.Record{
+		"loaded/a": {Version: verA, Data: dataA, Checksum: storage.RecordChecksum("loaded/a", verA, dataA, false)},
+		"loaded/b": {Version: verB, Data: dataB, Checksum: storage.RecordChecksum("loaded/b", verB, dataB, false)},
+	}
+	dump, err := persist.Encode(records, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("Encode fixture: want nil, got error: %v", err)
+	}
+	var taps int
+	eng, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		&loadFixtureStore{dump: dump},
+		storage.Config{OnChange: func(string, storage.Record, uint64) { taps++ }},
+		persist.Config{},
+	)
+	if discarded != 0 {
+		t.Errorf("Open() discarded = %d, want 0", discarded)
+	}
+	if taps != 0 {
+		t.Fatalf("Open fired OnChange %d times, want 0 (the startup load is not a change feed)", taps)
+	}
+	loaded := eng.Records()
+	if len(loaded) != len(records) {
+		t.Fatalf("Open loaded %d records, want %d", len(loaded), len(records))
+	}
+	for key := range records {
+		_, getErr := eng.Get(key)
+		if getErr != nil {
+			t.Errorf("Get(%s) after Open error = %v, want nil", key, getErr)
+		}
+	}
+}
+
 // Synctest-suite constants: the engine timing under test (the design
 // defaults, D-04), the fake port's node identity and the flush-race width.
 const (
@@ -255,46 +337,61 @@ type fakeSave struct {
 
 // fakeDumpPort is the in-memory port.DumpStore of the synctest suite: it
 // records every save's virtual timestamp and bytes, counts attempts
-// separately from completed saves, and fails the leading failSaves saves.
-// It never touches the filesystem — real I/O inside a synctest bubble is
-// not durably blocking and deadlock-panics the bubble (Pitfall 6). A
-// non-nil gate parks every Save before it records anything — the hold
-// point that keeps one dump in flight while the exit-race tests cancel.
-// The snapshot methods mirror the adapter's semantics in memory:
+// separately from completed saves, records every attempt's virtual instant
+// (failed ones included) and fails the leading failSaves saves with failErr
+// (errFakeSave when nil). It never touches the filesystem — real I/O inside
+// a synctest bubble is not durably blocking and deadlock-panics the bubble
+// (Pitfall 6). A non-nil gate parks every Save before it records anything —
+// the hold point that keeps one dump in flight while the exit-race tests
+// cancel. The snapshot methods mirror the adapter's semantics in memory:
 // CreateSnapshot byte-copies the latest completed save under the name,
 // missing snapshots read as an error.
 type fakeDumpPort struct {
-	mu        sync.Mutex
-	attempts  int
-	saves     []fakeSave
-	failSaves int
-	snapshots map[string][]byte
-	gate      chan struct{}
+	mu         sync.Mutex
+	attempts   int
+	attemptAts []time.Time
+	saves      []fakeSave
+	failSaves  int
+	failErr    error
+	snapshots  map[string][]byte
+	gate       chan struct{}
 }
 
-// Save records the dump at the current virtual time, failing the leading
-// configured saves; a configured gate parks the save before it records —
-// the dump is in flight, not attempted, while parked.
-func (f *fakeDumpPort) Save(dump []byte) error {
+// SaveStream runs fill into memory and records the resulting generation at
+// the current virtual time, failing the leading configured saves with the
+// configured error; a configured gate parks the save before it records — the
+// dump is in flight, not attempted, while parked.
+func (f *fakeDumpPort) SaveStream(fill func(io.Writer) error) error {
 	f.mu.Lock()
 	gate := f.gate
 	f.mu.Unlock()
 	if gate != nil {
 		<-gate
 	}
+	var buf bytes.Buffer
+	err := fill(&buf)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts++
+	f.attemptAts = append(f.attemptAts, time.Now())
 	if f.failSaves > 0 {
 		f.failSaves--
+		if f.failErr != nil {
+			return f.failErr
+		}
 		return errFakeSave
 	}
-	f.saves = append(f.saves, fakeSave{at: time.Now(), dump: bytes.Clone(dump)})
+	if err != nil {
+		return err
+	}
+	f.saves = append(f.saves, fakeSave{at: time.Now(), dump: bytes.Clone(buf.Bytes())})
 	return nil
 }
 
-// Load is the empty start; the synctest suite never restarts.
-func (*fakeDumpPort) Load(_ func([]byte) error) ([]byte, bool) { return nil, false }
+// Load reports the empty start: the synctest suite never restarts.
+func (*fakeDumpPort) Load(_ time.Time, _ func([]byte) error) port.LoadResult {
+	return port.LoadResult{}
+}
 
 // CreateSnapshot stores an in-memory copy of the latest completed save
 // under the name.
@@ -329,6 +426,17 @@ func (f *fakeDumpPort) snapshot(name string) []byte {
 	return f.snapshots[name]
 }
 
+// installSnapshot stores a hand-built snapshot generation under name — the
+// seam the restore-report tests use to supply a persist.Encode fixture.
+func (f *fakeDumpPort) installSnapshot(name string, data []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.snapshots == nil {
+		f.snapshots = make(map[string][]byte)
+	}
+	f.snapshots[name] = bytes.Clone(data)
+}
+
 // saveCount returns the number of completed saves.
 func (f *fakeDumpPort) saveCount() int {
 	f.mu.Lock()
@@ -343,11 +451,35 @@ func (f *fakeDumpPort) saveAttempts() int {
 	return f.attempts
 }
 
+// attemptInstants returns the virtual instant of every Save attempt, failed
+// ones included, in attempt order.
+func (f *fakeDumpPort) attemptInstants() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.attemptAts)
+}
+
+// setFailErr sets the error the leading failSaves saves return.
+func (f *fakeDumpPort) setFailErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failErr = err
+}
+
 // save returns the recorded save i.
 func (f *fakeDumpPort) save(i int) fakeSave {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.saves[i]
+}
+
+// seedSave installs a completed save as if it were the on-disk generation —
+// the fixture for a test that starts a clean engine over an existing main and
+// expects CreateSnapshot to copy it without a flush rewrite.
+func (f *fakeDumpPort) seedSave(dump []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saves = append(f.saves, fakeSave{at: time.Now(), dump: bytes.Clone(dump)})
 }
 
 // newFakeEngine builds an engine over an empty store and a fresh fake port,
@@ -378,11 +510,97 @@ func startDumper(t *testing.T, eng *persist.Engine) (stop func()) {
 	}
 }
 
+// recordingSeam is the injected clock/timer seam's recorder: it delegates to
+// the bubble's virtual clock, so the timing assertions stay exact, and counts
+// every read and arm so a test can prove the engine used the supplied
+// functions instead of the wall clock.
+type recordingSeam struct {
+	mu     sync.Mutex
+	nows   int
+	afters int
+}
+
+// Now returns the bubble's virtual time and counts the read.
+func (r *recordingSeam) Now() time.Time {
+	r.mu.Lock()
+	r.nows++
+	r.mu.Unlock()
+	return time.Now()
+}
+
+// After arms the bubble's virtual timer and counts the arm.
+func (r *recordingSeam) After(d time.Duration) <-chan time.Time {
+	r.mu.Lock()
+	r.afters++
+	r.mu.Unlock()
+	return time.After(d)
+}
+
+// counts returns the recorded read and arm counts.
+func (r *recordingSeam) counts() (nows, afters int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nows, r.afters
+}
+
+// TestEngine_injectedClock proves the PERSIST-12 seam: a supplied Now/After
+// pair is the engine's only clock and timer source. A Set at virtual t=0
+// resolves exactly at Debounce, the dump lands at that same instant, and the
+// recorder observes the reads and arms — while the defaults preserve the
+// existing behavior the rest of the suite exercises.
+func TestEngine_injectedClock(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		seam := &recordingSeam{}
+		dumps := &fakeDumpPort{}
+		// The store keeps the bubble clock directly, so every counting call
+		// the recorder sees is the ENGINE's — the seam under test.
+		clk := clock.NewClock(time.Now, 0, 0, time.Minute)
+		store := storage.NewStore(synctestNodeID, clk, storage.Config{})
+		eng := persist.New(store, dumps, persist.Config{Now: seam.Now, After: seam.After})
+		defer startDumper(t, eng)()
+
+		start := time.Now()
+		returned := make(chan time.Time, 1)
+		go func() {
+			_, _, err := eng.Set("seam", []byte("seam-value"))
+			if err != nil {
+				t.Errorf("Set(seam) error = %v, want nil", err)
+			}
+			returned <- time.Now()
+		}()
+		returnedAt := <-returned
+		synctest.Wait()
+
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("save count = %d, want exactly 1", got)
+		}
+		want := start.Add(synctestDebounce)
+		if !dumps.save(0).at.Equal(want) {
+			t.Errorf("the dump landed at %v, want exactly %v", dumps.save(0).at, want)
+		}
+		if !returnedAt.Equal(want) {
+			t.Errorf("Set returned at %v, want exactly the dump instant %v", returnedAt, want)
+		}
+		nows, afters := seam.counts()
+		if nows == 0 {
+			t.Error("the engine never read the injected Config.Now")
+		}
+		if afters < 2 {
+			t.Errorf("the engine armed %d timer channels through Config.After, want the debounce and the deadline", afters)
+		}
+	})
+}
+
 // TestEngine_confirmDebounceTiming proves the write-confirmation timing law
 // exactly in virtual time (PERS-04, D-04): a Set at t=0 registers its
 // waiter, the debounced dumper waits out the full 50 ms quiet window, the
 // single save lands at virtual t=50 ms, and Set returns only then — with
 // the saved bytes decoding to the written record.
+//
+// Decision 14.3 (ADR 0003): the dump write policy stays as-is — the debounce
+// window and the single save per quiet period are the accepted disk-protection
+// bias, not an implementation accident this timing test may optimize away.
 func TestEngine_confirmDebounceTiming(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -413,9 +631,9 @@ func TestEngine_confirmDebounceTiming(t *testing.T) {
 			t.Errorf("Set returned at %v, want exactly the dump instant %v",
 				returnedAt, start.Add(synctestDebounce))
 		}
-		records, discarded, err := persist.Decode(save.dump)
-		if err != nil || discarded != 0 {
-			t.Fatalf("Decode() = (%d discarded, %v), want (0, nil)", discarded, err)
+		records, stats, err := persist.Decode(save.dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 {
+			t.Fatalf("Decode() = (%d discarded, %v), want (0, nil)", stats.Total(), err)
 		}
 		if rec, ok := records["k"]; !ok || string(rec.Data) != "v" {
 			t.Errorf("saved record for k = (%q, %t), want the written value", rec.Data, ok)
@@ -531,9 +749,9 @@ func TestEngine_dumpFailureFansOut(t *testing.T) {
 		if got := dumps.saveCount(); got != 1 {
 			t.Fatalf("completed saves = %d, want 1", got)
 		}
-		records, discarded, err := persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
-		if err != nil || discarded != 0 {
-			t.Fatalf("Decode(second dump) = (%d discarded, %v), want (0, nil)", discarded, err)
+		records, stats, err := persist.Decode(dumps.save(dumps.saveCount()-1).dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 {
+			t.Fatalf("Decode(second dump) = (%d discarded, %v), want (0, nil)", stats.Total(), err)
 		}
 		for i := range fanoutWaiters {
 			if _, ok := records[fmt.Sprintf("fan-%d", i)]; !ok {
@@ -609,7 +827,7 @@ func TestEngine_flushRacesRunExit(t *testing.T) {
 				if i%2 == 0 {
 					err = eng.Snapshot("raced")
 				} else {
-					err = eng.Restore("seed")
+					_, err = eng.Restore("seed")
 				}
 				raced <- err
 			}()
@@ -732,9 +950,9 @@ func TestFlush_remoteDirtiness(t *testing.T) {
 		if saves := dumps.saveCount(); saves != 1 {
 			t.Fatalf("completed saves = %d, want exactly the one covering dump", saves)
 		}
-		records, discarded, err := persist.Decode(dumps.save(0).dump)
-		if err != nil || discarded != 0 {
-			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", discarded, err)
+		records, stats, err := persist.Decode(dumps.save(0).dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 {
+			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", stats.Total(), err)
 		}
 		merged, ok := records["remote"]
 		if !ok || merged.Version != remote.Version || string(merged.Data) != "remote-value" {
@@ -832,7 +1050,7 @@ func TestEngine_writeSurface(t *testing.T) {
 			t.Fatalf("SetIfAbsent confirmed without a covering dump: saves %d, before %d",
 				got, savesBefore)
 		}
-		records, _, err := persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
+		records, _, err := persist.Decode(dumps.save(dumps.saveCount()-1).dump, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Decode() error = %v, want nil", err)
 		}
@@ -846,7 +1064,7 @@ func TestEngine_writeSurface(t *testing.T) {
 			t.Fatalf("Delete(live) error = %v, want nil", err)
 		}
 		synctest.Wait()
-		records, _, err = persist.Decode(dumps.save(dumps.saveCount() - 1).dump)
+		records, _, err = persist.Decode(dumps.save(dumps.saveCount()-1).dump, storage.ValueMaxBytes)
 		if err != nil {
 			t.Fatalf("Decode() error = %v, want nil", err)
 		}
@@ -855,6 +1073,51 @@ func TestEngine_writeSurface(t *testing.T) {
 				ok, rec.Deleted, rec.Version == ver)
 		}
 	})
+}
+
+// TestEngine_lookup_tombstoneVisible proves the engine forwards the
+// tombstone-visible view to its store while Get stays the live-only API
+// read: a deleted key is ErrNotFound for Get, yet Lookup returns the
+// tombstone with Deleted=true and the same version Version reports, and
+// Versions carries it. The writes go through ApplyRemote — the non-blocking
+// merge path — so no dumper goroutine is needed for a read-contract test.
+func TestEngine_lookup_tombstoneVisible(t *testing.T) {
+	t.Parallel()
+	const probeNowMs = int64(1730000000000)
+	eng, _ := newFakeEngine()
+	live := version.PackVersion(probeNowMs, 0, synctestNodeID)
+	_, _, err := eng.ApplyRemote("view/key", storage.Record{Version: live, Data: []byte("value")})
+	if err != nil {
+		t.Fatalf("ApplyRemote(live) error = %v, want nil", err)
+	}
+	tombstone := version.PackVersion(probeNowMs+1, 0, synctestNodeID)
+	_, _, err = eng.ApplyRemote("view/key", storage.Record{Version: tombstone, Deleted: true})
+	if err != nil {
+		t.Fatalf("ApplyRemote(tombstone) error = %v, want nil", err)
+	}
+
+	_, err = eng.Get("view/key")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Get(tombstoned) error = %v, want storage.ErrNotFound", err)
+	}
+	rec, ok := eng.Lookup("view/key")
+	if !ok {
+		t.Fatal("Lookup(tombstoned) ok = false, want true")
+	}
+	if !rec.Deleted {
+		t.Error("Lookup(tombstoned).Deleted = false, want true")
+	}
+	if rec.Version != tombstone {
+		t.Errorf("Lookup(tombstoned) version = %x, want %x", rec.Version[:], tombstone[:])
+	}
+	ver, found := eng.Version("view/key")
+	if !found || ver != tombstone {
+		t.Errorf("Version(tombstoned) = (%x, %t), want (%x, true)", ver[:], found, tombstone[:])
+	}
+	versions := eng.Versions()
+	if got, present := versions["view/key"]; !present || got != tombstone {
+		t.Errorf("Versions()[view/key] = (%x, %t), want (%x, true)", got[:], present, tombstone[:])
+	}
 }
 
 // TestEngine_restartDiscardsTornRecord proves the restart class separation
@@ -917,14 +1180,19 @@ func TestEngine_restartDiscardsTornRecord(t *testing.T) {
 	}
 }
 
-// TestEngine_snapshotCreateLoadRestore is plan 03-02's tracer (PERS-05): a
-// named snapshot is a byte-exact copy of the confirmed on-disk main dump
-// (D-10), and Restore replays exactly the snapshot's keys through the
-// store's ordinary write path with fresh dominating versions — a
-// snapshot-live value beats a current tombstone, a snapshot tombstone beats
-// a current live value, and a key absent from the snapshot keeps its state
-// untouched (D-09) — while a fresh engine with only the carried-over
-// snapshot directory restores every snapshot key (recovery from scratch).
+// TestEngine_snapshotCreateLoadRestore is plan 03-02's tracer (PERS-05),
+// rewritten for decision 14.1 / ADR 0001: a named snapshot is a byte-exact
+// copy of the confirmed on-disk main dump (D-10), and Restore is a FULL
+// ROLLBACK — the snapshot IS the restored state, never a partial merge into
+// whatever the target holds. Every snapshot record replays through the
+// store's ordinary write path with a fresh dominating version (D-09): a
+// snapshot-live value beats a current tombstone and a snapshot tombstone
+// beats a current live value. Every current LIVE key absent from the
+// snapshot is deleted with a fresh tombstone and returned in the replay
+// report, while a key already tombstoned locally stays untouched — no
+// version burned, no redundant record. A fresh engine with only the
+// carried-over snapshot directory restores every snapshot key (recovery
+// from scratch).
 func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	t.Parallel()
 	dumpPath := filepath.Join(t.TempDir(), "dump.json")
@@ -993,28 +1261,33 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	}
 
 	preRestore := eng.Records()
-	err = eng.Restore("pre")
+	restored, err := eng.Restore("pre")
 	if err != nil {
 		t.Fatalf("Restore(pre) error = %v, want nil", err)
 	}
-	restored := eng.Records()
+	after := eng.Records()
+	replayed := make(map[string]persist.RestoredRecord, len(restored))
+	for _, rec := range restored {
+		replayed[rec.Key] = rec
+	}
 
-	// Fresh-version dominance: every replayed record beats every
-	// pre-restore version, so the restore replicates and wins by normal
-	// LWW like any write (D-09).
+	// Fresh-version dominance: every record the restore installed — the
+	// replayed snapshot records and the rollback tombstone alike — beats
+	// every pre-restore version, so the restore replicates and wins by
+	// normal LWW like any write (D-09).
 	var maxPre version.RecordVersion
 	for _, rec := range preRestore {
 		if rec.Version.Compare(maxPre) > 0 {
 			maxPre = rec.Version
 		}
 	}
-	for _, key := range []string{"keep-a", "keep-b", "resurrect", "re-tomb"} {
-		rec, ok := restored[key]
+	for _, key := range []string{"keep-a", "keep-b", "resurrect", "re-tomb", "post-key"} {
+		rec, ok := after[key]
 		if !ok {
-			t.Fatalf("restored records lack %s", key)
+			t.Fatalf("post-restore records lack %s", key)
 		}
 		if rec.Version.Compare(maxPre) != 1 {
-			t.Errorf("restored %s version %x does not dominate every pre-restore version (max %x)",
+			t.Errorf("post-restore %s version %x does not dominate every pre-restore version (max %x)",
 				key, rec.Version[:], maxPre[:])
 		}
 	}
@@ -1035,24 +1308,38 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 	if !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("post-restore Get(re-tomb) error = %v, want ErrNotFound (the snapshot tombstone wins)", err)
 	}
-	if rec := restored["re-tomb"]; !rec.Deleted {
+	if rec := replayed["re-tomb"]; !rec.Deleted {
 		t.Error("restored re-tomb is live, want the snapshot's tombstone")
 	}
 	// gone: the snapshot holds it deleted and it stayed tombstoned — the
-	// replay Delete is the store's ErrNotFound no-op: no version burned.
-	if got, want := restored["gone"].Version, preRestore["gone"].Version; got != want {
-		t.Errorf("restored gone version %x differs from pre-restore %x, want identical (no version burned on the no-op Delete)",
+	// replay Delete is the store's ErrNotFound no-op: no version burned and
+	// no record produced.
+	if _, ok := replayed["gone"]; ok {
+		t.Error("the restore report names gone, want the already-tombstoned key absent (no version burned)")
+	}
+	if got, want := after["gone"].Version, preRestore["gone"].Version; got != want {
+		t.Errorf("gone version %x differs from pre-restore %x, want identical (no version burned on the no-op Delete)",
 			got[:], want[:])
 	}
-	// post-key: absent from the snapshot — its post-snapshot state stands.
-	rec, err := eng.Get("post-key")
-	if err != nil || string(rec.Data) != "post-value" {
-		t.Errorf("post-restore Get(post-key) = (%q, %v), want the untouched post-snapshot value",
-			rec.Data, err)
+	// post-key: live locally and absent from the snapshot — the full
+	// rollback deletes it with a fresh tombstone and reports that tombstone,
+	// so the snapshot load broadcasts the rollback (PROTO-08).
+	rollback, ok := replayed["post-key"]
+	if !ok {
+		t.Fatalf("Restore(pre) report lacks the post-key rollback tombstone; got %+v", restored)
 	}
-	if got, want := restored["post-key"].Version, preRestore["post-key"].Version; got != want {
-		t.Errorf("post-key version moved across the restore: %x then %x, want identical (absent keys untouched)",
-			want[:], got[:])
+	if !rollback.Deleted {
+		t.Error("the reported post-key rollback record is live, want Deleted=true")
+	}
+	if len(rollback.Data) != 0 {
+		t.Errorf("the reported post-key rollback record carries %d data bytes, want none", len(rollback.Data))
+	}
+	if !after["post-key"].Deleted {
+		t.Error("post-restore records keep post-key live, want the rollback tombstone")
+	}
+	_, err = eng.Get("post-key")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("post-restore Get(post-key) error = %v, want ErrNotFound (the rollback tombstone wins)", err)
 	}
 
 	// Recovery from scratch: a fresh engine — empty store, fresh disk, only
@@ -1074,7 +1361,7 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 		t.Errorf("fresh Open() discarded = %d, want 0", discarded)
 	}
 	runEngine(t, eng3)
-	err = eng3.Restore("pre")
+	_, err = eng3.Restore("pre")
 	if err != nil {
 		t.Fatalf("fresh Restore(pre) error = %v, want nil", err)
 	}
@@ -1104,36 +1391,42 @@ func TestEngine_snapshotCreateLoadRestore(t *testing.T) {
 
 // TestEngine_snapshotFlushForcesDump pins D-10's "forces the current dump
 // to complete" against the real dumper loop under exact virtual time with
-// no real I/O inside the bubble (PERS-05): a dirty engine — its one save
-// failed, the write returned ErrDumpFailed — must complete a NEW dump
-// before the snapshot copies, observable as the fake's attempt count (the
-// forced save is attempt two) and the copied bytes carrying the record;
-// a Snapshot on the fully-confirmed engine that follows adds no save at
-// all (not dirty: no dump, straight copy).
+// no real I/O inside the bubble (PERS-05): a dirty engine with no dump
+// failure pending — a remote merge marks it dirty without a waiter — must
+// complete a NEW dump before the snapshot copies, observable as the fake's
+// attempt count (the forced save is attempt one, before the debounce fires)
+// and the copied bytes carrying the record; a Snapshot on the
+// fully-confirmed engine that follows adds no save at all (not dirty: no
+// dump, straight copy).
+//
+// A dirty engine whose failure ladder has a rung pending does NOT force an
+// extra attempt (WR-02, TestSnapshot_forcedFlushRespectsRetryLadder): the
+// flush answers the ladder's last classified failure immediately and the
+// armed rung completes the covering dump on its own schedule.
 func TestEngine_snapshotFlushForcesDump(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		eng, dumps := newFakeEngine()
-		dumps.failSaves = 1
 		defer startDumper(t, eng)()
-		setErr := make(chan error, 1)
-		go func() {
-			_, _, err := eng.Set("forced", []byte("forced-value"))
-			setErr <- err
-		}()
-		err := <-setErr
-		if !errors.Is(err, persist.ErrDumpFailed) {
-			t.Fatalf("Set() error = %v, want ErrDumpFailed (the dirty state)", err)
+
+		remote := storage.Record{
+			Version: version.PackVersion(1, 1, synctestNodeID+1),
+			Data:    []byte("forced-value"),
 		}
-		if got := dumps.saveCount(); got != 0 {
-			t.Fatalf("completed saves before the snapshot = %d, want 0", got)
+		_, _, err := eng.ApplyRemote("forced", remote)
+		if err != nil {
+			t.Fatalf("ApplyRemote() error = %v, want nil", err)
 		}
+		if got := dumps.saveAttempts(); got != 0 {
+			t.Fatalf("save attempts before the snapshot = %d, want 0 — the debounce has not fired", got)
+		}
+
 		err = eng.Snapshot("s")
 		if err != nil {
 			t.Fatalf("Snapshot(s) error = %v, want nil", err)
 		}
-		if got := dumps.saveAttempts(); got != 2 {
-			t.Fatalf("save attempts = %d, want exactly 2 (one failed, one forced by the snapshot)", got)
+		if got := dumps.saveAttempts(); got != 1 {
+			t.Fatalf("save attempts = %d, want exactly 1 (forced by the snapshot before the debounce)", got)
 		}
 		if got := dumps.saveCount(); got != 1 {
 			t.Fatalf("completed saves = %d, want 1", got)
@@ -1142,9 +1435,9 @@ func TestEngine_snapshotFlushForcesDump(t *testing.T) {
 		if !bytes.Equal(copied, dumps.save(0).dump) {
 			t.Error("snapshot copy differs from the forced save's bytes")
 		}
-		records, discarded, err := persist.Decode(copied)
-		if err != nil || discarded != 0 {
-			t.Fatalf("Decode(snapshot) = (%d discarded, %v), want (0, nil)", discarded, err)
+		records, stats, err := persist.Decode(copied, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 {
+			t.Fatalf("Decode(snapshot) = (%d discarded, %v), want (0, nil)", stats.Total(), err)
 		}
 		if rec, ok := records["forced"]; !ok || string(rec.Data) != "forced-value" {
 			t.Errorf("snapshot lacks the forced record: (%q, %t), want the written value", rec.Data, ok)
@@ -1156,8 +1449,8 @@ func TestEngine_snapshotFlushForcesDump(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Snapshot(s2) error = %v, want nil", err)
 		}
-		if got := dumps.saveAttempts(); got != 2 {
-			t.Errorf("save attempts after the confirmed snapshot = %d, want still 2 (no extra save)", got)
+		if got := dumps.saveAttempts(); got != 1 {
+			t.Errorf("save attempts after the confirmed snapshot = %d, want still 1 (no extra save)", got)
 		}
 		if !bytes.Equal(dumps.snapshot("s2"), dumps.save(0).dump) {
 			t.Error("second snapshot copy differs from the confirmed save's bytes")
@@ -1182,7 +1475,7 @@ func TestEngine_restoreMissingSnapshot(t *testing.T) {
 		t.Fatalf("seed Set(stable) error = %v, want nil", err)
 	}
 	before := eng.Records()
-	err = eng.Restore("nope")
+	_, err = eng.Restore("nope")
 	if err == nil {
 		t.Fatal("Restore(nope) = nil, want the missing-snapshot error")
 	}
@@ -1245,7 +1538,7 @@ func TestEngine_closeSurface(t *testing.T) {
 	if !errors.Is(err, persist.ErrClosed) {
 		t.Errorf("post-close Delete() error = %v, want ErrClosed", err)
 	}
-	err = eng.Restore("pre")
+	_, err = eng.Restore("pre")
 	if !errors.Is(err, persist.ErrClosed) {
 		t.Errorf("post-close Restore() error = %v, want ErrClosed", err)
 	}
@@ -1312,13 +1605,388 @@ func TestEngine_restoreCorruptSnapshot(t *testing.T) {
 	)
 	runEngine(t, eng2)
 	before := eng2.Records()
-	err = eng2.Restore("bad")
+	_, err = eng2.Restore("bad")
 	if err == nil {
 		t.Fatal("Restore(corrupt snapshot) = nil, want the generation-level decode error")
 	}
 	if !recordsEqual(eng2.Records(), before) {
 		t.Error("records changed across the corrupt-snapshot restore")
 	}
+}
+
+// corruptKeyChecksum returns dump with exactly the named record line's
+// checksum incremented by one, leaving its version, data and tombstone flag
+// intact: the decoder then discards precisely that line as the checksum
+// class while the generation stays readable and its census is satisfied —
+// the CR-01 regression fixture (a snapshot that is valid except for one
+// record the decoder cannot read).
+func corruptKeyChecksum(t *testing.T, dump []byte, key string) []byte {
+	t.Helper()
+	lines := bytes.Split(bytes.TrimSuffix(dump, []byte("\n")), []byte("\n"))
+	found := false
+	for i, line := range lines {
+		var parsed map[string]any
+		err := json.Unmarshal(line, &parsed)
+		if err != nil {
+			t.Fatalf("parse dump line %d: %v", i, err)
+		}
+		if parsed["key"] != key {
+			continue
+		}
+		checksum, ok := parsed["checksum"].(float64)
+		if !ok {
+			t.Fatalf("dump line %d for key %q has no numeric checksum", i, key)
+		}
+		parsed["checksum"] = checksum + 1
+		corrupted, err := json.Marshal(parsed)
+		if err != nil {
+			t.Fatalf("re-encode dump line %d: %v", i, err)
+		}
+		lines[i] = corrupted
+		found = true
+	}
+	if !found {
+		t.Fatalf("dump has no record line for key %q", key)
+	}
+	return bytes.Join(lines, []byte("\n"))
+}
+
+// TestEngine_restorePartialSnapshotRefused is the CR-01 regression: a
+// snapshot that is readable at generation level but has one record line the
+// decoder discards (a flipped checksum) must fail the load BEFORE applying
+// anything. The decoded map omits the corrupted key, so a full rollback
+// computed from it would treat that key as "absent from the snapshot" and
+// delete the live value with a fresh tombstone that then replicates
+// cluster-wide. The refusal keeps every live record, burns no version,
+// sends no dump and surfaces ErrSnapshotIncomplete — the DataLoss class.
+func TestEngine_restorePartialSnapshotRefused(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		for key, value := range map[string]string{
+			"keep":   "live-keep",
+			"victim": "live-victim",
+		} {
+			_, _, err := eng.Set(key, []byte(value))
+			if err != nil {
+				t.Fatalf("seed Set(%s) error = %v, want nil", key, err)
+			}
+		}
+
+		snapVersion := version.PackVersion(2, 0, synctestNodeID+1)
+		valid := snapshotFixture(t, map[string]storage.Record{
+			"keep":   {Version: snapVersion, Data: []byte("snap-keep")},
+			"victim": {Version: snapVersion, Data: []byte("snap-victim")},
+		})
+		dumps.installSnapshot("partial", corruptKeyChecksum(t, valid, "victim"))
+
+		before := eng.Records()
+		saves := dumps.saveCount()
+		restored, err := eng.Restore("partial")
+		if !errors.Is(err, persist.ErrSnapshotIncomplete) {
+			t.Fatalf("Restore(partially readable snapshot) error = %v, want ErrSnapshotIncomplete", err)
+		}
+		if restored != nil {
+			t.Fatalf("Restore(partially readable snapshot) returned %d records, want nil (nothing applied)",
+				len(restored))
+		}
+		if !recordsEqual(eng.Records(), before) {
+			t.Error("records changed across the refused restore")
+		}
+		// The corrupted line still NAMES victim, so the rollback must not read
+		// its absence from the decoded map as "the snapshot does not name it".
+		for key, want := range map[string]string{"keep": "live-keep", "victim": "live-victim"} {
+			rec, getErr := eng.Get(key)
+			if getErr != nil || string(rec.Data) != want {
+				t.Errorf("Get(%s) after the refused restore = (%q, %v), want the live value %q",
+					key, rec.Data, getErr, want)
+			}
+		}
+		if got := dumps.saveCount(); got != saves {
+			t.Errorf("the refused restore ran %d extra saves, want 0 (nothing reaches the dumper)", got-saves)
+		}
+	})
+}
+
+// snapshotFixture encodes records as a snapshot generation, filling each
+// record's checksum from the production domain first: Decode discards a
+// checksum-invalid record, so a hand-built fixture must carry the real
+// checksum or a restore test could pass for the wrong reason (the 03-08
+// hand-built-fixture rule).
+func snapshotFixture(t *testing.T, records map[string]storage.Record) []byte {
+	t.Helper()
+	for key, rec := range records {
+		rec.Checksum = storage.RecordChecksum(key, rec.Version, rec.Data, rec.Deleted)
+		records[key] = rec
+	}
+	dump, err := persist.Encode(records, storage.ValueMaxBytes)
+	if err != nil {
+		t.Fatalf("persist.Encode(snapshot fixture) error = %v, want nil", err)
+	}
+	return dump
+}
+
+// TestEngine_restoreReturnsReplayed proves the replay report PROTO-08's
+// snapshot-load notify consumes under full-rollback semantics (decision
+// 14.1, ADR 0001): a restore that changes the store returns every record it
+// installed — sorted by key, each carrying the store's freshly stamped
+// version, the snapshot's data and tombstone flag — and, for a current LIVE
+// key the snapshot does not name, the ROLLBACK tombstone that deleted it
+// (fresh version, no data), so the notify list covers the whole rollback.
+func TestEngine_restoreReturnsReplayed(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		for key, value := range map[string]string{
+			"alpha": "old-alpha",
+			"beta":  "old-beta",
+			"gamma": "gamma-value",
+		} {
+			_, _, err := eng.Set(key, []byte(value))
+			if err != nil {
+				t.Fatalf("seed Set(%s) error = %v, want nil", key, err)
+			}
+		}
+
+		snapVersion := version.PackVersion(1, 0, synctestNodeID+1)
+		dumps.installSnapshot("snap", snapshotFixture(t, map[string]storage.Record{
+			"alpha": {Version: snapVersion, Data: []byte("snap-alpha")},
+			"beta":  {Version: snapVersion, Deleted: true},
+			"delta": {Version: snapVersion, Data: []byte("snap-delta")},
+		}))
+
+		preRestore := eng.Records()
+		restored, err := eng.Restore("snap")
+		if err != nil {
+			t.Fatalf("Restore(snap) error = %v, want nil", err)
+		}
+		keys := make([]string, len(restored))
+		for i, rec := range restored {
+			keys[i] = rec.Key
+		}
+		// gamma is absent from the snapshot and live locally: the full
+		// rollback deletes it and reports the tombstone, so the sorted union
+		// carries it after the snapshot's own keys.
+		if want := []string{"alpha", "beta", "delta", "gamma"}; !slices.Equal(keys, want) {
+			t.Fatalf("Restore(snap) keys = %v, want %v (the sorted union of snapshot keys and rollback tombstones)", keys, want)
+		}
+		for _, rec := range restored {
+			if rec.Version == (version.RecordVersion{}) {
+				t.Errorf("restored %s carries the zero version", rec.Key)
+			}
+			if rec.Version.Compare(snapVersion) != 1 {
+				t.Errorf("restored %s version %x does not dominate the snapshot's %x",
+					rec.Key, rec.Version[:], snapVersion[:])
+			}
+		}
+		byKey := make(map[string]persist.RestoredRecord, len(restored))
+		for _, rec := range restored {
+			byKey[rec.Key] = rec
+		}
+		if rec := byKey["alpha"]; rec.Deleted || string(rec.Data) != "snap-alpha" {
+			t.Errorf("restored alpha = (%q, deleted=%t), want the snapshot's live value", rec.Data, rec.Deleted)
+		}
+		if rec := byKey["beta"]; !rec.Deleted {
+			t.Error("restored beta is live, want the snapshot's tombstone")
+		}
+		if rec := byKey["delta"]; rec.Deleted || string(rec.Data) != "snap-delta" {
+			t.Errorf("restored delta = (%q, deleted=%t), want the snapshot's live value", rec.Data, rec.Deleted)
+		}
+		// gamma: the rollback record is a tombstone with no data, its fresh
+		// version beats the pre-restore record, and the store agrees.
+		rollback := byKey["gamma"]
+		if !rollback.Deleted {
+			t.Error("restored gamma is live, want the rollback tombstone")
+		}
+		if len(rollback.Data) != 0 {
+			t.Errorf("the gamma rollback record carries %d data bytes, want none", len(rollback.Data))
+		}
+		if prior := preRestore["gamma"].Version; rollback.Version.Compare(prior) != 1 {
+			t.Errorf("gamma rollback version %x does not dominate its pre-restore version %x",
+				rollback.Version[:], prior[:])
+		}
+		_, getErr := eng.Get("gamma")
+		if !errors.Is(getErr, storage.ErrNotFound) {
+			t.Errorf("post-restore Get(gamma) error = %v, want ErrNotFound (the rollback tombstone wins)", getErr)
+		}
+	})
+}
+
+// TestEngine_restoreNoOpReturnsEmpty proves the no-op report: a snapshot
+// equal to the store's current state returns an empty record list and nil,
+// marks nothing dirty and performs no dump — the whole-restore no-op
+// contract D-15 (03 IN-02 + 04 IN-02) with PROTO-08's empty answer.
+func TestEngine_restoreNoOpReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		_, _, err := eng.Set("keep", []byte("keep-value"))
+		if err != nil {
+			t.Fatalf("seed Set(keep) error = %v, want nil", err)
+		}
+		err = dumps.CreateSnapshot("same")
+		if err != nil {
+			t.Fatalf("CreateSnapshot(same) error = %v, want nil", err)
+		}
+		saves := dumps.saveCount()
+
+		restored, err := eng.Restore("same")
+		if err != nil {
+			t.Fatalf("Restore(same) error = %v, want nil", err)
+		}
+		if len(restored) != 0 {
+			t.Fatalf("Restore(same) returned %d records, want an empty list", len(restored))
+		}
+		if got := dumps.saveCount(); got != saves {
+			t.Errorf("completed saves after the no-op restore = %d, want the unchanged %d", got, saves)
+		}
+	})
+}
+
+// TestEngine_restoreExtraLiveKeyIsNotNoOp pins the rollback half of the
+// no-op boundary (RESEARCH Pitfall 13): a snapshot whose records already
+// match the store is still a change when one current LIVE key is absent
+// from it, because the load must delete that key. The restore reports the
+// extra key's rollback tombstone — alongside the re-stamped snapshot
+// records, since any change replays in full (D-07 step 3) — deletes it and
+// performs the final dump. The matching snapshot with no extra live key
+// stays the empty-list, no-dump no-op
+// (TestEngine_restoreNoOpReturnsEmpty).
+func TestEngine_restoreExtraLiveKeyIsNotNoOp(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		for key, value := range map[string]string{
+			"keep-a": "keep-a-value",
+			"keep-b": "keep-b-value",
+		} {
+			_, _, err := eng.Set(key, []byte(value))
+			if err != nil {
+				t.Fatalf("seed Set(%s) error = %v, want nil", key, err)
+			}
+		}
+		err := dumps.CreateSnapshot("same")
+		if err != nil {
+			t.Fatalf("CreateSnapshot(same) error = %v, want nil", err)
+		}
+		// Post-snapshot live key: the snapshot equals the current state for
+		// every key it names, so only this extra key makes the load a change.
+		_, _, err = eng.Set("extra", []byte("extra-value"))
+		if err != nil {
+			t.Fatalf("post-snapshot Set(extra) error = %v, want nil", err)
+		}
+		preRestore := eng.Records()
+		saves := dumps.saveCount()
+
+		restored, err := eng.Restore("same")
+		if err != nil {
+			t.Fatalf("Restore(same) error = %v, want nil", err)
+		}
+		byKey := make(map[string]persist.RestoredRecord, len(restored))
+		for _, rec := range restored {
+			byKey[rec.Key] = rec
+		}
+		rollback, ok := byKey["extra"]
+		if !ok {
+			t.Fatalf("Restore(same) report lacks the extra-key rollback tombstone; got %+v", restored)
+		}
+		if !rollback.Deleted {
+			t.Error("the reported extra rollback record is live, want Deleted=true")
+		}
+		if len(rollback.Data) != 0 {
+			t.Errorf("the extra rollback record carries %d data bytes, want none", len(rollback.Data))
+		}
+		if prior := preRestore["extra"].Version; rollback.Version.Compare(prior) != 1 {
+			t.Errorf("extra rollback version %x does not dominate its pre-restore version %x",
+				rollback.Version[:], prior[:])
+		}
+		_, getErr := eng.Get("extra")
+		if !errors.Is(getErr, storage.ErrNotFound) {
+			t.Errorf("post-restore Get(extra) error = %v, want ErrNotFound (the rollback tombstone wins)", getErr)
+		}
+		if got := dumps.saveCount(); got != saves+1 {
+			t.Errorf("completed saves after the rollback = %d, want the final dump (%d+1)", got, saves)
+		}
+	})
+}
+
+// TestEngine_restoreFailedFlushReturnsReplayed proves a failed confirming
+// dump still reports what the replay installed (PROTO-08): Restore returns
+// the replayed records plus ErrDumpFailed, and the store keeps the replayed
+// state readable in memory — the dump failure is reported honestly, never
+// as a successful empty load.
+func TestEngine_restoreFailedFlushReturnsReplayed(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		_, _, err := eng.Set("alpha", []byte("old-alpha"))
+		if err != nil {
+			t.Fatalf("seed Set(alpha) error = %v, want nil", err)
+		}
+		snapVersion := version.PackVersion(1, 0, synctestNodeID+1)
+		dumps.installSnapshot("snap", snapshotFixture(t, map[string]storage.Record{
+			"alpha": {Version: snapVersion, Data: []byte("new-alpha")},
+		}))
+		dumps.mu.Lock()
+		dumps.failSaves = burstWrites
+		dumps.mu.Unlock()
+
+		restored, err := eng.Restore("snap")
+		if !errors.Is(err, persist.ErrDumpFailed) {
+			t.Fatalf("Restore(snap) error = %v, want ErrDumpFailed", err)
+		}
+		if len(restored) != 1 || restored[0].Key != "alpha" || string(restored[0].Data) != "new-alpha" {
+			t.Fatalf("Restore(snap) records = %+v, want the replayed alpha", restored)
+		}
+		rec, getErr := eng.Get("alpha")
+		if getErr != nil || string(rec.Data) != "new-alpha" {
+			t.Errorf("post-restore Get(alpha) = (%q, %v), want the replayed in-memory state", rec.Data, getErr)
+		}
+	})
+}
+
+// TestEngine_restoreSkipsReplay proves the remaining replay skip is absent
+// from the report (PROTO-08): a tombstone with no live record to beat is a
+// replay skip — Delete's ErrNotFound writes nothing and burns no version — so
+// Restore returns an empty list and nil, installs nothing, and never notifies
+// what it did not replay. The value-limit class is no longer a skip: a
+// snapshot holding one is refused as partially readable before any change
+// (CR-01, TestEngine_configShrunkValueLimits).
+func TestEngine_restoreSkipsReplay(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		dumps := &fakeDumpPort{}
+		clk := clock.NewClock(time.Now, 0, 0, time.Minute)
+		store := storage.NewStore(synctestNodeID, clk, storage.Config{ValueMaxBytes: shrunkValueLimit})
+		eng := persist.New(store, dumps, persist.Config{})
+		defer startDumper(t, eng)()
+
+		snapVersion := version.PackVersion(1, 0, synctestNodeID+1)
+		dumps.installSnapshot("snap", snapshotFixture(t, map[string]storage.Record{
+			"absent-tomb": {Version: snapVersion, Deleted: true},
+		}))
+
+		restored, err := eng.Restore("snap")
+		if err != nil {
+			t.Fatalf("Restore(snap) error = %v, want nil (the tombstone skip is not an error)", err)
+		}
+		if len(restored) != 0 {
+			t.Fatalf("Restore(snap) records = %+v, want an empty list (the tombstone skips)", restored)
+		}
+		if got := len(eng.Records()); got != 0 {
+			t.Errorf("post-restore records = %d, want 0 (nothing was replayed)", got)
+		}
+	})
 }
 
 // TestEngine_applyRemoteTriggersDump proves the REPL-03 memory-apply contract
@@ -1371,9 +2039,9 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 			t.Errorf("ApplyRemote returned at %v, not before the dump at %v — it registered a waiter",
 				returnedAt, save.at)
 		}
-		records, discarded, err := persist.Decode(save.dump)
-		if err != nil || discarded != 0 {
-			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", discarded, err)
+		records, stats, err := persist.Decode(save.dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 {
+			t.Fatalf("Decode(save) = (%d discarded, %v), want (0, nil)", stats.Total(), err)
 		}
 		if merged, ok := records["remote"]; !ok || merged.Version != remote.Version || string(merged.Data) != "remote-value" {
 			t.Errorf("the save carries remote = (%t, %x, %q), want the merged record", ok, merged.Version[:], merged.Data)
@@ -1409,11 +2077,19 @@ func TestEngine_applyRemoteTriggersDump(t *testing.T) {
 }
 
 // TestEngine_configShrunkValueLimits pins the config-shrink resilience
-// paths: Open skips a dumped record the shrunk store limit rejects instead
-// of aborting startup, Restore skips the same class instead of failing, and
-// a direct Set surfaces storage.ErrValueTooLarge unchanged with no waiter
-// registered (PERS-02/PERS-05 — the codec's 61440 envelope does not shrink
-// with the config, so these are the belt-and-braces skips).
+// paths: Open discards a dumped record the shrunk value limit rejects at
+// decode — the codec applies the configured limit, so the record counts in
+// the value-limit class and never reaches the merge belt — Restore refuses
+// the same snapshot as partially readable (CR-01: a full rollback from the
+// decoded key set could delete a key the snapshot names but the shrunk limit
+// discarded, so the load fails before any change), and a direct Set surfaces
+// storage.ErrValueTooLarge unchanged with no waiter registered
+// (PERSIST-01/PERS-02/PERS-05).
+//
+// Decision 14.11 (ADR 0011): the ~60 KiB single-value limit stays — this
+// test narrows only the configurable envelope under it, so the accepted
+// ceiling is what a shrunk config is measured against, never a probe that the
+// decision would raise or remove.
 func TestEngine_configShrunkValueLimits(t *testing.T) {
 	t.Parallel()
 	dumpPath := filepath.Join(t.TempDir(), "dump.json")
@@ -1442,8 +2118,8 @@ func TestEngine_configShrunkValueLimits(t *testing.T) {
 		persistfile.New(dumpPath),
 		storage.Config{ValueMaxBytes: shrunkValueLimit}, persist.Config{},
 	)
-	if discarded != 0 {
-		t.Errorf("shrunk Open() discarded = %d, want 0 (the skip is at merge, not codec)", discarded)
+	if discarded != 1 {
+		t.Errorf("shrunk Open() discarded = %d, want 1 (the codec applies the configured value limit)", discarded)
 	}
 	_, err = shrunk.Get("fat")
 	if !errors.Is(err, storage.ErrNotFound) {
@@ -1458,17 +2134,26 @@ func TestEngine_configShrunkValueLimits(t *testing.T) {
 		t.Errorf("shrunk Set(huge) error = %v, want ErrValueTooLarge unchanged", err)
 	}
 	runEngine(t, shrunk)
-	err = shrunk.Restore("cfg")
-	if err != nil {
-		t.Fatalf("shrunk Restore(cfg) error = %v, want nil (oversized record skipped)", err)
+	slimBefore, slimErr := shrunk.Get("slim")
+	if slimErr != nil {
+		t.Fatalf("pre-refusal Get(slim) error = %v, want nil", slimErr)
+	}
+	_, err = shrunk.Restore("cfg")
+	if !errors.Is(err, persist.ErrSnapshotIncomplete) {
+		t.Fatalf("shrunk Restore(cfg) error = %v, want ErrSnapshotIncomplete (the snapshot holds a value-limit discard)",
+			err)
 	}
 	_, err = shrunk.Get("fat")
 	if !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("post-restore Get(fat) error = %v, want ErrNotFound (replay skipped)", err)
+		t.Errorf("post-refusal Get(fat) error = %v, want ErrNotFound (still absent)", err)
 	}
 	slimRec, slimErr = shrunk.Get("slim")
 	if slimErr != nil || string(slimRec.Data) != "slim" {
-		t.Errorf("post-restore Get(slim) = (%q, %v), want (slim, nil)", slimRec.Data, slimErr)
+		t.Errorf("post-refusal Get(slim) = (%q, %v), want (slim, nil)", slimRec.Data, slimErr)
+	}
+	if got := slimRec.Version; got != slimBefore.Version {
+		t.Errorf("post-refusal slim version %x changed, want the pre-refusal %x (no replay)",
+			got[:], slimBefore.Version[:])
 	}
 }
 
@@ -1526,7 +2211,7 @@ func TestEngine_redundantDirty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateSnapshot(matching) error = %v, want nil", err)
 		}
-		err = eng.Restore("matching")
+		_, err = eng.Restore("matching")
 		if err != nil {
 			t.Fatalf("Restore(matching) error = %v, want nil", err)
 		}
@@ -1563,15 +2248,78 @@ func TestEngine_redundantDirty(t *testing.T) {
 		if got := dumps2.saveCount(); got != 1 {
 			t.Fatalf("the remote change plus the local waiter ran %d saves, want exactly 1 covering dump", got)
 		}
-		records, discarded, err := persist.Decode(dumps2.save(0).dump)
-		if err != nil || discarded != 0 {
-			t.Fatalf("Decode(covering dump) = (%d discarded, %v), want (0, nil)", discarded, err)
+		records, stats, err := persist.Decode(dumps2.save(0).dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 {
+			t.Fatalf("Decode(covering dump) = (%d discarded, %v), want (0, nil)", stats.Total(), err)
 		}
 		if r, ok := records["cfg/remote"]; !ok || r.Version != newer || string(r.Data) != "newer value" {
 			t.Fatalf("covering dump holds cfg/remote = (%v, %q), want (%v, %q)", r.Version, r.Data, newer, "newer value")
 		}
 		if r, ok := records["cfg/local"]; !ok || string(r.Data) != "local value" {
 			t.Fatalf("covering dump holds cfg/local = %q, want the confirmed local write", r.Data)
+		}
+	})
+}
+
+// TestEngine_applyRemoteEqualVersionContent proves the dirty decision follows
+// the store's `changed` result, never a version comparison (PERSIST-07, ADR
+// 0012, research Pitfall 5): an equal-version record that wins the content
+// tie-break changes the stored record and arms exactly one dump, while an
+// identical redelivery leaves the clean engine clean. The conflict returned
+// is the one tie-break conflict the store reports in both directions.
+func TestEngine_applyRemoteEqualVersionContent(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eng, dumps := newFakeEngine()
+		defer startDumper(t, eng)()
+
+		base := version.PackVersion(1730000000000, 0, redundantRemoteNode)
+		settled := storage.Record{Version: base, Data: []byte("base value")}
+		_, _, err := eng.ApplyRemote("cfg/tie", settled)
+		if err != nil {
+			t.Fatalf("establishing ApplyRemote() error = %v, want nil", err)
+		}
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 1 {
+			t.Fatalf("the establishing remote merge ran %d saves, want 1", got)
+		}
+
+		// Equal version, greater content: the tie-break installs the incoming
+		// record, so the engine must dirty and dump exactly once more.
+		winner := storage.Record{Version: base, Data: []byte("tie-break winner")}
+		conflicts, _, err := eng.ApplyRemote("cfg/tie", winner)
+		if err != nil {
+			t.Fatalf("tie-break ApplyRemote() error = %v, want nil", err)
+		}
+		if len(conflicts) != 1 || conflicts[0].Key != "cfg/tie" || conflicts[0].Winner != base || conflicts[0].Loser != base {
+			t.Fatalf("tie-break ApplyRemote() conflicts = %v, want exactly one pairing the equal version", conflicts)
+		}
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 2 {
+			t.Fatalf("the tie-break install ran %d total saves, want 2 — a content change must dirty", got)
+		}
+		records, stats, err := persist.Decode(dumps.save(1).dump, storage.ValueMaxBytes)
+		if err != nil || stats.Total() != 0 {
+			t.Fatalf("Decode(tie-break dump) = (%d discarded, %v), want (0, nil)", stats.Total(), err)
+		}
+		if r, ok := records["cfg/tie"]; !ok || r.Version != base || string(r.Data) != "tie-break winner" {
+			t.Fatalf("tie-break dump holds cfg/tie = (%x, %q, %t), want the content winner", r.Version[:], r.Data, ok)
+		}
+
+		// Identical redelivery over the live record: a full no-op, no dump.
+		conflicts, _, err = eng.ApplyRemote("cfg/tie", winner)
+		if err != nil {
+			t.Fatalf("identical-redelivery ApplyRemote() error = %v, want nil", err)
+		}
+		if conflicts != nil {
+			t.Fatalf("identical-redelivery ApplyRemote() conflicts = %v, want none", conflicts)
+		}
+		synctest.Sleep(synctestDebounce)
+		synctest.Wait()
+		if got := dumps.saveCount(); got != 2 {
+			t.Fatalf("the identical redelivery ran %d total saves, want 2 — no change means no dump", got)
 		}
 	})
 }
@@ -1619,5 +2367,141 @@ func TestDumpStats_records(t *testing.T) {
 	stop()
 	if got := eng.DumpStats(); got.Total != 2 || got.Errors != 1 || got.DurationSeconds <= 0 {
 		t.Fatalf("after the failed dump DumpStats() = %+v, want Total 2, Errors 1, a positive duration", got)
+	}
+}
+
+// TestEngine_keyCountAndObserveGeneration pins the three engine
+// pass-throughs (PROTO-01, PROTO-02, T-4-43): KeyCount counts records
+// without consulting dump state — 0 before any write, 1 once a confirmed
+// Set has completed its dump — Generation moves only with the store's
+// content and not for reads, and Observe feeds the store clock so the next
+// Set strictly dominates the absorbed version.
+func TestEngine_keyCountAndObserveGeneration(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	eng, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), storage.Config{}, persist.Config{},
+	)
+	if discarded != 0 {
+		t.Errorf("Open() discarded = %d, want 0", discarded)
+	}
+	runEngine(t, eng)
+
+	if got := eng.KeyCount(); got != 0 {
+		t.Fatalf("KeyCount() on an empty engine = %d, want 0", got)
+	}
+	if got := eng.Generation(); got != 0 {
+		t.Fatalf("Generation() on an empty engine = %d, want 0", got)
+	}
+
+	// Set blocks until a covering dump completed, so the count is read after
+	// the record is both in memory and on disk.
+	_, _, err := eng.Set("alpha", []byte("alpha-value"))
+	if err != nil {
+		t.Fatalf("Set(alpha) error = %v, want nil", err)
+	}
+	if got := eng.KeyCount(); got != 1 {
+		t.Fatalf("KeyCount() after a confirmed Set = %d, want 1", got)
+	}
+	if got := eng.Generation(); got != 1 {
+		t.Fatalf("Generation() after a confirmed Set = %d, want 1", got)
+	}
+
+	// Read paths move neither counter, dump state or not.
+	_, err = eng.Get("alpha")
+	if err != nil {
+		t.Fatalf("Get(alpha) error = %v, want nil", err)
+	}
+	_, _ = eng.Lookup("alpha")
+	_, _ = eng.Version("alpha")
+	_ = eng.Versions()
+	_ = eng.Records()
+	if got := eng.KeyCount(); got != 1 {
+		t.Fatalf("KeyCount() after reads = %d, want the unchanged 1", got)
+	}
+	if got := eng.Generation(); got != 1 {
+		t.Fatalf("Generation() after reads = %d, want the unchanged 1", got)
+	}
+
+	// Observe is clock-only: no record, no generation move, and the next
+	// Set strictly dominates the absorbed version.
+	absorbed := version.PackVersion(time.Now().Add(time.Hour).UnixMilli(), 5, tracerNodeID+1)
+	eng.Observe(absorbed)
+	if got := eng.KeyCount(); got != 1 {
+		t.Fatalf("KeyCount() after Observe = %d, want the unchanged 1", got)
+	}
+	if got := eng.Generation(); got != 1 {
+		t.Fatalf("Generation() after Observe = %d, want the unchanged 1", got)
+	}
+	ver, _, err := eng.Set("beta", []byte("beta-value"))
+	if err != nil {
+		t.Fatalf("Set(beta) error = %v, want nil", err)
+	}
+	if got := ver.Compare(absorbed); got <= 0 {
+		t.Fatalf("next Set version %x does not strictly beat the absorbed %x", ver[:], absorbed[:])
+	}
+	if got := eng.KeyCount(); got != 2 {
+		t.Fatalf("KeyCount() after the second Set = %d, want 2", got)
+	}
+	if got := eng.Generation(); got != 2 {
+		t.Fatalf("Generation() after the second Set = %d, want 2", got)
+	}
+}
+
+// TestEngine_exactValueLimitRestart pins the configured limit's inclusive
+// boundary end to end at an accepted small flag value (PERSIST-01): a value
+// of exactly ValueMaxBytes is confirmed, lands in the dump and comes back
+// whole after a reopen, while one byte more is rejected by the store. At
+// 8 bytes the datagram ceiling is irrelevant, which is the small-value
+// direction of the boundary the frozen P-01 tests prove at 64 000.
+func TestEngine_exactValueLimitRestart(t *testing.T) {
+	t.Parallel()
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	const smallLimit = 8
+	cfg := storage.Config{ValueMaxBytes: smallLimit}
+	eng, discarded := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), cfg, persist.Config{},
+	)
+	if discarded != 0 {
+		t.Fatalf("Open() on an empty directory discarded = %d, want 0", discarded)
+	}
+	stop := startDumper(t, eng)
+	t.Cleanup(stop)
+
+	value := []byte("12345678") // exactly smallLimit bytes.
+	_, _, err := eng.Set("exact", value)
+	if err != nil {
+		t.Fatalf("Set(exact) of a %d-byte value with ValueMaxBytes=%d error = %v, want nil",
+			len(value), smallLimit, err)
+	}
+	// Set returned, so the covering dump completed (PERS-04): the record is
+	// on disk before the reopen.
+	dump, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read the dump %s after Set returned: %v", dumpPath, err)
+	}
+	if !strings.Contains(string(dump), `"key":"exact"`) {
+		t.Fatalf("the confirmed %d-byte record is not in the dump %s after Set returned", len(value), dumpPath)
+	}
+
+	reopened, discardedAfter := persist.Open(
+		tracerNodeID, time.Now, tracerDriftWarn,
+		persistfile.New(dumpPath), cfg, persist.Config{},
+	)
+	if discardedAfter != 0 {
+		t.Fatalf("reopened Open() discarded = %d, want 0", discardedAfter)
+	}
+	rec, err := reopened.Get("exact")
+	if err != nil {
+		t.Fatalf("the confirmed %d-byte record is gone after reopening the dump: %v", len(value), err)
+	}
+	if !bytes.Equal(rec.Data, value) {
+		t.Fatalf("the value after reopening = %q, want %q", rec.Data, value)
+	}
+	_, _, err = reopened.Set("over", []byte("123456789"))
+	if !errors.Is(err, storage.ErrValueTooLarge) {
+		t.Errorf("Set(over) of a %d-byte value error = %v, want ErrValueTooLarge", smallLimit+1, err)
 	}
 }

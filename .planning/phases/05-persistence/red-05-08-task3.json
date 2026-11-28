@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/grpcapi/ -v -run '^TestServer_unconfirmed'",
+  "exitCode": 1,
+  "output": "=== RUN   TestServer_unconfirmedSetMapsAndNotifies\n=== PAUSE TestServer_unconfirmedSetMapsAndNotifies\n=== RUN   TestServer_unconfirmedDeleteMapsAndNotifies\n=== PAUSE TestServer_unconfirmedDeleteMapsAndNotifies\n=== CONT  TestServer_unconfirmedSetMapsAndNotifies\n=== CONT  TestServer_unconfirmedDeleteMapsAndNotifies\n=== NAME  TestServer_unconfirmedSetMapsAndNotifies\n    server_test.go:1005: Set with a hung dump: want code Unavailable, got Internal (err=rpc error: code = Internal desc = internal error: write not confirmed before the confirmation timeout)\n=== NAME  TestServer_unconfirmedDeleteMapsAndNotifies\n    server_test.go:1049: Delete with a hung dump: want code Unavailable, got Internal (err=rpc error: code = Internal desc = internal error: write not confirmed before the confirmation timeout)\n--- FAIL: TestServer_unconfirmedSetMapsAndNotifies (0.08s)\n--- FAIL: TestServer_unconfirmedDeleteMapsAndNotifies (0.08s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/grpcapi\t0.091s\nFAIL\n",
+  "targetTest": "TestServer_unconfirmedSetMapsAndNotifies",
+  "targetFile": "internal/grpcapi/server_test.go",
+  "expected": "A timed-out Set answers Unavailable with the ErrUnconfirmed message and notifies the installed record with track=false; the same holds for Delete's tombstone",
+  "actual": "Both RPCs answer Internal (mapError has no ErrUnconfirmed case) and neither notifies — the unconfirmed class is not total on the RPC path",
+  "semanticAssessment": "Both target tests executed and failed on the planned assertion: mapError falls through to codes.Internal for ErrUnconfirmed, and the handler failure branches notify only ErrDumpFailed. No build or fixture failure; the failure is exactly the missing RPC totality PERSIST-08 adds."
+}

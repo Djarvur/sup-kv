@@ -86,6 +86,71 @@ linters:
           allow:
             - $gostd
             - github.com/Djarvur/sup-kv # own module path allowed per D-11's deny-third-party wording
+        sup-kv-public-api-no-internal:
+          files:
+            - '**/api/**' # the published consumer package; leading **/ + quotes for the same depguard glob reason as above
+            - '!$test'
+          deny:
+            - pkg: github.com/Djarvur/sup-kv/internal
+              desc: the public API package must remain importable by other modules
+        # ---- sup-kv dependency direction (OBSV-07, D-07) ----------------
+        # Adapters are wired only from cmd, the composition root. The pure
+        # decision core (internal/app) and the port definitions
+        # (internal/port) may not import them, so the architecture is a lint
+        # gate with a visible config diff rather than a review convention.
+        # Adapters are named individually: the core packages legitimately
+        # import each other, internal/port imports internal/app/{storage,
+        # version}, and internal/testutil is a shared helper, not an adapter
+        # (research D-07 import audit).
+        sup-kv-adapters-not-in-core:
+          files:
+            - '**/internal/app/**'
+            - '**/internal/port/**'
+            - '!$test'
+          deny:
+            - pkg: github.com/Djarvur/sup-kv/internal/udprepl
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+            - pkg: github.com/Djarvur/sup-kv/internal/persistfile
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+            - pkg: github.com/Djarvur/sup-kv/internal/grpcapi
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+            - pkg: github.com/Djarvur/sup-kv/internal/metrics
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+            - pkg: github.com/Djarvur/sup-kv/internal/stand
+              desc: adapters are wired from cmd; the pure core/ports may not import them
+        # The exporter reads value seams (internal/app/repl, internal/port)
+        # and the engine's stats; it never imports a socket, dump or API
+        # adapter. internal/metrics dropped internal/udprepl in 07-01 by
+        # moving SentByType to internal/app/repl, so this rule is satisfiable.
+        sup-kv-metrics-no-adapters:
+          files:
+            - '**/internal/metrics/**'
+            - '!$test'
+          deny:
+            - pkg: github.com/Djarvur/sup-kv/internal/udprepl
+              desc: the exporter reads value types; it must not import the socket adapter
+            - pkg: github.com/Djarvur/sup-kv/internal/persistfile
+              desc: the exporter reads the engine's stats, not the dump adapter
+            - pkg: github.com/Djarvur/sup-kv/internal/grpcapi
+              desc: the exporter must not import the API adapter
+        # The API adapter consumes the port seams, never the replication
+        # adapter and never the exporter.
+        sup-kv-grpcapi-no-repl-metrics:
+          files:
+            - '**/internal/grpcapi/**'
+            - '!$test'
+          deny:
+            - pkg: github.com/Djarvur/sup-kv/internal/udprepl
+              desc: the API adapter consumes the port seams, never the replication adapter
+            - pkg: github.com/Djarvur/sup-kv/internal/metrics
+              desc: the API adapter must not import the exporter
+        # Allowed exception (Q-05), written justification:
+        # sup-kv-grpcapi -> internal/persistfile is allowed for the two snapshot
+        # sentinels (ErrInvalidSnapshotName, ErrNoDump) and sup-kv-grpcapi ->
+        # internal/app/persist for the *persist.Engine store facade (12 methods,
+        # plus the Watch hub's Records/Set). Replacing the engine with a local
+        # interface is a larger refactor with no Phase-7 requirement; the
+        # exception is deliberate and visible here rather than hidden in code.
     dupl:
       threshold: 100
     embeddedstructfieldcheck:

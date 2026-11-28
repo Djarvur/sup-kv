@@ -9,23 +9,53 @@
 // caller launches Run in its own goroutine, Run exits when the context is
 // cancelled resolving every stranded waiter with ErrClosed, and the engine
 // itself spawns no goroutine. A write blocks inside Set, SetIfAbsent or
-// Delete until a dump containing it completed or failed — nil confirms the
-// write is on disk (PERS-04), ErrDumpFailed reports the failed dump while
-// the record stays readable in memory (D-05). Reads are never gated on
-// dumps. No callbacks, no events — results only (Phase 2 D-01 tradition).
+// Delete until its covering dump resolves in one of three ways: nil confirms
+// the write is on disk (PERS-04); ErrDumpFailed reports the failed dump while
+// the record stays readable in memory (D-05); ErrUnconfirmed reports that the
+// dump did not complete within Config.ConfirmTimeout — the record is in
+// memory and not yet durable (PERSIST-08, D-07). FlushTimeout is bounded by
+// its own d; Flush, Snapshot and Restore are bounded by Config.ConfirmTimeout
+// — so a hung fsync can never park them. Reads are never gated on dumps. No
+// callbacks, no events — results only (Phase 2 D-01 tradition).
+//
+// The package is split into five internal roles (D-10, PERSIST-11): the
+// loader/composition root (Open, mergeRecords and the load report), the
+// store facade (the thin read and write forwards plus ApplyRemote), the
+// dump scheduler (Run, the dump cycle, the retry ladder and the dump
+// counters), confirmation accounting (the waiters, the dirty epoch, the
+// flush request channel and the single-claim resolution) and snapshot
+// orchestration (Snapshot, Restore and the replay helpers). Engine is the
+// composition of those values; the split adds no exported name and no
+// interface.
+//
+// EncodeTo rejects an out-of-domain value limit — zero or negative, or above
+// the dump format's datagram ceiling (maxDumpValueBytes) — before writing any
+// byte (IN-04), so a valid dump is byte-identical and an invalid configuration
+// can never emit a partial generation. The format's line bound is sized from
+// that ceiling, so a larger configured limit could emit a line this package's
+// own Decode rejects; the shipped binary's config validation rejects it first,
+// and the library guard keeps every non-binary caller honest.
 //
 // Timing guarantees (D-04, PERS-03): under any write cadence a write is
 // confirmed within MaxWait plus one dump duration — the dump starts no
 // later than the oldest unconfirmed write plus MaxWait, because the
 // deadline timer is armed from the clean-to-dirty transition and only the
 // debounce timer resets on later changes, so bursts can coalesce but never
-// starve confirmation. After a failed dump the next attempt starts one
-// debounce interval later — the re-armed timer, never a tight retry loop —
-// and it also carries the failed era's surviving records.
+// starve confirmation. After a failed dump the next attempt is armed at the
+// failure instant plus a bounded ladder — 100 ms doubling to a 5 s cap,
+// reset by a success (D-05, PERSIST-05) — never a tight retry loop, and it
+// also carries the failed era's surviving records. A snapshot's flush request
+// cannot bypass that ladder: while a rung is pending it answers with the last
+// classified failure (ErrDumpFailed) instead of forcing an extra attempt and
+// an extra ERROR line at the client's rate (WR-02). An explicit
+// Flush/FlushTimeout is the shutdown seam and forces one attempt even while a
+// rung is pending, so shutdown never skips the mandated final dump (N-1).
 //
 // Snapshots (PERS-05, D-08..D-10): Snapshot first forces the current dump
 // to complete — a clean engine skips the redundant dump, a dirty one is
-// dumped before anything is copied — then byte-copies the finished main
+// dumped before anything is copied unless the failure ladder has a rung
+// pending, in which case the flush answers that failure as ErrDumpFailed
+// and nothing is copied — then byte-copies the finished main
 // dump under the adapter-validated name, so the snapshot is byte-identical
 // to the confirmed on-disk state at creation; a failed flush aborts with
 // nothing copied. Restore decodes the snapshot with the same codec and

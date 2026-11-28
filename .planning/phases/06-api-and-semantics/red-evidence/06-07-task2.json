@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/grpcapi/ -run '^TestGRPC_(maxRecv|worstCasePageFitsSendLimit)$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestGRPC_maxRecv\n=== PAUSE TestGRPC_maxRecv\n=== RUN   TestGRPC_worstCasePageFitsSendLimit\n=== PAUSE TestGRPC_worstCasePageFitsSendLimit\n=== CONT  TestGRPC_maxRecv\n=== CONT  TestGRPC_worstCasePageFitsSendLimit\n=== NAME  TestGRPC_maxRecv\n    limits_test.go:37: Set whose value alone reaches MaxRecvBytes: want code ResourceExhausted, got InvalidArgument (err=rpc error: code = InvalidArgument desc = value exceeds the maximum allowed size)\n--- FAIL: TestGRPC_maxRecv (0.03s)\n--- PASS: TestGRPC_worstCasePageFitsSendLimit (0.20s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/grpcapi\t0.224s\nFAIL\n",
+  "targetTest": "TestGRPC_maxRecv",
+  "targetFile": "internal/grpcapi/limits_test.go",
+  "expected": "A Set whose value alone reaches LimitsFor(testValueLimit).MaxRecvBytes is rejected at the transport with codes.ResourceExhausted, distinct from the handler's InvalidArgument value limit; a Set at the configured value limit succeeds.",
+  "actual": "The harness still built grpc.NewServer() with no options, so the 4 MiB gRPC default accepted the message and the handler answered InvalidArgument (\"value exceeds the maximum allowed size\").",
+  "semanticAssessment": "The target executed and failed on the planned assertion (code InvalidArgument versus ResourceExhausted), naming the value-limit message that proves the handler — not the transport — spoke. TestGRPC_worstCasePageFitsSendLimit passed in the same run by design: it pins the page-budget/marshal agreement that already exists, while the transport knob this task adds is what makes the receive-ceiling target observable. No build, fixture or discovery failure is involved."
+}

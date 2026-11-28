@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/grpcapi/ -run '^TestHealth_(shutdownIsOneWay|backstopWithoutShutdownServes)$' -v",
+  "exitCode": 1,
+  "output": "=== RUN   TestHealth_shutdownIsOneWay\n=== PAUSE TestHealth_shutdownIsOneWay\n=== RUN   TestHealth_backstopWithoutShutdownServes\n=== PAUSE TestHealth_backstopWithoutShutdownServes\n=== CONT  TestHealth_shutdownIsOneWay\n=== CONT  TestHealth_backstopWithoutShutdownServes\n--- PASS: TestHealth_backstopWithoutShutdownServes (0.06s)\n=== NAME  TestHealth_shutdownIsOneWay\n    gate_test.go:359: health after Shutdown: want NOT_SERVING even though the backstop opened the gate, got SERVING\n--- FAIL: TestHealth_shutdownIsOneWay (0.06s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/grpcapi\t0.072s\nFAIL\n",
+  "targetTest": "TestHealth_shutdownIsOneWay",
+  "targetFile": "internal/grpcapi/gate_test.go",
+  "expected": "After Server.Shutdown() (twice, idempotent) and a late 50 ms backstop that opens the gate, health stays NOT_SERVING; the control harness without the prior Shutdown reaches SERVING.",
+  "actual": "Health read SERVING after the backstop: the skeleton Shutdown used SetServingStatus, which the late openGate overwrote — exactly the race T-06-23 describes.",
+  "semanticAssessment": "The target executed and failed on the planned assertion with the observed SERVING value; the run names the race rather than a fixture fault, and the control in the same run passed (SERVING without a prior Shutdown), proving the harness observes a real transition. The skeleton body mirrors today's main.go behavior (SetServingStatus) so the RED reproduces the production race; GREEN replaces it with the standard health server's one-way Shutdown."
+}

@@ -507,7 +507,7 @@ func TestMerge_losers(t *testing.T) {
 			t.Errorf("Get() = (%q, %v), want the stored value (%q, nil)", rec.Data, err, "a")
 		}
 	})
-	t.Run("equal version is a no-op with no conflicts", func(t *testing.T) {
+	t.Run("equal version with greater content wins and reports one conflict", func(t *testing.T) {
 		t.Parallel()
 		store := newStore()
 		stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
@@ -520,8 +520,29 @@ func TestMerge_losers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
+		want := []storage.Conflict{{Key: "k", Winner: stored.Version, Loser: stored.Version}}
+		if !conflictsEqual(conflicts, want) {
+			t.Errorf("Merge() conflicts = %v, want exactly one pairing the equal version", conflicts)
+		}
+		rec, err := store.Get("k")
+		if err != nil || rec.Version != stored.Version || !bytes.Equal(rec.Data, []byte("x")) {
+			t.Errorf("Get() = (%x, %q, %v), want the greater-content winner %q", rec.Version[:], rec.Data, err, "x")
+		}
+	})
+	t.Run("equal version with identical content is a full no-op", func(t *testing.T) {
+		t.Parallel()
+		store := newStore()
+		stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		_, _, err := store.Merge("k", stored)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		conflicts, _, err := store.Merge("k", stored)
+		if err != nil {
+			t.Fatalf("redelivery Merge() error = %v, want nil", err)
+		}
 		if conflicts != nil {
-			t.Errorf("Merge() conflicts = %v, want nil (duplicate delivery is silent)", conflicts)
+			t.Errorf("redelivery Merge() conflicts = %v, want nil (identical content is silent)", conflicts)
 		}
 		rec, err := store.Get("k")
 		if err != nil || rec.Version != stored.Version || !bytes.Equal(rec.Data, []byte("a")) {
@@ -881,13 +902,15 @@ func TestStore_concurrentDeleteVsSet(t *testing.T) {
 	}
 }
 
-// changeTapEvent is one OnChange tap firing as the tests observe it: the key
-// and the handed record — the store's stored copy, which is replaced
+// changeTapEvent is one OnChange tap firing as the tests observe it: the key,
+// the handed record — the store's stored copy, which is replaced
 // wholesale on the next install and never mutated in place, so retaining it
-// is safe per the field's documented contract.
+// is safe per the field's documented contract — and the content generation
+// the install produced.
 type changeTapEvent struct {
-	key    string
-	record storage.Record
+	key        string
+	record     storage.Record
+	generation uint64
 }
 
 // changeTapRecorder collects the events a storage.Config.OnChange tap
@@ -900,10 +923,10 @@ type changeTapRecorder struct {
 }
 
 // tap is the Config.OnChange callback.
-func (r *changeTapRecorder) tap(key string, rec storage.Record) {
+func (r *changeTapRecorder) tap(key string, rec storage.Record, gen uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.events = append(r.events, changeTapEvent{key: key, record: rec})
+	r.events = append(r.events, changeTapEvent{key: key, record: rec, generation: gen})
 }
 
 // count returns how many events have fired so far.
@@ -1102,7 +1125,7 @@ func TestStore_onChange(t *testing.T) {
 		}
 	})
 
-	t.Run("an equal-version redelivery fires nothing", func(t *testing.T) {
+	t.Run("an equal-version content win fires the tap once more", func(t *testing.T) {
 		t.Parallel()
 		store, tap := newTapStore()
 		rec := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
@@ -1110,16 +1133,36 @@ func TestStore_onChange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed Merge() error = %v, want nil", err)
 		}
-		dup := storage.Record{Version: rec.Version, Data: []byte("x")}
-		conflicts, _, err := store.Merge("k", dup)
+		winner := storage.Record{Version: rec.Version, Data: []byte("x")}
+		conflicts, _, err := store.Merge("k", winner)
+		if err != nil {
+			t.Fatalf("Merge() error = %v, want nil", err)
+		}
+		if len(conflicts) != 1 {
+			t.Fatalf("Merge() conflicts = %v, want exactly one tie-break conflict", conflicts)
+		}
+		if got := tap.count(); got != 2 {
+			t.Fatalf("tap fired %d times, want 2 — the seed install plus the tie-break install (D-06)", got)
+		}
+	})
+
+	t.Run("an identical equal-version redelivery fires nothing", func(t *testing.T) {
+		t.Parallel()
+		store, tap := newTapStore()
+		rec := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+		_, _, err := store.Merge("k", rec)
+		if err != nil {
+			t.Fatalf("seed Merge() error = %v, want nil", err)
+		}
+		conflicts, _, err := store.Merge("k", rec)
 		if err != nil {
 			t.Fatalf("Merge() error = %v, want nil", err)
 		}
 		if conflicts != nil {
-			t.Fatalf("Merge() conflicts = %v, want nil (equal version is a full no-op)", conflicts)
+			t.Fatalf("Merge() conflicts = %v, want nil (identical content is a full no-op)", conflicts)
 		}
 		if got := tap.count(); got != 1 {
-			t.Fatalf("tap fired %d times, want 1 (the seed install only — an equal-version redelivery never installs, D-06)", got)
+			t.Fatalf("tap fired %d times, want 1 (the seed install only — an identical redelivery never installs, D-06)", got)
 		}
 	})
 
@@ -1141,4 +1184,333 @@ func TestStore_onChange(t *testing.T) {
 		// Reaching here without a nil-callback panic is the assertion: the
 		// zero-value Config behaves exactly like the pre-tap store.
 	})
+}
+
+// TestStore_changeTapGeneration pins the generation the tap hands over
+// (APIS-04, D-04): it is the just-incremented content generation — one step
+// per actual install, in tap order — and no event fires for a rejected
+// SetIfAbsent, a Delete of a missing key, an identical merge redelivery or a
+// clock-only Observe, so the persist engine's durability watermark can never
+// be advanced for a change that did not happen.
+func TestStore_changeTapGeneration(t *testing.T) {
+	t.Parallel()
+
+	store, tap := newTapStore()
+	_, _, err := store.Set("k", []byte("v1"))
+	if err != nil {
+		t.Fatalf("Set k=v1: want nil, got error: %v", err)
+	}
+	_, _, err = store.Set("k", []byte("v2"))
+	if err != nil {
+		t.Fatalf("Set k=v2: want nil, got error: %v", err)
+	}
+	_, _, err = store.SetIfAbsent("k", []byte("rejected"))
+	if !errors.Is(err, storage.ErrAlreadyExists) {
+		t.Fatalf("SetIfAbsent on an existing key = %v, want ErrAlreadyExists", err)
+	}
+	_, _, err = store.Delete("missing")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Delete of a missing key = %v, want ErrNotFound", err)
+	}
+	delVer, _, err := store.Delete("k")
+	if err != nil {
+		t.Fatalf("Delete k: want nil, got error: %v", err)
+	}
+	_, _, err = store.Merge("k", storage.Record{Version: delVer, Deleted: true})
+	if err != nil {
+		t.Fatalf("Merge identical tombstone: want nil, got error: %v", err)
+	}
+	store.Observe(delVer) // clock-only: no record, no install, no tap event.
+
+	want := []uint64{1, 2, 3}
+	if got := tap.count(); got != len(want) {
+		t.Fatalf("tap fired %d times, want %d (one per actual install, none for rejections or no-ops)", got, len(want))
+	}
+	for i, wantGen := range want {
+		if ev := tap.event(i); ev.generation != wantGen {
+			t.Fatalf("tap event %d generation = %d, want %d", i, ev.generation, wantGen)
+		}
+	}
+	if got := store.Generation(); got != want[len(want)-1] {
+		t.Fatalf("Store.Generation() = %d, want the last tapped generation %d", got, want[len(want)-1])
+	}
+}
+
+// requireGeneration fails unless store.Generation() equals want — the
+// content-generation assertions' single spelling.
+func requireGeneration(t *testing.T, store *storage.Store, want uint64) {
+	t.Helper()
+	if got := store.Generation(); got != want {
+		t.Fatalf("Generation() = %d, want %d", got, want)
+	}
+}
+
+// TestStore_observeAdvancesClock pins the version-only absorption seam
+// (PROTO-01): Observe feeds the store clock exactly the received version and
+// touches no record, so the very next local Set stamps a strictly greater
+// version while Len and Lookup stay exactly as they were.
+func TestStore_observeAdvancesClock(t *testing.T) {
+	t.Parallel()
+	store := newStore()
+	_, _, err := store.Set("seat", []byte("seat"))
+	if err != nil {
+		t.Fatalf("seed Set() error = %v, want nil", err)
+	}
+	beforeLen := store.Len()
+	absorbed := version.PackVersion(testNowMs+10_000, 3, nodeB)
+	store.Observe(absorbed)
+	if got := store.Len(); got != beforeLen {
+		t.Fatalf("Len() after Observe = %d, want the unchanged %d", got, beforeLen)
+	}
+	if _, ok := store.Lookup("absorbed"); ok {
+		t.Fatal("Lookup(absorbed) found a record, want none (Observe is clock-only)")
+	}
+	ver, _, err := store.Set("absorbed", []byte("v"))
+	if err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if got := ver.Compare(absorbed); got != cmpNewer {
+		t.Fatalf("next Set version %x does not strictly beat the absorbed %x", ver[:], absorbed[:])
+	}
+}
+
+// TestStore_observeMonotone pins the absorption monotonicity: observing an
+// older version after a newer one never lowers the clock, so the next local
+// write still beats the newer reading (clock.Update's receive rule).
+func TestStore_observeMonotone(t *testing.T) {
+	t.Parallel()
+	store := newStore()
+	newer := version.PackVersion(testNowMs+10_000, 9, nodeB)
+	older := version.PackVersion(testNowMs+5_000, 0, nodeB)
+	store.Observe(newer)
+	store.Observe(older)
+	ver, _, err := store.Set("k", []byte("v"))
+	if err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if got := ver.Compare(newer); got != cmpNewer {
+		t.Fatalf("next Set version %x does not strictly beat the newer absorbed %x", ver[:], newer[:])
+	}
+}
+
+// TestStore_observeReturnsDrift pins the drift return to the RECEIVED
+// reading: the signal is the received stamp's lead against the wall clock at
+// the event, exactly like Merge's return (OBSV-05, D-02). An in-tolerance
+// observation returns zero, and a stamp beyond the drift-warn threshold
+// returns a positive drift on its FIRST observation — the signal depends on
+// the stamp, not on prior absorption — and stays positive on a repeat.
+func TestStore_observeReturnsDrift(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an in-tolerance version returns zero drift", func(t *testing.T) {
+		t.Parallel()
+		store := newStore()
+		_, _, err := store.Set("seat", []byte("seat"))
+		if err != nil {
+			t.Fatalf("seed Set() error = %v, want nil", err)
+		}
+		drift := store.Observe(version.PackVersion(testNowMs+1000, 0, nodeB))
+		if drift != 0 {
+			t.Fatalf("Observe() drift = %v, want 0 within tolerance", drift)
+		}
+	})
+
+	t.Run("a far-ahead version returns a positive drift on the first observation", func(t *testing.T) {
+		t.Parallel()
+		store := newStore()
+		_, _, err := store.Set("seat", []byte("seat"))
+		if err != nil {
+			t.Fatalf("seed Set() error = %v, want nil", err)
+		}
+		far := version.PackVersion(testNowMs+int64(testDriftWarn/time.Millisecond)+1000, 0, nodeB)
+		if drift := store.Observe(far); drift <= 0 {
+			t.Fatalf("first Observe(far) drift = %v, want a positive warning past the threshold", drift)
+		}
+		if drift := store.Observe(far); drift <= 0 {
+			t.Fatalf("repeat Observe(far) drift = %v, want a positive warning — the signal depends on the stamp", drift)
+		}
+	})
+}
+
+// TestStore_len covers the O(1) record count: a fresh store reads 0, every
+// install path adds one — Set, a successful SetIfAbsent, a winning Merge and
+// a Delete's tombstone — while a rejected SetIfAbsent, a missing-key Delete
+// and an equal-version Merge change nothing. Tombstones stay counted: Len is
+// the record count, not the live count, and it clones no Data (PROTO-02,
+// T-4-11).
+func TestStore_len(t *testing.T) {
+	t.Parallel()
+	store := newStore()
+	if got := store.Len(); got != 0 {
+		t.Fatalf("fresh store Len() = %d, want 0", got)
+	}
+	_, _, err := store.Set("live", []byte("v"))
+	if err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if got := store.Len(); got != 1 {
+		t.Fatalf("Len() after Set = %d, want 1", got)
+	}
+	_, _, err = store.SetIfAbsent("absent", []byte("v"))
+	if err != nil {
+		t.Fatalf("SetIfAbsent() error = %v, want nil", err)
+	}
+	if got := store.Len(); got != 2 {
+		t.Fatalf("Len() after successful SetIfAbsent = %d, want 2", got)
+	}
+	_, _, err = store.SetIfAbsent("live", []byte("dup"))
+	if !errors.Is(err, storage.ErrAlreadyExists) {
+		t.Fatalf("SetIfAbsent(existing) error = %v, want ErrAlreadyExists", err)
+	}
+	if got := store.Len(); got != 2 {
+		t.Fatalf("Len() after rejected SetIfAbsent = %d, want the unchanged 2", got)
+	}
+	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("m")})
+	if err != nil {
+		t.Fatalf("Merge() error = %v, want nil", err)
+	}
+	if got := store.Len(); got != 3 {
+		t.Fatalf("Len() after Merge install = %d, want 3", got)
+	}
+	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("x")})
+	if err != nil {
+		t.Fatalf("equal Merge() error = %v, want nil", err)
+	}
+	if got := store.Len(); got != 3 {
+		t.Fatalf("Len() after equal-version Merge = %d, want the unchanged 3", got)
+	}
+	_, _, err = store.Delete("live")
+	if err != nil {
+		t.Fatalf("Delete() error = %v, want nil", err)
+	}
+	if got := store.Len(); got != 3 {
+		t.Fatalf("Len() after Delete = %d, want 3 (the tombstone stays a record)", got)
+	}
+	_, _, err = store.Delete("missing")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Delete(missing) error = %v, want ErrNotFound", err)
+	}
+	if got := store.Len(); got != 3 {
+		t.Fatalf("Len() after missing-key Delete = %d, want the unchanged 3", got)
+	}
+}
+
+// TestStore_generationContentOnly pins the content-generation contract
+// (T-4-43): it moves by exactly one per record-changing install — Set, a
+// successful SetIfAbsent, a successful Delete and every winning Merge (a
+// content tie-break win included) all
+// converge on install — and stays put for a rejected SetIfAbsent, a
+// missing-key Delete, an equal-version loss, an identical redelivery, a
+// strictly older Merge, the clock-only Observe and
+// every read path. A call counter would move where this must not.
+func TestStore_generationContentOnly(t *testing.T) {
+	t.Parallel()
+	store := newStore()
+	requireGeneration(t, store, 0)
+
+	_, _, err := store.Set("k", []byte("v"))
+	if err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 1)
+
+	// Every read path leaves it unchanged.
+	_, err = store.Get("k")
+	if err != nil {
+		t.Fatalf("Get() error = %v, want nil", err)
+	}
+	_, _ = store.Version("k")
+	_, _ = store.Lookup("k")
+	_ = store.Versions()
+	_ = store.Records()
+	_ = store.Len()
+	requireGeneration(t, store, 1)
+
+	// A rejected SetIfAbsent installs nothing.
+	_, _, err = store.SetIfAbsent("k", []byte("dup"))
+	if !errors.Is(err, storage.ErrAlreadyExists) {
+		t.Fatalf("SetIfAbsent(existing) error = %v, want ErrAlreadyExists", err)
+	}
+	requireGeneration(t, store, 1)
+
+	// A successful SetIfAbsent is an install.
+	_, _, err = store.SetIfAbsent("created", []byte("v"))
+	if err != nil {
+		t.Fatalf("SetIfAbsent() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 2)
+
+	// Deleting a missing key burns no version and installs nothing.
+	_, _, err = store.Delete("missing")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Delete(missing) error = %v, want ErrNotFound", err)
+	}
+	requireGeneration(t, store, 2)
+
+	// A successful Delete installs its tombstone.
+	_, _, err = store.Delete("k")
+	if err != nil {
+		t.Fatalf("Delete() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 3)
+
+	// A merge into a missing key installs with no displacement.
+	stored := storage.Record{Version: version.PackVersion(mergeL, 0, nodeA), Data: []byte("a")}
+	_, _, err = store.Merge("merged", stored)
+	if err != nil {
+		t.Fatalf("Merge() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 4)
+
+	// An equal version with greater content wins and installs; an identical
+	// redelivery and an older merge are no-ops (PERSIST-07, ADR 0012).
+	_, _, err = store.Merge("merged", storage.Record{Version: stored.Version, Data: []byte("x")})
+	if err != nil {
+		t.Fatalf("equal Merge() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 5)
+	_, _, err = store.Merge("merged", storage.Record{Version: stored.Version, Data: []byte("x")})
+	if err != nil {
+		t.Fatalf("identical redelivery Merge() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 5)
+	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeL-1, 0, nodeB), Data: []byte("old")})
+	if err != nil {
+		t.Fatalf("older Merge() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 5)
+
+	// A strictly greater merge installs.
+	_, _, err = store.Merge("merged", storage.Record{Version: version.PackVersion(mergeLNext, 0, nodeB), Data: []byte("b")})
+	if err != nil {
+		t.Fatalf("greater Merge() error = %v, want nil", err)
+	}
+	requireGeneration(t, store, 6)
+
+	// Observe is clock-only: no record moves the generation.
+	store.Observe(version.PackVersion(testNowMs+10_000, 0, nodeB))
+	requireGeneration(t, store, 6)
+}
+
+// TestStorage_valueLimit pins the single-source value limit (PERSIST-01):
+// the exported constant is the documented 61 440 default, Config.ValueLimit
+// resolves both the zero case and an explicit configured limit, and a store
+// built from a positive Config reports that same effective limit through its
+// accessor. The literal in this package's constants is the pin; production
+// derives every use from storage.ValueMaxBytes.
+func TestStorage_valueLimit(t *testing.T) {
+	t.Parallel()
+	if got := storage.ValueMaxBytes; got != valueMax {
+		t.Errorf("storage.ValueMaxBytes = %d, want %d", got, valueMax)
+	}
+	if got := (storage.Config{}).ValueLimit(); got != valueMax {
+		t.Errorf("Config{}.ValueLimit() = %d, want %d", got, valueMax)
+	}
+	if got := (storage.Config{ValueMaxBytes: 8}).ValueLimit(); got != 8 {
+		t.Errorf("Config{ValueMaxBytes: 8}.ValueLimit() = %d, want 8", got)
+	}
+	store := storage.NewStore(testNodeID, clock.NewClock(fixedNow(), 0, 0, testDriftWarn), storage.Config{ValueMaxBytes: 8})
+	if got := store.ValueMaxBytes(); got != 8 {
+		t.Errorf("NewStore(ValueMaxBytes: 8).ValueMaxBytes() = %d, want 8", got)
+	}
 }

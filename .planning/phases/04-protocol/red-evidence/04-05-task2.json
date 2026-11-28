@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/app/repl/ -v -run '^TestReplication_staleAnsweredNotAcked$'",
+  "exitCode": 1,
+  "output": "=== RUN   TestReplication_staleAnsweredNotAcked\n=== PAUSE TestReplication_staleAnsweredNotAcked\n=== CONT  TestReplication_staleAnsweredNotAcked\n    retransmit_test.go:1306: the stale DataReplication emitted 1 messages directly, want 0 — the answer queues\n--- FAIL: TestReplication_staleAnsweredNotAcked (0.00s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/app/repl\t0.008s\nFAIL",
+  "targetTest": "TestReplication_staleAnsweredNotAcked",
+  "targetFile": "internal/app/repl/retransmit_test.go",
+  "expected": "A held k@v5 receiving k@v3 answers with exactly one queued unicast DataReplication carrying v5, emits no Ack, leaves the store unmerged and the tracking ledger untouched.",
+  "actual": "applyRemote emitted 1 message directly — the Ack for the stale datagram — instead of queueing a reply; no newer record was answered.",
+  "semanticAssessment": "The target test executed and failed on its planned assertion: the stale DataReplication was acknowledged instead of answered. The sibling integration test TestWaitIntegration_staleRecordNotAcked independently failed pre-fix with acked=true 1/1 on the real adapter pair, confirming the same defect end to end. No build, fixture or discovery failure and no unrelated test failure."
+}

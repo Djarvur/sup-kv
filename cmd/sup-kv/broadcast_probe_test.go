@@ -28,7 +28,23 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Djarvur/sup-kv/internal/testutil"
 )
+
+// scenarioUDPPort returns one free UDP port from cmd/sup-kv's band inside
+// the private port window (testutil.CmdBand: [29100, 30100), strictly below
+// the kernel's ephemeral range, so no other test's :0 bind is ever issued
+// there). The band sits above the [27900, 28100) reserve held for the fixed
+// documented ports of README.md and docs/EXAMPLES.md, so a probe pick stays
+// collision-free against the verbatim doc tests. The shared allocator claims
+// the candidate while its bind probe is held, so a parallel probe sibling
+// cannot take the port between pick and bind (the T-11 flake-class-1
+// mitigation; the stand's scenarios run in their own disjoint band).
+func scenarioUDPPort(t *testing.T) int {
+	t.Helper()
+	return testutil.UDPPort(t, testutil.CmdBand())
+}
 
 // probeAttempts bounds the fresh-port retries when a probe cannot even
 // bind: an off-suite holder in the private window is a pick-to-bind race,
@@ -37,8 +53,9 @@ import (
 const probeAttempts = 5
 
 // probeSendBroadcast probes whether ONE datagram sent to dstIP:dstPort
-// reaches a socket bound to 0.0.0.0:dstPort — probeLoopbackSend generalized
-// over the destination address. The two failure classes stay distinct so
+// reaches a socket bound to 0.0.0.0:dstPort — internal/stand's
+// probeLoopbackSend generalized over the destination address. The two
+// failure classes stay distinct so
 // the caller can act: not reached within the bounded read deadline (the
 // platform lacks the fan-out — a capability result), versus a sendErr (a
 // bind or send failure — a probe error, retried on a fresh port).

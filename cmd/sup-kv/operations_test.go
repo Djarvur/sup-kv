@@ -13,6 +13,7 @@ package main_test
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,32 @@ const operationsDocPath = "../../docs/OPERATIONS.md"
 // reflection disclosure beside the trust model, monitoring knobs, lifecycle
 // and exit codes). Each literal is chosen from the authored doc's own
 // wording — renaming a heading or dropping a knob breaks the guard loudly.
+//
+// The Phase 5 persistence rows pin the behavior this phase shipped: the
+// load-outcomes section (## Load outcomes), the memory-model section
+// (## Memory model), the preserved evidence naming (.corrupt-), the
+// preservation-failure signal (preserve_error), the orphan-temp marker
+// (.tmp~, the sweep's only selection key), the retry ladder's cap
+// (5 s cap) and the health statement (SERVING under a persistent dump
+// failure), plus the four new metric families pinned row by row.
+// TestOperationsDocFamilies cross-checks those family names against the
+// exporter, so the doc cannot document a family that does not exist.
+//
+// The Phase 7 rows pin the as-built operator contract (07-10): the lifecycle
+// catalog (## Lifecycle logs) with one message literal per entry, the 0/1/2/3
+// exit table, the reachable drift direction (received version leads), the
+// startup drift_warn/max_clock_lead relation, the four routed core counters,
+// the unbound_listing label and the current-RSS definition.
+//
+// The Phase 9 rows (09-05) pin the completed operator reference: the failure
+// table's section heading, the seven runbook titles, the metrics reference
+// and log catalog headings, the honest no-metric cell, the conditional
+// datagram-loss bound (M-06 — the unconditional sentence is forbidden
+// below), the three trust-model absences (M-15), the two proven-claim sites'
+// named tests (M-05) and the CONFIGURATION.md pointer (M-07). The metrics
+// reference, the log catalog and the failure table's evidence columns carry
+// their own two-directional machine checks in metrics_catalog_test.go; these
+// anchors pin the mandated facts those checks do not.
 var operationsAnchors = []struct {
 	literal string
 	pins    string
@@ -44,7 +71,7 @@ var operationsAnchors = []struct {
 	{"sync_interval", "REPL-10 partition-heal bound component (2 × sync_interval + response)"},
 	{"## Scale envelope", "the scale-envelope section"},
 	{"60 KiB", "the value envelope in human units"},
-	{"61440", "the envelope constant exactly as the code carries it (defaultValueMaxBytes)"},
+	{"61440", "the envelope constant exactly as the code carries it (storage.ValueMaxBytes)"},
 	{"--value-max-bytes", "the flag that tunes the envelope"},
 	{"SUPKV_VALUE_MAX_BYTES", "the envelope flag's env twin"},
 	{"InvalidArgument", "larger values are rejected with InvalidArgument"},
@@ -65,14 +92,78 @@ var operationsAnchors = []struct {
 	{"/metrics", "the Prometheus text endpoint"},
 	{"/debug/vars", "the expvar endpoint"},
 	{"SUPKV_METRICS_CERT", "the env-only mTLS certificate triple"},
+	{"## Lifecycle logs", "the lifecycle-catalog section heading — one record per catalog entry at its documented level"},
+	{"Starting sup-kv", "the startup INFO record's message"},
+	{"Dump load", "the load-outcome INFO record's message (prompt/main)"},
+	{"Startup gate opened", "the gate INFO record's message — reason sync or backstop"},
+	{"Peer restarted", "the peer-restart WARN record's message"},
+	{"Clock drift", "the drift WARN record's message"},
 	{"## Lifecycle and exit codes", "the lifecycle/exit-codes section"},
 	{"SIGTERM", "the graceful-shutdown trigger"},
 	{"exit code 0", "clean shutdown: final dump confirmed on disk"},
-	{"exit code 1", "failed final dump (Restart=on-failure reacts)"},
+	{"exit code 1", "startup failure or Serve error (Restart=on-failure reacts; a Serve error still runs the bounded final dump)"},
 	{"exit code 2", "malformed configuration"},
+	{"exit code 3", "a failed final dump, including on the Serve-error path"},
 	{"Restart=on-failure", "the systemd reaction to exit code 1"},
+	{"received version leads", "the drift condition's only direction — a received version ahead of local wall time (OBSV-05)"},
+	{"drift_warn < max_clock_lead", "the startup relation that keeps the drift warning reachable"},
+	{"unbound_listing", "the unbound-listing discard class in the complete catalog"},
+	{"supkv_replication_listings_dropped_total", "the routed listing-drop counter (Phase 4 deferral)"},
+	{"supkv_replication_sync_streams_dropped_total", "the routed partial-DataSync-stream counter (Phase 4 deferral)"},
+	{"supkv_replication_listed_keys_evicted_total", "the routed listed-key eviction counter (Phase 4 deferral)"},
+	{"supkv_replication_notifications_regressed_total", "the routed regressed-notification counter (Phase 4 deferral)"},
+	{"current resident set size", "process_resident_memory_bytes reports the current RSS on Linux, not the peak"},
 	{"SUPKV_LOG_LEVEL", "the structured-logging level knob"},
 	{"SUPKV_LOG_FORMAT", "the structured-logging format knob (JSON default)"},
+	{"## Load outcomes", "the load-outcomes section heading — Prompt/Main/Backup/Unusable and the one-WARN/one-ERROR rule"},
+	{"## Memory model", "the memory-model section heading — one copy plus one record line plus the 64 KiB writer"},
+	{".corrupt-", "the preserved evidence naming — never rotated, never auto-deleted, removed only by an operator after inspection"},
+	{"preserve_error", "the preservation-failure hazard signal — non-empty means the corrupt generation may still be at main"},
+	{".tmp~", "the hidden orphan-temp marker — the startup sweep's only selection key, age-bounded at one hour"},
+	{"5 s cap", "the dump retry ladder's cap after doubling from 100 ms"},
+	{"SERVING", "health stays SERVING under a persistent dump failure"},
+	{"supkv_dump_load_total", "the startup load-outcome family — all four outcome labels render, at zero when unseen"},
+	{"supkv_dump_records_discarded_total", "the load-time discard family — checksum/version/value_limit/malformed labels"},
+	{"supkv_dumps_failures_total", "the dump failure-class family — disk_full/permission/other labels"},
+	{"supkv_dumps_unconfirmed_total", "the unconfirmed-write counter — a confirmation timeout is not a dump error"},
+	// The Phase 9 (09-05) rows: the completed operator reference.
+	{"## Failure behaviour", "the Spec's 18-row failure-behavior table — S-FAIL-01..18 keyed in registry order by TestOperationsFailureTable"},
+	{"## Runbook: dump failure and full disk", "runbook 2 of 8 — the dump-failure/full-disk runbook in the clock-drift shape"},
+	{"## Runbook: missing peer", "runbook 3 of 8 — the peer-timeout eviction runbook"},
+	{"## Runbook: growing unconfirmed set", "runbook 4 of 8 — the unacked-backlog runbook"},
+	{"## Runbook: write conflict", "runbook 5 of 8 — the merges_conflicts_total runbook"},
+	{"## Runbook: incompatible versions", "runbook 6 of 8 — the bad_proto_version runbook"},
+	{"## Runbook: corrupted dump", "runbook 7 of 8 — the .corrupt-/load-outcome runbook"},
+	{"## Runbook: duplicate node_id", "runbook 8 of 8 — the duplicate_node_id runbook (clock drift remains the first)"},
+	{"## Metrics reference", "the typed metrics reference — checked against metrics.Snapshot in both directions by TestMetricsReferenceCatalog"},
+	{"## Log-message catalog", "the complete literal level matrix — checked against main.go's call sites by TestOperationsLogCatalog"},
+	{"none — log only", "the honest no-metric cell — the table never invents a metric to fill a cell"},
+	{"delivery opportunity falls inside the ladder's window", "the M-06 conditional datagram-loss bound — recovery is bounded by the ladder, not unconditionally by ack_timeout_max"},
+	{"partition-heal bound's territory", "the M-06 clause naming where sustained loss is bounded instead"},
+	{"no authorization", "the second of the three absences the trust model states together (M-15)"},
+	{"no transport security", "the third absence (M-15) — plaintext wire and gRPC listener"},
+	{"the only TLS surface", "the optional metrics-endpoint mTLS triple is the only TLS surface (M-15)"},
+	{"TestBound_lossWithinAckTimeoutMax", "M-05: the datagram-loss bound's named test at the first proven-claim site"},
+	{"TestScenario_farAhead", "M-05: the far-ahead drift claim's named test at the second proven-claim site"},
+	{"docs/CONFIGURATION.md", "the M-07 pointer from the one-point validation prose to the flag reference"},
+}
+
+// operationsForbidden pins the claims this phase's corrections removed: a
+// failed final dump does not exit 1, and a Main load is not silent — the one
+// INFO "Dump load" record carries the outcome. The entries are matched
+// against a whitespace-normalized document (line wrapping in the source is
+// not a way to keep a stale sentence alive), which is why the doc is
+// normalized the same way in the test.
+var operationsForbidden = []struct {
+	phrase string
+	why    string
+}{
+	{"Nothing is logged about the outcome itself", "the Main load now logs one INFO `Dump load` record carrying outcome=main"},
+	{"failed-final-dump exit code 1", "a failed final dump exits with code 3; exit code 1 means startup or a Serve error"},
+	{"dump open", "a dump-path/load problem is a load outcome, not a fatal startup stage — the node starts, and a failed final dump exits 3"},
+	// 09-05 (M-06): the unconditional bound sentence the conditional wording
+	// replaced — recovery is bounded by the ladder's window only.
+	{"bounds recovery at `ack_timeout_max` (default 5s)", "the unconditional M-06 sentence 09-05 replaced — sustained loss past the ladder's window is the partition-heal bound's territory"},
 }
 
 // TestOperationsDoc is the DOCS-02 drift guard: docs/OPERATIONS.md must
@@ -98,6 +189,53 @@ func TestOperationsDoc(t *testing.T) {
 	for _, a := range operationsAnchors {
 		if !strings.Contains(doc, a.literal) {
 			t.Fatalf("%s does not contain %q — %s", operationsDocPath, a.literal, a.pins)
+		}
+	}
+	// The stale-sentence guard compares normalized text on both sides: the
+	// doc wraps its paragraphs, so a raw substring search over the authored
+	// wording would pass vacuously for a phrase split across a line break.
+	normalized := strings.Join(strings.Fields(doc), " ")
+	for _, f := range operationsForbidden {
+		phrase := strings.Join(strings.Fields(f.phrase), " ")
+		if strings.Contains(normalized, phrase) {
+			t.Fatalf("%s still contains the stale claim %q — %s", operationsDocPath, f.phrase, f.why)
+		}
+	}
+}
+
+// metricsSourcePath is the exporter source whose declared family names the
+// doc's family list must match — the API the runbook promises an operator,
+// not a rendered sample.
+const metricsSourcePath = "../../internal/metrics/metrics.go"
+
+// supkvFamilyPattern matches one supkv_ family name in the runbook. The
+// doc's own spelling drives the cross-check: whatever family it names must
+// be grep-present in the exporter.
+var supkvFamilyPattern = regexp.MustCompile(`supkv_[a-z][a-z0-9_]*`)
+
+// TestOperationsDocFamilies is the exporter cross-check (T-5-31's
+// documented-name half): every supkv_ family the runbook names must appear
+// in internal/metrics/metrics.go, so a documented family that does not
+// exist cannot send an operator to an empty graph. It is a presence check,
+// not a truth claim: the values, labels and semantics stay
+// TestOperationsDoc's and the phase's manual UAT's.
+func TestOperationsDocFamilies(t *testing.T) {
+	t.Parallel()
+	doc, err := os.ReadFile(operationsDocPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", operationsDocPath, err)
+	}
+	exporter, err := os.ReadFile(metricsSourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", metricsSourcePath, err)
+	}
+	names := supkvFamilyPattern.FindAllString(string(doc), -1)
+	if len(names) == 0 {
+		t.Fatalf("%s names no supkv_ family — the cross-check would pass vacuously", operationsDocPath)
+	}
+	for _, name := range names {
+		if !strings.Contains(string(exporter), name) {
+			t.Errorf("%s documents %s, which internal/metrics/metrics.go does not declare", operationsDocPath, name)
 		}
 	}
 }

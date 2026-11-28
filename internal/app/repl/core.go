@@ -15,10 +15,15 @@ package repl
 
 import (
 	"bytes"
+	"container/heap"
+	"container/list"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Djarvur/sup-kv/internal/app/storage"
@@ -28,8 +33,25 @@ import (
 
 // SupportedProtoVersion is the wire protocol version this core speaks: the
 // envelope version of every datagram it emits, and any inbound datagram
-// whose version differs is discarded as BadProtoVersion (REPL-09).
-const SupportedProtoVersion = 1
+// whose version differs is discarded as BadProtoVersion (REPL-09). Version 2
+// carries the DataSync completeness header (sync_id, chunk_index,
+// chunk_count): a version-1 listing cannot express completeness, so accepting
+// it would restore the first-chunk reading this version removes (PROTO-01).
+const SupportedProtoVersion = 2
+
+// MaxSyncChunkBytes is the largest accepted Config.SyncChunkBytes budget: the
+// IPv4 UDP payload ceiling — 65 535 bytes less the 20-byte IP header and the
+// 8-byte UDP header — the same value as udprepl.MaxDatagramBytes (the
+// udprepl cross-seam test pins the two constants together). The chunk
+// budget's contract is that a budgeted chunk's real encoded datagram is at
+// most SyncChunkBytes (see entryOverheadBytes and chunkOverheadBytes), so a
+// budget above this ceiling describes a chunk no datagram can carry; worse,
+// the listing build now caches its chunks for the build's lifetime, so an
+// unlimited budget pre-allocated from the byte budget would pin its oversized
+// first chunk for the whole cache age instead of releasing it as transient
+// garbage (WR-06). [Config.normalized] clamps to this value and
+// cmd/sup-kv rejects an explicit out-of-range flag before any bind.
+const MaxSyncChunkBytes = 65507
 
 // The discard class tokens passed to [Config.OnDiscard] (D-08): stable
 // first-class strings — one per DiscardStats counter — that the
@@ -42,6 +64,48 @@ const (
 	DiscardBadProtoVersion = "bad_proto_version"
 	DiscardOwnBroadcast    = "own_broadcast"
 	DiscardDuplicateNodeID = "duplicate_node_id"
+
+	// DiscardUnboundListing is the retained-listing binding's own class
+	// (CR-01, Phase-4 review New-2): a listing from a sender identity the
+	// peer table does not hold — or whose envelope run_id differs from the
+	// row's — is not a duplicate identity but a listing that may legitimately
+	// have overtaken its Hello, so it gets its own operator story rather than
+	// masquerading as duplicate_node_id. The drop itself is unchanged: it is
+	// counted, WARNed through the shared limiter and taken before the clock
+	// call, the accumulation and the completeness publication.
+	DiscardUnboundListing = "unbound_listing"
+
+	// DiscardEmptyKey and its four siblings below are the wire-validation
+	// classes (XPORT-03, XPORT-04, XPORT-10, D-06), in the pinned
+	// intra-message order [Core.validate] applies: a datagram carrying any
+	// one of them is discarded before [Core.handleMessage], so no store
+	// write, no clock call and no timer ever observes it.
+	DiscardEmptyKey          = "empty_key"
+	DiscardKeyTooLong        = "key_too_long"
+	DiscardTombstoneWithData = "tombstone_with_data"
+	DiscardBadChecksum       = "bad_checksum"
+	DiscardBadVersion        = "bad_version"
+
+	// DiscardBadSyncHeader is the DataSync header class (PROTO-01, T-4-02):
+	// a listing part whose chunk_count/chunk_index pair is outside its domain
+	// — count 0, an index outside 1..count, a count above the stream cap, or
+	// a count disagreeing with the live round — is discarded before any
+	// accumulation, clock call or entry comparison.
+	DiscardBadSyncHeader = "bad_sync_header"
+
+	// warnClassApplyFailure is the shared limiter's class token for a failed
+	// replicated-record apply (Phase-3 IN-01, T-07-17): it is not a discard
+	// class (nothing is discarded at the framing level and no DiscardStats
+	// counter moves), but it rides the same per-(node_id, class) limiter so a
+	// peer whose records always fail to apply cannot flood the log.
+	warnClassApplyFailure = "apply_failure"
+
+	// warnClassClockDrift is the shared limiter's class token for a received
+	// version leading local wall time beyond drift_warn (D-02, T-07-22): the
+	// MergeStats counter stays per offending record, while the WARN (or the
+	// OnDrift event) is admitted once per peer per interval so a peer
+	// flooding leading versions cannot flood the log.
+	warnClassClockDrift = "clock_drift"
 )
 
 // Design defaults a zero or negative Config field is normalized to, from
@@ -56,14 +120,128 @@ const (
 	defaultSyncChunkBytes     = 1400
 	defaultSyncResponseRate   = 500
 
-	// maxSyncResponseRate is the top of SyncResponseRate's valid domain.
+	// defaultMaxClockLead is the inbound version bound's design default
+	// (XPORT-04, D-06): strictly greater than drift_warn's 60 s default, so
+	// the drift WARN window is reachable — a received version may lead system
+	// time by more than drift_warn and still be accepted, while a crafted
+	// far-future version is rejected before any store or clock call. A
+	// Config.MaxClockLead of zero or less is normalized to this value.
+	defaultMaxClockLead = 2 * time.Minute
+
+	// discardWarnInterval is the per-class rate limit of the validation
+	// WARNs (T-3-25): one WARN per class per this much event-loop time.
+	// Driven by the handler's now, never a wall clock read.
+	discardWarnInterval = 10 * time.Second
+
+	// MaxSyncResponseRate is the top of SyncResponseRate's valid domain.
 	// At any rate above it, one second divided by the rate as a
 	// [time.Duration] truncates to a zero interval and silently disables
 	// the egress limiter (D-15 P4-WR-02), so normalized() clamps every
 	// out-of-domain rate — zero, negative or above this cap — to
 	// defaultSyncResponseRate: the floor(1s/rate) spacing stays non-zero
-	// at every configuration, and the limiter is never silently off.
-	maxSyncResponseRate = 1e9
+	// at every configuration, and the limiter is never silently off. The
+	// configuration validation rejects a rate above it before any bind,
+	// reading this constant instead of duplicating the literal.
+	MaxSyncResponseRate int = 1e9
+
+	// maxEgressEntries bounds the reactive-unicast egress queue (XPORT-07,
+	// RESEARCH Pattern 9): twice the documented 20 000-key scale plus
+	// headroom. An overflow drops the OLDEST queued answer together with its
+	// dedupe identity (T-3-21), and the drop is counted in EgressDropped.
+	maxEgressEntries = 32768
+
+	// maxListingDestinations bounds the in-flight TARGETED listing
+	// destinations — the concurrent first-seen and restart FIFOs (CR-01,
+	// T-4-23). One FIFO per known peer is the healthy shape; a hostile
+	// segment can claim at most this many distinct (node_id, run_id)
+	// identities, and every further trigger is refused and counted instead of
+	// minting a queue entry (the destination is never the datagram's source
+	// handle, so a spoofed port buys nothing, T-4-25). The value leaves room
+	// for a 32-node segment. The periodic broadcast round is NOT subject to
+	// this bound: it reserves its own FIFO and chunk work (WR-01), so no
+	// volume of targeted triggers can refuse the only listing every peer
+	// receives.
+	maxListingDestinations = 32
+
+	// maxListingChunks bounds the total queued listing chunk work across every
+	// destination (CR-01, T-4-23, WR-01): one full worst-case round for each
+	// targeted destination PLUS the reserved broadcast round. The count is
+	// virtual — every FIFO holds one pointer to the shared build (CR-01), so a
+	// full queue costs one build plus O(destinations) bookkeeping, never
+	// per-chunk memory. Sizing it as (destinations+1) × the receiver's
+	// chunk ceiling is what makes the destination cap, not this bound, the
+	// binding limit for any round a receiver will accept (chunk_count must be
+	// at or under maxSyncChunks, T-4-02): a documented-scale round can no
+	// longer be refused because other destinations filled a smaller pool. A
+	// trigger that would cross the bound is refused whole — never partially
+	// enqueued — counted, and (for a targeted first-seen/restart trigger)
+	// re-armed for a later Advance (WR-01).
+	maxListingChunks = (maxListingDestinations + 1) * maxSyncChunks
+
+	// maxSyncStreams bounds the partial-listing accumulator: a peer may send
+	// many distinct sync_ids with missing chunks, so the number of retained
+	// streams is capped and an overflow evicts the least-progressed stream
+	// deterministically (T-4-03). The cap is deliberately small: a healthy
+	// segment has one in-flight round per peer plus transient stragglers.
+	maxSyncStreams = 16
+
+	// maxSyncEntriesPerStream bounds one stream's accumulated key→version
+	// entries (T-4-03). A stream beyond it is dropped whole, so a single
+	// hostile round cannot fill memory before the total cap reacts.
+	maxSyncEntriesPerStream = 65536
+
+	// maxSyncEntriesTotal bounds the accumulator's total retained entries
+	// across every stream — the in-flight entry cap, matching
+	// maxListedKeysTotal below. Overflow evicts whole streams, least
+	// progressed first, and counts each eviction (T-4-03).
+	maxSyncEntriesTotal = 131072
+
+	// maxSyncChunks bounds the accepted chunk_count (T-4-02): sized for a
+	// worst-case 20 000-key round at one entry per chunk, with headroom. A
+	// header above it is a bad_sync_header violation, never accumulated
+	// state.
+	maxSyncChunks = 65536
+
+	// syncStreamGotHint caps the chunk-index map's initial capacity hint
+	// (WR-05): the map grows as chunks actually arrive, and those arrivals are
+	// bounded by the entry caps, so a claimed chunk_count must never
+	// pre-allocate a map the datagram can never fill. Eight slots cover the
+	// chunks a healthy round delivers before the map's own growth takes over.
+	syncStreamGotHint = 8
+
+	// maxListedKeysTotal bounds the retained per-peer listed-key payload —
+	// the union's size, coincidentally equal to maxSyncEntriesTotal because
+	// both model the same 20 000-key scale with headroom (T-4-41). An
+	// overflow evicts whole peer sets in LRU order, so the union, the
+	// refcounts and the retained total shrink together; each released key is
+	// counted in ListedKeysEvicted.
+	maxListedKeysTotal = 131072
+
+	// listedKeysMaxAgeSyncIntervals is the retained-listing lifetime, in sync
+	// intervals (CR-01): a peer that has not republished its complete listing
+	// for this many intervals stops protecting keys. Two intervals tolerate
+	// one lost round without widening the exposure window further.
+	listedKeysMaxAgeSyncIntervals = 2
+
+	// seenRunsCap bounds the per-peer history of previously current run_ids
+	// (PROTO-06, T-4-30): a fixed ring behind the alternating-identity
+	// discrimination, so a hostile flapping identity cannot grow per-peer
+	// memory without bound. When the ring wraps, the oldest entry is forgotten
+	// and an ancient run_id is treated as a restart again — documented,
+	// bounded behavior rather than unbounded memory.
+	seenRunsCap = 8
+
+	// jitterDivisor is the jitter envelope's denominator: timer jitter spans
+	// a tenth of the interval (positive-only), pacer jitter a tenth of the
+	// spacing (±).
+	jitterDivisor = 10
+
+	// Deterministic jitter salts: one per call site, so the three independent
+	// jitter streams never alias and a same-seed replay stays byte-identical
+	// (T-3-22).
+	helloJitterSalt   = 0x9e37_79b9_7f4a_7c15
+	syncJitterSalt    = 0xbf58_476d_1ce4_e5b9
+	spacingJitterSalt = 0x94d0_49bb_1331_11eb
 
 	// backoffGrowth is the retransmission ladder's doubling factor: each
 	// retry doubles the previous delay from ack_timeout up to the
@@ -88,11 +266,13 @@ const (
 
 	// chunkOverheadBytes is the conservative fixed per-chunk estimate: the
 	// envelope fields (proto_version, node_id, run_id, crc32 and the body's
-	// tag plus length varint), the Body oneof wrapper and the DataSync
-	// repeated-field framing — roughly 45-50 bytes on the real wire. The
-	// stated guarantee of the two constants together: the real encoded
-	// datagram for any budgeted chunk is at most SyncChunkBytes.
-	chunkOverheadBytes = 64
+	// tag plus length varint), the Body oneof wrapper, the DataSync
+	// repeated-field framing and the completeness header (sync_id,
+	// chunk_index, chunk_count — roughly 60-70 bytes on the real wire with
+	// their field tags and a multi-byte sync_id). The stated guarantee of the
+	// two constants together: the real encoded datagram for any budgeted
+	// chunk is at most SyncChunkBytes.
+	chunkOverheadBytes = 96
 )
 
 // Config holds the replication timing parameters; it is immutable once
@@ -103,11 +283,13 @@ const (
 // reading of IDEA.md's parameter list, research A5); the per-key backoff
 // ladder itself doubles from AckTimeout and saturates at AckTimeoutMax —
 // documented with every step at Core.scanRetransmit. SyncResponseRate paces
-// the egress queue: responses are spaced floor(1s/SyncResponseRate)
-// nanoseconds apart by integer division (probe #16), the first response
-// immediate. Rates outside the domain (0, 1e9] clamp to the 500/s default —
+// the three outbound streams: the egress queue, the listing queue and the
+// record-send queue are each spaced floor(1s/SyncResponseRate)
+// nanoseconds apart by integer division (probe #16); the first response
+// after an idle queue is immediate. Rates outside the domain (0, 1e9] clamp
+// to the 500/s default —
 // above 1e9 the integer division truncates to a zero interval and would
-// silently disable the limiter (D-15 P4-WR-02, the maxSyncResponseRate cap).
+// silently disable the limiter (D-15 P4-WR-02, the MaxSyncResponseRate cap).
 type Config struct {
 	HelloInterval      time.Duration
 	PeerTimeout        time.Duration
@@ -119,19 +301,48 @@ type Config struct {
 	SyncResponseRate   int
 	Log                func(msg string)
 
+	// MaxClockLead bounds how far ahead of the handler's now a received
+	// record version's unix_ts_ms reading may lie (XPORT-04, D-06): a
+	// version beyond now+MaxClockLead is discarded as DiscardBadVersion
+	// before any store or clock call, so a crafted far-future stamp can
+	// never poison the hybrid logical clock. A zero or negative value
+	// normalizes to defaultMaxClockLead (2 m) — the default is strictly
+	// above drift_warn's 60 s, so the drift WARN window is reachable; a
+	// scenario that legitimately needs more (a far-ahead clock under test)
+	// sets its own explicit value, and the production default is never
+	// widened for tests.
+	MaxClockLead time.Duration
+
 	// OnDiscard is invoked at every HandleDatagram discard site with the
 	// class token (DiscardBadCRC, ...) and a short metadata detail — the
 	// source handle, the offending node id (D-08). Additive to Log: the
-	// duplicate-node_id configuration errors keep their Log call, and the
-	// core itself stays silent (D-09) — this is a plain callback the
-	// adapter or main side may bridge into structured logging or counters;
-	// the class is a first-class value, never a message prefix to parse.
+	// duplicate-node_id and unbound_listing configuration WARNs keep their
+	// Log call, and the core itself stays silent (D-09) — this is a plain
+	// callback the adapter or main side may bridge into structured logging
+	// or counters; the class is a first-class value, never a message prefix
+	// to parse.
 	OnDiscard func(class, detail string)
+
+	// OnPeerEvent receives every peer-table lifecycle transition (D-01,
+	// OBSV-01) — appear, restart and eviction — as one typed [PeerEvent].
+	// The callback runs on the single driver goroutine and must return
+	// immediately. Nil is valid: no event is emitted and the peer table
+	// behaves identically, so tests and single-purpose harnesses need no
+	// renderer.
+	OnPeerEvent func(PeerEvent)
+
+	// OnDrift receives clock-drift warnings (D-01, D-02, OBSV-05) once the
+	// shared per-(node_id, clock_drift) limiter has admitted the warning:
+	// the MergeStats counter stays per offending record while repeated
+	// warnings inside the interval are suppressed (T-07-22). Nil falls back
+	// to the prebuilt Log string, so a harness that captures only Log keeps
+	// observing drift without wiring this seam.
+	OnDrift func(DriftEvent)
 }
 
 // normalized returns cfg with out-of-domain fields replaced by the design
 // defaults — zero or negative everywhere, and SyncResponseRate additionally
-// above maxSyncResponseRate, where the spacing division would truncate to
+// above MaxSyncResponseRate, where the spacing division would truncate to
 // zero (D-15 P4-WR-02) — and a nil Log or OnDiscard replaced by a no-op.
 func (c Config) normalized() Config {
 	if c.HelloInterval <= 0 {
@@ -155,8 +366,17 @@ func (c Config) normalized() Config {
 	if c.SyncChunkBytes <= 0 {
 		c.SyncChunkBytes = defaultSyncChunkBytes
 	}
-	if c.SyncResponseRate <= 0 || c.SyncResponseRate > maxSyncResponseRate {
+	if c.SyncChunkBytes > MaxSyncChunkBytes {
+		// A budget above the datagram ceiling describes a chunk no datagram can
+		// carry, and the cached listing build would pin the oversized
+		// allocation for its whole age (WR-06).
+		c.SyncChunkBytes = MaxSyncChunkBytes
+	}
+	if c.SyncResponseRate <= 0 || c.SyncResponseRate > MaxSyncResponseRate {
 		c.SyncResponseRate = defaultSyncResponseRate
+	}
+	if c.MaxClockLead <= 0 {
+		c.MaxClockLead = defaultMaxClockLead
 	}
 	if c.Log == nil {
 		c.Log = func(_ string) {}
@@ -168,22 +388,52 @@ func (c Config) normalized() Config {
 }
 
 // StateStore is the record source the replication core consumes: remote
-// records join the store through ApplyRemote and the sync paths read the
-// full snapshot through Records. The concrete engine (internal/app/persist
+// records join the store through ApplyRemote, and the sync paths read the
+// tombstone-visible view — one version probe per listing entry, one point
+// read per reply, and the shallow version map for building listings. The
+// old whole-store snapshot method is deliberately absent: no sync path has a
+// legitimate use for it, and its removal makes the O(store)-per-datagram
+// cost compile-impossible (XPORT-06). The concrete engine (internal/app/persist
 // wrapping storage.Store — its ApplyRemote is the remote-apply seam plan
 // 04-06 shipped) and tests adapting storage.Store through a Merge-delegating
-// wrapper both satisfy it. Declared
-// consumer-side here, per the storage.Clock precedent — internal/port holds
-// no interfaces.
+// wrapper both satisfy it. Declared consumer-side here, per the
+// storage.Clock precedent: the core consumes the interface without importing
+// the concrete engine — the port interfaces (DumpStore, Message) live in
+// internal/port.
 type StateStore interface {
 	// ApplyRemote joins rec under key by the store's LWW merge and reports
 	// the displaced versions and the clock drift, exactly like a local
 	// write's bookkeeping but triggered by replication.
 	ApplyRemote(key string, rec storage.Record) ([]storage.Conflict, time.Duration, error)
 
-	// Records returns a full snapshot of the map, tombstones included,
-	// with Data defensively copied — the DataSync compare source.
-	Records() map[string]storage.Record
+	// Version returns the stored version for key — tombstones included — and
+	// false when the key holds no record. One lock-protected map lookup and
+	// no Data copy: the per-entry probe a DataSync comparison takes.
+	Version(key string) (version.RecordVersion, bool)
+
+	// Lookup returns a copy of the stored record for key, tombstones
+	// included. This is the drain-time exact-record source for every queued
+	// DataReplication answer (a DataRequest reply or a strictly-newer DataSync
+	// or stale-record response), so no producer needs a value copy before the
+	// egress dedupe check (CR-02).
+	Lookup(key string) (storage.Record, bool)
+
+	// Versions returns a fresh map from every key — tombstones included — to
+	// its stored version, copying no Data: the DataSync listing source.
+	Versions() map[string]version.RecordVersion
+
+	// Observe absorbs one received version into the store's clock without
+	// touching any record: the per-DataSync-part HLC update (PROTO-01), so
+	// the next local write beats it. A positive return is a received lead past
+	// drift_warn: handleDataSync counts it once per part in MergeStats.DriftWarnings
+	// and reports it through OnDrift/Log under the shared limiter (OBSV-05).
+	Observe(ver version.RecordVersion) (drift time.Duration)
+
+	// Generation returns the store's monotone content generation: it moves
+	// only when a stored record actually changed and never for a rejected or
+	// read path. A listing build records it and is reused only while it is
+	// unchanged (04-08, T-4-43).
+	Generation() uint64
 }
 
 // NewRunID returns a fresh per-process-start run identifier: 16 random
@@ -208,15 +458,46 @@ type DiscardStats struct {
 	BadProtoVersion uint64
 	OwnEcho         uint64
 	DuplicateNodeID uint64
+
+	// UnboundListing covers the retained-listing binding (CR-01, D-04's
+	// New-2): a DataSync whose node_id has no live peer-table row, or whose
+	// envelope run_id differs from the row's, is discarded before any
+	// retention, completeness or entry comparison. It is separate from
+	// DuplicateNodeID — an unbound listing is not an identity collision, and
+	// the two stories have different operator remedies.
+	UnboundListing uint64
+
+	// The wire-validation classes (XPORT-03, XPORT-04, XPORT-10): one
+	// counter per rejection [Core.validate] produces. EmptyKey and
+	// KeyTooLong cover the key domain of DataReplication, DataRequest, Ack
+	// and every DataSync entry; TombstoneWithData, BadChecksum and
+	// BadVersion apply to DataReplication records (and BadVersion to
+	// DataSync entry versions too).
+	EmptyKey          uint64
+	KeyTooLong        uint64
+	TombstoneWithData uint64
+	BadChecksum       uint64
+	BadVersion        uint64
+
+	// BadSyncHeader covers the DataSync completeness header's domain
+	// (PROTO-01): a part outside chunk_count>=1, 1<=chunk_index<=count,
+	// count<=maxSyncChunks, or inconsistent with a live round is discarded
+	// before any accumulation or clock update.
+	BadSyncHeader uint64
 }
 
-// MergeStats counts the remote-merge observability signals (OBS-01, D-10):
-// Conflicts is every displaced-or-rejected version the store reported — an
-// LWW loser is an ordinary overwrite, counted and never journaled — and
-// DriftWarnings is every apply whose drift signal was nonzero: the store
-// clock gates the signal at its drift-warn threshold (zero drift is within
-// tolerance, any nonzero return is beyond it), so the counter mirrors
-// exactly the warnings storage.Merge already decided.
+// MergeStats counts the remote-merge observability signals (OBS-01, OBSV-03):
+// Conflicts is every pending (unacked) local write displaced by an applied
+// replicated record, computed from the core's pending set — an ordinary
+// overwrite of a confirmed local record or of a remote record, a rejected
+// stale incoming record and an identical redelivery count nothing, and the
+// store's per-outcome Conflict return is not this counter's source (ADR
+// 0004). DriftWarnings is every received record and DataSync part maximum
+// whose version leads local wall time by more than drift_warn, regardless of
+// the merge outcome: the store clock gates the signal at its drift-warn
+// threshold (zero within tolerance, positive only when the received reading
+// leads), so the counter mirrors exactly the warnings storage.Merge already
+// decided (OBSV-05).
 type MergeStats struct {
 	Conflicts     uint64
 	DriftWarnings uint64
@@ -233,82 +514,419 @@ type PeerInfo struct {
 }
 
 // peer is the core's internal peer-table row, keyed by NodeID (D-03).
+// rotation is the per-peer listing round counter: it rotates the start chunk
+// of every targeted (restart) listing toward this peer, so repeated rounds
+// cover the whole key space under buffer loss (D-01's targeted half). The
+// counter lives in the row across restarts, which keeps the rotation
+// advancing without any disk state. seenRuns is the bounded history of run
+// ids this row announced before the current one: every accepted run change
+// pushes the outgoing current run, so a return to an old identity is an
+// alternating-run_id configuration error instead of a restart (PROTO-06).
 type peer struct {
 	handle    string
 	runID     [16]byte
 	lastHello time.Time
+	rotation  uint64
+
+	// seenRuns is the fixed 8-slot ring behind the alternating-identity
+	// discrimination (T-4-27, T-4-30): a fixed array, never a growing slice,
+	// so a hostile flapping identity cannot grow per-peer memory without
+	// bound. seenLen counts the valid entries (from slot 0 while the ring has
+	// not wrapped) and seenPos is the next write position.
+	seenRuns [seenRunsCap][16]byte
+	seenLen  uint8
+	seenPos  uint8
 }
 
-// queuedUnicast is one reactive unicast response waiting in the egress
-// queue (REPL-05's rate limiter): the destination's opaque address handle
-// (D-03) and the message. Exactly three producer sites exist — DataRequest
-// emissions, DataRequest replies and DataSync-newer responses (the
-// egress-limiter scope pin) — and nothing else ever queues: proactive
-// traffic (Hello, retransmits, the timer/startup DataSync itself) bypasses
-// the limiter, which is what bounds an empty node's recovery instead of
-// letting it become a flood (T-04-07).
-type queuedUnicast struct {
+// pushSeenRun records run as one of this row's previously current run_ids,
+// keeping the most recent seenRunsCap entries and overwriting the oldest when
+// the ring wraps.
+func (p *peer) pushSeenRun(run [16]byte) {
+	p.seenRuns[p.seenPos] = run
+	p.seenPos = (p.seenPos + 1) % seenRunsCap
+	if p.seenLen < seenRunsCap {
+		p.seenLen++
+	}
+}
+
+// seen reports whether run is one of the previously announced run_ids still
+// inside the bounded ring. Slots past seenLen are never consulted, so an
+// all-zero run_id only matches after it was genuinely announced.
+func (p *peer) seen(run [16]byte) bool {
+	for i := range p.seenLen {
+		if p.seenRuns[i] == run {
+			return true
+		}
+	}
+	return false
+}
+
+// egressKind separates the two reactive unicast message kinds that share the
+// egress queue: a DataRequest and a DataReplication answer.
+type egressKind uint8
+
+const (
+	egressDataRequest egressKind = iota
+	egressDataReplication
+)
+
+// egressKey is the egress queue's dedupe identity — (handle, kind, key),
+// exactly the RESEARCH RPL-11 wording (T-3-20/T-3-21). The record version is
+// deliberately excluded: a DataRequest carries none, and a DataReplication
+// answer re-reads the stored record at drain time. The queue never pins Data
+// and no producer looks a record up before the dedupe check (CR-02): a
+// queued answer costs a key plus this small struct, so a remote listing that
+// reveals every key cannot make the node retain a value copy per entry, and a
+// repeated request allocates nothing before the identity collapses it.
+type egressKey struct {
 	handle string
-	msg    port.Message
+	kind   egressKind
+	key    string
 }
 
-// pendingEntry is one local write awaiting peer Acks (REPL-02): a
-// defensive copy of the written record (the storage.install precedent — the
-// author may reuse its buffer after NotifyLocalWrite returns), the exact
-// tracked version, the wait-set of known peers that have not yet Acked that
-// version, the set of peers that have (sorted ascending, idempotent —
-// handleAck inserts; eviction never touches it, which is what keeps an
-// Ack distinguishable from a peer_timeout eviction in PendingSnapshot,
-// T-05-04), the retransmission ladder state (next retry time and current
-// backoff — the ladder itself fires from Advance, plan 04-02 Task 2), and
-// the creation time behind UnackedStats' oldest age.
+// queuedUnicast is one reactive unicast response waiting in the egress queue
+// (REPL-05's rate limiter): its dedupe identity — destination handle (D-03),
+// kind and key — and NOTHING else. No message is retained: the drain builds
+// the DataRequest or DataReplication from the identity (resolveQueuedResponse),
+// so an updated record simply ships as its current version and a vanished key
+// emits nothing. Exactly three producers feed it — a DataRequest for a
+// missing-or-older listing entry, a DataRequest reply, and a DataSync
+// local-newer answer (the egress-limiter scope pin) — and nothing else ever
+// queues: proactive traffic (Hello, listings, retransmits) bypasses the
+// limiter, which is what bounds an empty node's recovery instead of letting
+// it become a flood (T-04-07).
+type queuedUnicast struct {
+	id egressKey
+}
+
+// listingDst identifies one listing destination: a peer's announced
+// (node_id, run_id) — never the datagram's source handle, which any host
+// chooses freely and which therefore cannot key a bounded queue (CR-01,
+// T-4-25) — or, as the zero identity, the periodic broadcast round.
+type listingDst struct {
+	nodeID uint16
+	runID  [16]byte
+}
+
+// broadcastDst returns the listing queue's destination identity for the
+// periodic broadcast round: the zero identity, which no peer can hold (node
+// ids start at 1 and every run_id is 16 random bytes). A function rather than
+// a package global keeps the core's state model free of mutable package state.
+func broadcastDst() listingDst { return listingDst{} }
+
+// listingBuild is one immutable DataSync listing built from a
+// StateStore.Versions view: the sorted chunk sequence, the build instant, the
+// store content generation it was copied at, and the round's sync_id. Every
+// FIFO created while the build is younger than cfg.SyncInterval AND the store
+// generation is unchanged holds a pointer to it, so a burst of triggers costs
+// one O(store) copy, never one per trigger (CR-01, T-4-24). The generation is
+// what keeps the cache honest: a build is a snapshot, so any store mutation
+// since makes it stale and the next trigger rebuilds exactly once — a cached
+// pre-mutation listing can never be served.
+type listingBuild struct {
+	chunks     [][]port.SyncEntry
+	at         time.Time
+	syncID     uint64
+	generation uint64
+}
+
+// listingFIFO is one destination's in-flight DataSync listing: a reference to
+// the shared build, the chunk the round starts at (rotation) and how many
+// chunks were already emitted. The shared build makes a queued destination
+// O(1) — no per-destination chunk copy (CR-01) — while the round's sync_id
+// and chunk count travel on every emitted chunk. Exactly one FIFO exists per
+// destination, so a trigger that arrives while a listing is in flight is a
+// no-op (T-3-23); rotation changes only the emission order, because each
+// chunk keeps its ORIGINAL 1-based index and completeness would otherwise be
+// unrecognizable.
+type listingFIFO struct {
+	build      *listingBuild
+	dst        listingDst
+	startIndex int
+	emitted    int
+}
+
+// owedListing is one targeted-listing trigger the caps refused, kept for a
+// later re-arm (WR-01): the destination it was built for and the rotation the
+// trigger asked for. The set lives in Core.listingOwed.
+type owedListing struct {
+	dst      listingDst
+	rotation uint64
+}
+
+// scanDiscardKey identifies one WARN rate-limit slot: a datagram's node_id
+// and its discard class (D-06/D-07, T-4-04). The peer identity belongs in the
+// key — a duplicate-node-id or foreign-version flood from one peer must not
+// suppress the first WARN another peer deserves.
+type scanDiscardKey struct {
+	nodeID uint16
+	class  string
+}
+
+// syncStreamKey identifies one peer's in-flight listing round: its node_id,
+// its run_id and the round's sync_id. run_id belongs in the key so a
+// restarted peer's fresh sync_id counter can never collide with the partial
+// state its previous run left behind.
+type syncStreamKey struct {
+	peer uint16
+	run  [16]byte
+	id   uint64
+}
+
+// syncStream is one peer's partial listing round: the round's chunk count,
+// the set of chunk indices received so far, and the accumulated key→version
+// entries. The round is complete exactly when every index 1..count is in
+// got — arrival of any single chunk proves nothing (PROTO-01).
+type syncStream struct {
+	count   uint32
+	got     map[uint32]struct{}
+	entries map[string]version.RecordVersion
+}
+
+// recordSend is one queued record emission: the tracked pair and whether the
+// send is a ladder retransmission (retry) or the discovery flush's first
+// send. The record itself is never retained — drainRecordSends re-reads it
+// through StateStore.Lookup at emission time (RESEARCH Pattern 2).
+type recordSend struct {
+	pk    pendingKey
+	retry bool
+}
+
+// pendingKey identifies one tracked local write in the pending set: the key
+// and the exact record version awaiting Acks. The version is part of the
+// identity, not a field of the entry alone, so a superseded version can never
+// be confused with the write that replaced it (REPL-02, D-03).
+type pendingKey struct {
+	key     string
+	version version.RecordVersion
+}
+
+// pendingRef is one node of Core.pendingOrder: the tracked pair plus its
+// creation time, kept beside the key so the order walk never needs a map
+// lookup. The list is maintained in createdAt order, so its front is the
+// oldest entry UnackedStats reports.
+type pendingRef struct {
+	pk        pendingKey
+	createdAt time.Time
+}
+
+// pendingEntry is one local write awaiting peer Acks (REPL-02). It retains
+// no record: the store is the single record source, and every emission
+// resolves the record through StateStore.Lookup, skipping when the stored
+// version no longer matches the tracked pair (the memory half of R-02 and
+// the stale-send guard). The entry holds the exact tracked version, the
+// wait-set of captured write-time peers that have not yet Acked that version
+// (seeded once, from the notification's captured slice — discovery never
+// grows it, A-01/IN-05), the set of
+// peers that have (sorted ascending, idempotent — handleAck inserts;
+// eviction never touches it, which is what keeps an Ack distinguishable from
+// a peer_timeout eviction in PendingSnapshot, T-05-04), the retransmission
+// ladder state (next retry time and current backoff — the ladder itself
+// fires from Advance), the creation time behind UnackedStats' oldest age,
+// and the entry's node in Core.pendingOrder.
 type pendingEntry struct {
-	rec       storage.Record
 	version   version.RecordVersion
 	waitSet   map[uint16]struct{}
 	acked     []uint16
 	nextRetry time.Time
 	backoff   time.Duration
 	createdAt time.Time
+	elem      *list.Element
+}
+
+// retryItem is one due-heap node: the tracked pair, its armed retransmission
+// deadline and the monotonically increasing push sequence that breaks
+// equal-deadline ties deterministically (the simnet eventHeap shape).
+type retryItem struct {
+	nextRetry time.Time
+	seq       uint64
+	pk        pendingKey
+}
+
+// retryHeap is the indexed min-heap of pending retry deadlines: items order
+// by (nextRetry, seq), and index locates a tracked pair's item in O(1), so a
+// re-arm is [heap.Fix] and a deletion is [heap.Remove] — both O(log n) and
+// leaving no stale item behind (T-3-14). The heap is the only due-time index
+// Advance consults: an iteration with nothing due touches the root alone.
+type retryHeap struct {
+	items []retryItem
+	index map[pendingKey]int
+}
+
+// Len implements [heap.Interface].
+func (h *retryHeap) Len() int { return len(h.items) }
+
+// Less implements [heap.Interface]: earlier deadline first, then the push
+// sequence — a deterministic total order for equal deadlines.
+func (h *retryHeap) Less(i, j int) bool {
+	if !h.items[i].nextRetry.Equal(h.items[j].nextRetry) {
+		return h.items[i].nextRetry.Before(h.items[j].nextRetry)
+	}
+	return h.items[i].seq < h.items[j].seq
+}
+
+// Swap implements [heap.Interface] and keeps index in step with the heap.
+func (h *retryHeap) Swap(i, j int) {
+	h.items[i], h.items[j] = h.items[j], h.items[i]
+	h.index[h.items[i].pk] = i
+	h.index[h.items[j].pk] = j
+}
+
+// Push implements [heap.Interface].
+func (h *retryHeap) Push(x any) {
+	item := x.(retryItem)
+	h.index[item.pk] = len(h.items)
+	h.items = append(h.items, item)
+}
+
+// Pop implements [heap.Interface]: container/heap pops the root by swapping
+// it to the end first, so removing the last item is the root removal; the
+// index entry goes with it.
+func (h *retryHeap) Pop() any {
+	old := h.items
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = retryItem{}
+	h.items = old[:n-1]
+	delete(h.index, item.pk)
+	return item
 }
 
 // Core is the replication decision state machine for one node. Not safe for
 // concurrent use: exactly one driver goroutine — the adapter's event loop
 // in production, the simulator's scheduler in tests — calls the handlers
 // (D-04); the copying accessors (Discards, SyncArrived, PeerSnapshot,
-// PendingSnapshot) are the sanctioned cross-goroutine read seams, consumed
-// through the production adapter's post-event atomics. Results, never
+// PeerIDs, PendingSnapshot) are the sanctioned cross-goroutine read seams,
+// consumed through the production adapter's post-event atomics. Results, never
 // callbacks: no handler takes a callback, a channel or a goroutine.
 type Core struct {
-	nodeID    uint16
-	runID     [16]byte
-	ownHandle string
-	store     StateStore
-	cfg       Config
-	peers     map[uint16]peer
-	pending   map[string]pendingEntry
+	nodeID uint16
+	runID  [16]byte
+	store  StateStore
+	cfg    Config
+	peers  map[uint16]peer
+
+	// peerGen is the peer id set's generation: it moves exactly when an id
+	// enters or leaves the table (a run_id change under a known id is not a
+	// set change), so the adapter's peer-id mirror can publish only on a real
+	// change — the A-01 write-time capture reads that mirror and the clone
+	// cost must not be paid per event (the listing-generation precedent).
+	peerGen uint64
+
+	// pending holds one entry per tracked (key, version) pair — no record
+	// Data (see pendingEntry). peerUnacked is the per-peer ledger: for every
+	// known peer, the set of pending keys it is still waiting on, so peer
+	// eviction touches only that peer's unacked entries instead of scanning
+	// the whole pending set (D-03). pendingOrder lists every pending pair in
+	// createdAt order for the O(1) oldest-age gauge. pendingByKey is the
+	// per-key index into pending: it maps a key to the one tracked pair the
+	// notification guard allows (the one-pair-per-key invariant is total — the
+	// guard rejects not-greater versions and removeSupersededLocal removes the
+	// smaller pair before the insert — so a single slot is exactly equivalent
+	// to a set-valued index). Maintenance is exactly two sites: the insert in
+	// trackLocalWrite and the delete in removePending, whose equality guard
+	// keeps a stale call from evicting a newer pair; any new insert or delete
+	// path must go through them.
+	pending      map[pendingKey]pendingEntry
+	pendingByKey map[string]pendingKey
+	peerUnacked  map[uint16]map[pendingKey]struct{}
+	pendingOrder *list.List
+
+	// retry is the indexed due-heap over the same pending pairs;
+	// retrySeq assigns each push's equal-deadline tie-break.
+	retry    retryHeap
+	retrySeq uint64
+
 	nextHello time.Time
 
 	// nextSync is the next sync-timer deadline; the zero time until the
 	// first Advance, whose startup trigger fires the initial full listing
-	// alongside the startup Hello (IDEA §Node lifecycle).
+	// alongside the startup Hello (IDEA §Node lifecycle). Each firing arms
+	// now + SyncInterval + a positive-only deterministic jitter, so the
+	// deadline never fires before the configured interval.
 	nextSync time.Time
 
+	// listingByDst holds the in-flight listing FIFOs keyed by destination
+	// identity (a peer's (node_id, run_id) or the zero broadcast identity);
+	// listingOrder is their enqueue order — the deterministic drain order — and
+	// listingCount the total queued chunk count across every FIFO. build is the
+	// shared, generation-checked listing build the FIFOs reference; nextListingAt
+	// is the shared listing pacer slot and syncRotation the broadcast round
+	// counter that rotates each round's start chunk (D-01, RESEARCH Pattern 5).
+	// listingDropped counts every trigger the destination or chunk cap refused
+	// (CR-01, T-4-23).
+	listingByDst   map[listingDst]*listingFIFO
+	listingOrder   []listingDst
+	listingCount   int
+	nextListingAt  time.Time
+	syncRotation   uint64
+	build          *listingBuild
+	listingDropped uint64
+
+	// listingOwed is the retry set of targeted listings a cap refused
+	// (WR-01): each entry keeps the destination and the rotation the trigger
+	// asked for, so a refusal delays a first-seen or restart listing instead
+	// of losing it for the run. The set is bounded by maxListingDestinations
+	// (a refused reservation past that is dropped and stays counted), and the
+	// retry runs at the end of every Advance once the drain has freed
+	// capacity. Entry order is owe order — the deterministic retry order.
+	listingOwed []owedListing
+
+	// recordQueue is the paced record-send FIFO fed by the discovery flush and
+	// the retransmit scanner; recordQueued is its (key, version) dedupe set and
+	// nextRecordAt the shared pacer slot (D-05, RESEARCH Pattern 2).
+	recordQueue  []recordSend
+	recordQueued map[pendingKey]struct{}
+	nextRecordAt time.Time
+
+	// Per-site monotone counters: the deterministic jitter sequence for the
+	// Hello and sync timers and for the listing and record pacer spacings
+	// (T-3-22 — deterministic hash only, same-seed replay stays byte-identical).
+	helloJitterSeq   uint64
+	syncJitterSeq    uint64
+	listingJitterSeq uint64
+	recordJitterSeq  uint64
+
 	egress []queuedUnicast
+
+	// egressIDs is the egress queue's dedupe set, kept in lockstep with the
+	// queue: a pop deletes its identity and an overflow drop deletes the
+	// evicted identity in the same operation (T-3-21). egressDropped counts
+	// every drop.
+	egressIDs     map[egressKey]struct{}
+	egressDropped uint64
 
 	// nextSendAt is the earliest virtual time the next queued response may
 	// emit; it is meaningful exactly while the egress queue is non-empty
 	// (enqueueResponse arms it, the drain advances it).
 	nextSendAt time.Time
 
-	// syncResponseInterval is the egress queue's per-response spacing,
-	// derived once at construction by the pinned deterministic integer
-	// arithmetic: floor(1s/SyncResponseRate) nanoseconds by integer
-	// division — exactly 2ms at the 500/s default and 3333333ns at 300/s
-	// (probe #16, echoed in docs/IDEA.md §Parameters).
+	// pacedSends counts every datagram the three pacers — listing chunks,
+	// record sends and egress responses — hand to the Outbox, the emission
+	// volume the metrics surface publishes. It counts EMISSIONS, never
+	// enqueues: a queue insertion is not a send (T-3-41), and RPL-18's
+	// broader send-failure accounting stays Phase 7's (OBSV-03), not
+	// compounded here. Driver-goroutine-only mutation behind the copying
+	// accessor, the Discards precedent.
+	pacedSends uint64
+
+	// syncResponseInterval is the shared pacer spacing — the egress queue's
+	// per-response and the listing and record pacers' base — derived once
+	// at construction by the pinned deterministic integer arithmetic:
+	// floor(1s/SyncResponseRate) nanoseconds by integer division — exactly
+	// 2ms at the 500/s default and 3333333ns at 300/s (probe #16, echoed in
+	// docs/IDEA.md §Parameters). The pacers never recompute it from a raw
+	// config value (RESEARCH Pitfall 22).
 	syncResponseInterval time.Duration
 
 	discards DiscardStats
+
+	// discardWarnAt is the per-(node_id, class) rate-limit state of the
+	// validation WARNs (T-3-25, T-4-04): the event-loop time of the last WARN
+	// per slot. An absent entry (never warned) always fires; afterwards a slot
+	// warns at most once per discardWarnInterval of event time. Map access is
+	// driver-goroutine-only, like every other core field (D-04).
+	discardWarnAt map[scanDiscardKey]time.Time
 
 	// mergeStats counts the remote-merge signals (OBS-01); retransmitted
 	// counts the ladder's retransmission emissions — driver-goroutine-only
@@ -316,29 +934,106 @@ type Core struct {
 	mergeStats    MergeStats
 	retransmitted uint64
 
-	// syncArrived flips true on the first received DataSync datagram and
-	// never resets — the startup gate's sync half (API-04). Set by
-	// handleDataSync on the driver goroutine; read through the copying
-	// SyncArrived accessor, which the production adapter mirrors into an
-	// atomic after every loop iteration so cross-goroutine readers never
-	// touch core state.
-	syncArrived bool
+	// notificationsRegressed counts local-write notifications the guard
+	// refused because their version was not greater than the version tracked
+	// for that key — regressive and equal duplicate notifications alike
+	// (PROTO-05, D-05). Driver-goroutine-only mutation behind the copying
+	// NotificationsRegressed accessor; Phase 7's OBSV surface owns publishing
+	// it (no adapter mirror this phase).
+	notificationsRegressed uint64
+
+	// pendingVisits counts every pending entry the core's whole-set loops
+	// inspect — the deterministic, load-independent measure of the scan
+	// surface the XPORT-02/PERF-05 flatness gates assert. The five inspected
+	// loops are trackedVersion and removeSupersededLocal (one entry on a hit,
+	// none on a miss, both through pendingByKey), applyRemote's displacement
+	// (the same), scanRetransmit's due loop (one per due item) and
+	// handleHello's discovery flush (one per pending pair). A new loop over
+	// the pending set MUST increment this counter where it examines an entry,
+	// or the flatness gate stops being a complete measure. Driver-goroutine-only
+	// mutation behind the copying PendingVisits accessor; it is a test seam,
+	// never a published metric.
+	pendingVisits uint64
+
+	// The listing accumulator (PROTO-01): one syncStream per
+	// (peer, run, sync_id) round, bounded by maxSyncStreams,
+	// maxSyncEntriesPerStream and maxSyncEntriesTotal; syncEntries is the
+	// total retained entry count the total cap reads, and syncStreamDropped
+	// counts every stream the caps evicted.
+	syncs             map[syncStreamKey]*syncStream
+	syncEntries       int
+	syncStreamDropped uint64
+
+	// The retained listed-key payload (PROTO-01, T-4-41): each peer's last
+	// complete listing as a key set, the union's per-key refcounts, the
+	// union itself and its size, the LRU over peers (listedOrder front =
+	// least recently published, which is also listedAt order) that bounds
+	// the payload, and each row's last-published instant. listedAt bounds
+	// the retention in TIME as well as in size (CR-01): a set nobody
+	// republished within two sync intervals leaves the union. Both dropping
+	// paths — eviction and expiry — count every released key in
+	// listedKeysEvicted.
+	listedByPeer      map[uint16]map[string]struct{}
+	listedRefs        map[string]int
+	listedKeys        map[string]struct{}
+	listedKeyCount    int
+	listedOrder       *list.List
+	listedPos         map[uint16]*list.Element
+	listedAt          map[uint16]time.Time
+	listedKeysEvicted uint64
+
+	// listingGen is the published listing content version: it moves exactly
+	// when the union membership or the complete flag actually changes, so an
+	// identical repeated complete listing republishes nothing downstream.
+	// listingComplete flips true on the first complete listing and never
+	// resets — the startup gate's sync half reads it through the copying
+	// SyncArrived accessor (one fact, one field: the former second flag could
+	// never differ, IN-06); nextSyncID allocates one fresh sync_id per listing
+	// BUILD (never per trigger — the shared build carries it, so two
+	// destinations reusing one build share the round identity, T-4-24;
+	// build-time counter, never crypto/rand — same-seed replay stays
+	// byte-identical).
+	listingGen      uint64
+	listingComplete bool
+	nextSyncID      uint64
+	// firstAdvance is the time of the first Advance (the warning's clock
+	// origin); helloSeen flips on the first Hello received from any peer, and
+	// peerWarned latches the one-shot WARN. Driver-goroutine-only, like every
+	// other core field (D-04); the WARN never repeats per interval.
+	firstAdvance time.Time
+	helloSeen    bool
+	peerWarned   bool
 }
 
-// New returns a core for nodeID with the per-process runID. ownHandle is
-// this node's own address as the adapter sees it (the local socket address
-// string) — opaque to the core (D-03), kept for the later own-echo and
-// duplicate-node_id classification work. store must be non-nil.
-func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg Config) *Core {
+// New returns a core for nodeID with the per-process runID. store must be
+// non-nil: the core itself owns no I/O (the depguard boundary), so the
+// adapter passes the store in and every decision reads and merges through
+// it.
+func New(nodeID uint16, runID [16]byte, store StateStore, cfg Config) *Core {
 	cfg = cfg.normalized()
 	return &Core{
 		nodeID:               nodeID,
 		runID:                runID,
-		ownHandle:            ownHandle,
 		store:                store,
 		cfg:                  cfg,
 		peers:                make(map[uint16]peer),
-		pending:              make(map[string]pendingEntry),
+		pending:              make(map[pendingKey]pendingEntry),
+		pendingByKey:         make(map[string]pendingKey),
+		peerUnacked:          make(map[uint16]map[pendingKey]struct{}),
+		pendingOrder:         list.New(),
+		retry:                retryHeap{index: make(map[pendingKey]int)},
+		listingByDst:         make(map[listingDst]*listingFIFO),
+		recordQueued:         make(map[pendingKey]struct{}),
+		egressIDs:            make(map[egressKey]struct{}),
+		discardWarnAt:        make(map[scanDiscardKey]time.Time),
+		syncs:                make(map[syncStreamKey]*syncStream),
+		listedByPeer:         make(map[uint16]map[string]struct{}),
+		listedRefs:           make(map[string]int),
+		listedKeys:           make(map[string]struct{}),
+		listedOrder:          list.New(),
+		listedPos:            make(map[uint16]*list.Element),
+		listedAt:             make(map[uint16]time.Time),
+		nextSyncID:           1,
 		syncResponseInterval: time.Second / time.Duration(cfg.SyncResponseRate),
 	}
 }
@@ -346,7 +1041,10 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // HandleDatagram processes one inbound datagram. The classification order
 // is pinned (D-02, REPL-08, REPL-09): a BadCRC framing verdict counts
 // BadCRC (the adapter never decoded the body); Undecodable counts
-// Undecodable; a wrong ProtoVersion counts BadProtoVersion; a datagram
+// Undecodable; a ProtoVersionMismatch verdict — or a Decoded verdict whose
+// ProtoVersion field differs, the defence-in-depth check for direct inputs —
+// counts BadProtoVersion and WARNs through the shared limiter, without any
+// body; a datagram
 // carrying our own node_id counts OwnEcho when its run_id equals ours (an
 // impostor cannot guess a 16-byte random run_id, so run_id equality is the
 // robust own-echo test — the sender's own broadcast really does loop back)
@@ -359,19 +1057,44 @@ func New(nodeID uint16, runID [16]byte, ownHandle string, store StateStore, cfg 
 // both conflicting handles (REPL-08). The classifier never pre-empts the
 // restart branch (REPL-07, plan 04-04): this second variant requires run_id
 // EQUALITY with the remembered row, so a known node whose announced run_id
-// differs always reaches the Hello handler and fires its targeted-listing
-// restart reaction — a restart is never counted as a duplicate. Every
-// discard site additionally fires cfg.OnDiscard with its class token and a
-// metadata detail (D-08) — additive to the duplicate-node_id Log calls,
-// never their replacement. Everything else reaches protocol processing:
-// Hello upserts the peer
-// table and — when a known node's run_id changed — answers with the
-// targeted full listing toward the restarted peer (REPL-07),
+// differs always reaches the Hello handler, which classifies a run_id it has
+// seen before as the alternating-identity configuration error and only an
+// unseen run_id as the targeted-listing restart (PROTO-06) — a genuine
+// restart is never counted as a duplicate. Every discard site additionally
+// fires cfg.OnDiscard with its class token and a metadata detail (D-08) —
+// additive to the configuration-error Log calls, never their replacement;
+// those Log calls now share the per-(node_id, class) rate limiter, so a
+// flapping host cannot flood the log from any duplicate-node path (T-4-28).
+//
+// The surviving datagram then passes the wire-validation pipeline
+// ([Core.validate], XPORT-03/04/10, D-06) BEFORE handleMessage — the
+// position is the contract: handleMessage is the only path to the store
+// (applyRemote is the sole ApplyRemote call, and therefore the sole
+// Clock.Update path), so a rejected datagram can touch neither the store
+// nor the clock, and no timer observes it either. The pinned
+// intra-message order: DataReplication — empty key, key longer than
+// storage.MaxKeyBytes, Deleted with non-empty Data, a record checksum that
+// does not match storage.RecordChecksum, a version beyond
+// now+cfg.MaxClockLead; DataRequest and Ack — empty key, key too long;
+// DataSync — every entry in received order: empty key, key too long,
+// version beyond the bound, with the first failing entry discarding the
+// whole datagram; Hello and a nil Msg — nothing. Every rejection counts its
+// own DiscardStats class, fires OnDiscard with the source handle as the
+// detail (never a key name, the T-6-05 metadata contract), and logs one
+// per-class rate-limited WARN on the event-loop's now (T-3-25).
+//
+// Everything else reaches protocol processing:
+// Hello learns a previously unknown node and answers it with one unicast
+// identity echo plus one targeted full listing (the first-seen listing,
+// PROTO-04 — the echo is what lets the receiver's CR-01 listing binding
+// accept that listing), refreshes a known node's liveness, or — when a known
+// node's run_id changed — replaces the old run's
+// listing with one targeted full listing toward the restarted peer (REPL-07),
 // DataReplication applies the record and Acks it, Ack drains
 // the pending-set wait-set (REPL-02), DataRequest answers through the
-// rate-limited egress queue (REPL-04), and DataSync compares against the
-// store snapshot and queues DataRequest / unicast DataReplication
-// responses on the same queue (REPL-05).
+// rate-limited egress queue (REPL-04), and DataSync compares per entry
+// against the store's tombstone-visible version view and queues DataRequest
+// / unicast DataReplication responses on the same queue (REPL-05).
 func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.Outbox) {
 	switch in.Status {
 	case port.BadCRC:
@@ -382,10 +1105,25 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		c.discards.Undecodable++
 		c.cfg.OnDiscard(DiscardUndecodable, in.Source)
 		return
-	}
-	if in.ProtoVersion != SupportedProtoVersion {
+	case port.ProtoVersionMismatch:
+		// The adapter judged the envelope's version before decoding the body
+		// (D-07: a foreign version's body need not follow this version's CRC
+		// contract), so there is no message — only the counted, attributed
+		// discard, WARNed at most once per (node_id, class) per interval.
 		c.discards.BadProtoVersion++
 		c.cfg.OnDiscard(DiscardBadProtoVersion, in.Source)
+		c.warnDiscard(now, in.NodeID, DiscardBadProtoVersion)
+		return
+	}
+	if in.ProtoVersion != SupportedProtoVersion {
+		// The defence-in-depth twin of the adapter's ProtoVersionMismatch
+		// branch: a Decoded verdict whose envelope field still differs gets
+		// the identical counted, attributed and rate-limited WARN, so a
+		// foreign proto_version is never silent on either path (OBSV-06,
+		// S-FAIL-17, T-07-24).
+		c.discards.BadProtoVersion++
+		c.cfg.OnDiscard(DiscardBadProtoVersion, in.Source)
+		c.warnDiscard(now, in.NodeID, DiscardBadProtoVersion)
 		return
 	}
 	if in.NodeID == c.nodeID {
@@ -396,7 +1134,7 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 		}
 		c.discards.DuplicateNodeID++
 		c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf("node_id %d at handle %q", in.NodeID, in.Source))
-		c.cfg.Log(fmt.Sprintf(
+		c.warnRateLimited(now, in.NodeID, DiscardDuplicateNodeID, fmt.Sprintf(
 			"sup-kv: configuration error: node_id %d announced by another run from handle %q, datagram discarded (REPL-08)",
 			in.NodeID, in.Source,
 		))
@@ -405,13 +1143,208 @@ func (c *Core) HandleDatagram(now time.Time, in port.InboundDatagram, out *port.
 	if known, ok := c.peers[in.NodeID]; ok && in.RunID == known.runID && in.Source != known.handle {
 		c.discards.DuplicateNodeID++
 		c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf("node_id %d handles %q/%q", in.NodeID, known.handle, in.Source))
-		c.cfg.Log(fmt.Sprintf(
+		c.warnRateLimited(now, in.NodeID, DiscardDuplicateNodeID, fmt.Sprintf(
 			"sup-kv: configuration error: node_id %d known at handle %q announced again from handle %q, datagram discarded (REPL-08)",
 			in.NodeID, known.handle, in.Source,
 		))
 		return
 	}
+	if class, detail, valid := c.validate(now, in); !valid {
+		c.discardValidated(now, in.NodeID, class, detail)
+		return
+	}
 	c.handleMessage(now, in, out)
+}
+
+// validate is the wire-validation pipeline (XPORT-03, XPORT-04, XPORT-10,
+// D-06): it runs between HandleDatagram's framing/identity classification
+// and handleMessage, so a rejected datagram never reaches a handler — and
+// therefore never the store, the clock or a timer. The intra-message order
+// is pinned (probe XPORT-10, tests pin every step):
+//
+//   - DataReplication: empty key, key longer than storage.MaxKeyBytes,
+//     tombstone carrying Data, a checksum that does not match
+//     storage.RecordChecksum(key, version, data, deleted), then a version
+//     beyond now+cfg.MaxClockLead;
+//   - DataRequest and Ack: empty key, then key too long (an Ack carries no
+//     record, so no checksum or version validation applies);
+//   - DataSync: the completeness header first — chunk_count>=1,
+//     1<=chunk_index<=chunk_count, chunk_count<=maxSyncChunks, and a count
+//     consistent with a live round — then every entry in received order:
+//     empty key, key too long, version beyond the bound; the first failing
+//     item discards the whole datagram;
+//   - Hello, a standalone SyncEntry and a nil Msg: nothing (a Hello carries
+//     no key or version, a standalone SyncEntry never travels, and a nil
+//     Msg on a Decoded verdict violates the adapter contract).
+//
+// The returned detail is the source handle alone — never a key name or a
+// record value (the T-6-05 metadata contract, T-3-27). valid reports
+// whether the datagram may proceed.
+func (c *Core) validate(now time.Time, in port.InboundDatagram) (class, detail string, valid bool) {
+	switch msg := in.Msg.(type) {
+	case port.DataReplication:
+		return c.validateReplication(now, in.Source, msg)
+	case port.DataRequest:
+		return keyVerdict(in.Source, msg.Key)
+	case port.Ack:
+		return keyVerdict(in.Source, msg.Key)
+	case port.DataSync:
+		return c.validateSync(now, in, msg)
+	}
+	return "", "", true
+}
+
+// validateReplication applies the pinned record order: key domain,
+// tombstone shape, checksum, then version. The version check is last so a
+// datagram with several faults reports the earliest structural one, and —
+// the point of the whole pipeline — a forgeable checksum never gets a
+// version verdict instead.
+func (c *Core) validateReplication(now time.Time, source string, msg port.DataReplication) (class, detail string, valid bool) {
+	if violation := keyClass(msg.Key); violation != "" {
+		return violation, source, false
+	}
+	if msg.Record.Deleted && len(msg.Record.Data) > 0 {
+		return DiscardTombstoneWithData, source, false
+	}
+	sum := storage.RecordChecksum(msg.Key, msg.Record.Version, msg.Record.Data, msg.Record.Deleted)
+	if sum != msg.Record.Checksum {
+		return DiscardBadChecksum, source, false
+	}
+	if !c.versionAccepted(now, msg.Record.Version) {
+		return DiscardBadVersion, source, false
+	}
+	return "", "", true
+}
+
+// validateSync applies the listing pipeline in pinned order: the completeness
+// header FIRST (chunk_count>=1, 1<=chunk_index<=chunk_count,
+// chunk_count<=maxSyncChunks, and a chunk_count consistent with a live
+// round), then every entry in received order — key domain, then version. The
+// first failing item discards the whole datagram, so a listing cannot smuggle
+// one bad entry or one impossible header past a per-chunk verdict, and a
+// rejected header leaves the live round's stored count untouched (T-4-02).
+func (c *Core) validateSync(now time.Time, in port.InboundDatagram, msg port.DataSync) (class, detail string, valid bool) {
+	if !validSyncHeader(msg) {
+		return DiscardBadSyncHeader, fmt.Sprintf(
+			"%s: chunk_count %d chunk_index %d", in.Source, msg.ChunkCount, msg.ChunkIndex,
+		), false
+	}
+	key := syncStreamKey{peer: in.NodeID, run: in.RunID, id: msg.SyncID}
+	if stream, ok := c.syncs[key]; ok && stream.count != msg.ChunkCount {
+		return DiscardBadSyncHeader, fmt.Sprintf(
+			"%s: chunk_count %d disagrees with the live round's %d", in.Source, msg.ChunkCount, stream.count,
+		), false
+	}
+	for _, entry := range msg.Entries {
+		if violation := keyClass(entry.Key); violation != "" {
+			return violation, in.Source, false
+		}
+		if !c.versionAccepted(now, entry.Version) {
+			return DiscardBadVersion, in.Source, false
+		}
+	}
+	return "", "", true
+}
+
+// keyVerdict is the key-only half shared by DataRequest and Ack: both carry
+// a key and no record, so nothing else is applicable.
+func keyVerdict(source, key string) (class, detail string, valid bool) {
+	if violation := keyClass(key); violation != "" {
+		return violation, source, false
+	}
+	return "", "", true
+}
+
+// keyClass returns the discard class for key's domain violation — empty
+// first, then the storage.MaxKeyBytes ceiling (XPORT-03) — or "" when the
+// key is acceptable. Validation is receive-side only: the store keeps
+// serving pre-upgrade records under longer keys, so reads stay permissive.
+func keyClass(key string) string {
+	if key == "" {
+		return DiscardEmptyKey
+	}
+	if len(key) > storage.MaxKeyBytes {
+		return DiscardKeyTooLong
+	}
+	return ""
+}
+
+// versionAccepted reports whether ver is a valid inbound record version at
+// the handler's now under cfg.MaxClockLead — the layout and future-bound
+// check of version.RecordVersion.Validate, which reads no clock (the D-02
+// seam: now is the caller's) and never panics.
+func (c *Core) versionAccepted(now time.Time, ver version.RecordVersion) bool {
+	return ver.Validate(now, c.cfg.MaxClockLead) == nil
+}
+
+// discardValidated records one wire-validation rejection: it counts the
+// class's own counter, fires cfg.OnDiscard with the class and the source
+// detail, and logs a per-(node_id, class) rate-limited WARN naming only the
+// class (T-3-25, T-3-27, T-4-04). The rate limit is driven by the
+// event-loop's now — the lastWarn bookkeeping is a plain per-slot timestamp,
+// never a wall clock read and never a global throttle. Counters stay the
+// reliable signal; the WARN is the operator's coarse hint, and per-datagram
+// discard logging stays the adapter's Debug-level OnDiscard bridge.
+func (c *Core) discardValidated(now time.Time, nodeID uint16, class, detail string) {
+	switch class {
+	case DiscardEmptyKey:
+		c.discards.EmptyKey++
+	case DiscardKeyTooLong:
+		c.discards.KeyTooLong++
+	case DiscardTombstoneWithData:
+		c.discards.TombstoneWithData++
+	case DiscardBadChecksum:
+		c.discards.BadChecksum++
+	case DiscardBadVersion:
+		c.discards.BadVersion++
+	case DiscardBadSyncHeader:
+		c.discards.BadSyncHeader++
+	}
+	c.cfg.OnDiscard(class, detail)
+	c.warnDiscard(now, nodeID, class)
+}
+
+// allowWarn claims the (node_id, class) limiter slot for now and reports
+// whether the caller should emit its WARN: the first occurrence of every
+// pair is admitted, and a repeat inside discardWarnInterval of event time is
+// suppressed. The slot bookkeeping lives here alone, so every counted-class
+// WARN — the discard classes and the drift warning — shares one cadence
+// (T-3-25, T-4-04, T-4-28, T-07-22). A separate message-formatting caller
+// decides what to log once admitted.
+func (c *Core) allowWarn(now time.Time, nodeID uint16, class string) bool {
+	key := scanDiscardKey{nodeID: nodeID, class: class}
+	last, warned := c.discardWarnAt[key]
+	if warned && now.Sub(last) < discardWarnInterval {
+		return false
+	}
+	c.discardWarnAt[key] = now
+	return true
+}
+
+// warnRateLimited logs msg unless the same (node_id, class) slot already
+// warned inside the last discardWarnInterval of event time — the one shared
+// limiter behind every counted classification WARN: the validation classes,
+// bad_sync_header, the unbound_listing drop and all three duplicate_node_id
+// paths, so a flapping, hostile or misconfigured peer can flood neither the
+// log nor the listing path (T-3-25, T-4-04, T-4-28). A slot's first warning
+// always fires, and the bookkeeping is a plain per-slot timestamp on the
+// handler's now, never a wall-clock read and never a global throttle.
+func (c *Core) warnRateLimited(now time.Time, nodeID uint16, class, msg string) {
+	if !c.allowWarn(now, nodeID, class) {
+		return
+	}
+	c.cfg.Log(msg)
+}
+
+// warnDiscard logs one discard-class WARN through the shared limiter, naming
+// only the class — the operator's coarse hint beside the reliable counters,
+// while per-datagram discard logging stays the adapter's Debug-level
+// OnDiscard bridge (T-3-25, T-3-27).
+func (c *Core) warnDiscard(now time.Time, nodeID uint16, class string) {
+	c.warnRateLimited(now, nodeID, class, fmt.Sprintf(
+		"sup-kv: discarded inbound datagram: class %s from node %d (one warning per node and class per %s)",
+		class, nodeID, discardWarnInterval,
+	))
 }
 
 // handleMessage dispatches one classified datagram's decoded message to its
@@ -421,13 +1354,13 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 	case port.Hello:
 		c.handleHello(now, in, out)
 	case port.DataReplication:
-		c.applyRemote(in.Source, msg, out)
+		c.applyRemote(now, in.NodeID, in.Source, msg, out)
 	case port.Ack:
-		c.handleAck(in.NodeID, msg)
+		c.handleAck(in.NodeID, msg, out)
 	case port.DataRequest:
 		c.handleDataRequest(now, in.Source, msg.Key)
 	case port.DataSync:
-		c.handleDataSync(now, in.Source, msg.Entries)
+		c.handleDataSync(now, in, msg, out)
 	case port.SyncEntry, nil:
 		// A standalone SyncEntry never travels (it lives inside DataSync),
 		// and a nil Msg on a Decoded verdict violates the adapter contract
@@ -436,110 +1369,337 @@ func (c *Core) handleMessage(now time.Time, in port.InboundDatagram, out *port.O
 }
 
 // handleHello upserts the peer-table row from one Hello datagram (REPL-01)
-// and owns the restart discrimination (REPL-07, probe #19). Three cases,
-// pinned: an unknown node_id is learned — entry created, no targeted listing
-// (the peer's own startup DataSync and the periodic rounds reconcile it); a
-// known node_id repeating its remembered run_id refreshes lastHello only,
-// never a second listing (a per-Hello full listing at hello_interval cadence
-// would be a self-inflicted listing flood; the flap case is bounded by this
-// idempotence, not by rate limiting); a known node_id whose run_id differs
-// from the remembered one is a detected restart — the duplicate-node_id
-// classifier never pre-empts this branch (HandleDatagram's second variant
-// requires run_id equality with the remembered row) — the entry updates in place
-// (handle, runID, lastHello; the table stays keyed by node_id, one row per
-// node — a change never forks a second row, which would fork ack tracking
-// and liveness) and the full current DataSync listing goes out UNICAST to
-// the peer's handle, every chunk in chunk order through the same plan-04-03
-// listing/chunking machinery the sync timer uses. Inequality with the
-// remembered run_id is the only trigger: run_ids are 16 random bytes per
-// process start, so they carry no temporal order — a stale run_id returning
-// after a newer one was seen is indistinguishable from a fresh restart and
-// is handled as just another change (entry update plus one idempotent
-// re-sync; reconciliation no-ops on equal state). In-flight protocol
-// datagrams from the old run — Ack, DataReplication, DataSync — process
+// and owns the three-way outcome (REPL-07, PROTO-04, probe #19), pinned:
+//
+//   - an unknown node_id is learned and gets exactly one immediate targeted
+//     listing toward its announced identity — the first-seen listing that
+//     gives a newly seen or returning peer its state without a sync_interval
+//     term — and, when the Hello also ends an empty table, the same event
+//     still runs the discovery flush. The two behaviors are not mutually
+//     exclusive and this branch must never return early (Pitfall 5): an evicted
+//     peer's return Hello, whatever its run_id, is this unknown-node case.
+//   - a known node_id repeating its remembered run_id refreshes lastHello
+//     only, never a second listing (a per-Hello full listing at hello_interval
+//     cadence would be a self-inflicted listing flood; the flap case is bounded
+//     by this idempotence, not by rate limiting).
+//   - a known node_id announcing a run_id it carried BEFORE but which is not
+//     current is the alternating-run_id configuration error (PROTO-06, R-12):
+//     counted as DuplicateNodeID, WARNed once per (node_id, class) interval
+//     through the shared limiter, dropped, and given NO listing — a flapping
+//     or hostile process must not be rewarded with a full listing per
+//     datagram. The row and its liveness stamp are untouched, so the
+//     currently remembered run remains authoritative.
+//   - a known node_id announcing an unseen run_id is a detected restart — the
+//     duplicate-node_id classifier never pre-empts this branch
+//     (HandleDatagram's second variant requires run_id equality with the
+//     remembered row) — the outgoing current run joins the row's bounded
+//     seen-run history, the old run's queued listing and partial rounds are
+//     dropped so no dead work outlives the row, and one targeted listing is
+//     enqueued. The old run's RETAINED listed keys deliberately survive: the
+//     new run's first complete listing replaces the set wholesale, and
+//     releasing them at the run change would reopen the F14
+//     listed-but-unarrived hole for the peer's keys until that replacement
+//     arrived (WR-02); the two-interval expiry bounds the wait when it never
+//     does. The entry
+//     updates in place (handle, runID, lastHello; the table stays keyed by
+//     node_id, one row per node — a change never forks a second row, which
+//     would fork ack tracking and liveness; the row's listing rotation
+//     survives) and one targeted listing is enqueued. A restart necessarily
+//     has discovery == false, so this branch returns.
+//
+// Both listing paths call the single [Core.enqueueListing] — there is no
+// second implementation — and both preface it with one unicast Hello to the
+// triggering handle: the receiver's listing binding (CR-01) requires a
+// peer-table row for the sender, and a peer that just announced itself may
+// not have heard our periodic Hello yet. The echo is cheap and bounded (the
+// reply terminates as a repeat Hello on the other side), and it is what
+// keeps PROTO-04's "state without a sync_interval term" true under the
+// binding. The first-seen round starts at chunk 0; the restart
+// round uses and advances the row's rotation counter, so repeated restarts
+// cover the whole key space under buffer loss (D-01's targeted half).
+// The restart test is "run_id unseen by this row", not "run_id differs": the
+// bounded seen-run ring remembers the previous 8 current run_ids, so an
+// alternation back to a recent identity is the named configuration error
+// while a genuinely new run — 16 random bytes per process start, carrying no
+// temporal order — is still a restart. When the ring wraps, the oldest
+// identity is forgotten and treated as a restart again (documented, bounded
+// behavior: T-4-30). In-flight
+// protocol datagrams from the old run — Ack and DataReplication — process
 // normally on their (key, version) merits, run_id-agnostic outside this
-// handler. The restart listing is proactive traffic and does NOT pass
-// through the sync_response_rate egress queue (the plan-04-03 egress-scope
-// pin): it is bounded by chunk framing and fires once per detected change,
-// while the heavy replay traffic it solicits IS limiter-gated — that flows
-// as DataRequest replies on the restarted node's side and newer-responses
-// on ours. A detected restart never re-adds the peer to any pending
-// wait-set and never touches the backoff ladder (the REPL-02 interplay):
-// the restarted node heals through reconciliation via the targeted listing,
-// not through retransmission, and an entry that already drained stays
-// drained — the dump/restart path, not retransmission, is the durability
-// story. Only a Hello refreshes lastHello — the field's name is the
-// liveness contract, and no other datagram type ever touches it. A Hello
-// that ends an empty table is discovery: in this same event the core
-// flushes every pending entry — one broadcast DataReplication per entry in
-// sorted key order, the new peer added to every wait-set, every ladder
-// restarted at cfg.AckTimeout — so a brand-new peer receives the pending
-// set promptly, not at the next backoff expiry (research A6). A Hello that
-// does not end an empty table modifies no wait-set: only discovery adds
-// waiters. Discovery and restart are mutually exclusive by construction —
-// a restart requires a remembered row, and an empty table remembers
-// nothing (an evicted peer's return Hello, whatever its run_id, is the
-// unknown-node case).
+// handler; an old-run DataSync part is the exception, because the listed-key
+// retention is bound to the row's current run_id (CR-01), so it is discarded
+// as unbound until the replacement run announces itself. The listing is
+// proactive traffic on the shared listing pacer,
+// never the sync_response_rate egress queue (the plan-04-03 egress-scope pin):
+// it is bounded by one in-flight listing per destination plus the queue caps,
+// and fires once per detected first Hello or run change, while the heavy
+// replay traffic it solicits IS limiter-gated — that flows as DataRequest
+// replies on the receiving node's side and newer-responses on ours. A detected
+// restart never re-adds the peer to any pending wait-set and never touches the
+// backoff ladder (the REPL-02 interplay): the restarted node heals through
+// reconciliation via the targeted listing, not through retransmission, and an
+// entry that already drained stays drained — the dump/restart path, not
+// retransmission, is the durability story. Only a Hello refreshes lastHello —
+// the field's name is the liveness contract, and no other datagram type ever
+// touches it. A Hello that ends an empty table is discovery: in this same
+// event the core enqueues the pending set on the paced record-send queue —
+// one broadcast DataReplication per entry in sorted key order, every ladder
+// restarted at cfg.AckTimeout — so a brand-new peer receives the pending set
+// promptly, not at the next backoff expiry (research A6), while the pacer
+// prevents the whole-set burst R-01/R-02 measured. The flush deliberately
+// does NOT add the new peer to any wait-set or ledger: the promise is exactly
+// the entry's write-time capture (A-01, IN-05, RESEARCH Pitfall 4), so a
+// discovered peer is broadcast to, never awaited. No Hello of any shape
+// modifies a wait-set.
 func (c *Core) handleHello(now time.Time, in port.InboundDatagram, out *port.Outbox) {
+	// Any received Hello — a discovery, a refresh or a restart — proves the
+	// receive path hears peers, so the no-Hello WARN stands down for the
+	// process lifetime (XPORT-09).
+	c.helloSeen = true
 	discovery := len(c.peers) == 0
-	restarted := false
-	if known, ok := c.peers[in.NodeID]; ok && known.runID != in.RunID {
-		restarted = true
-	}
-	c.peers[in.NodeID] = peer{handle: in.Source, runID: in.RunID, lastHello: now}
-	if restarted {
-		for _, chunk := range c.listingChunks() {
-			out.Unicast(in.Source, port.DataSync{Entries: chunk})
+	known, remembered := c.peers[in.NodeID]
+	if remembered {
+		switch {
+		case known.runID == in.RunID:
+			// A repeat Hello is idempotence: refresh the liveness stamp, emit
+			// nothing, never a second listing.
+			known.handle = in.Source
+			known.lastHello = now
+			c.peers[in.NodeID] = known
+			return
+		case known.seen(in.RunID):
+			// A run_id this row carried before and no longer has is an
+			// alternating identity — a named configuration error (PROTO-06):
+			// counted, WARNed through the shared per-(node_id, class) limiter,
+			// dropped with no listing and no row change, so a flapping
+			// process cannot force a full listing per datagram.
+			c.discards.DuplicateNodeID++
+			c.cfg.OnDiscard(DiscardDuplicateNodeID, fmt.Sprintf(
+				"node_id %d announced a previously seen run_id from handle %q", in.NodeID, in.Source))
+			c.warnRateLimited(now, in.NodeID, DiscardDuplicateNodeID, fmt.Sprintf(
+				"sup-kv: configuration error: node_id %d alternated to a previously seen run_id from handle %q, datagram discarded (PROTO-06)",
+				in.NodeID, in.Source,
+			))
+			return
 		}
+		// A new run under this node_id no longer stands behind the old run's
+		// listing: its partial rounds and queued FIFO are dropped, so neither
+		// the bounded listing queue nor the accumulator inherits dead state
+		// (CR-01). Its RETAINED listed keys stay, though: retainListedKeys
+		// replaces the whole per-peer set on the new run's first complete
+		// listing, so dropping them here would reopen the listed-but-unarrived
+		// hole (F14) for the restarted peer's keys until its replacement
+		// listing arrives (WR-02) — the two-interval expiry in
+		// expireListedKeys bounds the wait when no replacement ever comes.
+		// The outgoing current run
+		// joins the row's bounded history before the row moves on, which is
+		// what makes a later return to it an alternation.
+		c.dropPeerSyncStreams(in.NodeID)
+		c.dropListing(listingDst{nodeID: in.NodeID, runID: known.runID})
+		c.dropOwedPeer(in.NodeID)
+		previousRun := known.runID
+		known.pushSeenRun(known.runID)
+		// One restart event carries both identities: the outgoing current run
+		// (captured before the row moved on) and the incoming unseen run
+		// (D-01, OBSV-01).
+		c.emitPeer(PeerEvent{
+			Kind:          PeerRestarted,
+			NodeID:        in.NodeID,
+			Handle:        in.Source,
+			RunID:         in.RunID,
+			PreviousRunID: previousRun,
+		})
+	}
+	known.handle = in.Source
+	known.runID = in.RunID
+	known.lastHello = now
+	c.peers[in.NodeID] = known
+	if !remembered {
+		// A first-seen id is the one Hello shape that changes the peer id
+		// set; the peer-id mirror publishes on this generation (A-01).
+		c.peerGen++
+		c.emitPeer(PeerEvent{Kind: PeerAppeared, NodeID: in.NodeID, Handle: in.Source, RunID: in.RunID})
+	}
+	c.greetAndList(now, in, known, remembered, out)
+	if remembered || !discovery {
 		return
 	}
-	if !discovery {
-		return
-	}
-	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
-		entry := c.pending[key]
-		entry.waitSet[in.NodeID] = struct{}{}
+	for _, pk := range sortedPendingKeys(c.pending) {
+		c.pendingVisits++
+		entry := c.pending[pk]
+		// The flush re-arms the ladder and queues the record send so the new
+		// peer receives the pending set, but it deliberately does NOT add the
+		// peer to the wait-set or the per-peer ledger: the promise is exactly
+		// the write-time capture the entry was created with (A-01, IN-05,
+		// RESEARCH Pitfall 4). A peer discovered after acceptance can be
+		// broadcast to; it can never be awaited. This loop stays deliberately
+		// O(n) — a newly seen peer must receive every pending pair once — and
+		// it prices itself in PendingVisits, so the one-time discovery cost is
+		// visible to the flatness gates and never confused with the hot path.
 		entry.backoff = c.cfg.AckTimeout
 		entry.nextRetry = now.Add(c.cfg.AckTimeout)
-		c.pending[key] = entry
-		out.Broadcast(port.DataReplication{Key: key, Record: entry.rec})
+		c.pending[pk] = entry
+		c.fixRetry(pk, entry.nextRetry)
+		c.enqueueRecordSend(now, pk, false)
 	}
 }
 
-// applyRemote joins one replicated record through the store seam and Acks
-// it immediately after the in-memory apply — nothing here waits for a dump
-// (REPL-03). A store error (for example a value over the configured limit)
-// is surfaced through Log, never a panic: a hostile or oversized datagram
-// must not take the node down, and a record the store refused is never
-// confirmed — no Ack and no supersession of pending tracking, so the sender
-// keeps retransmitting and the unacked gauge keeps climbing: the truthful
-// signal of divergence, never a "delivered" report for a record that was
-// never stored. Merge idempotence keeps the error-free duplicate delivery
-// of an already-stored record a no-op that still Acks (REPL-09's adjacency
-// edge). The ApplyRemote returns feed the MergeStats counters (OBS-01,
-// D-10): every displaced-or-rejected version counts a conflict — counted
-// only, never journaled — and a nonzero drift return (the store clock's
-// beyond-threshold signal) counts a drift warning.
-func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Outbox) {
-	conflicts, drift, err := c.store.ApplyRemote(msg.Key, msg.Record)
+// greetAndList announces this node to a first-seen or restarting peer and
+// triggers the one targeted listing it is owed: the identity echo first, then
+// the listing FIFO, or — when the caps refuse it — an owed entry a later
+// Advance re-arms (WR-01). The row's rotation advances only on a restarted
+// peer whose round was actually admitted, so a refused round never claims
+// coverage it did not provide; the updated row is written back to the table.
+//
+//nolint:revive // flag-parameter: restart is the caller's already-decided branch (first-seen vs run change), not a second mode this helper chooses.
+func (c *Core) greetAndList(now time.Time, in port.InboundDatagram, known peer, restart bool, out *port.Outbox) {
+	// The listing's receiver must already hold this node's peer row, or the
+	// listing binding (CR-01) discards every part: a first-seen or restarting
+	// peer has not necessarily heard our Hello yet, so the identity half of
+	// "one targeted listing toward a newly seen peer" travels with it — one
+	// unicast Hello to the same handle, flushed ahead of the paced listing
+	// chunks. Without this echo the targeted listing would be dropped as
+	// unbound and the joiner would wait for our next periodic Hello PLUS a
+	// periodic listing, reintroducing the sync_interval term D-04 removes.
+	// The exchange terminates: a receiver that has not yet learned us answers
+	// our echo with its own echo (and listing), and that reply reaches us as a
+	// repeat Hello — the row it names is the one the original Hello created —
+	// so each side echoes at most once per pair.
+	out.Unicast(in.Source, port.Hello{})
+	dst := listingDst{nodeID: in.NodeID, runID: in.RunID}
+	if !c.enqueueListing(now, dst, known.rotation) {
+		// A caps-refused first-seen or restart listing is re-armed, not lost
+		// (WR-01): the row was already updated, so this peer's next Hello takes
+		// the repeat branch and would never trigger the listing again.
+		c.oweListing(dst, known.rotation)
+		return
+	}
+	if !restart {
+		return
+	}
+	known.rotation++
+	c.peers[in.NodeID] = known
+}
+
+// applyRemote resolves one inbound DataReplication against the store's
+// current state, with exactly three version outcomes (PROTO-03, the refined
+// D-03) and the equal-version content tie-break on top (PERSIST-07, ADR 0012):
+//
+//   - strictly older incoming (a held version sorts after it): answer with
+//     exactly one unicast DataReplication carrying the held record and send
+//     NO Ack. The answer is queued as an identity-only egress entry and
+//     re-reads the stored record at drain time, so the newer data is always
+//     current. The store is not merged, the merge counters are untouched and
+//     the tracking ledger neither gains nor loses an entry — an Ack here
+//     would tell the sender a record it did not get was accepted.
+//   - equal version with identical content: Ack it and emit no reply. The
+//     record is already held (merge idempotence), and every equal duplicate
+//     must be confirmed or retransmission ladders never drain (S-PROTO-16,
+//     R-02). The clock already absorbed this version when the record was
+//     installed, so skipping the merge changes no state.
+//   - equal version with different content: the store's deterministic
+//     (version, content) tie-break decides, and the wire answer follows the
+//     stored record after the merge — never the version, which is equal on
+//     both sides. When the store now holds exactly the incoming record the
+//     sender won, so it is Acked and no reply is emitted; otherwise the
+//     stored record won, and the sender receives exactly one unicast
+//     DataReplication carrying it and no Ack. Both replicas therefore
+//     converge on the same record, and no randomness lets a peer choose or
+//     predict a different outcome.
+//   - strictly newer or absent: fall through to ApplyRemote and Ack after
+//     the in-memory apply — nothing here waits for a dump (REPL-03).
+//
+// The Version probe before ApplyRemote selects the stale, identical or merge
+// path; the reply verdict itself is re-derived from the stored record read
+// after the merge, because an equal-version tie-break win or loss cannot be
+// named by the version bytes. A store error on the apply path
+// (for example a value over the configured limit) is surfaced through Log,
+// never a panic: a hostile or oversized datagram must not take the node
+// down, and a record the store refused is never confirmed — no Ack and no
+// supersession of pending tracking, so the sender keeps retransmitting and
+// the unacked gauge keeps climbing: the truthful signal of divergence,
+// never a "delivered" report for a record that was never stored. The WARN
+// rides the shared (node_id, apply_failure) limiter and names only the
+// quoted source handle, never the key: a peer whose records always fail
+// cannot flood the log, and the failure text cannot echo record data
+// (T-07-17, T-07-18). The
+// ApplyRemote returns feed the MergeStats counters (OBS-01, OBSV-03): a
+// POSITIVE drift return counts a drift warning — the store clock reports the
+// received version's lead against local wall time, and only a received
+// reading beyond the threshold ahead of the wall is a warning (a negative
+// return, the wall clock jumping past the received version, is never
+// counted, OBSV-05) — while Conflicts counts only the displacement of a
+// pending (unacked) local write, detected from the core's own pending set
+// after the apply, never from the store's per-outcome Conflict slice (ADR
+// 0004): the store reports every LWW outcome, so len(conflicts) would count
+// ordinary overwrites the Spec does not call conflicts.
+func (c *Core) applyRemote(
+	now time.Time, nodeID uint16, source string, msg port.DataReplication, out *port.Outbox,
+) {
+	if held, present := c.store.Version(msg.Key); present {
+		switch cmp := held.Compare(msg.Record.Version); {
+		case cmp > 0:
+			// The sender is behind: answer with the held record, never Ack.
+			c.enqueueResponse(now, source, egressDataReplication, msg.Key)
+			return
+		case cmp == 0:
+			// Only identical content is the old equal-version no-op; a
+			// differing record must reach the store so the tie-break decides.
+			if stored, ok := c.store.Lookup(msg.Key); ok && storage.RecordsEqual(stored, msg.Record) {
+				out.Unicast(source, port.Ack{Key: msg.Key, Version: held})
+				return
+			}
+		}
+	}
+	_, drift, err := c.store.ApplyRemote(msg.Key, msg.Record)
 	if err != nil {
-		c.cfg.Log(fmt.Sprintf("sup-kv: applying replicated record for key %q from handle %q: %v", msg.Key, source, err))
+		// The key is deliberately absent: the shared (node_id,
+		// apply_failure) limiter bounds the flood and the quoted source
+		// handle is all the operator needs (T-07-17, T-07-18).
+		c.warnRateLimited(now, nodeID, warnClassApplyFailure,
+			fmt.Sprintf("sup-kv: applying replicated record from handle %q: %v", source, err))
 		// Not applied: no Ack, no supersession — never confirm a record the
 		// store refused.
 		return
 	}
-	c.mergeStats.Conflicts += uint64(len(conflicts))
-	if drift != 0 {
+	if drift > 0 {
+		// Only a received version ahead of local wall time is a drift
+		// warning (OBSV-05); a negative reading — the wall clock jumped past
+		// the received version — is never counted. The counter is per record;
+		// the event rides the shared limiter (D-01, D-02).
 		c.mergeStats.DriftWarnings++
+		c.emitDrift(now, nodeID, source, drift)
 	}
-	// Remote supersession: a strictly greater remote version under the same
-	// key fulfills the tracking promise by winning — the same byte order
-	// storage.Merge joins by; an equal version (a redelivery) leaves
-	// tracking unchanged (REPL-02).
-	if entry, ok := c.pending[msg.Key]; ok && msg.Record.Version.Compare(entry.version) > 0 {
-		delete(c.pending, msg.Key)
+	// One post-apply read serves both the reply verdict and the displacement
+	// count: the incoming record won exactly when the store now holds it
+	// (ADR 0012).
+	stored, present := c.store.Lookup(msg.Key)
+	incomingWon := present && storage.RecordsEqual(stored, msg.Record)
+	// Pending displacement (OBSV-03, ADR 0004): a tracked local write is
+	// displaced only when the applied record actually replaced it — a
+	// strictly greater version, or an equal version the incoming record won
+	// on content (the identical-content case returned above, so equal
+	// versions here always mean differing records). The candidate is read from
+	// the key's index slot, so an apply for an untracked key inspects no
+	// pending entry. A pending version the incoming record did not beat stays
+	// tracked and counts nothing, and a displaced entry emits its Superseded
+	// result with the TRACKED version — the displaced write's resolution is an
+	// honest false (XPORT-12).
+	if pk, tracked := c.pendingByKey[msg.Key]; tracked {
+		c.pendingVisits++
+		if cmp := msg.Record.Version.Compare(pk.version); cmp > 0 || (cmp == 0 && incomingWon) {
+			c.mergeStats.Conflicts++
+			out.Superseded(pk.key, pk.version)
+			c.removePending(pk)
+		}
 	}
-	out.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})
+	if incomingWon {
+		out.Unicast(source, port.Ack{Key: msg.Key, Version: msg.Record.Version})
+		return
+	}
+	// The stored record won: answer with it exactly like the strictly-older
+	// branch, and send no Ack — the sender's record was not accepted.
+	c.enqueueResponse(now, source, egressDataReplication, msg.Key)
 }
 
 // handleAck drains one waiter of the pending entry matching the Ack's
@@ -557,25 +1717,34 @@ func (c *Core) applyRemote(source string, msg port.DataReplication, out *port.Ou
 // joins the acked set whether or not the sender was in the wait-set (the
 // counting behavior — WR-01): the wait-set gate does not exist, so a peer
 // may appear in acked without ever having been waited on, and the acked
-// length can exceed the write-time peer snapshot; the D-08 report keeps
-// its peer set fixed at write time (D-10) by reading the count clamped to
-// the write-time total (grpcapi's waitForDrain). The empty-table guard is
-// load-bearing: an entry whose every waiter was evicted stays retained in
-// suspension, and an Ack can only drain when peers actually exist. The
-// peer is identified by the datagram's NodeID alone; nothing here writes
-// the peer table.
-func (c *Core) handleAck(peerID uint16, ack port.Ack) {
-	entry, ok := c.pending[ack.Key]
-	if !ok || entry.version != ack.Version {
+// length can exceed the write-time peer snapshot. The core's acked set is
+// therefore a superset; the adapter's tracker counts only the peers in its
+// captured write-time set (A-01, T-06-04), so the D-08 report can never be
+// inflated by a stranger's Ack. The empty-table
+// guard is load-bearing: an entry whose every waiter was evicted stays
+// retained in suspension, and an Ack can only drain when peers actually
+// exist. The peer is identified by the datagram's NodeID alone; nothing
+// here writes the peer table. Every matching Ack emits an [port.Result] —
+// including a stranger's, the count the waiter tracker needs — and a
+// drain emits the Drained result at the deletion point (XPORT-12): the
+// result stream is how a waiter learns what this call observed, without a
+// callback entering the core.
+func (c *Core) handleAck(peerID uint16, ack port.Ack, out *port.Outbox) {
+	pk := pendingKey{key: ack.Key, version: ack.Version}
+	entry, ok := c.pending[pk]
+	if !ok {
 		return
 	}
 	delete(entry.waitSet, peerID)
+	c.ledgerRemove(peerID, pk)
 	entry.acked = ackedInsert(entry.acked, peerID)
+	out.Ack(pk.key, pk.version, peerID)
 	if len(entry.waitSet) == 0 && len(c.peers) > 0 {
-		delete(c.pending, ack.Key)
+		out.Drained(pk.key, pk.version)
+		c.removePending(pk)
 		return
 	}
-	c.pending[ack.Key] = entry
+	c.pending[pk] = entry
 }
 
 // ackedInsert returns acked with id inserted at its sorted position — the
@@ -590,70 +1759,504 @@ func ackedInsert(acked []uint16, id uint16) []uint16 {
 	return slices.Insert(acked, pos, id)
 }
 
-// handleDataRequest answers one DataRequest (REPL-04): a single Records()
-// snapshot serves the whole handler call — the snapshot discipline every
-// sync path of this plan reuses, never one snapshot per response — and a
-// key present in the snapshot (tombstones included, so deletes heal
-// through the same LWW path as writes) enqueues one unicast
-// DataReplication carrying the exact snapshot record on the egress queue,
-// which Advance drains at the sync_response_rate cadence. A key absent
-// from the snapshot produces nothing at all — no error reply, no nack,
-// nothing enqueued, ever. The reply addresses the datagram's source handle
-// regardless of peer-table membership: a stranger's DataRequest is still
-// protocol traffic from a live node, and replies are unicast only — a
-// broadcast reply would amplify one request into N datagrams.
+// handleDataRequest answers one DataRequest (REPL-04): one O(1)
+// Version presence probe serves the whole handler call — the view
+// discipline, never a whole-store snapshot and never a Data copy before the
+// dedupe check (CR-02) — and a key the store holds (tombstones included, so
+// deletes heal through the same LWW path as writes) enqueues one unicast
+// DataReplication IDENTITY on the egress queue; the drain re-reads the
+// current record and builds the message. A key the store does not hold
+// produces nothing at all — no error reply, no nack, nothing enqueued, ever.
+// The reply addresses the datagram's source handle regardless of peer-table
+// membership: a stranger's DataRequest is still protocol traffic from a live
+// node, and replies are unicast only — a broadcast reply would amplify one
+// request into N datagrams.
 func (c *Core) handleDataRequest(now time.Time, source, key string) {
-	rec, ok := c.store.Records()[key]
-	if !ok {
+	if _, ok := c.store.Version(key); !ok {
 		return
 	}
-	c.enqueueResponse(now, source, port.DataReplication{Key: key, Record: rec})
+	c.enqueueResponse(now, source, egressDataReplication, key)
 }
 
-// handleDataSync compares one received DataSync listing against the local
-// store (REPL-05): a single Records() snapshot serves the whole handler
-// call, and each listing entry compares per key by the full record-version
-// order — version.Compare, the same order storage.Merge joins by. The
-// first received DataSync datagram — any chunk, an empty listing included —
-// sets the core's syncArrived flag (the startup gate's sync half, API-04,
-// the A1 reading: the protocol deliberately carries no chunk-completeness
-// state because chunks are self-sufficient, so the first received chunk is
-// the honest first-sync-round signal and the startup_gate timeout is the
-// backstop). A locally absent key or a strictly newer listing version
-// enqueues a unicast DataRequest to the sender's handle; a strictly newer
-// local record — tombstones included, so a local delete heals the sender's
-// live copy through the reply — enqueues a unicast exact-record
-// DataReplication; equal versions produce silence. Entries are processed
-// in received order (senders emit sorted, but the compare is per key and
+// handleDataSync processes one DataSync part (REPL-05, PROTO-01). The header
+// names one peer's listing round; parts accumulate by
+// (node_id, run_id, sync_id) and the round is complete exactly when every
+// chunk index 1..chunk_count has arrived — the first part alone is never the
+// listing (the R-03 defect this shape removes). Before accumulation, a
+// non-empty part absorbs its maximum entry version into the store clock
+// exactly once (PROTO-01): the call sits after header validation — so a
+// datagram the validation pipeline discarded never reaches the clock (T-4-10)
+// — and is independent of stream completion, so a partial round's versions
+// already advance the HLC. An empty part has no version to absorb. Only a
+// complete round publishes its key set through retainListedKeys, sets
+// listingComplete once, moves the listing generation when the published
+// content actually changed, and opens the gate — all in this
+// same handler, so no partial listing can open it. The part's entries then
+// compare per key against the store exactly as before: a locally absent key
+// or a strictly newer listing version enqueues a unicast DataRequest
+// identity; a strictly newer local record — the point Version probe already
+// proved presence, and the drain re-reads the current record (tombstones
+// included, so a local delete heals the sender's live copy) — enqueues a
+// unicast DataReplication identity; equal versions produce silence. Both
+// enqueues are identity-only, so no Data is copied and no record is looked
+// up before the dedupe check (CR-02).
+// Entries are processed in received order (the compare is per key and
 // order-independent by construction) and every response flows through the
-// single rate-limited egress queue — the scope pin; no reactive unicast
-// has a bypass path, which is what survives empty-node recovery (T-04-07).
-func (c *Core) handleDataSync(now time.Time, source string, entries []port.SyncEntry) {
-	c.syncArrived = true
-	snapshot := c.store.Records()
-	for _, entry := range entries {
-		local, present := snapshot[entry.Key]
-		cmp := local.Version.Compare(entry.Version)
+// single rate-limited egress queue — the scope pin; no reactive unicast has a
+// bypass path, which is what survives empty-node recovery (T-04-07). A
+// directly-driven core receives no header validation (the wired path
+// classifies that before this handler), so an impossible header returns
+// without touching any state.
+//
+// A listing is TRUSTED state — it makes arbitrary key names unreadable and
+// uncreatable through the RPC layer — so it is accepted only from a real
+// peer identity (CR-01): a datagram whose node_id has no peer-table row, or
+// whose envelope run_id differs from the row's, is the named unbound_listing
+// class. It is counted, WARNed through the shared limiter and dropped BEFORE
+// the clock call, the accumulation and the completeness publication: an
+// unbound sender can neither retain keys, nor complete a round, nor open the
+// gate.
+func (c *Core) handleDataSync(now time.Time, in port.InboundDatagram, msg port.DataSync, _ *port.Outbox) {
+	if !validSyncHeader(msg) {
+		return
+	}
+	if !c.listingBound(now, in) {
+		return
+	}
+	if len(msg.Entries) > 0 {
+		// A listing part's maximum entry version is a received reading for
+		// OBSV-05: count one warning per offending part — never one per
+		// entry, so a large listing cannot inflate the counter (T-07-16).
+		drift := c.store.Observe(maxEntryVersion(msg.Entries))
+		if drift > 0 {
+			c.mergeStats.DriftWarnings++
+			c.emitDrift(now, in.NodeID, in.Source, drift)
+		}
+	}
+	c.accumulateSync(now, in, msg)
+	for _, entry := range msg.Entries {
+		local, present := c.store.Version(entry.Key)
 		switch {
-		case !present || cmp < 0:
-			c.enqueueResponse(now, source, port.DataRequest{Key: entry.Key})
-		case cmp > 0:
-			c.enqueueResponse(now, source, port.DataReplication{Key: entry.Key, Record: local})
+		case !present || local.Compare(entry.Version) < 0:
+			c.enqueueResponse(now, in.Source, egressDataRequest, entry.Key)
+		case local.Compare(entry.Version) > 0:
+			// The probe above already proved presence; the drain owns the
+			// race between this probe and the record read.
+			c.enqueueResponse(now, in.Source, egressDataReplication, entry.Key)
 		}
 	}
 }
 
-// enqueueResponse appends one reactive unicast to the egress queue
+// listingBound reports whether in's identity is bound to a live peer-table
+// row — the CR-01 retention gate. Every other stateful path compares the
+// envelope run_id with the remembered row's, and the listed-key union must
+// not be cheaper to fill than the peer table itself: an unauthenticated
+// sender that never sent a Hello (or that forges a different run under a
+// known node_id) would otherwise install permanent state, flush a real
+// peer's protective set and open the startup gate past both backstops. The
+// drop is the unbound_listing class (D-04's New-2, distinct from
+// duplicate_node_id: a listing may legitimately overtake its Hello), counted
+// and rate-limited exactly like the duplicate-identity paths, and nothing —
+// no clock call, no accumulation, no completeness — follows it.
+func (c *Core) listingBound(now time.Time, in port.InboundDatagram) bool {
+	if known, ok := c.peers[in.NodeID]; ok && known.runID == in.RunID {
+		return true
+	}
+	c.discards.UnboundListing++
+	c.cfg.OnDiscard(DiscardUnboundListing, fmt.Sprintf(
+		"node_id %d listing from unbound run at handle %q", in.NodeID, in.Source))
+	c.warnRateLimited(now, in.NodeID, DiscardUnboundListing, fmt.Sprintf(
+		"sup-kv: node_id %d sent a listing from a run the peer table does not hold, datagram discarded (CR-01)",
+		in.NodeID,
+	))
+	return false
+}
+
+// maxEntryVersion returns the greatest version among entries by the full
+// 16-byte comparison; entries must be non-empty. The absorbed reading is the
+// exact maximum of the part's validated versions — no averaging, rounding or
+// truncation (PROTO-01 precision).
+func maxEntryVersion(entries []port.SyncEntry) version.RecordVersion {
+	maxVer := entries[0].Version
+	for _, entry := range entries[1:] {
+		if entry.Version.Compare(maxVer) > 0 {
+			maxVer = entry.Version
+		}
+	}
+	return maxVer
+}
+
+// validSyncHeader reports whether msg's completeness header is inside its
+// domain: at least one chunk, a 1-based index inside the round, and a count
+// at or under the stream cap (T-4-02). One step outside any bound is
+// invalid; an empty listing is a single empty chunk, never chunk_count 0.
+func validSyncHeader(msg port.DataSync) bool {
+	return msg.ChunkCount >= 1 &&
+		msg.ChunkIndex >= 1 &&
+		msg.ChunkIndex <= msg.ChunkCount &&
+		msg.ChunkCount <= maxSyncChunks
+}
+
+// accumulateSync folds one valid, identity-bound part into its round's
+// stream, enforcing the three bounds, and completes the listing when every
+// index 1..count is present. The stream key includes the peer's run_id, so a
+// restart's fresh sync_id counter cannot merge into the previous run's
+// partial state.
+func (c *Core) accumulateSync(now time.Time, in port.InboundDatagram, msg port.DataSync) {
+	key := syncStreamKey{peer: in.NodeID, run: in.RunID, id: msg.SyncID}
+	stream := c.syncs[key]
+	if stream == nil {
+		c.makeSyncStreamRoom()
+		// The index map's capacity hint is clamped (WR-05): it must never
+		// scale with the attacker-supplied chunk_count. A one-chunk datagram
+		// claiming maxSyncChunks would otherwise buy ~1.2 MiB of retained heap
+		// per stream — a remotely repeatable ~19 MiB for the stream bound —
+		// while the map grows correctly on its own as chunks actually arrive,
+		// and those arrivals are already bounded by the entry caps.
+		stream = &syncStream{
+			count:   msg.ChunkCount,
+			got:     make(map[uint32]struct{}, int(min(msg.ChunkCount, syncStreamGotHint))),
+			entries: make(map[string]version.RecordVersion, len(msg.Entries)),
+		}
+		c.syncs[key] = stream
+	} else if stream.count != msg.ChunkCount {
+		// A part disagreeing with the live round's count never merges: the
+		// wired path classifies it as bad_sync_header and the stored count is
+		// the round's identity.
+		return
+	}
+	stream.got[msg.ChunkIndex] = struct{}{}
+	for _, entry := range msg.Entries {
+		if _, seen := stream.entries[entry.Key]; seen {
+			continue // idempotent: the same key twice contributes once
+		}
+		stream.entries[entry.Key] = entry.Version
+		c.syncEntries++
+	}
+	if c.enforceSyncBounds(key) {
+		return // the bounds dropped this round; nothing may complete from it
+	}
+	if !stream.complete() {
+		return
+	}
+	changed := c.retainListedKeys(now, in.NodeID, stream.entries)
+	if !c.listingComplete {
+		c.listingComplete = true
+		changed = true
+	}
+	if changed {
+		c.listingGen++
+	}
+	c.discardSyncStream(key)
+}
+
+// complete reports whether every chunk index 1..count has arrived — the
+// single completeness predicate: arrival of any one chunk proves nothing.
+func (s *syncStream) complete() bool {
+	if len(s.got) < int(s.count) {
+		return false
+	}
+	for i := uint32(1); i <= s.count; i++ {
+		if _, ok := s.got[i]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// makeSyncStreamRoom evicts least-progressed rounds until another stream can
+// be admitted. Eviction order is deterministic — fewest received chunks
+// first, then (peer, run bytes, sync_id) ascending — so same-seed replay
+// stays byte-identical (T-4-03, T-3-22).
+func (c *Core) makeSyncStreamRoom() {
+	for len(c.syncs) >= maxSyncStreams {
+		if !c.dropWeakestSyncStream() {
+			return
+		}
+	}
+}
+
+// enforceSyncBounds applies the per-stream and total entry caps after one
+// accumulation, reporting whether the round was dropped. A stream past
+// maxSyncEntriesPerStream is evicted whole; then least-progressed streams are
+// evicted until the total fits maxSyncEntriesTotal. Every eviction counts in
+// syncStreamDropped.
+func (c *Core) enforceSyncBounds(key syncStreamKey) bool {
+	stream := c.syncs[key]
+	if stream == nil {
+		return true
+	}
+	if len(stream.entries) > maxSyncEntriesPerStream {
+		c.evictSyncStream(key)
+		return true
+	}
+	for c.syncEntries > maxSyncEntriesTotal {
+		if !c.dropWeakestSyncStream() {
+			break
+		}
+	}
+	_, kept := c.syncs[key]
+	return !kept
+}
+
+// dropWeakestSyncStream evicts the least-progressed round and reports
+// whether one existed. The comparator is a total order over the streams, so
+// the choice never depends on map iteration order.
+func (c *Core) dropWeakestSyncStream() bool {
+	var weakest syncStreamKey
+	var weakestStream *syncStream
+	found := false
+	for key, stream := range c.syncs {
+		if !found || syncStreamLess(key, stream, weakest, weakestStream) {
+			weakest, weakestStream, found = key, stream, true
+		}
+	}
+	if !found {
+		return false
+	}
+	c.evictSyncStream(weakest)
+	return true
+}
+
+// syncStreamLess orders two partial rounds for deterministic eviction:
+// fewer received chunks is weaker (less likely to complete soon), then the
+// key's peer, run bytes and sync_id break ties ascending.
+func syncStreamLess(a syncStreamKey, aStream *syncStream, b syncStreamKey, bStream *syncStream) bool {
+	if len(aStream.got) != len(bStream.got) {
+		return len(aStream.got) < len(bStream.got)
+	}
+	if a.peer != b.peer {
+		return a.peer < b.peer
+	}
+	if cmp := bytes.Compare(a.run[:], b.run[:]); cmp != 0 {
+		return cmp < 0
+	}
+	return a.id < b.id
+}
+
+// evictSyncStream drops one partial round and counts the drop — the only
+// deletion path that counts; completion uses discardSyncStream.
+func (c *Core) evictSyncStream(key syncStreamKey) {
+	if _, ok := c.syncs[key]; !ok {
+		return
+	}
+	c.discardSyncStream(key)
+	c.syncStreamDropped++
+}
+
+// discardSyncStream deletes one partial round and releases its accumulated
+// entries from the total counter — the shared completion/eviction deletion.
+func (c *Core) discardSyncStream(key syncStreamKey) {
+	stream, ok := c.syncs[key]
+	if !ok {
+		return
+	}
+	c.syncEntries -= len(stream.entries)
+	delete(c.syncs, key)
+}
+
+// dropPeerSyncStreams discards every partial round a peer left behind — the
+// restart and peer-eviction cleanup, so a dead run's partial state cannot
+// occupy the bounded accumulator.
+func (c *Core) dropPeerSyncStreams(peer uint16) {
+	for key := range c.syncs {
+		if key.peer == peer {
+			c.discardSyncStream(key)
+		}
+	}
+}
+
+// retainListedKeys installs entries as peer's whole listed-key set, releases
+// the set it replaces through the union refcounts, records the publish
+// instant, refreshes the peer's LRU position, and then evicts whole peer
+// sets from the LRU front while the retained total exceeds
+// maxListedKeysTotal (T-4-41). It reports whether the UNION membership
+// actually changed — a key entering or leaving the union, not merely a
+// peer's own set being rewritten — so a key shared with another peer neither
+// enters nor leaves it, and an identical repeated listing moves no
+// generation and the adapter's mirror clones nothing. A key shared by
+// several peers stays in the union until its last lister drops it; eviction
+// therefore shrinks the union, the refcounts and the retained total together.
+// The recorded instant is what bounds the retention in time (CR-01,
+// [Core.expireListedKeys]): a set nobody republishes stops protecting keys.
+func (c *Core) retainListedKeys(now time.Time, peer uint16, entries map[string]version.RecordVersion) bool {
+	if sameListedKeys(c.listedByPeer[peer], entries) {
+		c.touchListedPeer(now, peer)
+		return false
+	}
+	released := c.dropListedPeer(peer)
+	set := make(map[string]struct{}, len(entries))
+	added := 0
+	for key := range entries {
+		set[key] = struct{}{}
+		c.listedRefs[key]++
+		if c.listedRefs[key] == 1 {
+			c.listedKeys[key] = struct{}{}
+			c.listedKeyCount++
+			added++
+		}
+	}
+	c.listedByPeer[peer] = set
+	c.listedAt[peer] = now
+	c.listedPos[peer] = c.listedOrder.PushBack(peer)
+	evicted := 0
+	for c.listedKeyCount > maxListedKeysTotal {
+		front := c.listedOrder.Front()
+		if front == nil {
+			break
+		}
+		victim := front.Value.(uint16)
+		evicted += c.dropListedPeer(victim)
+	}
+	c.listedKeysEvicted += uint64(evicted)
+	return released > 0 || added > 0 || evicted > 0
+}
+
+// touchListedPeer moves peer to the LRU back and refreshes its publish
+// instant without touching its set — the identical-repeat path: recency
+// updates, content does not. A peer with no retained set is a no-op: an
+// empty listing adds no key to the union, so creating a row for it would let
+// a listing-shaped datagram grow listedByPeer without bound while
+// listedKeyCount stayed 0 and the size cap never applied (CR-01).
+func (c *Core) touchListedPeer(now time.Time, peer uint16) {
+	elem := c.listedPos[peer]
+	if elem == nil {
+		return
+	}
+	c.listedOrder.MoveToBack(elem)
+	c.listedAt[peer] = now
+}
+
+// dropListedPeer removes peer's whole listed-key contribution: every key whose
+// last lister it was leaves the union, the refcounts shrink, and the peer row
+// and LRU element go. It returns how many keys left the union — the count
+// ListedKeysEvicted publishes. Used both for replacement and eviction, so a
+// dead peer's keys can never survive in the mirror.
+func (c *Core) dropListedPeer(peer uint16) int {
+	set, ok := c.listedByPeer[peer]
+	if !ok {
+		return 0
+	}
+	released := 0
+	for key := range set {
+		c.listedRefs[key]--
+		if c.listedRefs[key] > 0 {
+			continue
+		}
+		delete(c.listedRefs, key)
+		if _, listed := c.listedKeys[key]; listed {
+			delete(c.listedKeys, key)
+			c.listedKeyCount--
+			released++
+		}
+	}
+	delete(c.listedByPeer, peer)
+	delete(c.listedAt, peer)
+	if elem := c.listedPos[peer]; elem != nil {
+		c.listedOrder.Remove(elem)
+		delete(c.listedPos, peer)
+	}
+	return released
+}
+
+// expireListedKeys releases every retained peer set that has not been
+// republished within two sync intervals (CR-01). Retention is bound in TIME
+// as well as in size: a peer that stops publishing listings — a dead run, a
+// partitioned segment, a sender that never lists again — must stop
+// protecting keys, or one forged or stale listing would deny them for the
+// process lifetime. The walk follows listedOrder, which is also publish-time
+// order (every retain and every identical repeat moves the peer to the back
+// and refreshes its instant), so it stops at the first fresh row. Each
+// released key counts in ListedKeysEvicted like an eviction, and a union
+// change moves the listing generation so the mirror republishes.
+func (c *Core) expireListedKeys(now time.Time) {
+	maxAge := listedKeysMaxAgeSyncIntervals * c.cfg.SyncInterval
+	var expired []uint16
+	for elem := c.listedOrder.Front(); elem != nil; elem = elem.Next() {
+		peer := elem.Value.(uint16)
+		if now.Sub(c.listedAt[peer]) < maxAge {
+			break // listedOrder is publish-time order: the rest are fresh too
+		}
+		expired = append(expired, peer)
+	}
+	for _, peer := range expired {
+		released := c.dropListedPeer(peer)
+		//nolint:gosec // G115: released counts union keys, bounded by maxListedKeysTotal.
+		c.listedKeysEvicted += uint64(released)
+		if released > 0 {
+			c.listingGen++
+		}
+	}
+}
+
+// earliestListedExpiry returns the instant the oldest retained set expires —
+// the deadline contribution that keeps [Core.expireListedKeys] from waiting
+// for an unrelated timer. The zero time means no set is retained (never a
+// deadline). After an expire pass every remaining instant is strictly future,
+// so the returned deadline is too.
+func (c *Core) earliestListedExpiry() time.Time {
+	front := c.listedOrder.Front()
+	if front == nil {
+		return time.Time{}
+	}
+	return c.listedAt[front.Value.(uint16)].Add(listedKeysMaxAgeSyncIntervals * c.cfg.SyncInterval)
+}
+
+// sameListedKeys reports whether peer's retained set already holds exactly
+// entries' keys — the identical-listing predicate the content-gated
+// generation depends on.
+func sameListedKeys(old map[string]struct{}, entries map[string]version.RecordVersion) bool {
+	if len(old) != len(entries) {
+		return false
+	}
+	for key := range entries {
+		if _, ok := old[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// enqueueResponse appends one reactive unicast identity to the egress queue
 // (REPL-05): the FIFO drains inside Advance at exactly one
 // syncResponseInterval per response, enqueue order IS drain order, and the
 // first response after an idle queue emits immediately — nextSendAt clamps
 // to this call's now, so no head-of-line delay ever applies to the first
-// datagram of a burst.
-func (c *Core) enqueueResponse(now time.Time, handle string, msg port.Message) {
+// datagram of a burst. The entry carries (handle, kind, key) and no message
+// (CR-02): the producer must not look a record up first, so a request for a
+// present key copies no Data, and the drain builds the message from the
+// current store state. The queue is bounded and deduplicated (XPORT-07): the
+// identity is (handle, kind, key), so the same answer requested twice — the
+// two-listings-1000-missing-keys case — occupies one slot, and an overflow
+// drops the OLDEST entry together with its identity (T-3-21) while counting
+// the drop. Duplicates are silent: the existing answer already covers the
+// request.
+func (c *Core) enqueueResponse(now time.Time, handle string, kind egressKind, key string) {
+	id := egressKey{handle: handle, kind: kind, key: key}
+	if _, dup := c.egressIDs[id]; dup {
+		return
+	}
 	if len(c.egress) == 0 {
 		c.nextSendAt = now
 	}
-	c.egress = append(c.egress, queuedUnicast{handle: handle, msg: msg})
+	c.egress = append(c.egress, queuedUnicast{id: id})
+	c.egressIDs[id] = struct{}{}
+	if len(c.egress) > maxEgressEntries {
+		c.dropOldestEgress()
+	}
+}
+
+// dropOldestEgress evicts the queue's oldest entry and deletes its dedupe
+// identity in the same operation: a retained identity would make a later
+// identical request look already queued and silently starve it (T-3-21,
+// RESEARCH Pitfall 10). The emptied slot is cleared to release its identity
+// strings.
+func (c *Core) dropOldestEgress() {
+	oldest := c.egress[0]
+	c.egress[0] = queuedUnicast{}
+	c.egress = c.egress[1:]
+	delete(c.egressIDs, oldest.id)
+	c.egressDropped++
 }
 
 // drainEgress emits every due queued response (REPL-05): while nextSendAt
@@ -664,12 +2267,22 @@ func (c *Core) enqueueResponse(now time.Time, handle string, msg port.Message) {
 // Advance that arrives late (past several slots) still emits only one
 // response per call of this loop's steady state: the slot advances from
 // the actual emission time, never bursting a backlog in one tick — the
-// limiter is what survives empty-node recovery (T-04-07).
+// limiter is what survives empty-node recovery (T-04-07). A queued
+// DataReplication answer re-reads the stored record at drain time and is
+// skipped when the key is gone (the store has changed since enqueue); a
+// skipped entry consumes no slot.
 func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
 	for len(c.egress) > 0 && !now.Before(c.nextSendAt) {
 		q := c.egress[0]
+		c.egress[0] = queuedUnicast{}
 		c.egress = c.egress[1:]
-		out.Unicast(q.handle, q.msg)
+		delete(c.egressIDs, q.id)
+		msg, ok := c.resolveQueuedResponse(q)
+		if !ok {
+			continue
+		}
+		out.Unicast(q.id.handle, msg)
+		c.pacedSends++
 		if now.After(c.nextSendAt) {
 			c.nextSendAt = now
 		}
@@ -677,132 +2290,585 @@ func (c *Core) drainEgress(now time.Time, out *port.Outbox) {
 	}
 }
 
+// resolveQueuedResponse builds the message to emit for one dequeued
+// response. A DataRequest is key-only by nature; a DataReplication answer
+// re-reads the record through Lookup and reports false when the key is gone
+// — the queue pins no Data, so the answer always carries the current record
+// (XPORT-07, CR-02).
+func (c *Core) resolveQueuedResponse(q queuedUnicast) (port.Message, bool) {
+	switch q.id.kind {
+	case egressDataReplication:
+		rec, ok := c.store.Lookup(q.id.key)
+		if !ok {
+			return nil, false
+		}
+		return port.DataReplication{Key: q.id.key, Record: rec}, true
+	case egressDataRequest:
+		return port.DataRequest{Key: q.id.key}, true
+	}
+	return nil, false
+}
+
 // NotifyLocalWrite is the explicit call a write's author makes after the
 // store write (D-05: no store subscriptions, no observers, no callbacks —
-// tests now, the gRPC handler in Phase 5). The core keeps a defensive copy
-// of rec (the storage.install precedent) as the pending entry — wait-set
-// seeded with every currently-known peer, ladder armed at cfg.AckTimeout —
-// and broadcasts the record as a DataReplication datagram. A newer local
-// write under the same key REPLACES the entry: fresh wait-set, ladder reset
+// tests now, the gRPC handler in Phase 5). The store is the single record
+// source (the write is already installed there), so the core keeps only the
+// (key, version) tracking entry — wait-set seeded with exactly the captured
+// write-time peers, ladder armed at cfg.AckTimeout — and broadcasts the
+// record as a
+// DataReplication datagram from a defensive copy (the author may reuse its
+// buffer once the call returns).
+//
+// The notification guard runs first (PROTO-05, D-05): a notification whose
+// version is NOT GREATER than the version the core already tracks for that
+// key — a regressive write or an equal duplicate — is ignored: no broadcast,
+// no ledger entry or other tracking change, and one NotificationsRegressed
+// count. A STRICTLY OLDER notification additionally resolves its own waiter
+// with a Superseded result naming the notified version (WR-03): the tracked,
+// greater write already displaced it, exactly as removeSupersededLocal
+// reports a newer local write, so a wait_for_replication for the displaced
+// write learns the honest false immediately instead of blocking for its
+// client-chosen timeout; an equal duplicate displaced nothing and only
+// counts. The comparison is against the tracked pending version, never
+// store.Version: the store already holds the first notified version when
+// this call runs, so a <= store comparison would swallow the normal path.
+// A key's first notification (no tracked entry) always proceeds.
+//
+// A newer local write under the same key REPLACES the older tracking: every
+// entry with a strictly smaller version leaves, fresh wait-set, ladder reset
 // — local supersession (REPL-02). Replication progress is never a
-// precondition of the write path: this enqueues-and-returns (D-05).
-func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
+// precondition of the write path: this enqueues-and-returns (D-05). A replay
+// of already-installed records uses [Core.NotifyReplayedWrite] instead: same
+// tracking, paced emission.
+//
+// peers is the write-time peer snapshot the author captured immediately
+// before its engine write (A-01, D-01): the tracked entry's promise set is
+// seeded from exactly those ids, so a peer discovered after acceptance is
+// broadcast to (the discovery flush and the retransmission ladder still reach
+// it) but never awaited, and an Ack from a node outside the snapshot never
+// completes the promise.
+func (c *Core) NotifyLocalWrite(now time.Time, key string, rec storage.Record, peers []uint16, out *port.Outbox) {
+	if _, accepted := c.trackLocalWrite(now, key, rec, peers, out); !accepted {
+		return
+	}
 	own := storage.Record{
 		Version:  rec.Version,
 		Data:     bytes.Clone(rec.Data),
 		Deleted:  rec.Deleted,
 		Checksum: rec.Checksum,
 	}
-	waitSet := make(map[uint16]struct{}, len(c.peers))
-	for id := range c.peers {
-		waitSet[id] = struct{}{}
-	}
-	c.pending[key] = pendingEntry{
-		rec:       own,
-		version:   own.Version,
-		waitSet:   waitSet,
-		nextRetry: now.Add(c.cfg.AckTimeout),
-		backoff:   c.cfg.AckTimeout,
-		createdAt: now,
-	}
 	out.Broadcast(port.DataReplication{Key: key, Record: own})
 }
 
+// NotifyReplayedWrite is [Core.NotifyLocalWrite] for a record a snapshot load
+// (or another recovery replay) already installed in the store: the tracking is
+// identical — same guard, same wait-set, same ladder — but the emission rides
+// the paced record-send queue instead of broadcasting immediately (WR-04,
+// T-4-20). A 20 000-record load therefore drains one datagram per pacer slot,
+// exactly like a tracked write's discovery flush or a retransmission, instead
+// of emitting 20 000 back-to-back broadcasts that lose most of themselves
+// against the receivers' inbound queues. The queue pins no record: the drain
+// re-reads the stored record and skips it when the version moved, and the
+// retransmission ladder still covers loss. Live writes keep the immediate
+// broadcast (a client waits on them); only the replay seam — which no client
+// waits on — trades latency for pacing.
+func (c *Core) NotifyReplayedWrite(now time.Time, key string, rec storage.Record, out *port.Outbox) {
+	// The replay keeps the pre-capture tracking shape: a load has no waiter,
+	// so there is no write-time promise to pin, and the entry seeds its
+	// wait-set from the current peer table exactly as it always has. This is
+	// deliberately NOT part of the A-01 promise (D-01 covers live writes).
+	pk, accepted := c.trackLocalWrite(now, key, rec, c.PeerIDs(), out)
+	if !accepted {
+		return
+	}
+	c.enqueueRecordSend(now, pk, false)
+}
+
+// trackLocalWrite applies the notification guard and the supersession rules
+// and installs the tracking entry, reporting the (key, version) pair the
+// caller must emit and whether the notification was accepted at all. The guard
+// branches are documented on [Core.NotifyLocalWrite]; both emission shapes
+// (immediate broadcast, paced record send) share this one bookkeeping path, so
+// no second implementation can drift. peers is the write-time peer snapshot
+// the entry's wait-set is seeded from exactly (A-01); nil is the no-promise
+// shape.
+func (c *Core) trackLocalWrite(now time.Time, key string, rec storage.Record, peers []uint16, out *port.Outbox) (pendingKey, bool) {
+	if tracked, ok := c.trackedVersion(key); ok {
+		switch cmp := rec.Version.Compare(tracked); {
+		case cmp < 0:
+			// The arriving write is older than the tracked one: the tracked
+			// write already displaced it, so its waiter resolves now with the
+			// honest false instead of waiting out its timeout (WR-03). The
+			// mirror and the tracking stay on the greater version.
+			out.Superseded(key, rec.Version)
+			c.notificationsRegressed++
+			return pendingKey{}, false
+		case cmp == 0:
+			// An equal duplicate displaced nothing: count it, resolve nothing.
+			c.notificationsRegressed++
+			return pendingKey{}, false
+		}
+	}
+	c.removeSupersededLocal(key, rec.Version, out)
+	pk := pendingKey{key: key, version: rec.Version}
+	_, tracked := c.pending[pk]
+	if !tracked {
+		// The promise set is exactly the write-time snapshot, restricted to
+		// peers the table still holds: a captured peer that has already left
+		// can never Ack, so awaiting it would idle to the caller's timeout
+		// instead of reporting the honest false (A-01, D-01).
+		waitSet := make(map[uint16]struct{}, len(peers))
+		for _, id := range peers {
+			if _, present := c.peers[id]; !present {
+				continue
+			}
+			waitSet[id] = struct{}{}
+		}
+		if len(peers) > 0 && len(waitSet) == 0 {
+			// The capture named peers the table no longer holds: nobody left
+			// can Ack this version, so the waiter learns the honest false now
+			// rather than burning its timeout on an unfulfillable promise.
+			out.WaitSetEmpty(key, rec.Version)
+		}
+		entry := pendingEntry{
+			version:   rec.Version,
+			waitSet:   waitSet,
+			nextRetry: now.Add(c.cfg.AckTimeout),
+			backoff:   c.cfg.AckTimeout,
+			createdAt: now,
+		}
+		entry.elem = c.insertPendingOrder(pk, now)
+		c.pending[pk] = entry
+		c.pendingByKey[pk.key] = pk
+		for id := range waitSet {
+			c.ledgerAdd(id, pk)
+		}
+		c.pushRetry(pk, entry.nextRetry)
+	}
+	return pk, true
+}
+
 // Advance fires the due timers — the hello timer, the DataSync startup and
-// interval triggers, the peer-timeout eviction scan, the retransmission
-// scan and the rate-limited egress drain at this stage — and returns the
+// interval triggers, the paced listing drain, the retained-listing expiry,
+// the peer-timeout eviction scan, the retransmission scan and its paced
+// record-send drain, and the
+// rate-limited egress drain — and returns the
 // next deadline for the driver to sleep on: the minimum of the following
-// hello deadline, the next sync deadline, the earliest peer expiry, while
+// hello deadline, the next sync deadline, the earliest listed-key expiry,
+// the earliest peer expiry, while
 // any pending entry exists the retransmit scan deadline (the
-// scan-granularity reading of retransmit_interval, research A5), and while
+// scan-granularity reading of retransmit_interval, research A5), while any
+// listing chunk is queued the next listing slot, while any record send is
+// queued the next record slot, and while
 // any response is queued the next egress slot. The returned deadline is
 // always strictly future: work due at now fires inside this same call.
 // Eviction runs before the retransmit scan so a peer expiring at now is
 // already gone when the scanner asks whether any peer remains; the egress
 // drain runs last so a tick's reactive responses follow its proactive
-// emissions.
+// emissions. Before any timer work it fires the one-shot no-Hello WARN
+// ([Core.warnIfNoPeer]) — a diagnostic, never a behavior change.
 func (c *Core) Advance(now time.Time, out *port.Outbox) time.Time {
+	c.warnIfNoPeer(now)
 	if !now.Before(c.nextHello) {
 		out.Broadcast(port.Hello{})
-		c.nextHello = now.Add(c.cfg.HelloInterval)
+		c.nextHello = now.Add(c.cfg.HelloInterval + c.helloJitter())
 	}
-	c.syncListing(now, out)
-	c.evictPeers(now)
-	c.scanRetransmit(now, out)
+	c.syncListing(now)
+	c.drainListings(now, out)
+	c.retryOwedListings(now)
+	c.expireListedKeys(now)
+	c.evictPeers(now, out)
+	c.scanRetransmit(now)
+	c.drainRecordSends(now, out)
 	c.drainEgress(now, out)
 	return c.nextDeadline(now)
+}
+
+// warnIfNoPeer surfaces a node that has heard no peer since it started
+// (XPORT-09, D-07): when no Hello has arrived by firstAdvance +
+// cfg.PeerTimeout, one WARN names the condition — the likely causes are a
+// bind address that receives no broadcasts, a wrong broadcast address, or a
+// silent segment. The warning fires at most once per process lifetime
+// (peerWarned latches it) because the deaf state persists and a per-interval
+// repeat would be noise, not signal; it never changes serving behavior.
+// Counting from the first Advance rather than from construction keeps the
+// deadline on the driver's own clock, so a core built long before its loop
+// runs does not warn before it ever had a chance to read a datagram.
+func (c *Core) warnIfNoPeer(now time.Time) {
+	if c.firstAdvance.IsZero() {
+		c.firstAdvance = now
+	}
+	if c.helloSeen || c.peerWarned {
+		return
+	}
+	if now.Before(c.firstAdvance.Add(c.cfg.PeerTimeout)) {
+		return
+	}
+	c.peerWarned = true
+	c.cfg.Log(fmt.Sprintf(
+		"sup-kv: no Hello received within peer_timeout (%s) of startup: no peer discovered — check the broadcast address and that the bind address receives broadcasts",
+		c.cfg.PeerTimeout))
 }
 
 // syncListing fires the DataSync full-listing emission (REPL-05): the
 // startup trigger on the first Advance — immediately after the startup
 // Hello, Hello first, both broadcast, the IDEA §Node lifecycle order
 // pinned by TestSync_triggers — and the timer trigger on every subsequent
-// Advance at or after lastSync+cfg.SyncInterval. The listing is one
-// Records() snapshot turned into entries for every record, tombstones
-// included (deletes reconcile through the same listing), sorted by key in
-// byte order and chunked by the conservative estimate; one broadcast
-// datagram per chunk leaves in chunk order. A store with zero records
-// still emits one DataSync with an empty entry list — an empty listing is
-// a valid sync round that invites newer-flooding from receivers (probe
-// #7). The neighbor-restart trigger — a Hello carrying a new run_id from
-// a known node — emits the same chunk sequence UNICAST toward the
-// restarted peer in handleHello (REPL-07, plan 04-04), through the shared
-// listingChunks build.
-func (c *Core) syncListing(now time.Time, out *port.Outbox) {
+// Advance at or after lastSync+cfg.SyncInterval plus a positive-only jitter
+// of at most a tenth of the interval. The listing comes from the shared
+// build ([Core.listingBuild]): one O(store) Versions copy per
+// (sync_interval age, store generation) is reused by every trigger while both
+// still hold, so a hostile trigger burst can never drive one copy per datagram
+// (CR-01, T-4-24). Every round stamps the build's sync_id and chunk_count on
+// each chunk; the chunks are ENQUEUED in rotated order — round r starts at
+// chunk r % len(chunks) — while each chunk keeps its ORIGINAL 1-based index,
+// and the shared listing pacer drains one datagram per
+// floor(1s/SyncResponseRate) interval (D-01), so a burst can never overflow
+// the receiver's buffer. A store with zero records still emits one DataSync
+// with an empty entry list and count 1 — an empty listing is a valid, complete
+// sync round that invites newer-flooding from receivers (probe #7). The first-
+// seen and restart triggers share the same [Core.enqueueListing] from
+// handleHello (REPL-07, PROTO-04). The timer advances even when the enqueue is
+// skipped: a trigger arriving while a broadcast listing is in flight must
+// never leave nextSync in the past, or every Advance would retrigger and the
+// driver would never sleep (RESEARCH Pitfall 3).
+func (c *Core) syncListing(now time.Time) {
 	if !c.nextSync.IsZero() && now.Before(c.nextSync) {
 		return
 	}
-	c.nextSync = now.Add(c.cfg.SyncInterval)
-	for _, chunk := range c.listingChunks() {
-		out.Broadcast(port.DataSync{Entries: chunk})
+	c.nextSync = now.Add(c.cfg.SyncInterval + c.syncJitter())
+	if c.enqueueListing(now, broadcastDst(), c.syncRotation) {
+		c.syncRotation++
 	}
 }
 
-// listingChunks builds the full DataSync listing chunk sequence from one
-// Records() snapshot (REPL-05): every record, tombstones included (deletes
-// reconcile through the same listing), sorted by key in byte order and
-// packed by the conservative-estimate chunker. One build serves both
-// emission triggers — the sync timer's broadcast (syncListing) and the
-// neighbor-restart unicast (handleHello, REPL-07) — so the restart
-// reaction reuses the plan-04-03 machinery verbatim, never a second
-// listing implementation. Identical store state produces the identical
-// chunk sequence: the walk is over the sorted listing, never a map (probe
-// #11), and an empty snapshot yields one empty chunk (probe #7).
+// enqueueListing enqueues one full listing toward dst, rotated by the caller's
+// round counter — the single enqueue function the first-seen Hello, the
+// restart branch and the periodic broadcast all share (no second
+// implementation). It is a no-op when dst already has a FIFO in flight (one
+// in-flight listing per destination, T-3-23), refuses when dst's caps are
+// full (counting the drop, T-4-23), and otherwise appends the FIFO with
+// startIndex = rotation % len(chunks). The periodic broadcast round is exempt
+// from the destination cap and its chunk work is reserved in
+// maxListingChunks, so a targeted flood can never refuse it (WR-01). It
+// reports whether a FIFO was enqueued; a refused or duplicate trigger advances
+// nothing. A refused TARGETED trigger is re-armed by its caller
+// ([Core.oweListing]); the broadcast retries at its next periodic tick.
+func (c *Core) enqueueListing(now time.Time, dst listingDst, rotation uint64) bool {
+	if _, busy := c.listingByDst[dst]; busy {
+		return false
+	}
+	build := c.listingBuild(now)
+	if !c.listingFits(dst, len(build.chunks)) {
+		c.listingDropped++
+		return false
+	}
+	c.admitListing(now, dst, rotation, build)
+	return true
+}
+
+// listingFits reports whether a round of chunks toward dst fits the caps dst
+// is subject to. A targeted destination must leave the broadcast round's
+// reserved chunk work untouched; the broadcast itself skips the destination
+// cap (its FIFO slot is reserved) and fits because maxListingChunks reserves
+// one full round beyond the targeted maximum.
+func (c *Core) listingFits(dst listingDst, chunks int) bool {
+	if dst != broadcastDst() && len(c.listingByDst) >= maxListingDestinations {
+		return false
+	}
+	return c.listingCount+chunks <= maxListingChunks
+}
+
+// admitListing installs one fitted listing FIFO at the caller's rotation and
+// accounts its chunk work. The first enqueue after an idle queue clamps the
+// shared pacer slot to now, so its first chunk is immediate.
+func (c *Core) admitListing(now time.Time, dst listingDst, rotation uint64, build *listingBuild) {
+	//nolint:gosec // G115: the modulus is len(build.chunks), an int, so the result fits.
+	start := int(rotation % uint64(len(build.chunks)))
+	if c.listingCount == 0 {
+		c.nextListingAt = now
+	}
+	c.listingByDst[dst] = &listingFIFO{build: build, dst: dst, startIndex: start}
+	c.listingOrder = append(c.listingOrder, dst)
+	c.listingCount += len(build.chunks)
+}
+
+// oweListing keeps a refused targeted listing for a later re-arm (WR-01) — a
+// refusal delays a first-seen or restart listing, it never loses it. One entry
+// per destination (a repeated refusal is one wait), and the retry set itself is
+// bounded by maxListingDestinations, so a hostile trigger flood cannot grow it
+// past the reservation the FIFO cap already models; past the bound the trigger
+// stays counted and lost, exactly as before the re-arm existed.
+func (c *Core) oweListing(dst listingDst, rotation uint64) {
+	for _, owed := range c.listingOwed {
+		if owed.dst == dst {
+			return
+		}
+	}
+	if len(c.listingOwed) >= maxListingDestinations {
+		return
+	}
+	c.listingOwed = append(c.listingOwed, owedListing{dst: dst, rotation: rotation})
+}
+
+// retryOwedListings re-arms every owed targeted listing the caps now admit, in
+// owe order (the deterministic order). An entry whose peer row vanished or
+// whose run changed is dropped — a listing is only meaningful toward the live
+// identity — and a destination that is already served in flight is dropped
+// (the in-flight round covers it). The first entry the caps still refuse stops
+// the pass: capacity is shared, so later entries would fail too, and ordering
+// by owe time keeps the delay fair.
+func (c *Core) retryOwedListings(now time.Time) {
+	for i := 0; i < len(c.listingOwed); {
+		owed := c.listingOwed[i]
+		if known, ok := c.peers[owed.dst.nodeID]; !ok || known.runID != owed.dst.runID {
+			c.listingOwed = c.removeOwedAt(i)
+			continue
+		}
+		if _, busy := c.listingByDst[owed.dst]; busy {
+			c.listingOwed = c.removeOwedAt(i)
+			continue
+		}
+		build := c.listingBuild(now)
+		if !c.listingFits(owed.dst, len(build.chunks)) {
+			return
+		}
+		c.admitListing(now, owed.dst, owed.rotation, build)
+		c.listingOwed = c.removeOwedAt(i)
+	}
+}
+
+// removeOwedAt deletes the i-th owed entry and returns the shortened slice.
+func (c *Core) removeOwedAt(i int) []owedListing {
+	return append(c.listingOwed[:i], c.listingOwed[i+1:]...)
+}
+
+// dropOwedPeer removes every owed listing for nodeID — the peer-eviction and
+// restart cleanup, so no dead identity's round is ever re-armed.
+func (c *Core) dropOwedPeer(nodeID uint16) {
+	for i := 0; i < len(c.listingOwed); {
+		if c.listingOwed[i].dst.nodeID == nodeID {
+			c.listingOwed = c.removeOwedAt(i)
+			continue
+		}
+		i++
+	}
+}
+
+// listingBuild returns the shared listing build for now: a cached build is
+// reused only while it is younger than cfg.SyncInterval AND the store's
+// content generation is unchanged; otherwise the store is copied and chunked
+// once, stamped with a fresh monotone sync_id and the generation it was built
+// at. The generation check is what keeps the cache honest: a build is a
+// snapshot of the store, so serving it after any mutation would ship stale
+// state and defeat PROTO-04's no-sync_interval-term freshness; a mutation
+// costs exactly one rebuild before the next trigger, never one per trigger
+// (T-4-24).
+func (c *Core) listingBuild(now time.Time) *listingBuild {
+	gen := c.store.Generation()
+	if c.build != nil && now.Sub(c.build.at) < c.cfg.SyncInterval && c.build.generation == gen {
+		return c.build
+	}
+	c.build = &listingBuild{
+		chunks:     c.listingChunks(),
+		at:         now,
+		syncID:     c.nextSyncID,
+		generation: gen,
+	}
+	c.nextSyncID++
+	return c.build
+}
+
+// dropListing removes dst's in-flight FIFO and releases its remaining queued
+// chunk work from listingCount — the peer-eviction and run-change cleanup, so
+// stale work cannot outlive the peer row it was built for (CR-01). A
+// destination with no FIFO is a no-op.
+func (c *Core) dropListing(dst listingDst) {
+	q, ok := c.listingByDst[dst]
+	if !ok {
+		return
+	}
+	c.listingCount -= len(q.build.chunks) - q.emitted
+	delete(c.listingByDst, dst)
+	c.listingOrder = removeListingDst(c.listingOrder, dst)
+}
+
+// chunkOrdinal returns the 0-based chunk position as the wire's 1-based
+// chunk_index.
+func chunkOrdinal(pos int) uint32 {
+	return uint32(pos + 1) //nolint:gosec // G115: bounded by maxSyncChunks, the chunker's ceiling.
+}
+
+// syncChunkCount returns the round's chunk count as the wire's uint32
+// chunk_count; the listing source is the in-memory store and the chunker
+// emits at most one chunk per entry, so the value is far below 2^32 for any
+// reachable store and within the receiver's maxSyncChunks for the documented
+// 20 000-key scale.
+func syncChunkCount(chunks [][]port.SyncEntry) uint32 {
+	return uint32(len(chunks)) //nolint:gosec // G115: a store cannot hold 2^32 entries in memory.
+}
+
+// drainListings emits queued listing chunks at the shared pacer cadence
+// (D-01): while a listing slot is due, one datagram carrying its shared
+// build's sync_id and chunk_count and the chunk at its own rotated position
+// emits — broadcast for the zero destination, unicast at the peer row's
+// current handle otherwise — and the slot advances by the jittered interval.
+// The broadcast round drains AHEAD of every targeted FIFO (WR-01): it is the
+// only listing every peer receives unprompted, so a flood of first-seen and
+// restart rounds can delay it by at most one pacing slot, never by their
+// entire queued work. Chunk indices are the chunk's ORIGINAL 1-based position
+// in the unrotated build, so rotation only reorders emission and a receiver
+// can still recognize completeness. The clamp shape is drainEgress': an
+// Advance that arrives late emits one datagram, never a backlog burst, and the
+// next slot is measured from the actual emission time. A destination whose
+// FIFO has emitted every chunk, or whose peer row disappeared, leaves the
+// order, so its in-flight mark clears exactly when its listing completes
+// (T-3-23).
+func (c *Core) drainListings(now time.Time, out *port.Outbox) {
+	for c.listingCount > 0 && !now.Before(c.nextListingAt) {
+		dst := c.listingOrder[0]
+		if _, serving := c.listingByDst[broadcastDst()]; serving {
+			dst = broadcastDst()
+		}
+		q := c.listingByDst[dst]
+		idx := (q.startIndex + q.emitted) % len(q.build.chunks)
+		msg := port.DataSync{
+			SyncID:     q.build.syncID,
+			ChunkIndex: chunkOrdinal(idx),
+			ChunkCount: syncChunkCount(q.build.chunks),
+			Entries:    q.build.chunks[idx],
+		}
+		if dst == broadcastDst() {
+			out.Broadcast(msg)
+		} else {
+			out.Unicast(c.peers[dst.nodeID].handle, msg)
+		}
+		c.pacedSends++
+		q.emitted++
+		c.listingCount--
+		if q.emitted == len(q.build.chunks) {
+			delete(c.listingByDst, dst)
+			c.listingOrder = removeListingDst(c.listingOrder, dst)
+		}
+		if now.After(c.nextListingAt) {
+			c.nextListingAt = now
+		}
+		c.listingJitterSeq++
+		c.nextListingAt = c.nextListingAt.Add(c.jitteredSpacing(c.syncResponseInterval, c.listingJitterSeq))
+	}
+}
+
+// removeListingDst removes dst from the drain order, preserving the order of
+// the rest — the completed-FIFO cleanup. The broadcast may complete while
+// other FIFOs wait behind it (drain priority, WR-01), so completion is never
+// assumed to be the head.
+func removeListingDst(order []listingDst, dst listingDst) []listingDst {
+	for i, d := range order {
+		if d == dst {
+			return append(order[:i], order[i+1:]...)
+		}
+	}
+	return order
+}
+
+// jitterOffset returns a deterministic offset in [0, span) derived from the
+// core's runID, the site's monotone sequence number and the site salt:
+// FNV-1a over the run identity, so identical seeds replay identically and no
+// PRNG state enters the core (T-3-22). A non-positive span returns zero.
+func (c *Core) jitterOffset(seq, salt uint64, span time.Duration) time.Duration {
+	if span <= 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(c.runID[:])
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], seq)
+	_, _ = h.Write(buf[:])
+	binary.BigEndian.PutUint64(buf[:], salt)
+	_, _ = h.Write(buf[:])
+	//nolint:gosec // G115: the modulus is a positive Duration, so the result is a valid Duration.
+	return time.Duration(h.Sum64() % uint64(span))
+}
+
+// helloJitter returns the Hello timer's positive-only jitter in
+// [0, HelloInterval/10): the deadline never fires before the configured
+// interval.
+func (c *Core) helloJitter() time.Duration {
+	c.helloJitterSeq++
+	return c.jitterOffset(c.helloJitterSeq, helloJitterSalt, c.cfg.HelloInterval/jitterDivisor)
+}
+
+// syncJitter returns the sync timer's positive-only jitter in
+// [0, SyncInterval/10): the periodic listing never fires before the
+// configured interval.
+func (c *Core) syncJitter() time.Duration {
+	c.syncJitterSeq++
+	return c.jitterOffset(c.syncJitterSeq, syncJitterSalt, c.cfg.SyncInterval/jitterDivisor)
+}
+
+// jitteredSpacing returns base with a deterministic +-10% offset —
+// [-base/10, +base/10] — for the listing and record pacers (D-01/D-05,
+// RESEARCH Pattern 10's jitter scope). A computed spacing below one
+// nanosecond floors to 1ns, so a pacer can never be silently disabled; the
+// retransmit ladder's deadlines never pass through this helper (the loss
+// bound depends on them).
+func (c *Core) jitteredSpacing(base time.Duration, seq uint64) time.Duration {
+	span := base / jitterDivisor
+	if span <= 0 {
+		return base
+	}
+	offset := c.jitterOffset(seq, spacingJitterSalt, 2*span+1) - span
+	return max(base+offset, time.Nanosecond)
+}
+
+// listingChunks copies the store's shallow Versions view into the full
+// DataSync listing chunk sequence (REPL-05): every record, tombstones included
+// (deletes reconcile through the same listing), sorted by key in byte order and
+// packed by the conservative-estimate chunker. It runs only when the shared
+// build is (re)built — at most once per (cfg.SyncInterval age, store
+// generation) — so every emission trigger, the periodic broadcast and the
+// first-seen/restart unicast alike, reads one immutable chunk sequence from
+// [Core.listingBuild] (CR-01, T-4-24). Identical store state produces the
+// identical chunk sequence: the walk is over the sorted listing, never a map
+// (probe #11), and an empty listing yields one empty chunk (probe #7).
 func (c *Core) listingChunks() [][]port.SyncEntry {
-	snapshot := c.store.Records()
-	entries := make([]port.SyncEntry, 0, len(snapshot))
-	for _, key := range slices.Sorted(maps.Keys(snapshot)) {
-		entries = append(entries, port.SyncEntry{Key: key, Version: snapshot[key].Version})
+	versions := c.store.Versions()
+	entries := make([]port.SyncEntry, 0, len(versions))
+	for _, key := range slices.Sorted(maps.Keys(versions)) {
+		entries = append(entries, port.SyncEntry{Key: key, Version: versions[key]})
 	}
 	return chunkSyncEntries(entries, c.cfg.SyncChunkBytes)
 }
 
-// chunkSyncEntries packs the sorted listing into self-sufficient chunks
-// (REPL-05, the A4 reading): the walk accumulates entries while the
-// conservative estimate usedEstimate + entryEstimate(next) stays at most
-// budget — a chunk filled to exactly the budget closes (probe #15), the
-// entry that would cross it opens the next chunk, and a single entry
-// whose own estimate already exceeds the budget ships alone as its own
-// oversized chunk — never dropped, never split, and carrying no
-// continuation state (no sequence numbers, no resumption cursor): any
-// single chunk is fully comparable alone. An empty listing yields one
-// empty chunk, so an empty store still announces itself (probe #7).
-// Identical store state produces the identical chunk sequence — the walk
-// is over the sorted listing, never a map (probe #11).
+// chunkSyncEntries packs the sorted listing into chunks (REPL-05, the A4
+// reading): the walk accumulates entries while the conservative estimate
+// usedEstimate + entryEstimate(next) stays at most budget — a chunk filled to
+// exactly the budget closes (probe #15), the entry that would cross it opens
+// the next chunk, and a single entry whose own estimate already exceeds the
+// budget ships alone as its own oversized chunk — never dropped, never split.
+// Every chunk is independently comparable; completeness is the round header's
+// job (sync_id/chunk_index/chunk_count), never a cursor inside the chunks. An
+// empty listing yields one empty chunk, so an empty store still announces
+// itself (probe #7). Identical store state produces the identical chunk
+// sequence — the walk is over the sorted listing, never a map (probe #11).
 func chunkSyncEntries(entries []port.SyncEntry, budget int) [][]port.SyncEntry {
 	var chunks [][]port.SyncEntry
-	// A budgeted chunk holds at most budget/entryOverheadBytes entries
-	// (every entry estimates at least entryOverheadBytes), so that is the
-	// capacity bound; a closed chunk's backing array is never reused —
-	// cur resets to nil, not cur[:0], or every chunk after the first would
-	// alias its predecessor's memory.
-	cur := make([]port.SyncEntry, 0, budget/entryOverheadBytes)
+	// A budgeted chunk holds at most budget/entryOverheadBytes entries (every
+	// entry estimates at least entryOverheadBytes) and never more than the
+	// listing itself, so the capacity hint is the smaller of the two: the byte
+	// budget sizes a bucket, it never promises the walk will fill it (WR-06 —
+	// an out-of-range budget once pre-allocated tens of millions of entries,
+	// and the cached build then pinned that allocation). A closed chunk's
+	// backing array is never reused — cur resets to nil, not cur[:0], or every
+	// chunk after the first would alias its predecessor's memory.
+	hint := min(len(entries), budget/entryOverheadBytes)
+	cur := make([]port.SyncEntry, 0, hint)
 	used := chunkOverheadBytes
-	for _, entry := range entries {
+	for i, entry := range entries {
 		est := len(entry.Key) + entryOverheadBytes
 		if len(cur) > 0 && used+est > budget {
 			chunks = append(chunks, cur)
-			cur = nil
+			cur = make([]port.SyncEntry, 0, min(len(entries)-i, budget/entryOverheadBytes))
 			used = chunkOverheadBytes
 		}
 		cur = append(cur, entry)
@@ -819,16 +2885,21 @@ func chunkSyncEntries(entries []port.SyncEntry, budget int) [][]port.SyncEntry {
 // at-or-after boundary, probe #18 — and eviction removes the peer from the
 // table AND from every pending entry's wait-set in the same event. It never
 // drains an entry by itself: with the drain rule, an entry whose every
-// waiter was evicted is retained in suspension until a future Hello
-// re-adds waiters via the flush rule. Eviction deliberately never touches a
+// waiter was evicted is retained in suspension, and a future Hello only
+// re-arms its ladder and re-broadcasts the record — the promise stays the
+// write-time capture and is never re-seeded from the table (A-01, IN-05).
+// Eviction deliberately never touches a
 // pending entry's acked set: an Ack that never arrived stays un-Acked, so
 // PendingSnapshot keeps eviction distinguishable from an Ack (T-05-04,
 // RESEARCH Pitfall 3). Only a Hello ever refreshed lastHello
 // (handleHello), so this scan is exactly the gone-after-peer_timeout
 // reading. An evicted peer is re-learned by its next Hello exactly like a
 // first Hello — there is no blacklist state of any kind, and the table
-// holds any number of peers (N nodes from day one).
-func (c *Core) evictPeers(now time.Time) {
+// holds any number of peers (N nodes from day one). Removing a tracked
+// entry's LAST waiter emits the WaitSetEmpty result with the tracked
+// version — the entry stays suspended, and a waiter learns the honest
+// false (an eviction is never an Ack, XPORT-12).
+func (c *Core) evictPeers(now time.Time, out *port.Outbox) {
 	expired := make([]uint16, 0, len(c.peers))
 	for id := range c.peers {
 		if !now.Before(c.peers[id].lastHello.Add(c.cfg.PeerTimeout)) {
@@ -836,15 +2907,54 @@ func (c *Core) evictPeers(now time.Time) {
 		}
 	}
 	for _, id := range expired {
+		row := c.peers[id]
+		// One eviction event carries the row identity and the event-time
+		// silence that crossed peer_timeout (D-01, OBSV-01), emitted before
+		// the row and its bookkeeping go.
+		c.emitPeer(PeerEvent{
+			Kind:        PeerEvicted,
+			NodeID:      id,
+			Handle:      row.handle,
+			RunID:       row.runID,
+			LastSeenAge: now.Sub(row.lastHello),
+		})
+		c.dropListing(listingDst{nodeID: id, runID: c.peers[id].runID})
+		c.dropOwedPeer(id)
 		delete(c.peers, id)
-		for key := range c.pending {
-			// wait-set only — acked stays (an eviction is never an Ack).
-			delete(c.pending[key].waitSet, id)
+		// An evicted id leaves the set: the peer-id mirror republishes so the
+		// write-time capture stops counting a peer that can never Ack (A-01).
+		c.peerGen++
+		// The evicted peer's retained listing and partial rounds go with it:
+		// the mirror must never serve a dead peer's keys, and the union must
+		// not retain them (PROTO-01, T-4-41). A union change moves the
+		// generation so the publication follows.
+		if c.dropListedPeer(id) > 0 {
+			c.listingGen++
 		}
+		c.dropPeerSyncStreams(id)
+		// The per-peer ledger bounds the walk: only this peer's unacked
+		// entries lose it as a waiter. Entries stay tracked (suspension),
+		// and acked stays untouched (an eviction is never an Ack).
+		for pk := range c.peerUnacked[id] {
+			entry, ok := c.pending[pk]
+			if !ok {
+				continue
+			}
+			if _, waiting := entry.waitSet[id]; !waiting {
+				continue
+			}
+			delete(entry.waitSet, id)
+			if len(entry.waitSet) == 0 {
+				out.WaitSetEmpty(pk.key, pk.version)
+			}
+			c.pending[pk] = entry
+		}
+		delete(c.peerUnacked, id)
 	}
 }
 
-// scanRetransmit fires every due pending entry's retransmission (REPL-02).
+// scanRetransmit enqueues every due pending entry's retransmission on the
+// paced record-send queue (REPL-02, D-05).
 // An entry is due when now is at or after its nextRetry AND the peer table
 // is non-empty; while the table is empty the scanner is suspended — it
 // fires nothing and advances no nextRetry or backoff, so entries and their
@@ -859,50 +2969,149 @@ func (c *Core) evictPeers(now time.Time) {
 // then 5000ms repeated forever — cumulative retries at t0+200, +600,
 // +1400, +3000, +6200ms and every 5000ms after that, until the entry drains
 // on full Ack coverage or leaves on supersession (REPL-02's "until").
-// Firing is one broadcast DataReplication per entry: every peer shares each
+// The ladder is armed at EMISSION, never at enqueue: the scan only queues a
+// send, and drainRecordSends re-arms the entry when the pacer actually
+// emits it (RESEARCH Pitfall 4) — arming at enqueue would make every
+// backed-up entry overdue the moment the pacer reached it, restoring the
+// R-02 storm. Firing is one broadcast DataReplication per entry: every peer
+// shares each
 // send, and peers that already Acked re-merge idempotently and re-Ack (the
 // always-Ack-on-duplicate truth of plan 04-01). retransmit_interval is the
 // scan granularity — while any entry is pending, Advance's returned
 // deadline is never more than cfg.RetransmitInterval past now, so a due
 // retry is honored at scan granularity (research A5); with no pending
-// entries this scanner contributes no deadline. Emission order is keys
-// sorted ascending: no map-iteration order ever reaches an emit path
-// (REPL-02, research Pitfall 1 / probe #9). Every emission counts in the
-// retransmissions counter (OBS-01) — the adapter mirrors it post-event.
-func (c *Core) scanRetransmit(now time.Time, out *port.Outbox) {
+// entries this scanner contributes no deadline. Only due heap items are
+// touched — an Advance with nothing due reads the heap root and nothing
+// else, so the scan cost is flat in the pending-set size (XPORT-02) — and
+// every due item inspected increments PendingVisits, the deterministic seam
+// the flatness gates read. Due
+// emissions are ordered by (key, version) — no map-iteration or heap-order
+// leak reaches an emit path (REPL-02, research Pitfall 1 / probe #9). Every
+// retry emission counts in the retransmissions counter (OBS-01) — the
+// adapter mirrors it post-event.
+func (c *Core) scanRetransmit(now time.Time) {
 	if len(c.peers) == 0 || len(c.pending) == 0 {
 		return
 	}
-	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
-		entry := c.pending[key]
-		if now.Before(entry.nextRetry) {
-			continue
-		}
-		out.Broadcast(port.DataReplication{Key: key, Record: entry.rec})
-		c.retransmitted++
-		entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
-		entry.nextRetry = now.Add(entry.backoff)
-		c.pending[key] = entry
+	due := c.popDueRetries(now)
+	slices.SortFunc(due, compareRetryItems)
+	for _, item := range due {
+		c.pendingVisits++
+		c.enqueueRecordSend(now, item.pk, true)
 	}
 }
 
+// compareRetryItems orders due items by key then version bytes — the sorted
+// emission discipline shared with every other emit path.
+func compareRetryItems(a, b retryItem) int {
+	return comparePendingKeys(a.pk, b.pk)
+}
+
+// enqueueRecordSend appends one record emission to the paced queue unless
+// the exact (key, version) identity is already queued (XPORT-02's dedupe):
+// the discovery flush's first send and a ladder retry for the same tracked
+// pair collapse into one datagram, so a slow pacer can never multiply the
+// storm. The first send after an idle queue clamps nextRecordAt to now —
+// the first send is immediate when nothing is ahead of it.
+func (c *Core) enqueueRecordSend(now time.Time, pk pendingKey, retry bool) {
+	if _, dup := c.recordQueued[pk]; dup {
+		return
+	}
+	if len(c.recordQueue) == 0 {
+		c.nextRecordAt = now
+	}
+	c.recordQueue = append(c.recordQueue, recordSend{pk: pk, retry: retry})
+	c.recordQueued[pk] = struct{}{}
+}
+
+// drainRecordSends emits queued record sends at the shared pacer cadence
+// (D-05): while a record slot is due, the FIFO's head resolves and emits —
+// at most one datagram per call, measured from the actual emission time —
+// and the slot advances by the jittered interval. The emitted entry's
+// ladder is re-armed here, from this emission time (RESEARCH Pitfall 4);
+// the queue never pins a record, because the lookup happens now.
+func (c *Core) drainRecordSends(now time.Time, out *port.Outbox) {
+	for len(c.recordQueue) > 0 && !now.Before(c.nextRecordAt) {
+		rs := c.recordQueue[0]
+		c.recordQueue[0] = recordSend{}
+		c.recordQueue = c.recordQueue[1:]
+		delete(c.recordQueued, rs.pk)
+		if !c.emitRecordSend(now, rs, out) {
+			continue
+		}
+		if now.After(c.nextRecordAt) {
+			c.nextRecordAt = now
+		}
+		c.recordJitterSeq++
+		c.nextRecordAt = c.nextRecordAt.Add(c.jitteredSpacing(c.syncResponseInterval, c.recordJitterSeq))
+	}
+}
+
+// emitRecordSend resolves and emits one queued record send, reporting
+// whether a datagram left. A pending entry that drained or was superseded
+// after enqueue emits nothing (RESEARCH Pitfall 5). A store miss or a
+// version mismatch emits nothing either: a retry removes the untrustworthy
+// entry (the stale-entry cleanup the retransmit scan owns); the discovery
+// flush's first send leaves the entry tracked — the flush owns only the
+// broadcast and ladder re-arm, never the promise set — so a stale first send
+// emits nothing and the later retry path performs the removal. A
+// resolved send broadcasts the current record, counts a retry, doubles the
+// entry's backoff up to AckTimeoutMax, and arms nextRetry from this
+// emission time ([armRetry]).
+func (c *Core) emitRecordSend(now time.Time, rs recordSend, out *port.Outbox) bool {
+	entry, ok := c.pending[rs.pk]
+	if !ok {
+		return false
+	}
+	rec, ok := c.store.Lookup(rs.pk.key)
+	if !ok || rec.Version != rs.pk.version {
+		if rs.retry {
+			c.removePending(rs.pk)
+		}
+		return false
+	}
+	out.Broadcast(port.DataReplication{Key: rs.pk.key, Record: rec})
+	c.pacedSends++
+	if rs.retry {
+		c.retransmitted++
+		entry.backoff = min(backoffGrowth*entry.backoff, c.cfg.AckTimeoutMax)
+	}
+	entry.nextRetry = now.Add(entry.backoff)
+	c.pending[rs.pk] = entry
+	c.armRetry(rs.pk, entry.nextRetry)
+	return true
+}
+
 // nextDeadline returns the earliest strictly-future deadline over the armed
-// timers: the hello timer, the sync timer, the earliest peer expiry, while
-// any pending entry exists the retransmit scan deadline, and while any
-// response is queued the next egress slot. After syncListing, evictPeers,
-// scanRetransmit and drainEgress have fired everything due, every
+// timers: the hello timer, the sync timer, the earliest listed-key expiry,
+// the earliest peer expiry, while
+// any pending entry exists the retransmit scan deadline, while any listing
+// chunk is queued the next listing slot, while any record send is queued the
+// next record slot, and while
+// any response is queued the next egress slot. After syncListing,
+// drainListings, expireListedKeys, evictPeers, scanRetransmit,
+// drainRecordSends and drainEgress have fired everything due, every
 // contribution is strictly future.
 func (c *Core) nextDeadline(now time.Time) time.Time {
 	deadline := c.nextHello
 	if !c.nextSync.IsZero() && c.nextSync.Before(deadline) {
 		deadline = c.nextSync
 	}
+	if c.listingCount > 0 && c.nextListingAt.Before(deadline) {
+		deadline = c.nextListingAt
+	}
 	if len(c.pending) > 0 {
 		if scan := c.retransmitDeadline(now); scan.Before(deadline) {
 			deadline = scan
 		}
 	}
+	if len(c.recordQueue) > 0 && c.nextRecordAt.Before(deadline) {
+		deadline = c.nextRecordAt
+	}
 	if expiry := c.earliestPeerExpiry(); !expiry.IsZero() && expiry.Before(deadline) {
+		deadline = expiry
+	}
+	if expiry := c.earliestListedExpiry(); !expiry.IsZero() && expiry.Before(deadline) {
 		deadline = expiry
 	}
 	if len(c.egress) > 0 && c.nextSendAt.Before(deadline) {
@@ -928,32 +3137,18 @@ func (c *Core) earliestPeerExpiry() time.Time {
 // retransmitDeadline returns the retransmit scan's deadline contribution:
 // the granularity ceiling now+cfg.RetransmitInterval (research A5 — while
 // any entry is pending, the driver never sleeps longer than this), clamped
-// by the earliest pending nextRetry when the scanner is armed. During
-// suspension (an empty peer table) the ladder is paused — its stale retry
-// times must not leak into the deadline — so the ceiling alone bounds the
-// sleep.
+// by the due-heap root when the scanner is armed. During suspension (an
+// empty peer table) the ladder is paused — its stale retry times must not
+// leak into the deadline — so the ceiling alone bounds the sleep.
 func (c *Core) retransmitDeadline(now time.Time) time.Time {
 	ceiling := now.Add(c.cfg.RetransmitInterval)
 	if len(c.peers) == 0 {
 		return ceiling
 	}
-	if earliest := c.earliestRetry(); earliest.Before(ceiling) {
-		return earliest
+	if root := c.retryRoot(); !root.IsZero() && root.Before(ceiling) {
+		return root
 	}
 	return ceiling
-}
-
-// earliestRetry returns the earliest pending nextRetry (the zero time when
-// nothing is pending); callers reach it only with a non-empty pending set.
-func (c *Core) earliestRetry() time.Time {
-	var earliest time.Time
-	for key := range c.pending {
-		nextRetry := c.pending[key].nextRetry
-		if earliest.IsZero() || nextRetry.Before(earliest) {
-			earliest = nextRetry
-		}
-	}
-	return earliest
 }
 
 // Discards returns the discard-class counters (D-02) — a value copy, safe
@@ -977,19 +3172,74 @@ func (c *Core) Retransmissions() uint64 {
 	return c.retransmitted
 }
 
-// SyncArrived reports whether at least one DataSync datagram has been
-// received — the startup gate's sync half (API-04), false until the first
-// handleDataSync and true forever after. The reading is pinned by A1: the
-// first received DataSync datagram counts as the first sync round, because
-// the protocol deliberately carries no chunk-completeness state — chunks
-// are self-sufficient (chunkSyncEntries) — and the startup_gate timeout is
-// the backstop for a node whose peers never announce. Set on the driver
-// goroutine only; like Discards this is a value read sanctioned for the
-// adapter's post-event mirroring, so cross-goroutine readers (Phase 5's
-// gate resolver) see the state through the adapter's atomic, never by
-// calling into a core the driver owns.
+// NotificationsRegressed returns the number of local-write notifications the
+// not-greater-than-tracked guard ignored (PROTO-05, D-05) — both regressive
+// notifications (a strictly older version, whose waiter also resolves as
+// Superseded, WR-03) and equal duplicate notifications of the tracked
+// version. A value read like the discard counters; Phase 7's OBSV surface owns
+// publishing it (no adapter mirror this phase).
+func (c *Core) NotificationsRegressed() uint64 {
+	return c.notificationsRegressed
+}
+
+// SyncArrived reports whether a COMPLETE listing has been processed — every
+// chunk of some peer's round received, not merely the first arrival (the
+// startup gate's sync half, API-04, PROTO-01). It is the same fact as
+// ListingComplete: one field backs both reads, because no observable state
+// could ever make them differ (IN-06). The flag flips in handleDataSync's
+// all-chunks branch and never resets. Set on the driver goroutine only; like
+// Discards this is a value read sanctioned for the adapter's post-event
+// mirroring, so cross-goroutine readers (Phase 5's gate resolver) see the
+// state through the adapter's one atomic listing pointer, never by calling
+// into a core the driver owns.
 func (c *Core) SyncArrived() bool {
-	return c.syncArrived
+	return c.listingComplete
+}
+
+// ListingGeneration returns the listing content version the adapter's mirror
+// compares against: it moves exactly when the retained union membership or
+// the listing-complete flag actually changes, so an identical repeated
+// complete listing moves nothing and triggers no downstream publication
+// (PROTO-01, T-4-05). A value read the adapter mirrors from its event loop.
+func (c *Core) ListingGeneration() uint64 {
+	return c.listingGen
+}
+
+// ListingComplete reports whether a complete listing has been processed —
+// every chunk of some peer's round received. It flips on the first complete
+// listing and never resets; the startup gate's sync half reads it through the
+// adapter's mirror.
+func (c *Core) ListingComplete() bool {
+	return c.listingComplete
+}
+
+// ListedKeysSnapshot returns a defensive clone of the retained listed-key
+// union — every key named by some peer's last complete listing. The union is
+// maintained incrementally by the refcounts, never recomputed from the
+// per-peer sets, so the read is O(keys) at listing cadence only; the clone
+// shares no backing map with core state (the storage.Records copying
+// precedent).
+func (c *Core) ListedKeysSnapshot() map[string]struct{} {
+	out := make(map[string]struct{}, len(c.listedKeys))
+	for key := range c.listedKeys {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+// SyncStreamDropped returns the number of partial-listing streams the bounds
+// evicted — the T-4-03 observability signal: a growing value means a peer is
+// flooding distinct sync_ids with missing chunks.
+func (c *Core) SyncStreamDropped() uint64 {
+	return c.syncStreamDropped
+}
+
+// ListedKeysEvicted returns the number of retained listed keys released by
+// whole-peer-set eviction or by expiry (T-4-41, CR-01) — each key removed
+// from the union by the maxListedKeysTotal bound or by the two-sync-interval
+// age bound increments it once.
+func (c *Core) ListedKeysEvicted() uint64 {
+	return c.listedKeysEvicted
 }
 
 // PeerSnapshot returns a defensive copy of the peer table keyed by NodeID
@@ -998,7 +3248,8 @@ func (c *Core) SyncArrived() bool {
 // timeouts, sync targets) and observability, without exposing core state.
 func (c *Core) PeerSnapshot() map[uint16]PeerInfo {
 	out := make(map[uint16]PeerInfo, len(c.peers))
-	for id, p := range c.peers {
+	for id := range c.peers {
+		p := c.peers[id]
 		out[id] = PeerInfo{Handle: p.handle, RunID: p.runID, LastHello: p.lastHello}
 	}
 	return out
@@ -1019,16 +3270,23 @@ type PendingInfo struct {
 
 // PendingSnapshot returns a copy of the pending set keyed by key — the
 // observability seam Phase 5's wait_for_replication and Phase 6's OBS-01
-// consume. Keys are iterated sorted and every WaitingOn is sorted ascending:
+// consume. It walks the pending map itself, never pendingByKey, because it
+// reports each whole entry's state; it is a copying test/observability seam,
+// never a hot path. Keys are iterated sorted and every WaitingOn is sorted
+// ascending:
 // no map-iteration order reaches a read path either (probe #9 discipline).
 // Acked is cloned, not aliased — the snapshot shares no backing array with
-// core state (the storage.Records defensive-copy precedent).
+// core state (the storage.Records defensive-copy precedent). Two versions
+// under one key can coexist transiently (a stale smaller local write beside
+// a newer tracked one); the snapshot reports the greatest version under each
+// key, the one the store's LWW join would keep, so the public keyed-by-key
+// contract stays single-valued.
 func (c *Core) PendingSnapshot() map[string]PendingInfo {
 	out := make(map[string]PendingInfo, len(c.pending))
-	for _, key := range slices.Sorted(maps.Keys(c.pending)) {
-		entry := c.pending[key]
-		out[key] = PendingInfo{
-			Version:   entry.version,
+	for _, pk := range sortedPendingKeys(c.pending) {
+		entry := c.pending[pk]
+		out[pk.key] = PendingInfo{
+			Version:   pk.version,
 			WaitingOn: slices.Sorted(maps.Keys(entry.waitSet)),
 			Acked:     slices.Clone(entry.acked),
 			NextRetry: entry.nextRetry,
@@ -1047,27 +3305,285 @@ type UnackedStats struct {
 // QueuedResponses returns the number of reactive unicast responses waiting
 // in the egress queue (REPL-05's rate limiter) — the simulator and
 // observability seam plan 04-05's quiescence check reads: a node whose
-// queue is empty has finished answering its sync round.
+// queue is empty has finished answering its sync round. The meaning is the
+// egress queue ONLY; QueuedSends is the total-queue accessor quiescence
+// needs now that listings and record sends have their own pacers
+// (RESEARCH Pitfall 23).
 func (c *Core) QueuedResponses() int {
 	return len(c.egress)
 }
 
+// QueuedSends returns the total number of datagrams waiting in every core
+// queue — listing chunks, record sends and egress responses — the
+// total-queue accessor the simulator's quiescence predicate consults: a
+// scenario must never declare quiescence while an unsent datagram is
+// queued (RESEARCH Pitfall 23, T-3-20).
+func (c *Core) QueuedSends() int {
+	return c.listingCount + len(c.recordQueue) + len(c.egress)
+}
+
+// EgressDropped returns the number of egress entries evicted by the
+// maxEgressEntries cap (XPORT-07) — the observability seam for the drop
+// policy: every eviction is counted, and the evicted identity is re-queueable
+// (T-3-21).
+func (c *Core) EgressDropped() uint64 {
+	return c.egressDropped
+}
+
+// ListingDropped returns the number of targeted listing triggers a cap
+// refused (CR-01, T-4-23, WR-01) — the observability seam for the listing
+// drop policy, mirroring EgressDropped: every refused first-seen or restart
+// listing is counted once, and the refused trigger is re-armed for a later
+// Advance, so the count measures back-pressure rather than permanent loss (a
+// trigger refused past the retry set's bound is lost and stays counted).
+func (c *Core) ListingDropped() uint64 {
+	return c.listingDropped
+}
+
+// PacedSends returns the number of datagrams the listing, record and egress
+// pacers have handed to the Outbox — the emission-volume seam the metrics
+// surface publishes as supkv_replication_datagrams_paced_total. The count is
+// taken at the Outbox handoff, never at enqueue (T-3-41): a queued datagram
+// has not been sent, so an enqueue-counting counter would publish the
+// RPL-18 lie this plan deliberately does not compound. A value read the
+// production adapter mirrors post-event like the discard counters.
+func (c *Core) PacedSends() uint64 {
+	return c.pacedSends
+}
+
+// PendingVisits returns how many pending entries the core's whole-set loops
+// have inspected since construction — the deterministic seam the
+// XPORT-02/PERF-05 flatness gates read: an idle Advance and a fresh-key local
+// write or inbound replication must report zero at any pending-set size. It
+// counts inspections of pending entries, never handler calls or emissions,
+// and it is deliberately not a published metric (no metrics family, no
+// adapter mirror). Adding a loop over the pending set without incrementing it
+// would make the gate an incomplete measure — the field contract states the
+// five sites. Driver-goroutine-only, like every other core counter.
+func (c *Core) PendingVisits() uint64 {
+	return c.pendingVisits
+}
+
+// PeerCount returns the number of known peers — the O(1) peer-table gauge
+// the production adapter's per-event mirror reads (RESEARCH Pitfall 8: the
+// copying PeerSnapshot allocates a whole map per call and is fit for tests
+// and observability, never the hot mirror).
+func (c *Core) PeerCount() int {
+	return len(c.peers)
+}
+
+// PeerIDs returns the known peer ids sorted ascending — the write-time peer
+// snapshot the API handler captures immediately before a write (A-01, D-01)
+// and the deterministic slice the simulator hands its own notifications. The
+// order is sorted, never map iteration, so a same-seed replay stays
+// byte-identical; the returned slice is fresh and owned by the caller.
+func (c *Core) PeerIDs() []uint16 {
+	return slices.Sorted(maps.Keys(c.peers))
+}
+
+// PeerGeneration returns the peer id set's generation — bumped exactly when an
+// id enters or leaves the table, so the adapter's peer-id mirror publishes
+// only on a real set change (the listing-generation precedent).
+func (c *Core) PeerGeneration() uint64 {
+	return c.peerGen
+}
+
 // UnackedStats returns the pending-set gauge observed at now: the unacked
 // entry count and, with at least one entry, now minus the oldest entry's
-// creation time. A pure read; the wall clock enters through the now
-// parameter (the D-02 seam — the core never reads a clock itself).
+// creation time. Both halves are O(1): the count is the map length and the
+// oldest entry is the front of the createdAt-ordered pending list — the
+// accessor never walks the set (RESEARCH Pitfall 7). A pure read; the wall
+// clock enters through the now parameter (the D-02 seam — the core never
+// reads a clock itself).
 func (c *Core) UnackedStats(now time.Time) UnackedStats {
 	stats := UnackedStats{Count: len(c.pending)}
-	if stats.Count == 0 {
+	front := c.pendingOrder.Front()
+	if front == nil {
 		return stats
 	}
-	var oldest time.Time
-	for key := range c.pending {
-		createdAt := c.pending[key].createdAt
-		if oldest.IsZero() || createdAt.Before(oldest) {
-			oldest = createdAt
+	ref := front.Value.(pendingRef)
+	stats.OldestAge = now.Sub(ref.createdAt)
+	return stats
+}
+
+// sortedPendingKeys returns every pending pair ordered by key then version
+// bytes — the deterministic iteration order the emission and snapshot paths
+// share (probe #9: no map-iteration order reaches a read or emit path). The
+// slice is fresh; the pending set is never exposed.
+func sortedPendingKeys(pending map[pendingKey]pendingEntry) []pendingKey {
+	keys := make([]pendingKey, 0, len(pending))
+	for pk := range pending {
+		keys = append(keys, pk)
+	}
+	slices.SortFunc(keys, comparePendingKeys)
+	return keys
+}
+
+// comparePendingKeys orders two pending pairs by key in byte order, then by
+// their record-version bytes — the total order sortedPendingKeys and
+// pendingOrder use.
+func comparePendingKeys(a, b pendingKey) int {
+	if cmp := strings.Compare(a.key, b.key); cmp != 0 {
+		return cmp
+	}
+	return bytes.Compare(a.version[:], b.version[:])
+}
+
+// insertPendingOrder links pk into the createdAt-ordered pending list and
+// returns its node. The driver's now is non-decreasing, so the append is the
+// steady-state O(1) path; an out-of-order creation time (a test or a
+// recovered writer) inserts at its sorted position instead of corrupting the
+// oldest-age gauge.
+func (c *Core) insertPendingOrder(pk pendingKey, createdAt time.Time) *list.Element {
+	if back := c.pendingOrder.Back(); back == nil || !createdAt.Before(back.Value.(pendingRef).createdAt) {
+		return c.pendingOrder.PushBack(pendingRef{pk: pk, createdAt: createdAt})
+	}
+	for e := c.pendingOrder.Back(); e != nil; e = e.Prev() {
+		if !createdAt.Before(e.Value.(pendingRef).createdAt) {
+			return c.pendingOrder.InsertAfter(pendingRef{pk: pk, createdAt: createdAt}, e)
 		}
 	}
-	stats.OldestAge = now.Sub(oldest)
-	return stats
+	return c.pendingOrder.PushFront(pendingRef{pk: pk, createdAt: createdAt})
+}
+
+// removePending deletes one tracked pair from every structure that holds it
+// — the pending map, the per-key index, the createdAt-ordered list and every
+// still-waiting peer's ledger set. The pointed-to deletion is shared by the
+// drain, supersession and stale-record paths, so no path can leak a list node,
+// an index slot or a ledger entry (T-3-14). The index delete is guarded by
+// equality: a stale call for an already-replaced pair must never evict the
+// newer pair that now owns the key.
+func (c *Core) removePending(pk pendingKey) {
+	entry, ok := c.pending[pk]
+	if !ok {
+		return
+	}
+	delete(c.pending, pk)
+	if cur, indexed := c.pendingByKey[pk.key]; indexed && cur == pk {
+		delete(c.pendingByKey, pk.key)
+	}
+	if entry.elem != nil {
+		c.pendingOrder.Remove(entry.elem)
+	}
+	c.removeRetry(pk)
+	for id := range entry.waitSet {
+		c.ledgerRemove(id, pk)
+	}
+}
+
+// trackedVersion returns the version currently tracked for key, if any.
+// The notification guard keeps the pending set at most one pair per key: a
+// not-greater notification never creates a second entry, and a newer one
+// first removes the smaller pair (removeSupersededLocal). The lookup reads the
+// key's single index slot, never the pending set: a hit inspects one entry, a
+// miss inspects none, so the guard is key-local at any pending-set size.
+func (c *Core) trackedVersion(key string) (version.RecordVersion, bool) {
+	pk, ok := c.pendingByKey[key]
+	if !ok {
+		return version.RecordVersion{}, false
+	}
+	c.pendingVisits++
+	return pk.version, true
+}
+
+// removeSupersededLocal deletes the tracked pair under key when its version is
+// strictly smaller than newer — the local-write supersession rule (REPL-02),
+// resolved through the key's index slot instead of a pending-set scan. An
+// equal version is not smaller, so an equal-version duplicate notification
+// leaves tracking untouched. The displaced pair emits its Superseded result
+// with the TRACKED (older) version — a waiter for that write learns its
+// version lost to a newer local write (XPORT-12).
+func (c *Core) removeSupersededLocal(key string, newer version.RecordVersion, out *port.Outbox) {
+	pk, ok := c.pendingByKey[key]
+	if !ok {
+		return
+	}
+	c.pendingVisits++
+	if pk.version.Compare(newer) >= 0 {
+		return
+	}
+	out.Superseded(pk.key, pk.version)
+	c.removePending(pk)
+}
+
+// ledgerAdd records that peerID is waiting on pk — the per-peer index behind
+// O(peer unacked) eviction.
+func (c *Core) ledgerAdd(peerID uint16, pk pendingKey) {
+	set := c.peerUnacked[peerID]
+	if set == nil {
+		set = make(map[pendingKey]struct{})
+		c.peerUnacked[peerID] = set
+	}
+	set[pk] = struct{}{}
+}
+
+// ledgerRemove drops pk from peerID's ledger: the peer Acked it, or the
+// entry left tracking.
+func (c *Core) ledgerRemove(peerID uint16, pk pendingKey) {
+	if set := c.peerUnacked[peerID]; set != nil {
+		delete(set, pk)
+	}
+}
+
+// pushRetry arms pk's deadline in the due-heap with the next sequence
+// number — the equal-deadline tie-break order of first insertion.
+func (c *Core) pushRetry(pk pendingKey, nextRetry time.Time) {
+	c.retrySeq++
+	heap.Push(&c.retry, retryItem{nextRetry: nextRetry, seq: c.retrySeq, pk: pk})
+}
+
+// fixRetry re-arms an already tracked pair's deadline in place (O(log n));
+// the pair keeps its original sequence, so re-arms never reorder equal
+// deadlines.
+func (c *Core) fixRetry(pk pendingKey, nextRetry time.Time) {
+	idx, ok := c.retry.index[pk]
+	if !ok {
+		return
+	}
+	c.retry.items[idx].nextRetry = nextRetry
+	heap.Fix(&c.retry, idx)
+}
+
+// armRetry sets pk's retry deadline, pushing when the pair has no heap item
+// and fixing it in place otherwise. The distinction matters for the record
+// queue: a retry send was popped from the heap by the scan and must be
+// re-pushed at emission, while a discovery-flush send still owns its heap
+// item and must only be re-timed (a second push would leave a duplicate
+// item behind).
+func (c *Core) armRetry(pk pendingKey, nextRetry time.Time) {
+	if _, ok := c.retry.index[pk]; ok {
+		c.fixRetry(pk, nextRetry)
+		return
+	}
+	c.pushRetry(pk, nextRetry)
+}
+
+// removeRetry deletes pk's due-heap item (O(log n)), leaving no stale entry
+// for the scan or the deadline read to trip over.
+func (c *Core) removeRetry(pk pendingKey) {
+	idx, ok := c.retry.index[pk]
+	if !ok {
+		return
+	}
+	heap.Remove(&c.retry, idx)
+}
+
+// retryRoot returns the earliest armed deadline, the zero time when the heap
+// is empty — the O(1) read behind nextDeadline.
+func (c *Core) retryRoot() time.Time {
+	if len(c.retry.items) == 0 {
+		return time.Time{}
+	}
+	return c.retry.items[0].nextRetry
+}
+
+// popDueRetries removes and returns every heap item due at now — the only
+// entries Advance touches, regardless of pending-set size. The caller owns
+// the returned slice; popped items are absent from the heap index already.
+func (c *Core) popDueRetries(now time.Time) []retryItem {
+	var due []retryItem
+	for len(c.retry.items) > 0 && !c.retry.items[0].nextRetry.After(now) {
+		due = append(due, heap.Pop(&c.retry).(retryItem))
+	}
+	return due
 }

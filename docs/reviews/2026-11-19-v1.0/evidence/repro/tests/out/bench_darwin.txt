@@ -1,0 +1,11 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/Djarvur/sup-kv/internal/app/persist
+cpu: Apple M3 Max
+BenchmarkDump10kKeys-16    	      58	  19995466 ns/op	   5147550 bytes/op	   5147550 dump-bytes	18938008 B/op	   40104 allocs/op
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/app/persist	2.446s
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/udprepl	0.539s
+PASS
+ok  	github.com/Djarvur/sup-kv/internal/grpcapi	0.614s

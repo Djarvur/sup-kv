@@ -11,10 +11,12 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
 )
 
 // watchTestTimeout bounds every wait for a delivery the pipeline owes the
@@ -64,12 +66,12 @@ func recvEvent(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchRes
 	}
 }
 
-// recvNone proves the stream stays quiet for the window: the negative proof
-// for suppressed events (merge losers, off-prefix writes). Sound because
-// the pipeline is known empty when it runs — the preceding positive event
-// arrived through a synchronous Recv — so it must be the stream's final
-// assertion.
-func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchResponse], window time.Duration) {
+// recvNone proves the stream stays quiet for watchQuietWindow: the negative
+// proof for suppressed events (merge losers, off-prefix writes, a repeated
+// confirmation). Sound because the pipeline is known empty when it runs — the
+// preceding positive event arrived through a synchronous Recv — so it must be
+// the stream's final assertion.
+func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchResponse]) {
 	t.Helper()
 	ch := make(chan watchRecv, 1)
 	go func() {
@@ -78,8 +80,8 @@ func recvNone(t *testing.T, stream grpc.ServerStreamingClient[apiproto.WatchResp
 	}()
 	select {
 	case got := <-ch:
-		t.Fatalf("Recv: want silence for %s, got event %v (err %v)", window, got.ev, got.err)
-	case <-time.After(window):
+		t.Fatalf("Recv: want silence for %s, got event %v (err %v)", watchQuietWindow, got.ev, got.err)
+	case <-time.After(watchQuietWindow):
 	}
 }
 
@@ -386,7 +388,74 @@ func TestWatch_replicatedChange(t *testing.T) {
 	}) {
 		t.Fatalf("ApplyRemote(loser) conflicts = %v, want %v", conflicts, want)
 	}
-	recvNone(t, stream, watchQuietWindow)
+	recvNone(t, stream)
+}
+
+// TestWatch_equalVersionTieBreakDelivered is the WR-02 regression: the
+// exact-cut floor must suppress only an event the subscriber's snapshot
+// already contains exactly, never every equal-version install. The store's
+// deterministic (version, content) law installs an equal-version content
+// winner and a remove-wins tombstone as real changes and fires the change
+// tap (storage.Config.OnChange: "a tie-break win at an equal version IS a
+// change"), so a subscriber whose snapshot holds the losing content at that
+// version must receive each install — otherwise its view diverges from the
+// store until it resubscribes, and APIS-04's "each confirmed write yields
+// exactly one event" does not hold for the winner.
+func TestWatch_equalVersionTieBreakDelivered(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	tieVersion := version.PackVersion(1_700_000_000_000, 1, 0x0C1)
+	_, _, err := ts.engine.ApplyRemote("tie/key", storage.Record{Version: tieVersion, Data: []byte("aaa")})
+	if err != nil {
+		t.Fatalf("seed ApplyRemote(tie/key): want nil, got error: %v", err)
+	}
+
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "tie/"})
+	if err != nil {
+		t.Fatalf("Watch tie/: want OK, got error: %v", err)
+	}
+	snapEv := recvEvent(t, stream)
+	if got := snapEv.GetRecord(); got.GetKey() != "tie/key" || got.GetDeleted() ||
+		!bytes.Equal(got.GetValue(), []byte("aaa")) {
+		t.Fatalf("snapshot event = (%s, deleted=%t, %q), want the seeded (tie/key, false, aaa)",
+			got.GetKey(), got.GetDeleted(), got.GetValue())
+	}
+
+	// Equal-version content winner: the greater Data bytes install at the
+	// SAME version, and the tap fires. The subscriber's snapshot holds "aaa"
+	// at that version, so only a content-aware floor delivers the winner.
+	conflicts, _, err := ts.engine.ApplyRemote("tie/key", storage.Record{Version: tieVersion, Data: []byte("bbb")})
+	if err != nil {
+		t.Fatalf("ApplyRemote(equal-version winner): want nil, got error: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Winner != tieVersion || conflicts[0].Loser != tieVersion {
+		t.Fatalf("ApplyRemote(equal-version winner) conflicts = %v, want one equal-version conflict", conflicts)
+	}
+	winner := recvEvent(t, stream)
+	if got := winner.GetRecord(); got.GetKey() != "tie/key" || got.GetDeleted() ||
+		!bytes.Equal(got.GetValue(), []byte("bbb")) || !bytes.Equal(got.GetVersion(), tieVersion[:]) {
+		t.Fatalf("tie-break event = (%s, deleted=%t, %q, version %x), want (tie/key, false, bbb, %x)",
+			got.GetKey(), got.GetDeleted(), got.GetValue(), got.GetVersion(), tieVersion[:])
+	}
+
+	// Remove-wins at the same version: the tombstone beats the live value and
+	// is a change in its own right. A subscriber that never learned the delete
+	// would keep serving a value the store no longer has.
+	conflicts, _, err = ts.engine.ApplyRemote("tie/key", storage.Record{Version: tieVersion, Deleted: true})
+	if err != nil {
+		t.Fatalf("ApplyRemote(remove-wins): want nil, got error: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Winner != tieVersion || conflicts[0].Loser != tieVersion {
+		t.Fatalf("ApplyRemote(remove-wins) conflicts = %v, want one equal-version conflict", conflicts)
+	}
+	tomb := recvEvent(t, stream)
+	if got := tomb.GetRecord(); got.GetKey() != "tie/key" || !got.GetDeleted() ||
+		!bytes.Equal(got.GetVersion(), tieVersion[:]) {
+		t.Fatalf("remove-wins event = (%s, deleted=%t, version %x), want the (tie/key, true, %x) tombstone",
+			got.GetKey(), got.GetDeleted(), got.GetVersion(), tieVersion[:])
+	}
 }
 
 // TestWatch_prefix proves D-04 on both phases: the snapshot of a prefixed
@@ -457,7 +526,7 @@ func TestWatch_prefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Set cfg/other: want OK, got error: %v", err)
 	}
-	recvNone(t, svcStream, watchQuietWindow)
+	recvNone(t, svcStream)
 }
 
 // TestWatch_slowConsumer proves the shed policy end-to-end (A3, T-05-05):
@@ -531,11 +600,15 @@ func TestWatch_slowConsumer(t *testing.T) {
 		}
 	}()
 
-	// The flood: the OnChange entry point at production rates.
+	// The flood: the OnChange entry point at production rates. Generation 0
+	// is already at or below the starting watermark, so these synthetic
+	// events release immediately — the flood exercises the shed path, not the
+	// durability gate (TestWatchHub_confirmGate and the held-dump tests own
+	// that).
 	nowMs := time.Now().UnixMilli()
 	for i := range watchSlowFlood {
 		ts.hub.Ingest(fmt.Sprintf("big/f%05d", i),
-			storage.Record{Version: version.PackVersion(nowMs+int64(i), 0, 0x0FE9), Data: []byte("f")})
+			storage.Record{Version: version.PackVersion(nowMs+int64(i), 0, 0x0FE9), Data: []byte("f")}, 0)
 	}
 	select {
 	case err := <-got:
@@ -543,4 +616,443 @@ func TestWatch_slowConsumer(t *testing.T) {
 	case <-time.After(watchShedDeadline):
 		t.Fatal("shed verdict did not arrive within the deadline")
 	}
+}
+
+// TestWatch_unconfirmedNotAnnounced proves the durability gate end-to-end
+// (D-04, APIS-04, T-06-17): an install the covering dump has not yet saved is
+// not announced, and the successful dump that makes it durable releases it
+// exactly once. The seed write proves the subscription is registered before
+// the held write starts — the hub takes the snapshot only after registering
+// the subscriber, so the snapshot event cannot arrive unregistered — and the
+// single pending Recv serves both the silence proof and the later delivery: a
+// timed-out select leaves that goroutine blocked in Recv, so it consumes the
+// first released event instead of racing a second receiver.
+func TestWatch_unconfirmedNotAnnounced(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gate/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set gate/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "gate/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "gate/seed" {
+		t.Fatalf("snapshot event = %s, want gate/seed", snap.GetRecord().GetKey())
+	}
+
+	pending := make(chan watchRecv, 1)
+	go func() {
+		ev, recvErr := stream.Recv()
+		pending <- watchRecv{ev: ev, err: recvErr}
+	}()
+
+	// Park every dump: the next install lands in memory but is not durable.
+	ts.dumps.holdDumps()
+	setDone := make(chan error, 1)
+	go func() {
+		_, setErr := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gate/a", Value: []byte("held")})
+		setDone <- setErr
+	}()
+	waitFor(t, gateWait, "the held write to install in memory", func() bool {
+		_, getErr := ts.engine.Get("gate/a")
+		return getErr == nil
+	})
+
+	select {
+	case got := <-pending:
+		t.Fatalf("Recv: announced an unconfirmed write before its dump (event %v, err %v)", got.ev, got.err)
+	case <-time.After(watchQuietWindow):
+	}
+	select {
+	case setErr := <-setDone:
+		t.Fatalf("Set returned while its covering dump was held: %v", setErr)
+	default:
+	}
+
+	ts.dumps.releaseDumps()
+	select {
+	case setErr := <-setDone:
+		if setErr != nil {
+			t.Fatalf("Set after the dump released: want OK, got error: %v", setErr)
+		}
+	case <-time.After(watchTestTimeout):
+		t.Fatal("Set did not return within the deadline after the dump was released")
+	}
+	var live *apiproto.WatchResponse
+	select {
+	case got := <-pending:
+		if got.err != nil {
+			t.Fatalf("Recv: want the released event, got error: %v", got.err)
+		}
+		live = got.ev
+	case <-time.After(watchTestTimeout):
+		t.Fatal("the released durable event did not arrive within the deadline")
+	}
+	rec := live.GetRecord()
+	if rec.GetKey() != "gate/a" || !bytes.Equal(rec.GetValue(), []byte("held")) {
+		t.Fatalf("released event = (%s, %q), want (gate/a, held)", rec.GetKey(), rec.GetValue())
+	}
+	recvNone(t, stream) // exactly once: the final assertion.
+}
+
+// TestWatch_confirmedExactlyOnce pins the ordinary write's event count
+// (APIS-04, D-04): one confirmed write yields exactly one live event — the
+// debounce/dump cycle behind the write must not duplicate it. The seed
+// snapshot proves the subscription is registered before the observed write.
+func TestWatch_confirmedExactlyOnce(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "once/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set once/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "once/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "once/seed" {
+		t.Fatalf("snapshot event = %s, want once/seed", snap.GetRecord().GetKey())
+	}
+
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "once/a", Value: []byte("v1")})
+	if err != nil {
+		t.Fatalf("Set once/a: want OK, got error: %v", err)
+	}
+	live := recvEvent(t, stream)
+	rec := live.GetRecord()
+	if rec.GetKey() != "once/a" || rec.GetDeleted() || !bytes.Equal(rec.GetValue(), []byte("v1")) {
+		t.Fatalf("live event = (%s, deleted=%t, %q), want (once/a, false, v1)",
+			rec.GetKey(), rec.GetDeleted(), rec.GetValue())
+	}
+	recvNone(t, stream) // exactly once: the final assertion.
+}
+
+// TestWatch_dumpFailedThenConfirmed proves the gate's hardest case (D-04,
+// T-06-17) through the API surface: a write whose dump failed answers
+// Unavailable and stays unannounced, and a later successful dump — forced by
+// a second write — releases both installs exactly once, in install order. A
+// handler-side "notify after Set" would have announced the first write
+// before the only dump that made it durable.
+func TestWatch_dumpFailedThenConfirmed(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gatefail/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set gatefail/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "gatefail/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "gatefail/seed" {
+		t.Fatalf("snapshot event = %s, want gatefail/seed", snap.GetRecord().GetKey())
+	}
+
+	pending := make(chan watchRecv, 1)
+	go func() {
+		ev, recvErr := stream.Recv()
+		pending <- watchRecv{ev: ev, err: recvErr}
+	}()
+
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = true
+	ts.dumps.mu.Unlock()
+	_, setErr := ts.client.Set(ctx, &apiproto.SetRequest{Key: "gatefail/a", Value: []byte("unconfirmed")})
+	if status.Code(setErr) != codes.Unavailable {
+		t.Fatalf("Set during the failed dump = %v, want codes.Unavailable", setErr)
+	}
+	if got := status.Convert(setErr).Message(); got != persist.ErrDumpFailed.Error() {
+		t.Fatalf("Set during the failed dump message = %q, want %q", got, persist.ErrDumpFailed.Error())
+	}
+	select {
+	case got := <-pending:
+		t.Fatalf("Recv: announced a write whose dump failed (event %v, err %v)", got.ev, got.err)
+	case <-time.After(watchQuietWindow):
+	}
+
+	ts.dumps.mu.Lock()
+	ts.dumps.failSave = false
+	ts.dumps.mu.Unlock()
+	// The second write forces a covering dump that includes the first key, so
+	// the failed-then-confirmed install becomes durable and is released.
+	_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "gatefail/b", Value: []byte("second")})
+	if err != nil {
+		t.Fatalf("Set gatefail/b after healing the dump: want OK, got error: %v", err)
+	}
+
+	var firstEvent *apiproto.WatchResponse
+	select {
+	case got := <-pending:
+		if got.err != nil {
+			t.Fatalf("Recv: want the first released event, got error: %v", got.err)
+		}
+		firstEvent = got.ev
+	case <-time.After(watchTestTimeout):
+		t.Fatal("the first released event did not arrive within the deadline after the covering dump")
+	}
+	first := firstEvent.GetRecord()
+	if first.GetKey() != "gatefail/a" || !bytes.Equal(first.GetValue(), []byte("unconfirmed")) {
+		t.Fatalf("first released event = (%s, %q), want (gatefail/a, unconfirmed) — install order",
+			first.GetKey(), first.GetValue())
+	}
+	second := recvEvent(t, stream).GetRecord()
+	if second.GetKey() != "gatefail/b" || !bytes.Equal(second.GetValue(), []byte("second")) {
+		t.Fatalf("second released event = (%s, %q), want (gatefail/b, second)",
+			second.GetKey(), second.GetValue())
+	}
+	recvNone(t, stream) // exactly once per key: the final assertion.
+}
+
+// TestWatchHub_confirmGate pins the hub's durability gate deterministically
+// (APIS-04, D-04, T-06-17): an event whose generation is above the confirmed
+// watermark is not delivered, Confirm(gen) releases it exactly once, and a
+// second Confirm of the same generation delivers nothing. The seed write
+// proves the subscription is registered; the synthetic event's generation is
+// far above the watermark the seed's own dump left, so the gate — not timing
+// — is what holds it.
+func TestWatchHub_confirmGate(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "hubgate/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set hubgate/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "hubgate/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "hubgate/seed" {
+		t.Fatalf("snapshot event = %s, want hubgate/seed", snap.GetRecord().GetKey())
+	}
+
+	pending := make(chan watchRecv, 1)
+	go func() {
+		ev, recvErr := stream.Recv()
+		pending <- watchRecv{ev: ev, err: recvErr}
+	}()
+
+	const heldGen = 5
+	held := storage.Record{
+		Version: version.PackVersion(time.Now().UnixMilli(), 0, 0x0A11),
+		Data:    []byte("held"),
+	}
+	ts.hub.Ingest("hubgate/a", held, heldGen)
+	select {
+	case got := <-pending:
+		t.Fatalf("Recv: delivered generation %d before Confirm reached it (event %v, err %v)", heldGen, got.ev, got.err)
+	case <-time.After(watchQuietWindow):
+	}
+
+	ts.hub.Confirm(heldGen)
+	var live *apiproto.WatchResponse
+	select {
+	case got := <-pending:
+		if got.err != nil {
+			t.Fatalf("Recv: want the released event, got error: %v", got.err)
+		}
+		live = got.ev
+	case <-time.After(watchTestTimeout):
+		t.Fatalf("Confirm(%d) did not release the held event within the deadline", heldGen)
+	}
+	rec := live.GetRecord()
+	if rec.GetKey() != "hubgate/a" || !bytes.Equal(rec.GetValue(), []byte("held")) {
+		t.Fatalf("released event = (%s, %q), want (hubgate/a, held)", rec.GetKey(), rec.GetValue())
+	}
+
+	ts.hub.Confirm(heldGen) // the repeated confirmation delivers nothing.
+	recvNone(t, stream)
+}
+
+// watchShutdownMessage is the pinned termination message every stream sees
+// when the hub itself is going away (D-04): a dying node must never look
+// like a clean end of stream.
+const watchShutdownMessage = "watch hub is shutting down"
+
+// TestWatch_shutdownUnavailable proves the shutdown verdict (D-04, T-06-19):
+// a Watch stream open when the hub's context is cancelled ends with
+// codes.Unavailable and the pinned message — never OK. The seed snapshot
+// proves the subscription is registered before the hub is cancelled.
+func TestWatch_shutdownUnavailable(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "shutdown/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set shutdown/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "shutdown/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "shutdown/seed" {
+		t.Fatalf("snapshot event = %s, want shutdown/seed", snap.GetRecord().GetKey())
+	}
+
+	ts.cancelHub()
+
+	ch := make(chan watchRecv, 1)
+	go func() {
+		ev, recvErr := stream.Recv()
+		ch <- watchRecv{ev: ev, err: recvErr}
+	}()
+	select {
+	case got := <-ch:
+		if got.err == nil {
+			t.Fatalf("Recv after hub shutdown = nil, want codes.Unavailable %q", watchShutdownMessage)
+		}
+		if code := status.Code(got.err); code != codes.Unavailable {
+			t.Fatalf("Recv after hub shutdown code = %s, want %s (err %v)", code, codes.Unavailable, got.err)
+		}
+		if msg := status.Convert(got.err).Message(); msg != watchShutdownMessage {
+			t.Fatalf("Recv after hub shutdown message = %q, want %q", msg, watchShutdownMessage)
+		}
+	case <-time.After(watchTestTimeout):
+		t.Fatal("the shutdown verdict did not arrive within the deadline")
+	}
+}
+
+// TestWatchHub_pendingBounded pins the pending queue's bound end-to-end
+// (D-04, T-06-18): installs whose covering dump never confirms accumulate
+// only up to watchIngress; crossing the bound sheds every subscriber with
+// ResourceExhausted, and a resubscription re-snapshots the current state.
+// The synthetic events reuse the snapshot's own key at the zero version, so
+// any residue left in the pipeline after the shed is suppressed as
+// already-contained rather than delivered.
+func TestWatchHub_pendingBounded(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "pending/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set pending/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "pending/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "pending/seed" {
+		t.Fatalf("snapshot event = %s, want pending/seed", snap.GetRecord().GetKey())
+	}
+
+	shed := make(chan error, 1)
+	go func() {
+		for {
+			_, recvErr := stream.Recv()
+			if recvErr != nil {
+				shed <- recvErr
+				return
+			}
+		}
+	}()
+
+	// Feed past the watchIngress bound in paced batches: the batch pacing
+	// keeps the ingress channel from overflowing (which would shed for the
+	// other reason), so the pending bound is the overflow under test. The
+	// generation is far above the confirmed watermark, so nothing is
+	// released while the queue fills.
+	const (
+		heldGen      = uint64(1) << 20
+		pendingFlood = 5 * 1024
+		batchSize    = 256
+	)
+	var zeroVersion version.RecordVersion
+	var shedErr error
+feed:
+	for i := range pendingFlood {
+		ts.hub.Ingest("pending/seed", storage.Record{Version: zeroVersion, Data: []byte("p")}, heldGen)
+		if i%batchSize == batchSize-1 {
+			time.Sleep(time.Millisecond)
+			select {
+			case shedErr = <-shed:
+				break feed
+			default:
+			}
+		}
+	}
+	if shedErr == nil {
+		select {
+		case shedErr = <-shed:
+		case <-time.After(watchShedDeadline):
+			t.Fatal("the pending-bound shed verdict did not arrive within the deadline")
+		}
+	}
+	assertCode(t, "Recv on the pending-bound shed watch stream", shedErr, codes.ResourceExhausted)
+
+	// Drain whatever residue the shed left behind (the synthetic events are
+	// suppressed by the snapshot, so no subscriber sees them), then
+	// resubscribe: the snapshot is the complete current state.
+	ts.hub.Confirm(^uint64(0))
+	fresh, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "pending/"})
+	if err != nil {
+		t.Fatalf("Watch after the shed: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, fresh); snap.GetRecord().GetKey() != "pending/seed" {
+		t.Fatalf("resubscribe snapshot event = %s, want pending/seed", snap.GetRecord().GetKey())
+	}
+	recvNone(t, fresh) // the snapshot is complete; no stale event leaks through.
+}
+
+// TestWatch_deletionsAndOrder pins the live feed's change semantics (D-04,
+// D-05): a Delete install is delivered as a deleted=true event (a delete IS
+// a change), and two writes under one key arrive strictly in version order
+// with no duplicate. Each write returns only after its covering dump, so
+// every observed event is a confirmed durable change.
+func TestWatch_deletionsAndOrder(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ctx := t.Context()
+
+	_, err := ts.client.Set(ctx, &apiproto.SetRequest{Key: "ord/seed", Value: []byte("s")})
+	if err != nil {
+		t.Fatalf("seed Set ord/seed: want OK, got error: %v", err)
+	}
+	stream, err := ts.client.Watch(ctx, &apiproto.WatchRequest{Prefix: "ord/"})
+	if err != nil {
+		t.Fatalf("Watch: want OK, got error: %v", err)
+	}
+	if snap := recvEvent(t, stream); snap.GetRecord().GetKey() != "ord/seed" {
+		t.Fatalf("snapshot event = %s, want ord/seed", snap.GetRecord().GetKey())
+	}
+
+	var prev []byte
+	for i, value := range []string{"v1", "v2"} {
+		_, err = ts.client.Set(ctx, &apiproto.SetRequest{Key: "ord/a", Value: []byte(value)})
+		if err != nil {
+			t.Fatalf("Set ord/a %s: want OK, got error: %v", value, err)
+		}
+		rec := recvEvent(t, stream).GetRecord()
+		if rec.GetKey() != "ord/a" || rec.GetDeleted() || !bytes.Equal(rec.GetValue(), []byte(value)) {
+			t.Fatalf("write %d event = (%s, deleted=%t, %q), want (ord/a, false, %s)",
+				i, rec.GetKey(), rec.GetDeleted(), rec.GetValue(), value)
+		}
+		if prev != nil && bytes.Compare(rec.GetVersion(), prev) <= 0 {
+			t.Fatalf("write %d version %x does not strictly dominate the previous %x", i, rec.GetVersion(), prev)
+		}
+		prev = slices.Clone(rec.GetVersion())
+	}
+
+	_, err = ts.client.Delete(ctx, &apiproto.DeleteRequest{Key: "ord/a"})
+	if err != nil {
+		t.Fatalf("Delete ord/a: want OK, got error: %v", err)
+	}
+	del := recvEvent(t, stream).GetRecord()
+	if del.GetKey() != "ord/a" || !del.GetDeleted() {
+		t.Fatalf("delete event = (%s, deleted=%t), want (ord/a, true)", del.GetKey(), del.GetDeleted())
+	}
+	if bytes.Compare(del.GetVersion(), prev) <= 0 {
+		t.Fatalf("delete version %x does not strictly dominate the write version %x", del.GetVersion(), prev)
+	}
+	recvNone(t, stream) // no duplicate of any event, the delete included.
 }

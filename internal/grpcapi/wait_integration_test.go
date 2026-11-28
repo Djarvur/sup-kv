@@ -14,24 +14,24 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/test/bufconn"
 
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
 	"github.com/Djarvur/sup-kv/internal/app/clock"
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/app/storage"
 	"github.com/Djarvur/sup-kv/internal/app/version"
 	"github.com/Djarvur/sup-kv/internal/grpcapi"
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 	"github.com/Djarvur/sup-kv/internal/udprepl"
 )
 
 // The wait_for_replication integration harness (05-REVIEW CR-01). Unlike
-// wait_test.go's fakeMirror — whose fixtures can publish mirror states the
-// real repl core never produces — this file drives the wait through a REAL
-// udprepl.Adapter pair exchanging real datagrams over real UDP sockets: the
-// production mirror timing, where the core deletes a pending entry inside
-// the very handleAck call that completes Ack coverage and the adapter
-// refreshes its mirror only after whole event-loop iterations, one datagram
-// per iteration.
+// wait_test.go's scripted tracker fake — whose fixtures can publish states
+// the real repl core never produces — this file drives the wait through a
+// REAL udprepl.Adapter pair exchanging real datagrams over real UDP
+// sockets: the production result seam, where the core deletes a pending
+// entry inside the very handleAck call that completes Ack coverage and the
+// adapter resolves the waiter tracker from the resulting Outbox event.
 //
 // The two nodes bind DIFFERENT loopback ports and target each other's port
 // as their broadcast address: broadcast Hello discovery crosses over, while
@@ -54,23 +54,18 @@ const (
 	integrationDeadline  = 5 * time.Second
 )
 
-// integrationUDPPort picks one free UDP port: bind a throwaway wildcard
-// socket to :0, read its port, close it (the udprepl smoke-test recipe —
-// the adapter keeps no local-address accessor, so the test must know the
-// ports before constructing the nodes). Takes testing.TB so the
-// confirmation-latency benchmark reuses the same picker.
+// integrationUDPPort returns one free UDP port from the grpcapi band inside
+// the private port window (testutil.GRPCApiBand: [31100, 32100), strictly
+// below the kernel's ephemeral range, so no other test's :0 bind is ever
+// issued there and the band is disjoint from every sibling package's). The
+// shared allocator claims the candidate while its bind probe is held, so no
+// parallel test in this process can take it between pick and bind. The
+// adapter keeps no local-address accessor, so the test must know the ports
+// before constructing the nodes; the testing.TB signature lets the
+// confirmation-latency benchmark reuse the picker.
 func integrationUDPPort(tb testing.TB) int {
 	tb.Helper()
-	var lc net.ListenConfig
-	// tb.Context() does not exist (testing.TB carries no Context method,
-	// Go 1.24 added it to T and B only), so usetesting's suggested fix does
-	// not compile — the documented-nolint case.
-	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:0") //nolint:usetesting // suggestion does not compile on TB
-	if err != nil {
-		tb.Fatalf("bind throwaway port-picking socket: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	return conn.LocalAddr().(*net.UDPAddr).Port
+	return testutil.UDPPort(tb, testutil.GRPCApiBand())
 }
 
 // integrationSocket binds a wildcard udp4 socket with SO_REUSEADDR and
@@ -149,7 +144,8 @@ func probeLoopbackBroadcast(tb testing.TB, port int) {
 
 // peerStore adapts *storage.Store to repl.StateStore for the peer node (the
 // udprepl smokeStore precedent): remote merges join through Merge, and the
-// store keeps the corroborating copy this test reads back.
+// store keeps the corroborating copy this test reads back through the
+// tombstone-visible point read.
 type peerStore struct{ store *storage.Store }
 
 // ApplyRemote joins one replicated record through the store's LWW merge.
@@ -157,20 +153,31 @@ func (s peerStore) ApplyRemote(key string, rec storage.Record) ([]storage.Confli
 	return s.store.Merge(key, rec)
 }
 
-// Records returns the full snapshot, tombstones included.
-func (s peerStore) Records() map[string]storage.Record { return s.store.Records() }
+// Version returns the stored version for key, tombstones included.
+func (s peerStore) Version(key string) (version.RecordVersion, bool) { return s.store.Version(key) }
 
-// TestWaitIntegration_ackedThroughRealAdapterMirror drives 05-REVIEW CR-01's
+// Lookup returns the stored record for key, tombstones included.
+func (s peerStore) Lookup(key string) (storage.Record, bool) { return s.store.Lookup(key) }
+
+// Versions returns the shallow key→version view, tombstones included.
+func (s peerStore) Versions() map[string]version.RecordVersion { return s.store.Versions() }
+
+// Observe absorbs one received version into the store's clock.
+func (s peerStore) Observe(ver version.RecordVersion) time.Duration { return s.store.Observe(ver) }
+
+// Generation returns the store's content generation.
+func (s peerStore) Generation() uint64 { return s.store.Generation() }
+
+// TestWaitIntegration_ackedThroughRealAdapterTracker drives 05-REVIEW CR-01's
 // exact production scenario end to end: one known peer, a Set with
 // wait_for_replication, the notify→broadcast→apply→ack cycle over real UDP
-// datagrams — a cycle that routinely finishes inside one 5ms poll window on
-// a healthy link — and the D-08 report coming back acked=true 1/1 from what
-// the real adapter mirror published. The response must also arrive well
-// under the appearance bound: the wait must observe the replication on the
-// mirror, not burn waitAppear before reporting an honest-looking false.
-// Finally the Ack chain is corroborated as real: the peer holds the record
-// byte-equal.
-func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
+// datagrams, and the D-08 report coming back acked=true 1/1 from what the
+// real adapter's tracker observed through the core's result stream. The
+// tracker is created synchronously when the write is notified (before the
+// notification is enqueued), so a cycle that finishes within microseconds
+// cannot be missed — there is no appearance window to wait out. Finally the
+// Ack chain is corroborated as real: the peer holds the record byte-equal.
+func TestWaitIntegration_ackedThroughRealAdapterTracker(t *testing.T) {
 	t.Parallel()
 
 	portA := integrationUDPPort(t)
@@ -188,7 +195,11 @@ func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
 		time.Minute,
 		&fakeDumpStore{},
 		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
-		persist.Config{Debounce: time.Millisecond, MaxWait: 50 * time.Millisecond},
+		persist.Config{
+			Debounce:    time.Millisecond,
+			MaxWait:     50 * time.Millisecond,
+			OnConfirmed: hub.Confirm,
+		},
 	)
 	engCtx, cancelEng := context.WithCancel(t.Context())
 	go func() { _ = eng.Run(engCtx) }()
@@ -223,17 +234,17 @@ func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
 	go func() { _ = adapterA.Run(ctx) }()
 	go func() { _ = adapterB.Run(ctx) }()
 
-	// Discovery over real broadcast Hellos: A must know B before the write,
-	// or the wait-set seeds empty, total is zero and the wait short-circuits
-	// at acked=true 0/0 (D-11) — the degenerate path this test must not
-	// confuse with success.
+	// Discovery over real broadcast Hellos: A must know B before the write, or
+	// the write-time capture is empty, total is zero and the wait answers the
+	// honest (false, 0/0) immediately (A-01) — the degenerate path this test
+	// must not confuse with success.
 	waitFor(t, integrationDeadline, "adapter A to discover adapter B", func() bool {
 		return adapterA.KnownPeers() == 1
 	})
 
 	opts := openGateOptions()
-	opts.KnownPeers = adapterA.KnownPeers
-	opts.PendingCopy = adapterA.PendingCopy
+	opts.WritePeers = adapterA.KnownPeerIDs
+	opts.WaitReplicated = adapterA.WaitReplicated
 	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
 	gateCtx, cancelGate := context.WithCancel(t.Context())
 	t.Cleanup(cancelGate)
@@ -279,7 +290,7 @@ func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
 			resp.GetAcked(), resp.GetAckedCount(), resp.GetTotalPeers())
 	}
 	if elapsed >= waitAssertBound {
-		t.Fatalf("Set took %v: want well under %v — a healthy cycle must resolve on the observed mirror, not burn the 500ms appearance bound",
+		t.Fatalf("Set took %v: want well under %v — a healthy cycle must resolve on the observed result event, with no appearance phase to burn",
 			elapsed, waitAssertBound)
 	}
 
@@ -292,4 +303,148 @@ func TestWaitIntegration_ackedThroughRealAdapterMirror(t *testing.T) {
 		got, err := storeB.Get("wait/integ")
 		return err == nil && got.Version == ver && bytes.Equal(got.Data, []byte("integration"))
 	})
+}
+
+// TestWaitIntegration_staleRecordNotAcked drives PROTO-03 end to end over the
+// real adapter pair: node B already holds "wait/stale" under a version about
+// 10 s ahead of node A's clock, so A's write arrives as a strictly older
+// DataReplication. B answers with its newer record and sends no Ack, and A's
+// wait_for_replication reports acked=false — the truthful report the stale
+// outcome exists for. B's store keeps the newer record: the stale write is
+// answered, never merged.
+//
+// The seed happens after discovery on purpose: B's startup listing is built
+// in the same event-loop iteration that emits the Hello A observes, so it was
+// built from an empty store. Seeding earlier would let the listing carry the
+// future version to A, where Observe/HLC absorption would make A's write
+// strictly newer and turn B's stale branch into a normal apply. The core
+// table (TestReplication_staleAnsweredNotAcked) owns the wire-level
+// Ack/reply counting; this test asserts only what the real adapter's tracker
+// reported and what the peer store retains.
+func TestWaitIntegration_staleRecordNotAcked(t *testing.T) {
+	t.Parallel()
+
+	portA := integrationUDPPort(t)
+	portB := integrationUDPPort(t)
+	probeLoopbackBroadcast(t, portB)
+
+	hub := grpcapi.NewWatchHub()
+	eng, _ := persist.Open(
+		42,
+		time.Now,
+		time.Minute,
+		&fakeDumpStore{},
+		storage.Config{ValueMaxBytes: testValueLimit, OnChange: hub.Ingest},
+		persist.Config{
+			Debounce:    time.Millisecond,
+			MaxWait:     50 * time.Millisecond,
+			OnConfirmed: hub.Confirm,
+		},
+	)
+	engCtx, cancelEng := context.WithCancel(t.Context())
+	go func() { _ = eng.Run(engCtx) }()
+	t.Cleanup(cancelEng)
+	hubCtx, cancelHub := context.WithCancel(t.Context())
+	go func() { _ = hub.Run(hubCtx) }()
+	t.Cleanup(cancelHub)
+
+	adapterA, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", portA),
+		fmt.Sprintf("127.255.255.255:%d", portB),
+		replNodeA, eng, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("node A adapter: %v", err)
+	}
+
+	// Peer node B: a plain storage store behind the repl.StateStore wrapper.
+	storeB := storage.NewStore(replNodeB, clock.NewClock(time.Now, 0, 0, time.Minute), storage.Config{})
+	adapterB, err := udprepl.New(
+		fmt.Sprintf("0.0.0.0:%d", portB),
+		fmt.Sprintf("127.255.255.255:%d", portA),
+		replNodeB, peerStore{store: storeB}, repl.Config{},
+	)
+	if err != nil {
+		t.Fatalf("node B adapter: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() { _ = adapterA.Run(ctx) }()
+	go func() { _ = adapterB.Run(ctx) }()
+
+	waitFor(t, integrationDeadline, "adapter A to discover adapter B", func() bool {
+		return adapterA.KnownPeers() == 1
+	})
+
+	// Seed B with a version ~10 s ahead of A's clock (inside the 60 s
+	// max_clock_lead), now that B's startup listing is known to have been
+	// built from the empty store.
+	const staleKey = "wait/stale"
+	staleData := []byte("newer")
+	staleVersion := version.PackVersion(time.Now().UnixMilli()+10_000, 0, replNodeB)
+	_, _, mergeErr := storeB.Merge(staleKey, storage.Record{Version: staleVersion, Data: staleData})
+	if mergeErr != nil {
+		t.Fatalf("seed node B's newer record: %v", mergeErr)
+	}
+
+	opts := openGateOptions()
+	opts.WritePeers = adapterA.KnownPeerIDs
+	opts.WaitReplicated = adapterA.WaitReplicated
+	api := grpcapi.NewServer(eng, adapterA.NotifyLocalWrite, hub, opts)
+	gateCtx, cancelGate := context.WithCancel(t.Context())
+	t.Cleanup(cancelGate)
+	go api.RunGate(gateCtx)
+
+	srv := grpc.NewServer()
+	apiproto.RegisterSupKVServiceServer(srv, api)
+	healthpb.RegisterHealthServer(srv, api.Health())
+
+	lis := bufconn.Listen(1 << 20)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient(
+		"passthrough:bufnet",
+		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStaticStreamWindowSize(testFlowWindowSize),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: want nil, got error: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := apiproto.NewSupKVServiceClient(conn)
+	health := healthpb.NewHealthClient(conn)
+	waitFor(t, gateWait, "the health endpoint to flip SERVING (gate open)", func() bool {
+		resp, err := health.Check(t.Context(), &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
+
+	resp, err := client.Set(t.Context(), &apiproto.SetRequest{
+		Key:                staleKey,
+		Value:              []byte("older"),
+		WaitForReplication: true,
+		WaitTimeoutMs:      100,
+	})
+	if err != nil {
+		t.Fatalf("Set %s: want OK, got error: %v", staleKey, err)
+	}
+	if resp.GetAcked() {
+		t.Fatalf("stale-write report: want acked=false, got acked=true %d/%d — B answered with its newer record instead of Acking",
+			resp.GetAckedCount(), resp.GetTotalPeers())
+	}
+	if resp.GetTotalPeers() != 1 {
+		t.Fatalf("stale-write report total peers = %d, want 1 — A knew B at write time", resp.GetTotalPeers())
+	}
+
+	// B answered, never merged: its newer record is untouched.
+	got, err := storeB.Get(staleKey)
+	if err != nil {
+		t.Fatalf("store B Get(%q) after the stale write: %v", staleKey, err)
+	}
+	if got.Version != staleVersion || !bytes.Equal(got.Data, staleData) {
+		t.Fatalf("store B holds (%x, %q), want the untouched newer record (%x, %q) — the stale write was merged",
+			got.Version[:], got.Data, staleVersion[:], staleData)
+	}
 }

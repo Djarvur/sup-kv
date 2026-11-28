@@ -1,0 +1,203 @@
+# Scheduled heavy machinery (D-09, TEST-16): one cron workflow carrying the
+# nightly 1000-seed chaos sweep, the bench smoke, the assert-red Critical run,
+# the 20x R-01 documented-scale evidence run, the race soak, the
+# documented-scale real-socket stand, and deep fuzzing.
+# PR CI (ci.yml) keeps its fast gate; the heavy jobs live here only.
+#
+# Every job pins the same actions ci.yml uses (checkout@v7, setup-go@v7 with
+# go-version-file: go.mod — no new action introductions), runs with
+# least-privilege permissions, and carries an explicit timeout-minutes so a
+# wedged job fails instead of holding a runner for the 6 h default
+# (P1-WR-01's precedent). No secrets are used: the workflow runs only
+# repo-owned code and scripts.
+name: Scheduled
+
+on:
+  schedule:
+    # Nightly at 02:30 UTC — off the top-of-hour Actions queue spike.
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: >-
+          Fresh chaos seeds for the TEST-01 sweep (default 1000; dispatch
+          with 10000 for the one-off phase proof — RESEARCH A4 budgets 1-3 h)
+        type: string
+        default: "1000"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chaos-seeds:
+    runs-on: ubuntu-latest
+    # Nightly (1000 seeds x -count=3) is minutes; the one-off 10 000-seed
+    # TEST-01 proof costs 1-3 h (RESEARCH A4), so the budget allows 4 h.
+    timeout-minutes: 240
+    env:
+      # Q1 resolution: the dispatch input scales the fresh-seed batch; the
+      # nightly schedule falls back to the 1000-seed default.
+      SUPKV_SIM_FRESH_SEEDS: ${{ github.event.inputs.seeds || '1000' }}
+    steps:
+      # T-2-21: workflow_dispatch input is untrusted. Accept digits only and a
+      # positive value; anything else falls back to 1000 rather than running
+      # an empty or malformed sweep. The value is consumed as a test-loop
+      # count only (never interpolated into shell logic beyond this check).
+      - name: Validate the fresh-seed count (T-2-21)
+        run: |
+          requested="${SUPKV_SIM_FRESH_SEEDS}"
+          if ! printf '%s' "$requested" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::warning::seeds input '$requested' is not a positive integer; falling back to 1000"
+            echo "SUPKV_SIM_FRESH_SEEDS=1000" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # TEST-16 acceptance wording verbatim: 1000 seeds, -shuffle=on, -count=3.
+      - name: Chaos sweep (TEST-16)
+        run: go test -race ./internal/app/repl/ -run '^TestChaos' -shuffle=on -count=3
+
+  bench-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # P1-WR-01: -benchtime=1x smoke only — no distributions, no thresholds
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # TEST-16's `-bench . -benchtime=1x` on schedule. The Makefile target is
+      # the single definition of the command (plan 02-10), so the workflow
+      # carries no duplicated flags; the p50/p99 lines are the job's evidence.
+      - name: "Bench smoke (TEST-16: make bench-smoke == -bench . -benchtime=1x)"
+        run: make bench-smoke
+
+  red-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # The documented-scale red scenarios (plan 02-05's standNightly
+      # selection): R-01's 20 000-key paced listing plus the documented-scale
+      # R-02/R-03 variants. scripts/red-runner exports SUPKV_RED_TESTS=1
+      # itself — the assert-red contract (D-01).
+      SUPKV_STAND_NIGHTLY: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # No skip flags: the scheduled run executes the full assert-red contract
+      # and the D-02 mutation stage (plan 02-13) — a nightly run that silently
+      # skipped mutants would be green CI lying.
+      - name: Expected-red gate (assert-red + mutation stage, no skip flags)
+        run: bash scripts/red-runner
+      # The red-runner writes its evidence under the phase directory; CI has
+      # no artifact-upload action in its convention set, so the workflow log
+      # carries the one-page summary (the runner's own error rows precede it).
+      - name: Red-evidence summary
+        if: always()
+        run: |
+          latest=$(ls -1dt .planning/phases/02-stand-and-simulator-as-tests/red-evidence/*/ 2>/dev/null | head -n 1 || true)
+          if [ -n "$latest" ] && [ -f "${latest}summary.txt" ]; then
+            cat "${latest}summary.txt"
+          else
+            echo "no red-evidence summary was written (the runner failed before the evidence step)"
+          fi
+
+  race-flake:
+    runs-on: ubuntu-latest
+    # TEST-11 bar: green in THREE CONSECUTIVE nightly runs; a failing flake
+    # class that needs a Phase 3-5 fix carries its red test forward (D-09).
+    # RESEARCH A1: x20 on tens-of-seconds local baselines lands in tens of
+    # minutes on a 2-core hosted runner — 120 minutes of headroom.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # The Makefile target is the single definition of TEST-11's
+      # `-race -count=20` command (plan 02-10).
+      - name: "Race soak (TEST-11: make race-soak)"
+        run: make race-soak
+
+  nightly-stand:
+    runs-on: ubuntu-latest
+    # The 10 000-key x 1 KiB F9 scenario costs minutes per D-04; the other
+    # stand scenarios stay short. 60 minutes is generous CI headroom.
+    timeout-minutes: 60
+    env:
+      # The documented-scale green half of the review's section-15 set:
+      # TestStand_emptyDiskRecovery selects 10 000 keys x 1 KiB with the
+      # documented default flags (plan 02-11's Task 1 selection). F2c is
+      # scale-independent. Red tests SKIP here — this job does NOT set
+      # SUPKV_RED_TESTS; assert-red is the red-run job's.
+      SUPKV_STAND_NIGHTLY: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: "Nightly real-socket stand (TEST-06: 10 000 x 1 KiB)"
+        run: go test -race -count=1 ./internal/stand/
+
+  red-r01-x20:
+    runs-on: ubuntu-latest
+    # XPORT-01's acceptance is 20 runs out of 20 at the documented 20 000-key
+    # scale — a duty too expensive for the red-run job (RESEARCH Pitfall 2:
+    # ~70-90 s/run plus seeding, so 25-40 min on a hosted runner). Dedicated
+    # job (RESEARCH A5): 120 min of job headroom bounds a wedged runner while
+    # -timeout 110m bounds the test binary itself. No skip flags: after the
+    # 03-12 flip a failure means the transport bound is not met and MUST fail
+    # CI, never pass quietly.
+    timeout-minutes: 120
+    env:
+      SUPKV_STAND_NIGHTLY: "1"
+      SUPKV_RED_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: R-01 paced sync, 20 000 keys x 1 KiB, 20/20 (XPORT-01)
+        run: go test -race -count=20 -timeout 110m ./internal/stand/ -run '^TestRed_R01_pacedSync20k$'
+      # This job invokes go test directly rather than scripts/red-runner, so
+      # no red-evidence directory is expected in a fresh checkout. State that
+      # honestly instead of faking one: the 20/20 verdict is this job's exit
+      # status, and only a run that did leave a summary prints one.
+      - name: 20x R-01 evidence summary
+        if: always()
+        run: |
+          # compgen -G keeps the glob honest under the runner's -e: no
+          # evidence directory is a normal case here, never an error.
+          if compgen -G ".planning/phases/02-stand-and-simulator-as-tests/red-evidence/*/summary.txt" >/dev/null; then
+            latest=$(ls -1dt .planning/phases/02-stand-and-simulator-as-tests/red-evidence/*/ | head -n 1)
+            cat "${latest}summary.txt"
+          else
+            echo "red-r01-x20 invoked go test directly (no red-runner evidence directory is expected): the 20/20 verdict is the job's exit status"
+          fi
+
+  deep-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40 # 2 x 10m -fuzztime plus build/setup headroom
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # TEST-08's scheduled deep run. One fuzz target per package (RESEARCH
+      # Pitfall 4), and -fuzztime on every invocation: an unbounded -fuzz
+      # would hang the job forever.
+      - name: FuzzDecode (UDP datagram decoder) — 10 minutes
+        run: go test -fuzz=FuzzDecode -fuzztime=10m ./internal/udprepl/
+      - name: FuzzDumpDecode (dump codec) — 10 minutes
+        run: go test -fuzz=FuzzDumpDecode -fuzztime=10m ./internal/app/persist/
+      # A crasher is written by go test into testdata/fuzz/<Target>/ and its
+      # bytes are printed in this job's log: committing it is a HUMAN
+      # follow-up (plan 02-17's prohibition on committing unreviewed
+      # crashers) — the workflow never auto-commits corpus files.

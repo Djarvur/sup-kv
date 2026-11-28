@@ -29,7 +29,7 @@ import (
 
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
-	"github.com/Djarvur/sup-kv/internal/udprepl"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // FamilyType is a metric family's exposition type — the two kinds the sup-kv
@@ -47,8 +47,9 @@ const (
 // exposition defines, and their values are fixed enums (bounded cardinality
 // by construction).
 const (
-	labelType  = "type"
-	labelClass = "class"
+	labelType    = "type"
+	labelClass   = "class"
+	labelOutcome = "outcome"
 )
 
 // errNoClientCertPEM reports a client-CA file whose bytes hold no PEM
@@ -182,10 +183,30 @@ type Sources struct {
 	Discards      func() repl.DiscardStats
 	KnownPeers    func() uint64
 	Unacked       func() repl.UnackedStats
-	Sent          func() udprepl.SentByType
+	Sent          func() repl.SentByType
 	Retransmitted func() uint64
 	MergeStats    func() repl.MergeStats
 	DumpStats     func() persist.DumpStats
+	LoadStats     func() persist.LoadStats
+
+	// The XPORT-07 emission set (03-12): the paced-datagram counter, the
+	// total send-queue gauge, the egress overflow drops and the receive-path
+	// error count — adapter accessors over the core's post-event mirrors.
+	Paced         func() uint64
+	SendQueue     func() int
+	EgressDropped func() uint64
+	ReadErrors    func() uint64
+
+	// The four routed Phase-4 counters (OBSV-03, D-05/14.4): targeted
+	// listing triggers a cap refused, partial DataSync streams evicted by
+	// the accumulator bounds, retained listed keys released by whole-peer
+	// eviction or expiry, and local-write notifications ignored by the
+	// not-greater-than-tracked guard — adapter accessors over the core's
+	// post-event mirrors.
+	ListingDropped         func() uint64
+	SyncStreamDropped      func() uint64
+	ListedKeysEvicted      func() uint64
+	NotificationsRegressed func() uint64
 }
 
 // Snapshot reads every source once and returns the whole family table: the
@@ -197,9 +218,59 @@ type Sources struct {
 // still publishes its full surface.
 func Snapshot(s Sources) []Family {
 	families := replicationFamilies(s.Unacked(), s.KnownPeers(), s.Retransmitted(), s.MergeStats())
+	families = append(families, pacingFamilies(s.Paced(), s.SendQueue(), s.EgressDropped(), s.ReadErrors())...)
+	families = append(families, listingFamilies(s.ListingDropped(), s.SyncStreamDropped(), s.ListedKeysEvicted(), s.NotificationsRegressed())...)
 	families = append(families, trafficFamilies(s.Discards(), s.Sent())...)
 	families = append(families, dumpFamilies(s.DumpStats())...)
+	load := s.LoadStats()
+	families = append(families, loadFamilies(load)...)
+	families = append(families, discardClassFamilies(load.Decoded)...)
 	return append(families, runtimeFamilies()...)
+}
+
+// loadFamilies builds the startup load-outcome family (PERSIST-02): the four
+// outcome labels always render, with the loaded outcome at 1 and the others
+// at 0; an unloaded engine reports all four at 0.
+func loadFamilies(stats persist.LoadStats) []Family {
+	samples := []Sample{
+		{Labels: []Label{{Name: labelOutcome, Value: "prompt"}}},
+		{Labels: []Label{{Name: labelOutcome, Value: "main"}}},
+		{Labels: []Label{{Name: labelOutcome, Value: "backup"}}},
+		{Labels: []Label{{Name: labelOutcome, Value: "unusable"}}},
+	}
+	if stats.Loaded {
+		switch stats.Outcome {
+		case port.LoadPrompt:
+			samples[0].Value = 1
+		case port.LoadMain:
+			samples[1].Value = 1
+		case port.LoadBackup:
+			samples[2].Value = 1
+		case port.LoadUnusable:
+			samples[3].Value = 1
+		}
+	}
+	return []Family{{
+		Name: "supkv_dump_load_total", Type: Counter,
+		Help:    "Startup dump loads by outcome.",
+		Samples: samples,
+	}}
+}
+
+// discardClassFamilies builds the load-time discard family (PERSIST-10): the
+// four decode classes always render from the accepted generation's census, so
+// an idle node publishes zero-valued samples rather than omitting the family.
+func discardClassFamilies(decoded persist.DecodeStats) []Family {
+	return []Family{{
+		Name: "supkv_dump_records_discarded_total", Type: Counter,
+		Help: "Dumped records discarded at load, by classification.",
+		Samples: []Sample{
+			{Labels: []Label{{Name: labelClass, Value: "checksum"}}, Value: float64(decoded.Checksum)},
+			{Labels: []Label{{Name: labelClass, Value: "version"}}, Value: float64(decoded.Version)},
+			{Labels: []Label{{Name: labelClass, Value: "value_limit"}}, Value: float64(decoded.ValueLimit)},
+			{Labels: []Label{{Name: labelClass, Value: "malformed"}}, Value: float64(decoded.Malformed)},
+		},
+	}}
 }
 
 // replicationFamilies builds the peer/unacked/retransmit/merge families (the
@@ -242,16 +313,93 @@ func replicationFamilies(
 		},
 		{
 			Name: "supkv_merges_conflicts_total", Type: Counter,
-			Help: "Remote merges that displaced a stored record.",
+			Help: "Pending (unacked) local writes displaced by a replicated value.",
 			Samples: []Sample{
 				{Value: float64(merged.Conflicts)},
 			},
 		},
 		{
 			Name: "supkv_clock_drift_warnings_total", Type: Counter,
-			Help: "Remote timestamps absorbed beyond the drift-warn threshold.",
+			Help: "Received records and listing-part versions that lead local wall time by more than drift-warn.",
 			Samples: []Sample{
 				{Value: float64(merged.DriftWarnings)},
+			},
+		},
+	}
+}
+
+// pacingFamilies builds the XPORT-07 emission families: the paced-datagram
+// counter (counted at the Outbox handoff, never at enqueue), the total
+// send-queue gauge (all three core queues), the egress overflow drops and the
+// receive-path errors — one reading of each seam per scrape.
+func pacingFamilies(paced uint64, sendQueue int, egressDropped, readErrors uint64) []Family {
+	return []Family{
+		{
+			Name: "supkv_replication_datagrams_paced_total", Type: Counter,
+			Help: "Replication datagrams emitted by the listing, record and egress pacers.",
+			Samples: []Sample{
+				{Value: float64(paced)},
+			},
+		},
+		{
+			Name: "supkv_replication_send_queue", Type: Gauge,
+			Help: "Replication datagrams waiting to emit across every core queue.",
+			Samples: []Sample{
+				{Value: float64(sendQueue)},
+			},
+		},
+		{
+			Name: "supkv_replication_egress_dropped_total", Type: Counter,
+			Help: "Egress responses dropped by the queue cap.",
+			Samples: []Sample{
+				{Value: float64(egressDropped)},
+			},
+		},
+		{
+			Name: "supkv_replication_read_errors_total", Type: Counter,
+			Help: "Receive-path errors the read loop survived.",
+			Samples: []Sample{
+				{Value: float64(readErrors)},
+			},
+		},
+	}
+}
+
+// listingFamilies builds the four routed Phase-4 counter families (OBSV-03,
+// D-05/14.4) over one reading of the adapter's post-event mirrors: targeted
+// listing triggers a cap refused, partial-listing streams the accumulator
+// bounds evicted, retained listed keys released by whole-peer eviction or
+// expiry, and local-write notifications the not-greater-than-tracked guard
+// ignored. Every family is unlabeled — the four counters have one dimension
+// only — so no user data can enter the exposition.
+func listingFamilies(listingDropped, syncStreamDropped, listedKeysEvicted, notificationsRegressed uint64) []Family {
+	return []Family{
+		{
+			Name: "supkv_replication_listings_dropped_total", Type: Counter,
+			Help: "Targeted listing triggers refused by the destination or chunk cap; retried later.",
+			Samples: []Sample{
+				{Value: float64(listingDropped)},
+			},
+		},
+		{
+			Name: "supkv_replication_sync_streams_dropped_total", Type: Counter,
+			Help: "Partial DataSync streams evicted by the accumulator bounds.",
+			Samples: []Sample{
+				{Value: float64(syncStreamDropped)},
+			},
+		},
+		{
+			Name: "supkv_replication_listed_keys_evicted_total", Type: Counter,
+			Help: "Retained listed keys released by whole-peer eviction or expiry.",
+			Samples: []Sample{
+				{Value: float64(listedKeysEvicted)},
+			},
+		},
+		{
+			Name: "supkv_replication_notifications_regressed_total", Type: Counter,
+			Help: "Local-write notifications ignored because their version was not greater than the tracked version.",
+			Samples: []Sample{
+				{Value: float64(notificationsRegressed)},
 			},
 		},
 	}
@@ -261,11 +409,11 @@ func replicationFamilies(
 // message type and inbound discards by classification (the OBS-02 surface in
 // full) — and always publishes the whole label vocabulary: a zero count is
 // information, not absence.
-func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family {
+func trafficFamilies(disc repl.DiscardStats, sentBy repl.SentByType) []Family {
 	return []Family{
 		{
 			Name: "supkv_replication_datagrams_sent_total", Type: Counter,
-			Help: "Replication datagrams sent, by message type.",
+			Help: "Outbound datagrams successfully handed to the socket, by message type.",
 			Samples: []Sample{
 				{Labels: []Label{{Name: labelType, Value: "hello"}}, Value: float64(sentBy.Hello)},
 				{Labels: []Label{{Name: labelType, Value: "data"}}, Value: float64(sentBy.Data)},
@@ -283,18 +431,34 @@ func trafficFamilies(disc repl.DiscardStats, sentBy udprepl.SentByType) []Family
 				{Labels: []Label{{Name: labelClass, Value: "bad_proto_version"}}, Value: float64(disc.BadProtoVersion)},
 				{Labels: []Label{{Name: labelClass, Value: "own_broadcast"}}, Value: float64(disc.OwnEcho)},
 				{Labels: []Label{{Name: labelClass, Value: "duplicate_node_id"}}, Value: float64(disc.DuplicateNodeID)},
+				{Labels: []Label{{Name: labelClass, Value: "unbound_listing"}}, Value: float64(disc.UnboundListing)},
+				{Labels: []Label{{Name: labelClass, Value: "empty_key"}}, Value: float64(disc.EmptyKey)},
+				{Labels: []Label{{Name: labelClass, Value: "key_too_long"}}, Value: float64(disc.KeyTooLong)},
+				{Labels: []Label{{Name: labelClass, Value: "tombstone_with_data"}}, Value: float64(disc.TombstoneWithData)},
+				{Labels: []Label{{Name: labelClass, Value: "bad_checksum"}}, Value: float64(disc.BadChecksum)},
+				{Labels: []Label{{Name: labelClass, Value: "bad_version"}}, Value: float64(disc.BadVersion)},
+				{Labels: []Label{{Name: labelClass, Value: "bad_sync_header"}}, Value: float64(disc.BadSyncHeader)},
 			},
 		},
 	}
 }
 
 // dumpFamilies builds the persistence-cycle families over one reading of the
-// engine's DumpStats seam.
+// engine's DumpStats seam: the last duration, the attempt and error totals,
+// the failure-class split (PERSIST-05) and the confirmation-timeout count
+// (PERSIST-08). The class family always renders all three values; each class
+// is read from its own explicitly counted counter (Other is counted in the
+// failure's branch, not derived as Errors minus the classified ones), so
+// every published series is monotone by construction — a scrape landing
+// between the error total's increment and the class increment cannot render a
+// decrease that rate()/increase() would read as a counter reset (IN-03).
+// Unconfirmed is independent of the error counters: a timed-out confirmation
+// says nothing about the dump's outcome.
 func dumpFamilies(stats persist.DumpStats) []Family {
 	return []Family{
 		{
 			Name: "supkv_dumps_duration_seconds", Type: Gauge,
-			Help: "Duration of the last dump's encode and save in seconds.",
+			Help: "Duration of the last dump attempt's encode and save in seconds.",
 			Samples: []Sample{
 				{Value: stats.DurationSeconds},
 			},
@@ -313,16 +477,35 @@ func dumpFamilies(stats persist.DumpStats) []Family {
 				{Value: float64(stats.Errors)},
 			},
 		},
+		{
+			Name: "supkv_dumps_failures_total", Type: Counter,
+			Help: "Failed dump attempts, by failure class.",
+			Samples: []Sample{
+				{Labels: []Label{{Name: labelClass, Value: "disk_full"}}, Value: float64(stats.DiskFull)},
+				{Labels: []Label{{Name: labelClass, Value: "permission"}}, Value: float64(stats.Permission)},
+				{Labels: []Label{{Name: labelClass, Value: "other"}}, Value: float64(stats.Other)},
+			},
+		},
+		{
+			Name: "supkv_dumps_unconfirmed_total", Type: Counter,
+			Help: "Writes answered before their covering dump completed.",
+			Samples: []Sample{
+				{Value: float64(stats.Unconfirmed)},
+			},
+		},
 	}
 }
 
 // runtimeFamilies reads the go_*/process_* runtime families (06-RESEARCH A2's
 // minimal D-04 enumeration) at scrape time — fresh gauges of the process
-// itself, never cached.
+// itself, never cached. CPU comes from one [processCPU] read; memory from the
+// platform-split [currentRSS] (current on Linux, the documented
+// development-only peak elsewhere).
 func runtimeFamilies() []Family {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	cpu, rss := processUsage()
+	cpu := processCPU()
+	rss := currentRSS()
 	return []Family{
 		{
 			Name: "go_goroutines", Type: Gauge,
@@ -354,7 +537,7 @@ func runtimeFamilies() []Family {
 		},
 		{
 			Name: "process_resident_memory_bytes", Type: Gauge,
-			Help: "Resident memory size in bytes.",
+			Help: "Current resident set size in bytes (Linux); development-only darwin builds report the process peak.",
 			Samples: []Sample{
 				{Value: rss},
 			},
@@ -362,22 +545,20 @@ func runtimeFamilies() []Family {
 	}
 }
 
-// processUsage reads this process's CPU time and resident set size through
-// [syscall.Getrusage] — Linux and darwin both provide it (06-RESEARCH A2's
-// minimal process_* enumeration under D-04). CPU is user+system seconds;
-// ru_maxrss is KiB on Linux and bytes on darwin, normalized here to bytes.
-func processUsage() (cpuSeconds, rssBytes float64) {
+// processCPU reads this process's CPU time through [syscall.Getrusage] —
+// Linux and darwin both provide it (06-RESEARCH A2's minimal process_*
+// enumeration under D-04). CPU is user+system seconds. The resident set is a
+// separate platform-split probe ([currentRSS]): Linux reports the CURRENT
+// size from /proc/self/statm, while the non-Linux fallback is the documented
+// development-only peak, never a substituted current value.
+func processCPU() float64 {
 	var ru syscall.Rusage
 	err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
 	if err != nil {
-		return 0, 0
+		return 0
 	}
 	sec := func(t syscall.Timeval) float64 { return float64(t.Sec) + float64(t.Usec)/1e6 }
-	rss := float64(ru.Maxrss)
-	if rss > 0 && runtime.GOOS != "darwin" {
-		rss *= 1024
-	}
-	return sec(ru.Utime) + sec(ru.Stime), rss
+	return sec(ru.Utime) + sec(ru.Stime)
 }
 
 // NewMux assembles the one listener's whole debug surface (D-03): /metrics

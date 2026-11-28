@@ -1,0 +1,221 @@
+{"Time":"2026-11-19T22:22:47.666064242+03:00","Action":"start","Package":"github.com/Djarvur/sup-kv/internal/grpcapi"}
+{"Time":"2026-11-19T22:22:47.70135973+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_writesUnavailableReadsOK"}
+{"Time":"2026-11-19T22:22:47.701538842+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_writesUnavailableReadsOK","Output":"=== RUN   TestGate_writesUnavailableReadsOK\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.701681165+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_writesUnavailableReadsOK","Output":"=== PAUSE TestGate_writesUnavailableReadsOK\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.701706928+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_writesUnavailableReadsOK"}
+{"Time":"2026-11-19T22:22:47.701727682+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnSync"}
+{"Time":"2026-11-19T22:22:47.701742061+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnSync","Output":"=== RUN   TestGate_opensOnSync\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.701867039+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnSync","Output":"=== PAUSE TestGate_opensOnSync\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.701897214+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnSync"}
+{"Time":"2026-11-19T22:22:47.702007832+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnTimeout"}
+{"Time":"2026-11-19T22:22:47.702035233+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnTimeout","Output":"=== RUN   TestGate_opensOnTimeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.702238294+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnTimeout","Output":"=== PAUSE TestGate_opensOnTimeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.702267681+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnTimeout"}
+{"Time":"2026-11-19T22:22:47.702409315+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestHealth_reflectsGate"}
+{"Time":"2026-11-19T22:22:47.702436918+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestHealth_reflectsGate","Output":"=== RUN   TestHealth_reflectsGate\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.702591397+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestHealth_reflectsGate","Output":"=== PAUSE TestHealth_reflectsGate\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.70263042+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestHealth_reflectsGate"}
+{"Time":"2026-11-19T22:22:47.702736784+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_createLoadRoundTrip"}
+{"Time":"2026-11-19T22:22:47.702761797+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_createLoadRoundTrip","Output":"=== RUN   TestSnapshot_createLoadRoundTrip\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.702942496+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_createLoadRoundTrip","Output":"=== PAUSE TestSnapshot_createLoadRoundTrip\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.70297066+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_createLoadRoundTrip"}
+{"Time":"2026-11-19T22:22:47.703073939+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_invalidName"}
+{"Time":"2026-11-19T22:22:47.703098626+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_invalidName","Output":"=== RUN   TestSnapshot_invalidName\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.703233942+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_invalidName","Output":"=== PAUSE TestSnapshot_invalidName\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.703263235+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_invalidName"}
+{"Time":"2026-11-19T22:22:47.703346045+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_gated"}
+{"Time":"2026-11-19T22:22:47.703370546+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_gated","Output":"=== RUN   TestSnapshot_gated\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.703496143+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_gated","Output":"=== PAUSE TestSnapshot_gated\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.703522792+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_gated"}
+{"Time":"2026-11-19T22:22:47.703605401+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList"}
+{"Time":"2026-11-19T22:22:47.70363869+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList","Output":"=== RUN   TestRed_R03_gateClosedUntilFullList\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.703798224+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList","Output":"=== PAUSE TestRed_R03_gateClosedUntilFullList\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.703827545+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList"}
+{"Time":"2026-11-19T22:22:47.703919913+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_setGetRoundTrip"}
+{"Time":"2026-11-19T22:22:47.70394968+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_setGetRoundTrip","Output":"=== RUN   TestServer_setGetRoundTrip\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.704069441+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_setGetRoundTrip","Output":"=== PAUSE TestServer_setGetRoundTrip\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.704095985+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_setGetRoundTrip"}
+{"Time":"2026-11-19T22:22:47.704221129+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_errorMapping"}
+{"Time":"2026-11-19T22:22:47.704245956+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_errorMapping","Output":"=== RUN   TestServer_errorMapping\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.704396593+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_errorMapping","Output":"=== PAUSE TestServer_errorMapping\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.704423571+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_errorMapping"}
+{"Time":"2026-11-19T22:22:47.704528281+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_list"}
+{"Time":"2026-11-19T22:22:47.704570252+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_list","Output":"=== RUN   TestServer_list\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.704718375+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_list","Output":"=== PAUSE TestServer_list\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.704764604+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_list"}
+{"Time":"2026-11-19T22:22:47.704817244+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWaitIntegration_ackedThroughRealAdapterMirror"}
+{"Time":"2026-11-19T22:22:47.704836854+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWaitIntegration_ackedThroughRealAdapterMirror","Output":"=== RUN   TestWaitIntegration_ackedThroughRealAdapterMirror\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.705054839+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWaitIntegration_ackedThroughRealAdapterMirror","Output":"=== PAUSE TestWaitIntegration_ackedThroughRealAdapterMirror\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.70508154+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWaitIntegration_ackedThroughRealAdapterMirror"}
+{"Time":"2026-11-19T22:22:47.705186045+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_zeroPeers"}
+{"Time":"2026-11-19T22:22:47.705219444+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_zeroPeers","Output":"=== RUN   TestWait_zeroPeers\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.705338679+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_zeroPeers","Output":"=== PAUSE TestWait_zeroPeers\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.705364442+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_zeroPeers"}
+{"Time":"2026-11-19T22:22:47.705470261+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_acksArrive"}
+{"Time":"2026-11-19T22:22:47.705494403+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_acksArrive","Output":"=== RUN   TestWait_acksArrive\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.705657544+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_acksArrive","Output":"=== PAUSE TestWait_acksArrive\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.705696525+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_acksArrive"}
+{"Time":"2026-11-19T22:22:47.705781405+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_timeout"}
+{"Time":"2026-11-19T22:22:47.705805735+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_timeout","Output":"=== RUN   TestWait_timeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.705935074+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_timeout","Output":"=== PAUSE TestWait_timeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.705962898+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_timeout"}
+{"Time":"2026-11-19T22:22:47.706045957+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_deleteSymmetry"}
+{"Time":"2026-11-19T22:22:47.706068736+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_deleteSymmetry","Output":"=== RUN   TestWait_deleteSymmetry\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.706188657+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_deleteSymmetry","Output":"=== PAUSE TestWait_deleteSymmetry\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.706215573+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_deleteSymmetry"}
+{"Time":"2026-11-19T22:22:47.706321248+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_appearanceRace"}
+{"Time":"2026-11-19T22:22:47.706366033+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_appearanceRace","Output":"=== RUN   TestWait_appearanceRace\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.706469333+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_appearanceRace","Output":"=== PAUSE TestWait_appearanceRace\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.706495054+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_appearanceRace"}
+{"Time":"2026-11-19T22:22:47.706615778+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_evictionNotAck"}
+{"Time":"2026-11-19T22:22:47.706651051+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_evictionNotAck","Output":"=== RUN   TestWait_evictionNotAck\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.706774745+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_evictionNotAck","Output":"=== PAUSE TestWait_evictionNotAck\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.70680128+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_evictionNotAck"}
+{"Time":"2026-11-19T22:22:47.706935994+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_superseded"}
+{"Time":"2026-11-19T22:22:47.706959524+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_superseded","Output":"=== RUN   TestWait_superseded\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.707119802+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_superseded","Output":"=== PAUSE TestWait_superseded\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.707149397+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_superseded"}
+{"Time":"2026-11-19T22:22:47.707251833+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_strangerAcksClampedToTotal"}
+{"Time":"2026-11-19T22:22:47.707276406+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_strangerAcksClampedToTotal","Output":"=== RUN   TestWait_strangerAcksClampedToTotal\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.707401907+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_strangerAcksClampedToTotal","Output":"=== PAUSE TestWait_strangerAcksClampedToTotal\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.707428794+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_strangerAcksClampedToTotal"}
+{"Time":"2026-11-19T22:22:47.707514015+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_overflowingTimeoutClamped"}
+{"Time":"2026-11-19T22:22:47.707538916+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_overflowingTimeoutClamped","Output":"=== RUN   TestWait_overflowingTimeoutClamped\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.707734002+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_overflowingTimeoutClamped","Output":"=== PAUSE TestWait_overflowingTimeoutClamped\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.70776643+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_overflowingTimeoutClamped"}
+{"Time":"2026-11-19T22:22:47.707851122+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_perRequestTimeout"}
+{"Time":"2026-11-19T22:22:47.707875754+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_perRequestTimeout","Output":"=== RUN   TestWait_perRequestTimeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.708003689+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_perRequestTimeout","Output":"=== PAUSE TestWait_perRequestTimeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.708032243+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_perRequestTimeout"}
+{"Time":"2026-11-19T22:22:47.708180625+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_snapshotThenLive"}
+{"Time":"2026-11-19T22:22:47.708231579+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_snapshotThenLive","Output":"=== RUN   TestWatch_snapshotThenLive\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.708270843+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_snapshotThenLive","Output":"=== PAUSE TestWatch_snapshotThenLive\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.708288028+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_snapshotThenLive"}
+{"Time":"2026-11-19T22:22:47.708406057+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_exactCut"}
+{"Time":"2026-11-19T22:22:47.708432478+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_exactCut","Output":"=== RUN   TestWatch_exactCut\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.708617783+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_exactCut","Output":"=== PAUSE TestWatch_exactCut\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.708662483+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_exactCut"}
+{"Time":"2026-11-19T22:22:47.708687841+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_replicatedChange"}
+{"Time":"2026-11-19T22:22:47.708702877+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_replicatedChange","Output":"=== RUN   TestWatch_replicatedChange\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.708853508+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_replicatedChange","Output":"=== PAUSE TestWatch_replicatedChange\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.708880374+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_replicatedChange"}
+{"Time":"2026-11-19T22:22:47.708906875+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_prefix"}
+{"Time":"2026-11-19T22:22:47.708919659+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_prefix","Output":"=== RUN   TestWatch_prefix\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.709030854+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_prefix","Output":"=== PAUSE TestWatch_prefix\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.709058691+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_prefix"}
+{"Time":"2026-11-19T22:22:47.709080003+03:00","Action":"run","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_slowConsumer"}
+{"Time":"2026-11-19T22:22:47.709093408+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_slowConsumer","Output":"=== RUN   TestWatch_slowConsumer\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.709280938+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_slowConsumer","Output":"=== PAUSE TestWatch_slowConsumer\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.709309683+03:00","Action":"pause","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_slowConsumer"}
+{"Time":"2026-11-19T22:22:47.709433027+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_writesUnavailableReadsOK"}
+{"Time":"2026-11-19T22:22:47.70948093+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_writesUnavailableReadsOK","Output":"=== CONT  TestGate_writesUnavailableReadsOK\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.709734023+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_acksArrive"}
+{"Time":"2026-11-19T22:22:47.709770279+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_acksArrive","Output":"=== CONT  TestWait_acksArrive\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.710451599+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_gated"}
+{"Time":"2026-11-19T22:22:47.710476926+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_gated","Output":"=== CONT  TestSnapshot_gated\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.710938719+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWaitIntegration_ackedThroughRealAdapterMirror"}
+{"Time":"2026-11-19T22:22:47.710979337+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWaitIntegration_ackedThroughRealAdapterMirror","Output":"=== CONT  TestWaitIntegration_ackedThroughRealAdapterMirror\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.711592903+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_zeroPeers"}
+{"Time":"2026-11-19T22:22:47.711632017+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_zeroPeers","Output":"=== CONT  TestWait_zeroPeers\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.711927091+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnTimeout"}
+{"Time":"2026-11-19T22:22:47.71195101+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnTimeout","Output":"=== CONT  TestGate_opensOnTimeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.712515446+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestHealth_reflectsGate"}
+{"Time":"2026-11-19T22:22:47.712543176+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestHealth_reflectsGate","Output":"=== CONT  TestHealth_reflectsGate\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.712725428+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_prefix"}
+{"Time":"2026-11-19T22:22:47.712751696+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_prefix","Output":"=== CONT  TestWatch_prefix\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.712777548+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_slowConsumer"}
+{"Time":"2026-11-19T22:22:47.712825217+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_slowConsumer","Output":"=== CONT  TestWatch_slowConsumer\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.712851201+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_createLoadRoundTrip"}
+{"Time":"2026-11-19T22:22:47.712866785+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_createLoadRoundTrip","Output":"=== CONT  TestSnapshot_createLoadRoundTrip\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.71288948+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_exactCut"}
+{"Time":"2026-11-19T22:22:47.71290538+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_exactCut","Output":"=== CONT  TestWatch_exactCut\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.712949813+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_timeout"}
+{"Time":"2026-11-19T22:22:47.712965673+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_timeout","Output":"=== CONT  TestWait_timeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.713342142+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_replicatedChange"}
+{"Time":"2026-11-19T22:22:47.713387091+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_replicatedChange","Output":"=== CONT  TestWatch_replicatedChange\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.716971427+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_invalidName"}
+{"Time":"2026-11-19T22:22:47.717034634+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_invalidName","Output":"=== CONT  TestSnapshot_invalidName\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.71706775+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnSync"}
+{"Time":"2026-11-19T22:22:47.717079179+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnSync","Output":"=== CONT  TestGate_opensOnSync\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.719917154+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_errorMapping"}
+{"Time":"2026-11-19T22:22:47.719966512+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_errorMapping","Output":"=== CONT  TestServer_errorMapping\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.756961785+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_gated","Output":"--- PASS: TestSnapshot_gated (0.05s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.757063304+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_gated","Elapsed":0.05}
+{"Time":"2026-11-19T22:22:47.757110146+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_snapshotThenLive"}
+{"Time":"2026-11-19T22:22:47.757126797+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_snapshotThenLive","Output":"=== CONT  TestWatch_snapshotThenLive\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.765756622+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_zeroPeers","Output":"--- PASS: TestWait_zeroPeers (0.05s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.765847641+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_zeroPeers","Elapsed":0.05}
+{"Time":"2026-11-19T22:22:47.765875632+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_perRequestTimeout"}
+{"Time":"2026-11-19T22:22:47.765890799+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_perRequestTimeout","Output":"=== CONT  TestWait_perRequestTimeout\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.767934238+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_writesUnavailableReadsOK","Output":"--- PASS: TestGate_writesUnavailableReadsOK (0.06s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.768014483+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_writesUnavailableReadsOK","Elapsed":0.06}
+{"Time":"2026-11-19T22:22:47.768042959+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_overflowingTimeoutClamped"}
+{"Time":"2026-11-19T22:22:47.768057948+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_overflowingTimeoutClamped","Output":"=== CONT  TestWait_overflowingTimeoutClamped\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.781434148+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestHealth_reflectsGate","Output":"--- PASS: TestHealth_reflectsGate (0.06s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.781530619+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestHealth_reflectsGate","Elapsed":0.06}
+{"Time":"2026-11-19T22:22:47.781591782+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_strangerAcksClampedToTotal"}
+{"Time":"2026-11-19T22:22:47.78161229+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_strangerAcksClampedToTotal","Output":"=== CONT  TestWait_strangerAcksClampedToTotal\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.787051639+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_superseded"}
+{"Time":"2026-11-19T22:22:47.787130313+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_superseded","Output":"=== CONT  TestWait_superseded\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.787174379+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnTimeout","Output":"--- PASS: TestGate_opensOnTimeout (0.07s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.788312173+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnTimeout","Elapsed":0.07}
+{"Time":"2026-11-19T22:22:47.788378515+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_invalidName","Output":"--- PASS: TestSnapshot_invalidName (0.07s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.788452704+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_invalidName","Elapsed":0.07}
+{"Time":"2026-11-19T22:22:47.788477433+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_appearanceRace"}
+{"Time":"2026-11-19T22:22:47.788492908+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_appearanceRace","Output":"=== CONT  TestWait_appearanceRace\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.79089802+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_acksArrive","Output":"--- PASS: TestWait_acksArrive (0.08s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.79096374+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_acksArrive","Elapsed":0.08}
+{"Time":"2026-11-19T22:22:47.790988089+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_deleteSymmetry"}
+{"Time":"2026-11-19T22:22:47.791029835+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_deleteSymmetry","Output":"=== CONT  TestWait_deleteSymmetry\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.793660359+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWaitIntegration_ackedThroughRealAdapterMirror","Output":"--- PASS: TestWaitIntegration_ackedThroughRealAdapterMirror (0.08s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.793970689+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWaitIntegration_ackedThroughRealAdapterMirror","Elapsed":0.08}
+{"Time":"2026-11-19T22:22:47.794010385+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_evictionNotAck"}
+{"Time":"2026-11-19T22:22:47.794027201+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_evictionNotAck","Output":"=== CONT  TestWait_evictionNotAck\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.800639774+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_errorMapping","Output":"--- PASS: TestServer_errorMapping (0.08s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.800748501+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_errorMapping","Elapsed":0.08}
+{"Time":"2026-11-19T22:22:47.800774892+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_setGetRoundTrip"}
+{"Time":"2026-11-19T22:22:47.800790094+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_setGetRoundTrip","Output":"=== CONT  TestServer_setGetRoundTrip\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.81775988+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_snapshotThenLive","Output":"--- PASS: TestWatch_snapshotThenLive (0.06s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.817871099+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_snapshotThenLive","Elapsed":0.06}
+{"Time":"2026-11-19T22:22:47.817931435+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_list"}
+{"Time":"2026-11-19T22:22:47.817950302+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_list","Output":"=== CONT  TestServer_list\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.823264231+03:00","Action":"cont","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList"}
+{"Time":"2026-11-19T22:22:47.823328612+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList","Output":"=== CONT  TestRed_R03_gateClosedUntilFullList\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.823377794+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnSync","Output":"--- PASS: TestGate_opensOnSync (0.10s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.830587015+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestGate_opensOnSync","Elapsed":0.1}
+{"Time":"2026-11-19T22:22:47.830667718+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_evictionNotAck","Output":"--- PASS: TestWait_evictionNotAck (0.04s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.830877324+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_evictionNotAck","Elapsed":0.04}
+{"Time":"2026-11-19T22:22:47.830913427+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_deleteSymmetry","Output":"--- PASS: TestWait_deleteSymmetry (0.04s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.831094428+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_deleteSymmetry","Elapsed":0.04}
+{"Time":"2026-11-19T22:22:47.831129374+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList","Output":"    red_gate_test.go:99: Get while only a partial DataSync listing has arrived: want code Unavailable, got OK (err=\u003cnil\u003e)\n","OutputType":"error"}
+{"Time":"2026-11-19T22:22:47.83360597+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList","Output":"--- FAIL: TestRed_R03_gateClosedUntilFullList (0.01s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.833710965+03:00","Action":"fail","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestRed_R03_gateClosedUntilFullList","Elapsed":0.01}
+{"Time":"2026-11-19T22:22:47.833738925+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_setGetRoundTrip","Output":"--- PASS: TestServer_setGetRoundTrip (0.03s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.845544867+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_setGetRoundTrip","Elapsed":0.03}
+{"Time":"2026-11-19T22:22:47.845672722+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_exactCut","Output":"--- PASS: TestWatch_exactCut (0.13s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.852498857+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_exactCut","Elapsed":0.13}
+{"Time":"2026-11-19T22:22:47.852587435+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_strangerAcksClampedToTotal","Output":"--- PASS: TestWait_strangerAcksClampedToTotal (0.07s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.857580779+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_strangerAcksClampedToTotal","Elapsed":0.07}
+{"Time":"2026-11-19T22:22:47.857640821+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_superseded","Output":"--- PASS: TestWait_superseded (0.07s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.871598445+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_superseded","Elapsed":0.07}
+{"Time":"2026-11-19T22:22:47.87167609+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_timeout","Output":"--- PASS: TestWait_timeout (0.15s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.874444879+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_timeout","Elapsed":0.15}
+{"Time":"2026-11-19T22:22:47.874495118+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_list","Output":"--- PASS: TestServer_list (0.06s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.88422882+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestServer_list","Elapsed":0.06}
+{"Time":"2026-11-19T22:22:47.884302952+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_appearanceRace","Output":"--- PASS: TestWait_appearanceRace (0.10s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.932541327+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_appearanceRace","Elapsed":0.1}
+{"Time":"2026-11-19T22:22:47.93260002+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_perRequestTimeout","Output":"--- PASS: TestWait_perRequestTimeout (0.17s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:47.96301939+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_perRequestTimeout","Elapsed":0.17}
+{"Time":"2026-11-19T22:22:47.963059944+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_replicatedChange","Output":"--- PASS: TestWatch_replicatedChange (0.24s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:48.000559249+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_replicatedChange","Elapsed":0.24}
+{"Time":"2026-11-19T22:22:48.000588401+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_prefix","Output":"--- PASS: TestWatch_prefix (0.29s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:48.017129426+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_prefix","Elapsed":0.29}
+{"Time":"2026-11-19T22:22:48.017153504+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_createLoadRoundTrip","Output":"--- PASS: TestSnapshot_createLoadRoundTrip (0.30s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:48.086395991+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestSnapshot_createLoadRoundTrip","Elapsed":0.3}
+{"Time":"2026-11-19T22:22:48.086416256+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_slowConsumer","Output":"--- PASS: TestWatch_slowConsumer (0.37s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:48.820336275+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWatch_slowConsumer","Elapsed":0.37}
+{"Time":"2026-11-19T22:22:48.820403947+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_overflowingTimeoutClamped","Output":"--- PASS: TestWait_overflowingTimeoutClamped (1.05s)\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:48.820432692+03:00","Action":"pass","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Test":"TestWait_overflowingTimeoutClamped","Elapsed":1.05}
+{"Time":"2026-11-19T22:22:48.820451423+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Output":"FAIL\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:48.850384401+03:00","Action":"output","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Output":"FAIL\tgithub.com/Djarvur/sup-kv/internal/grpcapi\t1.184s\n","OutputType":"frame"}
+{"Time":"2026-11-19T22:22:48.850418478+03:00","Action":"fail","Package":"github.com/Djarvur/sup-kv/internal/grpcapi","Elapsed":1.184}

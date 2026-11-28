@@ -1,6 +1,12 @@
 # Quality gates: strict lint + 4-cell OS/arch gate matrix.
 # Check-run names ("lint", "gate (<cell>)") are the required-check contexts
 # recorded in the branch-protection ruleset — any matrix change is a ruleset change.
+#
+# TEST-05 policy: the internal/stand socket tests are non-skippable on Linux —
+# a capability-probe miss is a FATAL naming the probe, never a t.Skip. The
+# darwin cell (macos-15) reports the limitation through the named
+# TestPlatform_darwinReplicationUntested green result, and the cross-compile
+# cell builds only.
 name: CI
 
 on:
@@ -29,15 +35,16 @@ jobs:
       # `run` silently ignores unknown top-level config keys (T-01-01): schema-check
       # the vendored strict config with the same pinned binary before linting.
       - run: go tool golangci-lint config verify
-      # Buf schema gates: proto lint + format + guarded breaking vs origin/master,
+      # Buf schema gates: proto lint + format + breaking vs origin/master,
       # all via the go.mod-pinned `go tool buf` binary (same as the Makefile targets).
-      # The guard is required because buf v1.75 exits 1 on a proto-less against-ref
-      # (probe-verified) while supkv.proto is not yet on origin/master — it
-      # self-destructs the moment PR #31 merges and every later PR gets the full
-      # FILE-policy comparison; the .git-dir against-input avoids any private-repo
+      # supkv.proto is on origin/master (landed with the Phase-6 PR), so buf
+      # breaking compares every PR's proto against it — the real FILE-policy
+      # wire-schema comparison; the .git-dir against-input avoids any private-repo
       # token plumbing the remote-https form would need (D-08, whose permitted
       # .git#branch fallback shape is refined here by the explicit remote-tracking
-      # refspec for determinism).
+      # refspec for determinism). The cat-file probe in the recipe below is the
+      # pre-Phase-6 guard left in place — plan 09-07 owns the next ci.yml
+      # change, so the M-49 fix touched the comments only.
       - name: Buf proto schema gates (lint, format, breaking vs origin/master)
         run: |
           go tool buf lint
@@ -80,6 +87,65 @@ jobs:
       - if: ${{ !matrix.cross }}
         run: |
           go vet ./...
+          # TEST-05: Linux socket tests mandatory — the stand package fails the
+          # cell on any skip; runs redundantly inside ./... for a named
+          # check-run entry.
+          go test -race ./internal/stand/
           go test -race ./...
           go mod tidy
           git diff --exit-code go.mod go.sum
+      # The deployment unit (M-16, deploy/sup-kv.service) is verified where
+      # systemd exists: on the two Linux cells the freshly built binary is
+      # installed at the unit's ExecStart path (passwordless sudo),
+      # systemd-analyze verify checks the unit (a missing ExecStart binary is
+      # caught by the install above), and the smoke below runs the unit's
+      # ExecStart ARGUMENT LIST with loopback overrides — production binds
+      # 0.0.0.0:7900 and broadcasts to the LAN segment broadcast
+      # (192.168.1.255 in the unit), which CI must never emit, so the four
+      # addresses go to loopback doc-band ports and the dump path to /tmp,
+      # while every other flag and value stays the unit's, verbatim. The
+      # smoke also pins --startup-gate-empty 2s because a fresh smoke node
+      # has an empty disk (the unit's production node loads a dump and opens
+      # on the 1s --startup-gate). The macos-15 cell skips (no systemd), the
+      # cross cell skips by the !matrix.cross guard above, and the check-run
+      # contexts and the matrix stay untouched — a matrix change would be a
+      # ruleset change.
+      - name: systemd unit verify (deploy/sup-kv.service, Linux cells)
+        if: ${{ !matrix.cross && runner.os == 'Linux' }}
+        run: |
+          go build -o /tmp/sup-kv-ci ./cmd/sup-kv/
+          sudo install -m 0755 /tmp/sup-kv-ci /usr/local/bin/sup-kv
+          systemd-analyze verify deploy/sup-kv.service
+      - name: ExecStart-args smoke (deploy/sup-kv.service, Linux cells)
+        if: ${{ !matrix.cross && runner.os == 'Linux' }}
+        run: |
+          /usr/local/bin/sup-kv --node-id 1 --bind-addr 127.0.0.1:27910 --broadcast-addr 127.0.0.1:27910 --dump-path /tmp/sup-kv-smoke.json --grpc-addr 127.0.0.1:27911 --metrics-addr 127.0.0.1:27912 --startup-gate-empty 2s &
+          pid=$!
+          serving=""
+          for i in $(seq 1 50); do
+            if go tool grpcurl -plaintext -d '{}' 127.0.0.1:27911 grpc.health.v1.Health/Check 2>/dev/null | grep -q '"SERVING"'; then serving=1; break; fi
+            sleep 0.2
+          done
+          if [ "$serving" != 1 ]; then
+            echo "the unit's ExecStart argument list never reached SERVING"
+            kill -TERM "$pid" 2>/dev/null || true
+            exit 1
+          fi
+          kill -TERM "$pid"
+          wait "$pid"
+          test "$?" -eq 0
+
+  # Dedicated nested-module job: examples/client is a separate Go module, so
+  # the root `go list ./...`/`go test ./...` graph never visits it (that
+  # exclusion is the point — the example proves consumer importability).
+  # This job runs the same `make client-example` target developers run
+  # locally: build + vet + tidy proof, no proto regeneration.
+  client-example:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make client-example

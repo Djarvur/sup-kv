@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Djarvur/sup-kv/internal/persistfile"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // Adapter-test constants: the marker a readable generation carries for the
@@ -84,48 +86,100 @@ func TestFileStore_atomicRotation(t *testing.T) {
 		t.Errorf("main mode = %o, want %o (the CreateTemp default, values privacy)",
 			info.Mode().Perm(), dumpFileMode)
 	}
-	got, ok := store.Load(permissiveOracle)
-	if !ok || !bytes.Equal(got, gen2) {
-		t.Errorf("Load() = (%q, %t), want the valid main generation", got, ok)
+	res := store.Load(time.Now(), permissiveOracle)
+	if res.Outcome != port.LoadMain || res.Generation != port.GenMain || !bytes.Equal(res.Dump, gen2) {
+		t.Errorf("Load() = (outcome %v, generation %v, %q), want the valid main generation",
+			res.Outcome, res.Generation, res.Dump)
+	}
+	if len(res.Failures) != 0 {
+		t.Errorf("Load() failures = %v, want none for an accepted main generation", res.Failures)
 	}
 }
 
 // TestFileStore_fallbackChain proves the chain half of PERS-02 over the
 // crash-residue table: a truncated, garbage, missing or oracle-rejecting
-// main generation advances the chain to .prev's bytes, and both generations
-// missing is the empty start.
+// main generation advances the chain to .prev's bytes, the outcome names
+// exactly which generation served, and both generations missing is the
+// prompt start. Rows with a present-but-unparseable candidate also pin the
+// failure report and the unusable classification; a backup start always
+// carries exactly one main failure, fs.ErrNotExist when the main was merely
+// absent (D-02).
 func TestFileStore_fallbackChain(t *testing.T) {
 	t.Parallel()
 	prevGen := []byte("PREV-" + readableMarker)
+	mainGen := []byte(readableMarker + "-MAIN")
 	tests := []struct {
-		name string
-		main []byte // nil removes the main generation entirely.
-		want []byte // nil expects the empty start.
+		name        string
+		main        []byte // nil removes the main generation entirely.
+		prev        []byte // nil removes the .prev generation entirely.
+		want        []byte // nil expects no accepted generation.
+		wantOutcome port.LoadOutcome
+		wantGen     port.Generation
+		wantFails   int
 	}{
 		{
-			name: "main truncated mid-line serves prev",
-			main: prevGen[:len(prevGen)-2],
-			want: prevGen,
+			name:        "main truncated mid-line serves prev",
+			main:        prevGen[:len(prevGen)-2],
+			prev:        prevGen,
+			want:        prevGen,
+			wantOutcome: port.LoadBackup,
+			wantGen:     port.GenPrev,
+			wantFails:   1,
 		},
 		{
-			name: "main containing not-JSON garbage serves prev",
-			main: []byte("not json at all"),
-			want: prevGen,
+			name:        "main containing not-JSON garbage serves prev",
+			main:        []byte("not json at all"),
+			prev:        prevGen,
+			want:        prevGen,
+			wantOutcome: port.LoadBackup,
+			wantGen:     port.GenPrev,
+			wantFails:   1,
 		},
 		{
-			name: "main removed serves prev",
-			main: nil,
-			want: prevGen,
+			name:        "main removed serves prev",
+			prev:        prevGen,
+			want:        prevGen,
+			wantOutcome: port.LoadBackup,
+			wantGen:     port.GenPrev,
+			wantFails:   1,
 		},
 		{
-			name: "both generations removed is the empty start",
-			main: nil,
-			want: nil,
+			name:        "both generations removed is the prompt start",
+			wantOutcome: port.LoadPrompt,
+			wantGen:     port.GenMain,
+			wantFails:   0,
 		},
 		{
-			name: "an oracle-rejecting main serves prev",
-			main: []byte("{\"format_version\":1}\n"),
-			want: prevGen,
+			name:        "an oracle-rejecting main serves prev",
+			main:        []byte("{\"format_version\":1}\n"),
+			prev:        prevGen,
+			want:        prevGen,
+			wantOutcome: port.LoadBackup,
+			wantGen:     port.GenPrev,
+			wantFails:   1,
+		},
+		{
+			name:        "an accepted main is the main outcome",
+			main:        mainGen,
+			want:        mainGen,
+			wantOutcome: port.LoadMain,
+			wantGen:     port.GenMain,
+			wantFails:   0,
+		},
+		{
+			name:        "both generations unparseable is unusable",
+			main:        []byte("not json at all"),
+			prev:        []byte("also not json"),
+			wantOutcome: port.LoadUnusable,
+			wantGen:     port.GenMain,
+			wantFails:   2,
+		},
+		{
+			name:        "one unparseable main with no prev is unusable",
+			main:        []byte("not json at all"),
+			wantOutcome: port.LoadUnusable,
+			wantGen:     port.GenMain,
+			wantFails:   1,
 		},
 	}
 	for _, tt := range tests {
@@ -136,18 +190,25 @@ func TestFileStore_fallbackChain(t *testing.T) {
 			if tt.main != nil {
 				writeFile(t, dumpPath, tt.main)
 			}
-			if tt.want != nil {
-				writeFile(t, dumpPath+".prev", prevGen)
+			if tt.prev != nil {
+				writeFile(t, dumpPath+".prev", tt.prev)
 			}
-			got, ok := persistfile.New(dumpPath).Load(markerOracle)
+			res := persistfile.New(dumpPath).Load(time.Now(), markerOracle)
+			if res.Outcome != tt.wantOutcome {
+				t.Errorf("Load() outcome = %v, want %v", res.Outcome, tt.wantOutcome)
+			}
+			if res.Generation != tt.wantGen {
+				t.Errorf("Load() generation = %v, want %v", res.Generation, tt.wantGen)
+			}
 			if tt.want == nil {
-				if ok {
-					t.Error("Load() ok = true, want the empty start")
+				if res.Dump != nil {
+					t.Errorf("Load() dump = %q, want no accepted generation", res.Dump)
 				}
-				return
+			} else if !bytes.Equal(res.Dump, tt.want) {
+				t.Errorf("Load() dump = %q, want %q", res.Dump, tt.want)
 			}
-			if !ok || !bytes.Equal(got, tt.want) {
-				t.Errorf("Load() = (%q, %t), want the previous generation's bytes", got, ok)
+			if len(res.Failures) != tt.wantFails {
+				t.Errorf("Load() failures = %d, want %d: %v", len(res.Failures), tt.wantFails, res.Failures)
 			}
 		})
 	}
@@ -155,7 +216,7 @@ func TestFileStore_fallbackChain(t *testing.T) {
 
 // TestFileStore_saveFailureHygiene proves the temp-file hygiene of Pitfall
 // 5: a Save that cannot create its temp file fails, and the directory keeps
-// exactly its pre-existing dump — no dump-* litter. Skipped as root, where
+// exactly its pre-existing dump — no temp litter. Skipped as root, where
 // directory modes do not bind.
 func TestFileStore_saveFailureHygiene(t *testing.T) {
 	t.Parallel()

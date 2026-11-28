@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.0",
+  "milestone": "v1.1 — Spec Compliance and Resilience",
   "phases": [
     {
       "number": "1",
@@ -37,12 +37,57 @@
       "number": "7",
       "name": "v1.0 — Docs, Examples and Release",
       "status": "complete"
+    },
+    {
+      "number": "1",
+      "name": "Spec Reference and Decisions",
+      "status": "complete"
+    },
+    {
+      "number": "2",
+      "name": "Stand and Simulator as Tests",
+      "status": "complete"
+    },
+    {
+      "number": "3",
+      "name": "Transport",
+      "status": "complete"
+    },
+    {
+      "number": "4",
+      "name": "Protocol",
+      "status": "complete"
+    },
+    {
+      "number": "5",
+      "name": "Persistence",
+      "status": "complete"
+    },
+    {
+      "number": "6",
+      "name": "API and Semantics",
+      "status": "complete"
+    },
+    {
+      "number": "7",
+      "name": "Observability and Configuration",
+      "status": "complete"
+    },
+    {
+      "number": "8",
+      "name": "Performance",
+      "status": "complete"
+    },
+    {
+      "number": "9",
+      "name": "Documentation and Release",
+      "status": "in_progress"
     }
   ],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 9 of 9 · executing"
   },
-  "updated_at": "2026-11-18T16:37:57.355Z"
+  "updated_at": "2026-11-28T01:21:33.896Z"
 }

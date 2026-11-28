@@ -1,0 +1,2 @@
+test	expected	observed	package	verdict
+TestRed_R03_gateClosedUntilFullList	red	fail,run	github.com/Djarvur/sup-kv/internal/grpcapi	OK

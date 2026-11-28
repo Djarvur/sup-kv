@@ -40,10 +40,13 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	grpcstatus "google.golang.org/grpc/status"
 
-	apiproto "github.com/Djarvur/sup-kv/internal/grpcapi/apiproto/supkvapi/v1"
+	apiproto "github.com/Djarvur/sup-kv/api/supkvapi/v1"
+	"github.com/Djarvur/sup-kv/internal/testutil"
 )
 
 // Smoke-test constants: the wait deadlines with their poll cadence, the
@@ -60,6 +63,31 @@ const (
 	versionBytes       = 16
 	hardDeadlineMargin = 250 * time.Millisecond
 
+	// processServingDeadline is a HARNESS START BUDGET, not a product
+	// bound: the first SERVING wait of a freshly spawned child covers
+	// process start plus the startup gate while the full -race suite and
+	// other packages' binaries compete for the machine. The recorded 06/07
+	// readiness failures were process-start starvation — the child needed
+	// more than the 10 s servingDeadline to start under load — so the
+	// structural cure lands first: spawnSem below caps this test binary at
+	// spawnSemSlots live spawned children. The 30 s hard upper bound is
+	// fixed; the 06/07 evidence and this host's load average are recorded
+	// in 08-09-SUMMARY.md, and exceeding the bound is a finding to report,
+	// never a reason to raise it. Every poll of an already-running node
+	// keeps servingDeadline.
+	processServingDeadline = 30 * time.Second
+	// logEventDeadline bounds a log-delivery wait for a driven event (the
+	// duplicate-node-id pair's configuration-error line), not a serving
+	// wait: the event crosses the UDP pair, so it needs its own budget
+	// rather than borrowing the readiness one.
+	logEventDeadline = 30 * time.Second
+	// spawnSemSlots caps the live spawned binaries this test binary keeps;
+	// the release-after-reap serializer is the structural cure for the
+	// process-start starvation, and spawnAcquireDeadline turns a would-be
+	// slot deadlock into a named failure instead of a suite timeout.
+	spawnSemSlots        = 8
+	spawnAcquireDeadline = 2 * time.Minute
+
 	smokeKey   = "smoke/lifecycle-key"
 	smokeValue = "sup-kv-binary-smoke-value"
 )
@@ -70,6 +98,13 @@ var (
 	smokeDir       string
 	smokeBin       string
 	errSmokeBinary error
+
+	// spawnSem is the release-after-reap serializer: a buffered channel of
+	// spawnSemSlots slots, acquired in launchNode before cmd.Start and
+	// released by the cleanup registered BEFORE node.reap, so the LIFO
+	// order kills the child first and frees the slot second. Test files are
+	// exempt from gochecknoglobals, so no directive is needed.
+	spawnSem = make(chan struct{}, spawnSemSlots)
 )
 
 func TestMain(m *testing.M) {
@@ -122,29 +157,23 @@ func smokeBinary(t *testing.T) string {
 	return smokeBin
 }
 
-// freeTCPPort picks one free TCP port: bind a throwaway listener to :0,
-// read its port, close it.
+// freeTCPPort returns one free TCP port from cmd/sup-kv's band inside the
+// private port window (testutil.CmdBand: [29100, 30100), strictly below the
+// kernel's ephemeral range, so no other test's :0 bind is ever issued there
+// and the band is disjoint from every sibling package's). The gRPC and
+// metrics listeners had the same pick-to-bind window as the UDP slot; the
+// shared allocator claims the candidate while its bind probe is held, so no
+// parallel test in this process can take it between pick and bind.
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("bind throwaway port-picking listener: %v", err)
-	}
-	defer func() { _ = listener.Close() }()
-	return listener.Addr().(*net.TCPAddr).Port
+	return testutil.TCPPort(t, testutil.CmdBand())
 }
 
-// freeUDPPort picks one free UDP port: bind a throwaway wildcard socket to
-// :0, read its port, close it (the smoke_test.go picker).
+// freeUDPPort returns one free UDP port from the same cmd/sup-kv band, via
+// the shared claim-while-held allocator (testutil.UDPPort).
 func freeUDPPort(t *testing.T) int {
 	t.Helper()
-	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(t.Context(), "udp4", "0.0.0.0:0")
-	if err != nil {
-		t.Fatalf("bind throwaway port-picking socket: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	return conn.LocalAddr().(*net.UDPAddr).Port
+	return testutil.UDPPort(t, testutil.CmdBand())
 }
 
 // waitFor polls cond every pollEvery until it holds or the deadline — the
@@ -170,12 +199,22 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 // smokeNode is one running binary under test with its captured output and
 // its single Wait result. stderr holds the plain post-exit buffer or the
 // structured-logging tests' lock-guarded live buffer (outputCapture).
+// exitResult is the reaper's stored Wait result, written under exitMu before
+// exited closes: the channel closure is the happens-before fence, so a
+// readiness wait can explain a dead child without consuming the one-buffered
+// exit channel.
 type smokeNode struct {
-	cmd    *exec.Cmd
-	stdout *bytes.Buffer
-	stderr outputCapture
-	exit   chan error
-	exited chan struct{}
+	cmd        *exec.Cmd
+	stdout     *bytes.Buffer
+	stderr     outputCapture
+	exit       chan error
+	exited     chan struct{}
+	exitMu     sync.Mutex
+	exitResult error
+	// startedAt is the instant cmd.Start returned. Startup-bound
+	// measurements begin here, so time spent queued for a spawnSem slot is
+	// harness queueing, never product startup.
+	startedAt time.Time
 }
 
 // outputCapture is the stderr seam smokeNode holds: the plain bytes.Buffer
@@ -226,6 +265,21 @@ func startLoggedNode(t *testing.T, bin string, env []string, args ...string) *sm
 // launchNode is the shared startNode body over one stderr capture.
 func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, args ...string) *smokeNode {
 	t.Helper()
+	// The serializer is the structural cure for process-start starvation:
+	// at most spawnSemSlots spawned binaries stay live in this test binary.
+	// Acquire before Start so the cap counts processes, not test bodies.
+	select {
+	case spawnSem <- struct{}{}:
+	case <-time.After(spawnAcquireDeadline):
+		t.Fatalf(
+			"no spawn slot free after %v (%d slots) — a spawned child leaked or the serializer is saturated",
+			spawnAcquireDeadline,
+			spawnSemSlots,
+		)
+	}
+	// Registered BEFORE node.reap: cleanups run LIFO, so the kill-and-reap
+	// runs first and this slot is freed only after the child is gone.
+	t.Cleanup(func() { <-spawnSem })
 	cmd := exec.CommandContext(t.Context(), bin, args...)
 	stdout := &bytes.Buffer{}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
@@ -236,15 +290,24 @@ func launchNode(t *testing.T, bin string, stderr outputCapture, env []string, ar
 	if err != nil {
 		t.Fatalf("start %s %v: %v", bin, args, err)
 	}
+	startedAt := time.Now()
 	node := &smokeNode{
-		cmd:    cmd,
-		stdout: stdout,
-		stderr: stderr,
-		exit:   make(chan error, 1),
-		exited: make(chan struct{}),
+		cmd:       cmd,
+		stdout:    stdout,
+		stderr:    stderr,
+		exit:      make(chan error, 1),
+		exited:    make(chan struct{}),
+		startedAt: startedAt,
 	}
+	// The reaper stores the Wait result before closing exited: the channel
+	// closure fences the field, so exitDiagnosis can read a completed child
+	// without racing and without consuming the one-buffered exit channel.
 	go func() {
-		node.exit <- cmd.Wait()
+		waitErr := cmd.Wait()
+		node.exitMu.Lock()
+		node.exitResult = waitErr
+		node.exitMu.Unlock()
+		node.exit <- waitErr
 		close(node.exited)
 	}()
 	t.Cleanup(node.reap)
@@ -306,10 +369,109 @@ func assertExitCode(t *testing.T, err error, want int) {
 	}
 }
 
+// errChildExited reports a spawned child that finished on its own before the
+// harness's wait completed; exitDiagnosis wraps it with the evidence.
+var errChildExited = errors.New("child exited unexpectedly")
+
+// exitDiagnosisTailBytes bounds each captured-output tail the diagnosis
+// carries: enough for the last log lines and the error text, never the whole
+// transcript.
+const exitDiagnosisTailBytes = 2048
+
+// exitStatus reports whether the reaper has closed exited, with the stored
+// Wait result when it has. The closed channel is the happens-before fence for
+// the field read; the result may legitimately be nil (a clean exit 0).
+func (n *smokeNode) exitStatus() (bool, error) {
+	select {
+	case <-n.exited:
+		n.exitMu.Lock()
+		defer n.exitMu.Unlock()
+		return true, n.exitResult
+	default:
+		return false, nil
+	}
+}
+
+// outputTail returns the last n bytes of s, or all of s when it is shorter.
+func outputTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
+// waitStatus renders a completed Wait: exit 0 for nil, the exit code and
+// String() for an ExitError, and the raw error otherwise.
+func waitStatus(err error) string {
+	if err == nil {
+		return "exit 0 (clean)"
+	}
+	exitErr, ok := errors.AsType[*exec.ExitError](err)
+	if ok {
+		return fmt.Sprintf("exit code %d (%s)", exitErr.ExitCode(), exitErr.String())
+	}
+	return err.Error()
+}
+
+// exitDiagnosis explains a spawned child that has already exited: nil while
+// it runs, otherwise an error wrapping errChildExited and naming the pid, the
+// Wait status and the tails of the captured stdout and stderr. It reads the
+// stored Wait result, so it is callable repeatedly and never consumes the
+// exit channel — a crashed child can never look like a slow one.
+func (n *smokeNode) exitDiagnosis() error {
+	exited, exitErr := n.exitStatus()
+	if !exited {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: process %d exited: %s; stderr tail: %q; stdout tail: %q",
+		errChildExited,
+		n.cmd.Process.Pid,
+		waitStatus(exitErr),
+		outputTail(n.stderr.String(), exitDiagnosisTailBytes),
+		outputTail(n.stdout.String(), exitDiagnosisTailBytes),
+	)
+}
+
+// awaitNodeServing is the node-aware readiness wait: an already-exited child
+// returns the exit diagnosis on the first poll instead of waiting out the
+// timeout — every poll of an already-running node is still awaitServing's.
+func awaitNodeServing(t *testing.T, node *smokeNode, addr string, timeout time.Duration) error {
+	t.Helper()
+	var diagnosis error
+	waitFor(t, timeout, "health SERVING on "+addr, func() bool {
+		diagnosis = node.exitDiagnosis()
+		if diagnosis != nil {
+			return true
+		}
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = conn.Close() }()
+		ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
+		defer cancel()
+		resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+		return err == nil && resp.GetStatus() == healthpb.HealthCheckResponse_SERVING
+	})
+	return diagnosis
+}
+
+// requireNodeServing is awaitNodeServing's fatal wrapper for the call sites
+// whose freshly spawned child must reach SERVING: the process-start budget is
+// the one a first wait needs, so the wrapper carries it.
+func requireNodeServing(t *testing.T, node *smokeNode, addr string) {
+	t.Helper()
+	err := awaitNodeServing(t, node, addr, processServingDeadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // awaitServing polls the gRPC health Check over real TCP until it reports
 // SERVING — the startup gate opened. Each poll uses a fresh client so the
 // poll cadence never couples to one connection's reconnect backoff.
-func awaitServing(t *testing.T, addr string, timeout time.Duration) { //nolint:unparam // every caller passes servingDeadline; stable harness shape, extended not rebuilt (06-07).
+func awaitServing(t *testing.T, addr string, timeout time.Duration) {
 	t.Helper()
 	waitFor(t, timeout, "health SERVING on "+addr, func() bool {
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -370,6 +532,34 @@ func TestMain_version(t *testing.T) {
 	}
 }
 
+// TestMain_helpListsEnvOnly pins the OBSV-02 usage contract at the real
+// binary boundary: --help exits 0 and the Environment-only block names all
+// five flagless knobs, so the logging and metrics-certificate surface is
+// discoverable from the help output alone.
+func TestMain_helpListsEnvOnly(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	out, err := runToCompletion(t, bin, nil, "--help")
+	if err != nil {
+		t.Fatalf("--help exited with %v, want the flag package's clean help exit 0", err)
+	}
+	if !strings.Contains(out, "Environment-only (no flag):") {
+		t.Fatalf("--help output lacks the %q block:\n%s", "Environment-only (no flag):", out)
+	}
+	for _, name := range []string{
+		"SUPKV_LOG_LEVEL",
+		"SUPKV_LOG_FORMAT",
+		"SUPKV_METRICS_CERT",
+		"SUPKV_METRICS_KEY",
+		"SUPKV_METRICS_CLIENT_CA",
+	} {
+		if !strings.Contains(out, name) {
+			t.Fatalf("--help output does not name the env-only variable %s:\n%s", name, out)
+		}
+	}
+}
+
 // TestMain_precedence proves the D-16/D-17 precedence end-to-end on the
 // observable gRPC listener: with only SUPKV_GRPC_ADDR set, the health
 // endpoint answers on the env-chosen port (env over the 127.0.0.1:7901
@@ -394,8 +584,9 @@ func TestMain_precedence(t *testing.T) {
 		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udp1),
 		"--dump-path="+dump1,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, envAddr, servingDeadline)
+	requireNodeServing(t, node1, envAddr)
 	signalAndWaitExit(t, node1)
 
 	// Run 2 — the same env plus an explicit flag: the flag must win.
@@ -408,8 +599,9 @@ func TestMain_precedence(t *testing.T) {
 		"--dump-path="+dump2,
 		"--grpc-addr="+flagAddr,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, flagAddr, servingDeadline)
+	requireNodeServing(t, node2, flagAddr)
 	signalAndWaitExit(t, node2)
 
 	dialer := &net.Dialer{Timeout: dialTimeout}
@@ -417,6 +609,626 @@ func TestMain_precedence(t *testing.T) {
 	if err == nil {
 		_ = conn.Close()
 		t.Fatalf("run 2 also bound the env-chosen port %s — flag over env is broken", envAddr)
+	}
+}
+
+// TestMain_maxClockLead proves the XPORT-04 knob's flag/env twin at the
+// configuration seam: --help lists the flag with its env twin named and the
+// documented 2 m default (strictly above the 60 s drift-warn default, so the
+// drift WARN window is reachable); the env twin is read into the flag's default (the
+// help output shows the env-chosen value); a malformed env value aborts
+// through the collected env-error path with exitUsage; and an explicit flag
+// value is the parsed source even when a valid env twin is set (a malformed
+// flag still fails the run — the env never shadows it). The bound's runtime
+// behavior is the core's proof (TestDiscard_beforeClock and
+// TestDiscard_validationClasses); this test owns the launch wiring.
+func TestMain_maxClockLead(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	t.Run("help lists the flag, its env twin and the 2m default", func(t *testing.T) {
+		t.Parallel()
+		out, err := runToCompletion(t, bin, nil, "--help")
+		if err != nil {
+			t.Fatalf("--help exited with %v, want the flag package's clean help exit 0", err)
+		}
+		for _, want := range []string{"-max-clock-lead", "env SUPKV_MAX_CLOCK_LEAD", "(default 2m0s)"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("--help does not contain %q — the flag, its env twin or its documented default is missing:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("the env twin sets the flag default", func(t *testing.T) {
+		t.Parallel()
+		out, err := runToCompletion(t, bin, []string{"SUPKV_MAX_CLOCK_LEAD=90s"}, "--help")
+		if err != nil {
+			t.Fatalf("--help with the env twin exited with %v, want exit 0", err)
+		}
+		if !strings.Contains(out, "(default 1m30s)") {
+			t.Fatalf("--help with SUPKV_MAX_CLOCK_LEAD=90s does not show the env-derived default \"(default 1m30s)\":\n%s", out)
+		}
+	})
+
+	t.Run("a malformed env value aborts with exitUsage", func(t *testing.T) {
+		t.Parallel()
+		// The configuration error fires before any bind, so no real port is
+		// needed — and picking a free one here would only add another
+		// parallel port-race window to the smoke harness.
+		_, err := runToCompletion(t, bin, []string{"SUPKV_MAX_CLOCK_LEAD=not-a-duration"},
+			"--node-id=1",
+			"--bind-addr=127.0.0.1:9",
+			"--broadcast-addr=127.255.255.255:9",
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		)
+		assertExitCode(t, err, exitUsageCode)
+	})
+
+	t.Run("an explicit flag is parsed over a valid env twin", func(t *testing.T) {
+		t.Parallel()
+		// The env twin carries a perfectly valid duration; the malformed
+		// explicit flag must still fail the run, which it can only do if the
+		// command-line flag is the parsed source. No bind happens, so the
+		// addresses are placeholders.
+		_, err := runToCompletion(t, bin, []string{"SUPKV_MAX_CLOCK_LEAD=90s"},
+			"--node-id=1",
+			"--bind-addr=127.0.0.1:9",
+			"--broadcast-addr=127.255.255.255:9",
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			"--max-clock-lead=not-a-duration",
+		)
+		assertExitCode(t, err, exitUsageCode)
+	})
+}
+
+// runToCompletion runs the binary with env appended to the inherited
+// environment and returns its combined output with the Wait result — the
+// shape for --help probes and startup-error rows, which terminate on their
+// own.
+func runToCompletion(t *testing.T, bin string, env []string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), bin, args...)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	err := cmd.Run()
+	return out.String(), err
+}
+
+// TestMain_valueMaxDatagram pins XPORT-03's startup ceiling executably: the
+// P-01 flag value (64000) and the exact largest fitting value (64 408) still
+// start and serve, while one byte more (64 409) and a clearly oversized
+// value (65 500) exit with the usage code and an error naming
+// --value-max-bytes, the key limit and the ceiling. The equality case pins
+// the comparison as `>` (the record is exactly 65 507 bytes and passes); the
+// adjacent case pins it as exclusive. This test is the executable guard for
+// the "64 000 is still accepted" claim; the P-01 expectation-row grep only
+// guards that those rows stay unchanged for Phase 5.
+func TestMain_valueMaxDatagram(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	for _, tc := range []struct {
+		name     string
+		valueMax int
+	}{
+		{"64000 starts and serves", 64000},
+		{"the exact boundary starts and serves", startupBoundaryValue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dumpPath := filepath.Join(t.TempDir(), "dump.json")
+			udpPort := freeUDPPort(t)
+			grpcPort := freeTCPPort(t)
+			addr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+			node := startLoggedNode(t, bin, nil,
+				"--node-id=1",
+				"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+				"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+				"--grpc-addr="+addr,
+				"--dump-path="+dumpPath,
+				"--startup-gate=10ms",
+				"--startup-gate-empty=10ms",
+				"--value-max-bytes="+strconv.Itoa(tc.valueMax),
+			)
+			requireNodeServing(t, node, addr)
+			if stderr := node.stderr.String(); strings.Contains(stderr, datagramCeilingLine) {
+				t.Fatalf("--value-max-bytes=%d produced the datagram-ceiling error while starting:\n%s", tc.valueMax, stderr)
+			}
+			signalAndWaitExit(t, node)
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		valueMax int
+	}{
+		{"one byte over the ceiling exits 2", startupBoundaryOverValue},
+		{"a clearly oversized value exits 2", 65500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := runToCompletion(t, bin, nil,
+				"--node-id=1",
+				"--bind-addr=127.0.0.1:9",
+				"--broadcast-addr=127.255.255.255:9",
+				"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+				"--value-max-bytes="+strconv.Itoa(tc.valueMax),
+			)
+			assertExitCode(t, err, exitUsageCode)
+			for _, want := range []string{datagramCeilingLine, "--value-max-bytes=" + strconv.Itoa(tc.valueMax), "1024-byte key limit", "65507"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("over-ceiling startup output does not contain %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestMain_valueMaxNonPositive pins the value-limit positivity contract at
+// the binary boundary (PERSIST-01): a zero or negative --value-max-bytes is
+// a configuration error through the usage path (exit 2), naming the flag —
+// never a silent fall back to the default limit. The probe bound only stops
+// a RED-state binary, which would start and serve, from hanging the test.
+func TestMain_valueMaxNonPositive(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	for _, tc := range []struct {
+		name string
+		flag string
+	}{
+		{"a zero value limit exits 2", "--value-max-bytes=0"},
+		{"a negative value limit exits 2", "--value-max-bytes=-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), valueMaxRangeProbe)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin,
+				"--node-id=1",
+				"--bind-addr=127.0.0.1:"+strconv.Itoa(freeUDPPort(t)),
+				"--broadcast-addr=127.255.255.255:9",
+				"--grpc-addr=127.0.0.1:"+strconv.Itoa(freeTCPPort(t)),
+				"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+				tc.flag,
+			)
+			out, err := cmd.CombinedOutput()
+			assertExitCode(t, err, exitUsageCode)
+			for _, want := range []string{"value-max-bytes must be positive", tc.flag} {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("the non-positive value-max-bytes run's output does not contain %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestMain_startupGateEmptyRange pins the startup-gate positivity contract at
+// the binary boundary (T-4-12): a non-positive --startup-gate-empty or
+// --startup-gate aborts through the usage path (exit 2) with a message naming
+// the offending parameter, so a zero or negative value can never mean "stay
+// closed forever". The configuration error fires before any bind, so the
+// addresses are placeholders; the context bound is only a RED-state safety net
+// for a value the validation does not reach.
+func TestMain_startupGateEmptyRange(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	for _, tc := range []struct {
+		name      string
+		flag      string
+		wantParam string
+	}{
+		{"a negative empty gate exits 2", "--startup-gate-empty=-1s", "--startup-gate-empty=-1s"},
+		{"a zero normal gate exits 2", "--startup-gate=0", "--startup-gate=0s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), startupGateRangeProbe)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin,
+				"--node-id=1",
+				"--bind-addr=127.0.0.1:9",
+				"--broadcast-addr=127.255.255.255:9",
+				"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+				tc.flag,
+			)
+			out, err := cmd.CombinedOutput()
+			assertExitCode(t, err, exitUsageCode)
+			for _, want := range []string{"startup gate must be positive", tc.wantParam} {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("the non-positive startup-gate run's output does not contain %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestMain_syncChunkBytesCeiling pins the WR-06 binary boundary: an explicit
+// --sync-chunk-bytes above the datagram ceiling aborts through the usage path
+// (exit 2) with a message naming the knob, its value and the ceiling, before
+// any bind — the core's clamp is defense in depth, never a silent substitute
+// for telling the operator their budget is unsendable.
+func TestMain_syncChunkBytesCeiling(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), startupGateRangeProbe)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, bin,
+		"--node-id=1",
+		"--bind-addr=127.0.0.1:9",
+		"--broadcast-addr=127.255.255.255:9",
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--sync-chunk-bytes=65508",
+	)
+	out, err := cmd.CombinedOutput()
+	assertExitCode(t, err, exitUsageCode)
+	for _, want := range []string{"sync-chunk-bytes exceeds the datagram ceiling", "--sync-chunk-bytes=65508", "65507"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("the over-ceiling sync-chunk-bytes run's output does not contain %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestMain_validationRelations pins the one-point validation contract at the
+// binary boundary (OBSV-02, D-03): each relation and positivity violation
+// exits 2 before any bind with an error naming the offending parameter, and a
+// trailing positional argument is rejected by name — never silently ignored.
+// The configuration error fires before the socket work, so the addresses are
+// placeholders; the context bound only stops a RED-state binary, which would
+// start and serve, from hanging the test.
+func TestMain_validationRelations(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	rows := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "a zero sync chunk budget exits 2",
+			args: []string{"--sync-chunk-bytes=0"},
+			want: []string{"--sync-chunk-bytes=0"},
+		},
+		{
+			name: "an over-cap sync response rate exits 2",
+			args: []string{"--sync-response-rate=1000000001"},
+			want: []string{"--sync-response-rate=1000000001"},
+		},
+		{
+			name: "a one-nanosecond retransmit interval exits 2",
+			args: []string{"--retransmit-interval=1ns"},
+			want: []string{"--retransmit-interval=1ns"},
+		},
+		{
+			name: "a peer timeout equal to the hello interval exits 2",
+			args: []string{"--peer-timeout=1s", "--hello-interval=1s"},
+			want: []string{"--peer-timeout=1s", "--hello-interval=1s"},
+		},
+		{
+			name: "an ack timeout above its ceiling exits 2",
+			args: []string{"--ack-timeout=6s", "--ack-timeout-max=5s"},
+			want: []string{"--ack-timeout=6s", "--ack-timeout-max=5s"},
+		},
+		{
+			name: "a max clock lead equal to the drift warn exits 2",
+			args: []string{"--drift-warn=2m", "--max-clock-lead=2m"},
+			want: []string{"--drift-warn=2m", "--max-clock-lead=2m"},
+		},
+		{
+			name: "an explicitly empty gRPC address exits 2",
+			args: []string{"--grpc-addr="},
+			want: []string{"--grpc-addr", "127.0.0.1:7901"},
+		},
+		{
+			name: "an out-of-range gRPC port exits 2 before any bind",
+			args: []string{"--grpc-addr=127.0.0.1:99999"},
+			want: []string{"--grpc-addr", "99999", "outside 0..65535"},
+		},
+		{
+			name: "a broadcast destination port of 0 exits 2",
+			args: []string{"--broadcast-addr=127.255.255.255:0"},
+			want: []string{"--broadcast-addr", "can never be sent to"},
+		},
+		{
+			name: "a trailing positional argument exits 2 naming it",
+			args: []string{"stray-operand"},
+			want: []string{"stray-operand"},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), validationRelationProbe)
+			defer cancel()
+			args := append([]string{
+				"--node-id=1",
+				"--bind-addr=127.0.0.1:9",
+				"--broadcast-addr=127.255.255.255:9",
+				"--dump-path=" + filepath.Join(t.TempDir(), "dump.json"),
+			}, row.args...)
+			out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
+			assertExitCode(t, err, exitUsageCode)
+			for _, want := range row.want {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("the invalid-configuration run's output does not contain %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestMain_startupGateEmptySelection pins the D-02 empty-vs-data selection end
+// to end through health timing only: a node that loaded no records waits the
+// empty backstop — still NOT_SERVING after the normal gate would have opened,
+// then SERVING once the empty gate elapses — while a node restarted over a
+// dump holding one key opens on the normal gate inside its bound. A seeded
+// node never consults startup_gate_empty, and no engine internals are read.
+func TestMain_startupGateEmptySelection(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	t.Run("an empty node waits the empty backstop", func(t *testing.T) {
+		t.Parallel()
+		dumpPath := filepath.Join(t.TempDir(), "dump.json")
+		udpPort := freeUDPPort(t)
+		addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+		const normalGate, emptyGate = 50 * time.Millisecond, 1500 * time.Millisecond
+		node := startNode(t, bin, nil,
+			"--node-id=1",
+			"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+			"--dump-path="+dumpPath,
+			"--grpc-addr="+addr,
+			"--startup-gate="+normalGate.String(),
+			"--startup-gate-empty="+emptyGate.String(),
+		)
+		// A lone empty node hears no peer, so only a backstop can open the
+		// gate. The 300 ms probe is six normal gates past launch: a node
+		// that chose the normal backstop is SERVING well before it.
+		waitFor(t, servingDeadline, "the empty node's health endpoint answering", func() bool {
+			_, ok, _ := healthAnswer(t, addr)
+			return ok
+		})
+		if elapsed := time.Since(node.startedAt); elapsed < startupGateSelectionProbe {
+			time.Sleep(startupGateSelectionProbe - elapsed)
+		}
+		// healthAnswer documents ok=false as a transient transport error
+		// ("not up yet"), not a status: under parallel package load one probe
+		// can still fail after the endpoint first answered. Retry within a
+		// bound that stays well inside the empty backstop, so a correct
+		// selection can never have opened the gate when the answer lands.
+		var status healthpb.HealthCheckResponse_ServingStatus
+		statusOK := false
+		waitFor(t, (emptyGate-startupGateSelectionProbe)/2, "the empty node's health answer after the probe", func() bool {
+			s, ok, _ := healthAnswer(t, addr)
+			if !ok {
+				return false
+			}
+			status, statusOK = s, true
+			return true
+		})
+		if !statusOK || status != healthpb.HealthCheckResponse_NOT_SERVING {
+			t.Fatalf("the empty node's health at >= %v after launch = (%v, ok=%t), want NOT_SERVING: the empty backstop (%v), not the normal gate (%v), must govern",
+				startupGateSelectionProbe, status, statusOK, emptyGate, normalGate)
+		}
+		awaitServing(t, addr, 5*time.Second)
+		signalAndWaitExit(t, node)
+		assertNoPanic(t, node, "the empty-gate node")
+	})
+
+	t.Run("a seeded node opens on the normal gate", func(t *testing.T) {
+		t.Parallel()
+		dumpPath := filepath.Join(t.TempDir(), "dump.json")
+		udpPort := freeUDPPort(t)
+		addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+		seedKey := "startup-gate-empty/seed"
+		const normalGate, emptyGate = 50 * time.Millisecond, 1500 * time.Millisecond
+		baseFlags := []string{
+			"--node-id=1",
+			"--bind-addr=0.0.0.0:" + strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:" + strconv.Itoa(udpPort),
+			"--dump-path=" + dumpPath,
+			"--grpc-addr=" + addr,
+		}
+
+		// First run: a fast empty-gated node writes one key and exits
+		// cleanly, so the restart's dump holds exactly one record.
+		seed := startNode(t, bin, nil, append(baseFlags,
+			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
+		)...)
+		requireNodeServing(t, seed, addr)
+		client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
+		ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+		_, err := client.Set(ctx, &apiproto.SetRequest{Key: seedKey, Value: []byte(smokeValue)})
+		cancel()
+		if err != nil {
+			t.Fatalf("Set(%q) on the seeding run: %v", seedKey, err)
+		}
+		signalAndWaitExit(t, seed)
+
+		// The restart loads the record, so the normal gate governs: 300 ms
+		// leaves room for process start plus the 50 ms gate while staying far
+		// below the empty backstop a broken selection would choose. The clock
+		// starts at process start, not at the startNode call, so a spawnSem
+		// queue wait is never mistaken for slow product startup.
+		node := startNode(t, bin, nil, append(baseFlags,
+			"--startup-gate="+normalGate.String(),
+			"--startup-gate-empty="+emptyGate.String(),
+		)...)
+		requireNodeServing(t, node, addr)
+		if elapsed := time.Since(node.startedAt); elapsed > startupGateSeededBound {
+			t.Fatalf("the seeded node opened %v after launch, want within %v (the normal gate, not the %v empty backstop)",
+				elapsed, startupGateSeededBound, emptyGate)
+		}
+		signalAndWaitExit(t, node)
+		assertNoPanic(t, node, "the seeded-gate node")
+	})
+}
+
+// healthAnswer performs one health Check against addr. ok is false when the
+// listener is not up yet — a transient transport error — so polls treat it as
+// not-yet rather than failing.
+func healthAnswer(t *testing.T, addr string) (healthpb.HealthCheckResponse_ServingStatus, bool, error) {
+	t.Helper()
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return healthpb.HealthCheckResponse_SERVICE_UNKNOWN, false, err
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), checkTimeout)
+	defer cancel()
+	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		return healthpb.HealthCheckResponse_SERVICE_UNKNOWN, false, err
+	}
+	return resp.GetStatus(), true, nil
+}
+
+// bindAddrWarnMsg is the stable substring of XPORT-09's non-wildcard bind
+// WARN — the message, not its detail attr, so the assertion pins the one
+// startup line the operator sees.
+const bindAddrWarnMsg = "Bind address is not a wildcard"
+
+// TestMain_bindAddrWarn pins XPORT-09's bind-address visibility half at the
+// binary boundary: a --bind-addr naming a concrete interface starts serving
+// normally (a unicast-only deployment stays usable — never a rejection) but
+// emits exactly one explanatory WARN naming the broadcast-reception
+// limitation, while a wildcard bind emits none.
+func TestMain_bindAddrWarn(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	t.Run("a non-wildcard bind warns once and keeps serving", func(t *testing.T) {
+		t.Parallel()
+		udpPort := freeUDPPort(t)
+		grpcAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+		node := startLoggedNode(t, bin, nil,
+			"--node-id=1",
+			"--bind-addr=127.0.0.1:"+strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+			"--grpc-addr="+grpcAddr,
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
+		)
+		requireNodeServing(t, node, grpcAddr)
+		waitFor(t, servingDeadline, "the non-wildcard bind WARN", func() bool {
+			return strings.Contains(node.stderr.String(), bindAddrWarnMsg)
+		})
+		if got := strings.Count(node.stderr.String(), bindAddrWarnMsg); got != 1 {
+			t.Fatalf("a non-wildcard bind produced %d WARN(s), want exactly 1:\n%s", got, node.stderr.String())
+		}
+		signalAndWaitExit(t, node)
+	})
+
+	t.Run("a wildcard bind does not warn", func(t *testing.T) {
+		t.Parallel()
+		udpPort := freeUDPPort(t)
+		grpcAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+		node := startLoggedNode(t, bin, nil,
+			"--node-id=1",
+			"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+			"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+			"--grpc-addr="+grpcAddr,
+			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
+		)
+		// The WARN is emitted synchronously before wire, so a serving node
+		// has already decided the question.
+		requireNodeServing(t, node, grpcAddr)
+		if out := node.stderr.String(); strings.Contains(out, bindAddrWarnMsg) {
+			t.Fatalf("a wildcard bind produced the non-wildcard WARN:\n%s", out)
+		}
+		signalAndWaitExit(t, node)
+	})
+}
+
+// TestMain_duplicateBind pins XPORT-09's duplicate-instance half at the
+// binary boundary: with the UDP address already occupied by another socket,
+// the real process exits non-zero and its output carries the kernel's
+// "address already in use" — a second instance can never start silently and
+// split the node's unicast traffic between two sockets.
+func TestMain_duplicateBind(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	// Occupy one explicit loopback address. A plain ListenConfig datagram
+	// bind sets no SO_REUSEADDR, so the binary's production bind — which
+	// sets none either — must be refused by the kernel.
+	occupier, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a loopback udp4 address: %v", err)
+	}
+	t.Cleanup(func() { _ = occupier.Close() })
+	occupied := occupier.LocalAddr().(*net.UDPAddr)
+	bindAddr := occupied.String()
+	udpPort := strconv.Itoa(occupied.Port)
+
+	out, err := runToCompletion(t, bin, nil,
+		"--node-id=1",
+		"--bind-addr="+bindAddr,
+		"--broadcast-addr=127.255.255.255:"+udpPort,
+		"--grpc-addr=127.0.0.1:"+strconv.Itoa(freeTCPPort(t)),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
+	)
+	assertExitCode(t, err, 1)
+	if !strings.Contains(out, "address already in use") {
+		t.Fatalf("a second instance on occupied %s exited without %q in its output:\n%s", bindAddr, "address already in use", out)
+	}
+}
+
+// TestMain_fatalBindLoggedAtError pins D-06's silent-exit fix at the binary
+// boundary: a fatal bind at SUPKV_LOG_LEVEL=error exits 1 AND leaves exactly
+// one parsed ERROR record naming the startup stage. The pre-D-06 log.Fatalf
+// rendered as an INFO record through slog.SetDefault and vanished at error
+// level, exiting 1 with no explanation (review O-01).
+func TestMain_fatalBindLoggedAtError(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	// Occupy one explicit loopback address, exactly as TestMain_duplicateBind
+	// does: a plain datagram bind sets no SO_REUSEADDR, so the binary's
+	// production bind must be refused by the kernel.
+	occupier, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a loopback udp4 address: %v", err)
+	}
+	t.Cleanup(func() { _ = occupier.Close() })
+	occupied := occupier.LocalAddr().(*net.UDPAddr)
+
+	out, err := runToCompletion(t, bin, []string{"SUPKV_LOG_LEVEL=error"},
+		"--node-id=1",
+		"--bind-addr="+occupied.String(),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(occupied.Port),
+		"--grpc-addr=127.0.0.1:"+strconv.Itoa(freeTCPPort(t)),
+		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
+	)
+	assertExitCode(t, err, exitStartupCode)
+
+	var errRecords []logRecord
+	for _, record := range parseLogRecords(out) {
+		if record.Level == "ERROR" {
+			errRecords = append(errRecords, record)
+		}
+	}
+	if len(errRecords) != 1 {
+		t.Fatalf("a fatal bind at SUPKV_LOG_LEVEL=error produced %d parsed ERROR records, want exactly 1:\n%s", len(errRecords), out)
+	}
+	if errRecords[0].Msg != "Startup failed" {
+		t.Fatalf("the fatal-bind ERROR record msg = %q, want %q:\n%s", errRecords[0].Msg, "Startup failed", out)
+	}
+	if errRecords[0].Stage == "" {
+		t.Fatalf("the fatal-bind ERROR record names no stage:\n%s", out)
 	}
 }
 
@@ -442,8 +1254,9 @@ func TestMain_lifecycle(t *testing.T) {
 		"--dump-path="+dumpPath,
 		"--grpc-addr="+addr,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, addr, servingDeadline)
+	requireNodeServing(t, node, addr)
 
 	client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
 	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
@@ -475,6 +1288,441 @@ func TestMain_lifecycle(t *testing.T) {
 	}
 }
 
+// earlyExitReadinessBound bounds the dead-child readiness assertion: the
+// diagnosis must land on the first poll, far below the serving budget it
+// replaces.
+const earlyExitReadinessBound = 2 * time.Second
+
+// TestMain_readinessDiagnosis proves an already-exited child fails a
+// readiness wait immediately with the exit diagnosis — pid, status and the
+// captured stderr tail — instead of waiting out the serving budget as if it
+// were slow. It drives the error-returning core behind requireNodeServing, so
+// the dead-child path is asserted directly rather than through a timeout.
+func TestMain_readinessDiagnosis(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	node := startNode(t, bin, nil, "--node-id=0")
+	waitFor(t, exitDeadline, "the invalid-configuration child's exit", func() bool {
+		select {
+		case <-node.exited:
+			return true
+		default:
+			return false
+		}
+	})
+	started := time.Now()
+	err := awaitNodeServing(t, node, "127.0.0.1:1", servingDeadline)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("awaitNodeServing on an exited child = nil, want the exit diagnosis")
+	}
+	if elapsed > earlyExitReadinessBound {
+		t.Fatalf("awaitNodeServing returned after %v on an exited child, want the diagnosis on the first poll (bound %v)",
+			elapsed, earlyExitReadinessBound)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("process %d", node.cmd.Process.Pid),
+		"exit code 2",
+		"stderr tail",
+		"required unique 16-bit node ID",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("awaitNodeServing diagnosis lacks %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestMain_finalDumpFailureExitsThree pins D-06's distinct failed-final-dump
+// code at the binary boundary. The dump directory is replaced by a regular
+// file, so the atomic save's os.CreateTemp fails with ENOTDIR for every uid —
+// unlike chmod 0500, which a root-run CI would bypass — and the bounded final
+// dump cannot land: the process exits 3 with the ERROR record explaining it.
+func TestMain_finalDumpFailureExitsThree(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "dump.json")
+	udpPort := freeUDPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	node := startLoggedNode(t, bin, []string{"SUPKV_LOG_LEVEL=error"},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
+	)
+	requireNodeServing(t, node, addr)
+
+	// Block the dump path: a regular file where the directory was. ensureDir
+	// stats the path and finds something, then os.CreateTemp fails with
+	// ENOTDIR for every uid (RESEARCH D-06's root-proof construction).
+	err := os.RemoveAll(dir)
+	if err != nil {
+		t.Fatalf("remove dump directory %s: %v", dir, err)
+	}
+	err = os.WriteFile(dir, []byte("blocked"), 0o600)
+	if err != nil {
+		t.Fatalf("replace dump directory %s with a regular file: %v", dir, err)
+	}
+
+	// A write whose covering dump cannot land answers Unavailable and leaves
+	// the engine dirty, so shutdown's bounded final dump has one to attempt.
+	client := apiproto.NewSupKVServiceClient(supKVConn(t, addr))
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	t.Cleanup(cancel)
+	_, setErr := client.Set(ctx, &apiproto.SetRequest{Key: smokeKey, Value: []byte(smokeValue)})
+	if grpcstatus.Code(setErr) != codes.Unavailable {
+		t.Fatalf("Set over a blocked dump path = %v, want Unavailable (the setup needs a dirty engine)", setErr)
+	}
+
+	err = node.cmd.Process.Signal(syscall.SIGTERM)
+	if err != nil {
+		t.Fatalf("SIGTERM %d: %v", node.cmd.Process.Pid, err)
+	}
+	var exitErr error
+	waitFor(t, exitDeadline, "process exit after SIGTERM over a blocked dump path", func() bool {
+		select {
+		case exitErr = <-node.exit:
+			return true
+		default:
+			return false
+		}
+	})
+	assertExitCode(t, exitErr, exitDumpFailedCode)
+
+	explained := false
+	for _, record := range parseLogRecords(node.stderr.String()) {
+		if record.Level == "ERROR" && record.Msg == "Final dump failed" {
+			explained = true
+			break
+		}
+	}
+	if !explained {
+		t.Fatalf("the failed-final-dump run left no parsed ERROR %q record:\n%s", "Final dump failed", node.stderr.String())
+	}
+}
+
+// TestMain_socketBuffersLogged pins XPORT-05's startup evidence end-to-end:
+// the real binary logs one static "Socket buffers" line carrying positive
+// recv_buf and send_buf attrs — the kernel's EFFECTIVE sizes, so the test
+// never asserts an exact number (the kernel doubles and clamps; RESEARCH
+// Pitfall 13).
+func TestMain_socketBuffersLogged(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	grpcPort := freeTCPPort(t)
+
+	node := startLoggedNode(t, bin, []string{"SUPKV_LOG_FORMAT=json", "SUPKV_LOG_LEVEL=info"},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+fmt.Sprintf("127.0.0.1:%d", grpcPort),
+		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
+	)
+	waitFor(t, servingDeadline, "the static Socket buffers startup line with positive sizes", func() bool {
+		recv, send, ok := parseSocketBuffersLine(node.stderr.String())
+		return ok && recv > 0 && send > 0
+	})
+	recv, send, ok := parseSocketBuffersLine(node.stderr.String())
+	if !ok || recv <= 0 || send <= 0 {
+		t.Fatalf("Socket buffers line = (recv %d, send %d, ok %t), want both positive", recv, send, ok)
+	}
+	t.Logf("startup logged effective socket buffers: recv_buf=%d send_buf=%d", recv, send)
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the socket-buffers startup run")
+}
+
+// TestMain_gateOpenLogged pins the gate catalog row at the binary boundary
+// (D-01): a lone real node's startup gate opens on its backstop — no listing
+// can ever arrive — and the process emits exactly one INFO "Startup gate
+// opened" record carrying reason=backstop, then still exits 0 on SIGTERM.
+func TestMain_gateOpenLogged(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+
+	node := startLoggedNode(t, bin, []string{"SUPKV_LOG_FORMAT=json", "SUPKV_LOG_LEVEL=info"},
+		"--node-id=1",
+		"--bind-addr=0.0.0.0:"+strconv.Itoa(udpPort),
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
+	)
+	requireNodeServing(t, node, addr)
+	waitFor(t, servingDeadline, "the one Startup gate opened record", func() bool {
+		return len(gateOpenRecords(node.stderr.String())) == 1
+	})
+	records := gateOpenRecords(node.stderr.String())
+	if len(records) != 1 {
+		t.Fatalf("the run emitted %d Startup gate opened records, want exactly 1:\n%s", len(records), node.stderr.String())
+	}
+	if records[0].Level != "INFO" {
+		t.Fatalf("the Startup gate opened record level = %q, want INFO:\n%s", records[0].Level, node.stderr.String())
+	}
+	if records[0].Reason != "backstop" {
+		t.Fatalf("the Startup gate opened record reason = %q, want backstop:\n%s", records[0].Reason, node.stderr.String())
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the gate-open run")
+}
+
+// gateOpenRecords returns the parsed records with the gate catalog's static
+// message.
+func gateOpenRecords(output string) []logRecord {
+	var records []logRecord
+	for _, record := range parseLogRecords(output) {
+		if record.Msg == "Startup gate opened" {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+// TestMain_startupLogRecord pins the D-01 startup record at the binary
+// boundary: one parsed "Starting sup-kv" INFO record carries the build
+// identity and the effective configuration, and no certificate/key key ever
+// reaches it (T-07-21).
+func TestMain_startupLogRecord(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	udpPort := freeUDPPort(t)
+	bind := "0.0.0.0:" + strconv.Itoa(udpPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+
+	node := startLoggedNode(t, bin, []string{"SUPKV_LOG_FORMAT=json", "SUPKV_LOG_LEVEL=info"},
+		"--node-id=1",
+		"--bind-addr="+bind,
+		"--broadcast-addr=127.255.255.255:"+strconv.Itoa(udpPort),
+		"--dump-path="+dumpPath,
+		"--grpc-addr="+addr,
+		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
+	)
+	requireNodeServing(t, node, addr)
+
+	var record map[string]any
+	waitFor(t, servingDeadline, "the Starting sup-kv record", func() bool {
+		found, ok := findLogMap(node.stderr.String(), "Starting sup-kv")
+		record = found
+		return ok
+	})
+	if got, ok := record["level"]; !ok || got != "INFO" {
+		t.Fatalf("the startup record level = %v (present %t), want INFO:\n%v", got, ok, record)
+	}
+	for key, want := range map[string]any{
+		"version":        "dev",
+		"node_id":        float64(1),
+		"bind_addr":      bind,
+		"dump_path":      dumpPath,
+		"max_clock_lead": "2m0s",
+		"metrics_tls":    false,
+	} {
+		if got, ok := record[key]; !ok || got != want {
+			t.Fatalf("startup record[%q] = %v (present %t), want %v:\n%v", key, got, ok, want, record)
+		}
+	}
+	if got, ok := record["go_version"]; !ok || got == "" {
+		t.Fatalf("startup record[go_version] = %v (present %t), want a non-empty runtime version:\n%v", got, ok, record)
+	}
+	for _, forbidden := range []string{"metrics_cert", "metrics_key", "metrics_client_ca"} {
+		if _, present := record[forbidden]; present {
+			t.Fatalf("the startup record carries the secret-bearing key %q, want it absent:\n%v", forbidden, record)
+		}
+	}
+
+	signalAndWaitExit(t, node)
+	assertNoPanic(t, node, "the startup-record run")
+}
+
+// TestMain_startupLogLoadOutcome pins the D-01 load-outcome record across a
+// real restart: a fresh directory logs exactly one INFO "Dump load" with
+// outcome=prompt and records=0 and, after the first run's final dump carries
+// a committed key, the second run logs exactly one with outcome=main and
+// records >= 1.
+func TestMain_startupLogLoadOutcome(t *testing.T) {
+	t.Parallel()
+	bin := smokeBinary(t)
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.json")
+	env := []string{"SUPKV_LOG_FORMAT=json", "SUPKV_LOG_LEVEL=info"}
+	flags := func(addr string) []string {
+		return []string{
+			"--node-id=1",
+			"--bind-addr=0.0.0.0:" + strconv.Itoa(freeUDPPort(t)),
+			"--broadcast-addr=127.255.255.255:" + strconv.Itoa(freeUDPPort(t)),
+			"--dump-path=" + dumpPath,
+			"--grpc-addr=" + addr,
+			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
+		}
+	}
+
+	firstAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	first := startLoggedNode(t, bin, env, flags(firstAddr)...)
+	requireNodeServing(t, first, firstAddr)
+	waitFor(t, servingDeadline, "the fresh start's Dump load record", func() bool {
+		return countLogMaps(first.stderr.String(), "Dump load") == 1
+	})
+	prompt := assertOneLoadRecord(t, first.stderr.String(), "prompt")
+	if got := prompt["records"]; got != float64(0) {
+		t.Fatalf("fresh-start Dump load records = %v, want 0", got)
+	}
+
+	// Commit one key so the first run's final dump carries a record for the
+	// restart to load.
+	client := apiproto.NewSupKVServiceClient(supKVConn(t, firstAddr))
+	ctx, cancel := context.WithTimeout(t.Context(), rpcTimeout)
+	t.Cleanup(cancel)
+	_, err := client.Set(ctx, &apiproto.SetRequest{Key: smokeKey, Value: []byte(smokeValue)})
+	if err != nil {
+		t.Fatalf("Set(%q): %v", smokeKey, err)
+	}
+	signalAndWaitExit(t, first)
+	assertNoPanic(t, first, "the fresh-start run")
+
+	secondAddr := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	second := startLoggedNode(t, bin, env, flags(secondAddr)...)
+	requireNodeServing(t, second, secondAddr)
+	waitFor(t, servingDeadline, "the restart's Dump load record", func() bool {
+		return countLogMaps(second.stderr.String(), "Dump load") == 1
+	})
+	mainRecord := assertOneLoadRecord(t, second.stderr.String(), "main")
+	if got, ok := mainRecord["records"].(float64); !ok || got < 1 {
+		t.Fatalf("restart Dump load records = %v, want at least 1 — the first run's dump must be loaded", mainRecord["records"])
+	}
+	signalAndWaitExit(t, second)
+	assertNoPanic(t, second, "the load-outcome restart")
+}
+
+// assertOneLoadRecord requires exactly one parsed "Dump load" record and the
+// expected outcome token, returning its attributes for field assertions.
+func assertOneLoadRecord(t *testing.T, output, wantOutcome string) map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, record := range parseLogMaps(output) {
+		if record["msg"] == "Dump load" {
+			records = append(records, record)
+		}
+	}
+	if len(records) != 1 {
+		t.Fatalf("%d Dump load record(s), want exactly 1:\n%s", len(records), output)
+	}
+	if got := records[0]["outcome"]; got != wantOutcome {
+		t.Fatalf("Dump load outcome = %v, want %q:\n%v", got, wantOutcome, records[0])
+	}
+	return records[0]
+}
+
+// countLogMaps returns how many parsed records carry msg.
+func countLogMaps(output, msg string) int {
+	count := 0
+	for _, record := range parseLogMaps(output) {
+		if record["msg"] == msg {
+			count++
+		}
+	}
+	return count
+}
+
+// parseLogMaps parses every JSON-object line of output into its raw
+// attribute map — the shape field-level assertions read when a fixed struct
+// would not cover every catalog key.
+func parseLogMaps(output string) []map[string]any {
+	var records []map[string]any
+	for line := range strings.SplitSeq(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+// findLogMap returns the first parsed record whose msg equals msg.
+func findLogMap(output, msg string) (map[string]any, bool) {
+	for _, record := range parseLogMaps(output) {
+		if record["msg"] == msg {
+			return record, true
+		}
+	}
+	return nil, false
+}
+
+// parseSocketBuffersLine extracts recv_buf and send_buf from the startup
+// "Socket buffers" JSON log line. ok reports the line appeared with both
+// integer attrs present; the caller asserts their positivity.
+func parseSocketBuffersLine(output string) (recv, send int, ok bool) {
+	for line := range strings.SplitSeq(output, "\n") {
+		if !strings.Contains(line, "Socket buffers") {
+			continue
+		}
+		var entry struct {
+			Msg     string `json:"msg"`
+			RecvBuf *int   `json:"recv_buf"`
+			SendBuf *int   `json:"send_buf"`
+		}
+		if json.Unmarshal([]byte(line), &entry) != nil || entry.Msg != "Socket buffers" {
+			continue
+		}
+		if entry.RecvBuf == nil || entry.SendBuf == nil {
+			continue
+		}
+		return *entry.RecvBuf, *entry.SendBuf, true
+	}
+	return 0, 0, false
+}
+
+// logRecord is the one JSON record shape the lifecycle-log tests parse: the
+// level and static message every handler emits, the optional stage a startup
+// failure names (D-06), and the gate-open reason (D-01).
+type logRecord struct {
+	Level  string `json:"level"`
+	Msg    string `json:"msg"`
+	Stage  string `json:"stage"`
+	Reason string `json:"reason"`
+}
+
+// parseLogRecords parses every JSON-object line of output, skipping the
+// non-JSON lines a usage error or the binary's own stdout may carry.
+func parseLogRecords(output string) []logRecord {
+	var records []logRecord
+	for line := range strings.SplitSeq(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var record logRecord
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
 // TestShutdown_secondSignal pins the P1-IN-01 contract end-to-end: signal
 // ownership stays armed across the whole D-19 shutdown, so a second SIGTERM
 // observed while the graceful drain is still in progress takes the force
@@ -502,6 +1750,7 @@ func TestShutdown_secondSignal(t *testing.T) {
 		"--dump-path="+dumpPath,
 		"--grpc-addr="+addr,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 
 	// The stream GracefulStop waits on. A reader goroutine drains the
@@ -589,12 +1838,45 @@ func TestShutdown_secondSignal(t *testing.T) {
 }
 
 // Structured-logging test constants (D-06/D-07/D-08): the broadcast
-// capability probe's wait, and main's configuration-error exit code
-// (exitUsage — the collected env-error path the malformed SUPKV_LOG_* values
-// must abort through, never a silent default).
+// capability probe's wait, and the D-06 exit table observed at the binary
+// boundary — 1 for a startup or Serve failure, 2 for a usage/configuration
+// error (the collected env-error path the malformed SUPKV_LOG_* values must
+// abort through, never a silent default) and 3 for a failed final dump.
 const (
-	logProbeWait  = 300 * time.Millisecond
-	exitUsageCode = 2
+	logProbeWait        = 300 * time.Millisecond
+	exitStartupCode     = 1
+	exitUsageCode       = 2
+	exitDumpFailedCode  = 3
+	datagramCeilingLine = "datagram ceiling"
+
+	// startupGateRangeProbe bounds the non-positive startup-gate rows: the
+	// validation is expected to reject before any bind, so the bound only
+	// stops a RED-state binary (which would serve until the runner's kill)
+	// from hanging the test.
+	startupGateRangeProbe = 3 * time.Second
+
+	// valueMaxRangeProbe bounds the non-positive value-max-bytes rows for the
+	// same reason: the validation rejects before any bind, and the bound only
+	// stops a RED-state binary from serving until the runner's kill.
+	valueMaxRangeProbe = 3 * time.Second
+
+	// validationRelationProbe bounds the relation/positivity process rows for
+	// the same reason: every one of them must exit 2 before any bind, so the
+	// bound only stops a RED-state binary (which would start and serve) from
+	// hanging the test.
+	validationRelationProbe = 3 * time.Second
+
+	// The empty-vs-data selection bounds: the empty node must still be closed
+	// this far past a 50 ms normal gate, and the seeded node must open inside
+	// this bound — far below the 1500 ms empty backstop.
+	startupGateSelectionProbe = 300 * time.Millisecond
+	startupGateSeededBound    = 300 * time.Millisecond
+
+	// startupBoundaryValue is the largest --value-max-bytes whose maximal-key
+	// record encodes to exactly 65 507 bytes; equality passes because the
+	// startup check is `>`. One byte more crosses the ceiling.
+	startupBoundaryValue     = 64408
+	startupBoundaryOverValue = startupBoundaryValue + 1
 )
 
 // logProbeSocket binds a wildcard udp4 socket with SO_REUSEADDR and
@@ -632,29 +1914,31 @@ func logProbeSocket(bindAddr string) (*net.UDPConn, error) {
 // two-node log tests need — a datagram sent to the loopback broadcast
 // address reaches the socket bound to the destination port (loopback
 // broadcast fan-out is a Linux-only kernel behavior; macOS lo0 carries no
-// BROADCAST flag — the wait_integration_test.go probe, D-12) — and skips
-// loudly naming what was probed when it is missing. The env-validation half
-// of the logging contract stays proven on every platform.
-func probeLoopbackBroadcast(t *testing.T, port int) {
+// BROADCAST flag — the wait_integration_test.go probe, D-12). A bind or send
+// failure is returned so the caller can retry on a fresh port; a read timeout
+// skips loudly naming what was probed, because that is the platform verdict.
+// The env-validation half of the logging contract stays proven on every
+// platform.
+func probeLoopbackBroadcast(t *testing.T, port int) error {
 	t.Helper()
 	rx, err := logProbeSocket(fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
-		t.Fatalf("probe rx bind: %v", err)
+		return fmt.Errorf("probe rx bind: %w", err)
 	}
 	defer func() { _ = rx.Close() }()
 	tx, err := logProbeSocket("0.0.0.0:0")
 	if err != nil {
-		t.Fatalf("probe tx bind: %v", err)
+		return fmt.Errorf("probe tx bind: %w", err)
 	}
 	defer func() { _ = tx.Close() }()
 	dst := &net.UDPAddr{IP: net.IPv4(127, 255, 255, 255), Port: port}
 	_, err = tx.WriteToUDP([]byte("sup-kv log smoke probe"), dst)
 	if err != nil {
-		t.Fatalf("probe send to %s: %v", dst, err)
+		return fmt.Errorf("probe send to %s: %w", dst, err)
 	}
 	err = rx.SetReadDeadline(time.Now().Add(logProbeWait))
 	if err != nil {
-		t.Fatalf("probe read deadline: %v", err)
+		return fmt.Errorf("probe read deadline: %w", err)
 	}
 	buf := make([]byte, 64)
 	for {
@@ -667,7 +1951,27 @@ func probeLoopbackBroadcast(t *testing.T, port int) {
 			)
 		}
 		if n > 0 {
-			return
+			return nil
+		}
+	}
+}
+
+// probeLoopbackPort picks a private-band port and proves the loopback
+// broadcast capability on it. A bind or send failure on one candidate is the
+// pick-to-bind race class the allocator's private window narrows but cannot
+// erase against a transient off-suite holder; like probeBroadcastForm, the
+// probe retries on a fresh port instead of reporting the race as a capability
+// verdict. A persistent failure still fails the test.
+func probeLoopbackPort(t *testing.T) int {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		port := freeUDPPort(t)
+		err := probeLoopbackBroadcast(t, port)
+		if err == nil {
+			return port
+		}
+		if attempt >= probeAttempts {
+			t.Fatalf("loopback-broadcast probe could not bind a fresh port in %d attempts: %v", probeAttempts, err)
 		}
 	}
 }
@@ -688,6 +1992,7 @@ func startLogPair(t *testing.T, bin string, envA []string, portA, portB int) (no
 		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 		"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcA),
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	nodeB = startNode(t, bin, nil,
 		"--node-id=1",
@@ -696,6 +2001,7 @@ func startLogPair(t *testing.T, bin string, envA []string, portA, portB int) (no
 		"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 		"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcB),
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
 	return nodeA, nodeB
 }
@@ -710,11 +2016,11 @@ func TestLog_jsonDefault(t *testing.T) {
 	t.Parallel()
 	bin := smokeBinary(t)
 
-	portA, portB := freeUDPPort(t), freeUDPPort(t)
-	probeLoopbackBroadcast(t, portB)
+	portA := freeUDPPort(t)
+	portB := probeLoopbackPort(t)
 	nodeA, nodeB := startLogPair(t, bin, nil, portA, portB)
 
-	waitFor(t, servingDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
+	waitFor(t, logEventDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
 		return strings.Contains(nodeA.stderr.String(), "configuration error")
 	})
 
@@ -741,6 +2047,12 @@ func TestLog_jsonDefault(t *testing.T) {
 		}
 		if rec.Msg == "Replication adapter" && strings.Contains(rec.Detail, "configuration error") {
 			sawDetailEvent = true
+			// The level is part of the pinned catalog contract: the adapter
+			// tap renders the Spec-mandated duplicate-node-id entry at WARN,
+			// so a demoted tap fails here as well as in the level matrix.
+			if rec.Level != "WARN" {
+				t.Fatalf("the driven adapter record level = %q, want WARN: %+v", rec.Level, rec)
+			}
 			if !strings.Contains(rec.Detail, "node_id 1") {
 				t.Fatalf("the driven event's detail %q does not name node_id 1", rec.Detail)
 			}
@@ -758,11 +2070,11 @@ func TestLog_formatText(t *testing.T) {
 	t.Parallel()
 	bin := smokeBinary(t)
 
-	portA, portB := freeUDPPort(t), freeUDPPort(t)
-	probeLoopbackBroadcast(t, portB)
+	portA := freeUDPPort(t)
+	portB := probeLoopbackPort(t)
 	nodeA, nodeB := startLogPair(t, bin, []string{"SUPKV_LOG_FORMAT=text"}, portA, portB)
 
-	waitFor(t, servingDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
+	waitFor(t, logEventDeadline, "the DuplicateNodeID event in node A's stderr", func() bool {
 		return strings.Contains(nodeA.stderr.String(), "configuration error")
 	})
 
@@ -869,8 +2181,9 @@ func TestMetrics_optIn(t *testing.T) {
 		"--grpc-addr="+grpcAddr,
 		"--metrics-addr=127.0.0.1:"+strconv.Itoa(metricsPort),
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, grpcAddr, servingDeadline)
+	requireNodeServing(t, node, grpcAddr)
 
 	status, body := httpGetBody(t, metricsURL)
 	if status != http.StatusOK {
@@ -882,12 +2195,20 @@ func TestMetrics_optIn(t *testing.T) {
 		"supkv_replication_peers",
 		"supkv_replication_datagrams_sent_total",
 		"supkv_replication_datagrams_retransmitted_total",
+		"supkv_replication_datagrams_paced_total",
+		"supkv_replication_send_queue",
+		"supkv_replication_egress_dropped_total",
+		"supkv_replication_read_errors_total",
 		"supkv_datagrams_discarded_total",
 		"supkv_merges_conflicts_total",
 		"supkv_clock_drift_warnings_total",
 		"supkv_dumps_duration_seconds",
 		"supkv_dumps_total",
 		"supkv_dumps_errors_total",
+		"supkv_dumps_failures_total",
+		"supkv_dumps_unconfirmed_total",
+		"supkv_dump_load_total",
+		"supkv_dump_records_discarded_total",
 		"go_goroutines",
 		"process_cpu_seconds_total",
 	} {
@@ -914,6 +2235,10 @@ func TestMetrics_optIn(t *testing.T) {
 // bind aborts its startup and its awaitServing times out. The mechanism is
 // pure loopback TCP with per-node ports: portable to every matrix cell,
 // deliberately not /proc or socket enumeration.
+//
+// Decision 14.8 (ADR 0008): metrics stay off by default — this is the
+// binary-level pin of that decision (no listener without --metrics-addr or
+// SUPKV_METRICS_ADDR); the rendering half is TestStand_metricsByEffect.
 func TestMetrics_noDefaultListener(t *testing.T) {
 	t.Parallel()
 	bin := smokeBinary(t)
@@ -928,13 +2253,14 @@ func TestMetrics_noDefaultListener(t *testing.T) {
 			"--dump-path="+filepath.Join(t.TempDir(), "dump.json"),
 			"--grpc-addr=127.0.0.1:"+strconv.Itoa(grpcPort),
 			"--startup-gate=10ms",
+			"--startup-gate-empty=10ms",
 		), fmt.Sprintf("127.0.0.1:%d", grpcPort)
 	}
 	nodeA, addrA := launch(1)
 	nodeB, addrB := launch(2)
 
-	awaitServing(t, addrA, servingDeadline)
-	awaitServing(t, addrB, servingDeadline)
+	requireNodeServing(t, nodeA, addrA)
+	requireNodeServing(t, nodeB, addrB)
 	signalAndWaitExit(t, nodeA)
 	signalAndWaitExit(t, nodeB)
 }
@@ -1090,8 +2416,9 @@ func startMTLSNode(t *testing.T, bin string, certs metricsCertSuite, metricsPort
 		"--grpc-addr="+grpcAddr,
 		"--metrics-addr="+metricsAddr,
 		"--startup-gate=10ms",
+		"--startup-gate-empty=10ms",
 	)
-	awaitServing(t, grpcAddr, servingDeadline)
+	requireNodeServing(t, node, grpcAddr)
 	return node, metricsAddr
 }
 

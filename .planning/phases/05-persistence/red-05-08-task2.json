@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/app/persist/ -v -run '^Test(Flush|Snapshot|Restore)_timeout'",
+  "exitCode": 1,
+  "output": "=== RUN   TestFlush_timeout\n=== PAUSE TestFlush_timeout\n=== RUN   TestSnapshot_timeout\n=== PAUSE TestSnapshot_timeout\n=== RUN   TestRestore_timeoutReturnsPartial\n=== PAUSE TestRestore_timeoutReturnsPartial\n=== CONT  TestSnapshot_timeout\n=== CONT  TestRestore_timeoutReturnsPartial\n=== CONT  TestFlush_timeout\n=== NAME  TestSnapshot_timeout\n    timeout_test.go:374: Snapshot() did not return within the confirmation timeout\n=== NAME  TestFlush_timeout\n    timeout_test.go:330: Flush() did not return within its confirmation timeout\n--- FAIL: TestSnapshot_timeout (0.00s)\n--- FAIL: TestFlush_timeout (0.00s)\n=== NAME  TestRestore_timeoutReturnsPartial\n    timeout_test.go:415: Restore() did not return within the confirmation timeout\n--- FAIL: TestRestore_timeoutReturnsPartial (0.00s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/app/persist\t0.010s\nFAIL\n",
+  "targetTest": "TestFlush_timeout",
+  "targetFile": "internal/app/persist/timeout_test.go",
+  "expected": "Flush and FlushTimeout return ErrUnconfirmed at their own deadlines when the dumper never answers; Snapshot copies nothing; Restore returns the partial replay list with a distinguishable ErrUnconfirmed",
+  "actual": "Flush, Snapshot and Restore all block past their deadline: the flush waits are unbounded (the tests' timeout guards fire)",
+  "semanticAssessment": "All three target tests executed and failed on the planned assertion: the flushCh send and reply waits have no deadline, so a hung dumper parks Flush, Snapshot and Restore. No build, fixture or load failure; the failures are exactly the unbounded waits PERSIST-08 removes."
+}

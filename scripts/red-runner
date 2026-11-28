@@ -1,0 +1,425 @@
+#!/usr/bin/env bash
+#
+# red-runner — the D-01 expected-red gate for the phase-02 red tests.
+#
+# The phase's Critical-scenario red tests (R-01, R-02, R-03, P-01) live in
+# the normal test packages but skip unless SUPKV_RED_TESTS=1 (D-01), so the
+# ordinary `make test` gates stay green while the defects they pin are
+# unfixed. This script is the other half of the mechanism: it opens the
+# gate itself, runs the packages under `go test -race -count=1 -json`, and
+# asserts every row of the in-repo expectation table
+# (scripts/red-expectations.tsv) against the parsed events:
+#
+#   - a `red` row MUST have a fail event; a skip event (env gate failed to
+#     open) is an ERROR; no events at all (test missing/renamed) is an ERROR;
+#   - a `green` row MUST NOT have a fail event — this is the one-line flip
+#     Phases 3-5 make when a fix lands (expectation-table row only);
+#   - an unexpected failing test whose name is not an expected-red row is
+#     an ERROR, so a broken normal test can never hide behind the expected
+#     reds;
+#   - malformed table rows are an ERROR.
+#
+# Every run records evidence — the raw `go test -json` stream and a parsed
+# one-page summary (name -> action) — under
+# .planning/phases/02-stand-and-simulator-as-tests/red-evidence/<UTC ts>/.
+# Never overwrites an existing evidence directory.
+#
+# Security contract (T-2-01): the script parses only the JSON events of the
+# exact `go test` command it spawned, uses python3 stdlib json (no eval, no
+# shell interpolation of test output), treats unknown/missing names as
+# errors rather than silent passes, and never evaluates test output beyond
+# the Action/Test/Package fields. Plain-text greps over human output are
+# forbidden (review Pitfall 6: a grep would match `=== RUN` lines and
+# subtest output, letting a skipped or panicked test look "found").
+#
+# Plan 02-13 adds the D-02 mutation stage: two sed-edited copies of the
+# production sources are built through `go test -overlay` in a temp dir and
+# must make TestChaos_convergence FAIL on fixed corpus seeds, while the
+# un-mutated control run passes on the same seeds. Plan 03-12 generalizes
+# the stage to a per-mutant source: "sync without tombstones" mutates
+# internal/app/storage/store.go's Versions view (the 03-07 rewrite moved
+# tombstone visibility there), "periodic sync disabled" mutates
+# internal/app/repl/core.go's syncListing. The production tree is never
+# touched (the overlay maps the absolute repo path to the temp copy), a sed
+# no-op and a mutated copy that does not compile are errors, and the stage
+# is skippable with --skip-mutants for local iteration ONLY: the scheduled
+# job runs the full script without flags (plan 02-11).
+#
+# Usage: bash scripts/red-runner [--skip-mutants]   (also `make red-run`)
+
+set -euo pipefail
+
+# --skip-mutants is for local iteration only; the scheduled job (plan 02-11)
+# runs the script without flags so the mutation probes always execute there.
+SKIP_MUTANTS=false
+if [ "$#" -gt 0 ]; then
+	if [ "$#" -eq 1 ] && [ "$1" = "--skip-mutants" ]; then
+		SKIP_MUTANTS=true
+	else
+		echo "usage: bash scripts/red-runner [--skip-mutants]" >&2
+		exit 2
+	fi
+fi
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || { cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd; })"
+TABLE="$ROOT/scripts/red-expectations.tsv"
+EVIDENCE_ROOT="$ROOT/.planning/phases/02-stand-and-simulator-as-tests/red-evidence"
+
+# Packages that contain red tests. Extend as later plans land more red
+# tests (02-05 added ./internal/stand/ with R-01/R-02/R-03; 02-12 adds
+# ./internal/persistfile/ with the P-01 engine test). The table carries no
+# package column, so the list stays here with this comment.
+PACKAGES=(
+	./internal/grpcapi/
+	./internal/stand/
+	./internal/persistfile/
+)
+
+# ---------------------------------------------------------------------------
+# D-02 mutation stage (plan 02-13): overlay probes, never in-place edits.
+# ---------------------------------------------------------------------------
+MUTANT_PACKAGE="./internal/app/repl/"
+MUTANT_TEST='^TestChaos_convergence$'
+MUTANT_CORPUS="$ROOT/internal/app/repl/testdata/chaos-seeds.txt"
+
+# Per-mutant sources (plan 03-12): each mutant names the file its mutator
+# edits. The two live in different packages — the tombstone mutant rides the
+# store's Versions view while the periodic-sync mutant rides the core's
+# syncListing — so the overlay key, the compile check and the clean-tree
+# check all follow the mutant's own source. Repo-relative, never absolute.
+MUTANT_SRC_SYNC_WITHOUT_TOMBSTONES="internal/app/storage/store.go"
+MUTANT_SRC_PERIODIC_SYNC_DISABLED="internal/app/repl/core.go"
+MUTANT_SOURCES=(
+	"$MUTANT_SRC_SYNC_WITHOUT_TOMBSTONES"
+	"$MUTANT_SRC_PERIODIC_SYNC_DISABLED"
+)
+
+# Fixed corpus seeds the stabilized chaos test must survive (the control arm)
+# and that each mutant must be KILLED by. The kill lists are per mutant
+# because their sensitivity differs. Re-scanned exhaustively against all 16
+# committed corpus seeds on 2026-11-22 (plan 03-12, after the tombstone
+# mutant moved to storage.Versions): "sync without tombstones" is killed by
+# exactly one seed (848612892191557850 — the tombstone listing is only
+# load-bearing when a node never held the key at all, so the newer-flooding
+# reply cannot heal it). Re-scanned again on 2026-11-22 (plan 04-13, after
+# first-seen listings landed): the first-seen targeted listing is now an
+# independent reconciliation path (RESEARCH Pitfall 7), so "periodic sync
+# disabled" survives on 15 of the 16 corpus seeds and is killed by exactly
+# one — 848612892191557850, the seed where the periodic broadcast is still
+# load-bearing. Every seed below is a verified kill for its mutant; the
+# control passes on every corpus seed and on the union below.
+MUTANT_SEEDS_SYNC_WITHOUT_TOMBSTONES=(848612892191557850)
+MUTANT_SEEDS_PERIODIC_SYNC_DISABLED=(848612892191557850)
+CONTROL_SEEDS=(
+	848612892191557850
+	8612631937004137123
+	5033908244225396622
+	5619387756189613155
+)
+
+# mutate_sync_without_tombstones SRC DST — "sync without tombstones": the
+# store's Versions view drops every Deleted record, so the listing built
+# from it can never reconcile a delete. The 03-07 rewrite moved the listing
+# to the shallow Versions view (which carries no Deleted flag), so the
+# original core.go sed no longer matched; the mutant lives at the source of
+# tombstone visibility instead (RESEARCH Pitfall 1 / Pattern 11). The sed
+# matches the landed single-line write; the runner asserts the edit changed
+# the file and that the mutated copy compiles.
+mutate_sync_without_tombstones() {
+	sed 's|out\[key\] = rec.Version|if !rec.Deleted { out[key] = rec.Version }|' "$1" >"$2"
+}
+
+# mutate_periodic_sync_disabled SRC DST — "periodic sync disabled": the
+# timer path of Core.syncListing advances nextSync and returns before the
+# emission, while the startup listing (nextSync still zero) is preserved.
+# The landed 03-07 shape is the same two-line gate-and-return the 02-13 sed
+# targeted; the sed rewrites the timer gate first, then replaces the guarded
+# return with nextSync advance + return, so the driver's deadline keeps
+# moving — a mutant that left nextSync in the past would livelock the
+# scheduler instead of failing the test. The replacement uses a literal
+# backslash-newline so BSD sed produces the same two-line body as GNU sed.
+mutate_periodic_sync_disabled() {
+	sed '/if !c.nextSync.IsZero() && now.Before(c.nextSync) {/{
+		s|if !c.nextSync.IsZero() && now.Before(c.nextSync) {|if !c.nextSync.IsZero() {|
+		n
+		s|return|c.nextSync = now.Add(c.cfg.SyncInterval)\
+		return|
+	}' "$1" >"$2"
+}
+
+# require_corpus_seed fails the run when a probe seed is not in the committed
+# corpus — a typo must never silently probe a non-corpus seed.
+require_corpus_seed() {
+	local seed="$1"
+	if ! grep -qx -- "$seed" "$MUTANT_CORPUS"; then
+		echo "red-runner: mutant seed $seed is not in the committed corpus $MUTANT_CORPUS" >&2
+		exit 1
+	fi
+}
+
+# control_probe runs the un-mutated test on every seed: the control arm the
+# mutant kills are measured against.
+control_probe() {
+	local summary="$1"
+	shift
+	local seed
+	for seed in "$@"; do
+		if SUPKV_SIM_SEED="$seed" go test -count=1 -timeout 120s "$MUTANT_PACKAGE" -run "$MUTANT_TEST" >"$TMP/control-$seed.log" 2>&1; then
+			printf 'control\t-\t%s\tpass\tpass\tOK\n' "$seed" >>"$summary"
+		else
+			echo "red-runner: control run FAILED on seed $seed — the mutant comparison is invalid" >&2
+			printf 'control\t-\t%s\tpass\tfail\tERROR\n' "$seed" >>"$summary"
+			exit 1
+		fi
+	done
+}
+
+# mutant_probe builds one mutant through a temp-dir copy + overlay JSON and
+# asserts it KILLS the test on every seed. source is the mutant's repo-relative
+# production source: the copy keeps its base name (under $dir and
+# $dir/mutated), the overlay maps the absolute repo path to the mutated copy,
+# and the compile check spans the package the source belongs to. A passing
+# mutant, a failing control, a sed no-op and a mutated copy that does not
+# compile all exit 1 naming the mutant and its source; a timeout is rejected
+# too (an infinite loop is not a test kill). Nonzero from go test under the
+# mutant is the EXPECTED verdict.
+mutant_probe() {
+	local name="$1"
+	local source="$2"
+	local mutator="$3"
+	local summary="$4"
+	shift 4
+	local base
+	base="$(basename "$source")"
+	local dir="$TMP/mutant-$name"
+	mkdir -p "$dir/mutated"
+	cp "$ROOT/$source" "$dir/$base"
+	"$mutator" "$dir/$base" "$dir/mutated/$base"
+	if cmp -s "$dir/$base" "$dir/mutated/$base"; then
+		echo "red-runner: mutant $name: sed edit of $source was a NO-OP — the target source no longer matches" >&2
+		exit 1
+	fi
+	printf '{"Replace": {"%s/%s": "%s/mutated/%s"}}\n' "$ROOT" "$source" "$dir" "$base" >"$dir/overlay.json"
+	if ! go test -overlay="$dir/overlay.json" -c -o "$dir/mutant.test" "$MUTANT_PACKAGE" >"$dir/build.log" 2>&1; then
+		echo "red-runner: mutant $name: mutated copy of $source does NOT COMPILE (see $dir/build.log)" >&2
+		exit 1
+	fi
+	local seed
+	for seed in "$@"; do
+		if SUPKV_SIM_SEED="$seed" go test -overlay="$dir/overlay.json" -count=1 -timeout 120s "$MUTANT_PACKAGE" -run "$MUTANT_TEST" >"$dir/$seed.log" 2>&1; then
+			echo "red-runner: mutant $name: PASSED on seed $seed — the stabilized chaos test no longer bites" >&2
+			printf 'mutant\t%s\t%s\tfail\tpass\tERROR\n' "$name" "$seed" >>"$summary"
+			exit 1
+		fi
+		if grep -q "panic: test timed out" "$dir/$seed.log"; then
+			echo "red-runner: mutant $name: TIMED OUT on seed $seed — an infinite loop is not a test kill" >&2
+			printf 'mutant\t%s\t%s\tfail\ttimeout\tERROR\n' "$name" "$seed" >>"$summary"
+			exit 1
+		fi
+		printf 'mutant\t%s\t%s\tfail\tfail\tOK\n' "$name" "$seed" >>"$summary"
+		echo "red-runner: mutant $name: seed $seed killed (expected fail)"
+	done
+}
+
+# assert_mutant_sources_clean fails the run when any mutant's production
+# source differs from HEAD at the named phase. The stage only reads the
+# production tree; a dirty source invalidates the comparison and is never
+# auto-cleaned.
+assert_mutant_sources_clean() {
+	local phase="$1"
+	local source
+	for source in "${MUTANT_SOURCES[@]}"; do
+		if [ -n "$(git -C "$ROOT" status --porcelain -- "$source")" ]; then
+			echo "red-runner: mutation stage requires a clean $source $phase (only temp-dir copies may differ from HEAD)" >&2
+			exit 1
+		fi
+	done
+}
+
+# run_mutation_stage asserts the clean-tree contract, records the verdicts in
+# the run's evidence summary, and fails the run on any deviation. The
+# production tree is read-only throughout: only temp-dir copies differ from
+# HEAD, and the pre/post git-status checks over every mutant source prove it.
+run_mutation_stage() {
+	local summary="$1"
+	local seed
+	assert_mutant_sources_clean "before it runs"
+	for seed in "${CONTROL_SEEDS[@]}" \
+		"${MUTANT_SEEDS_SYNC_WITHOUT_TOMBSTONES[@]}" \
+		"${MUTANT_SEEDS_PERIODIC_SYNC_DISABLED[@]}"; do
+		require_corpus_seed "$seed"
+	done
+	{
+		printf '\n# mutation stage (D-02 overlay probes)\n'
+		printf 'probe\tname\tseed\texpected\tobserved\tverdict\n'
+	} >>"$summary"
+	control_probe "$summary" "${CONTROL_SEEDS[@]}"
+	mutant_probe "sync-without-tombstones" "$MUTANT_SRC_SYNC_WITHOUT_TOMBSTONES" \
+		mutate_sync_without_tombstones "$summary" \
+		"${MUTANT_SEEDS_SYNC_WITHOUT_TOMBSTONES[@]}"
+	mutant_probe "periodic-sync-disabled" "$MUTANT_SRC_PERIODIC_SYNC_DISABLED" \
+		mutate_periodic_sync_disabled "$summary" \
+		"${MUTANT_SEEDS_PERIODIC_SYNC_DISABLED[@]}"
+	assert_mutant_sources_clean "after the stage"
+	echo "red-runner: mutation stage green — every mutant killed the stabilized chaos test; control passed"
+}
+
+if [ ! -f "$TABLE" ]; then
+	echo "red-runner: expectation table not found: $TABLE" >&2
+	exit 1
+fi
+
+# D-01: the runner ALWAYS opens the red gate itself. A red test that skips
+# is an error downstream (the parser treats a skip for an expected-red name
+# as an error), so a lost export can never masquerade as a green run.
+export SUPKV_RED_TESTS=1
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+JSON_OUT="$TMP/go-test.json"
+GO_TEST_ERR="$TMP/go-test.stderr"
+SUMMARY_OUT="$TMP/summary.txt"
+
+echo "red-runner: SUPKV_RED_TESTS=1 go test -p 1 -race -count=1 -json ${PACKAGES[*]}"
+# The red run's own exit code is NOT trusted (D-01): red tests are expected
+# to fail, so nonzero is normal. The expectation check below decides.
+#
+# -p 1 serializes the packages: the stand red scenarios assert wall-clock
+# pacing and throughput bounds and must own the machine (stand_red_test.go's
+# file doc) — a sibling package's race-instrumented build and test load
+# would corrupt the measurement the red verdict reads.
+go test -p 1 -race -count=1 -json "${PACKAGES[@]}" >"$JSON_OUT" 2>"$GO_TEST_ERR" || true
+if [ -s "$GO_TEST_ERR" ]; then
+	echo "red-runner: go test stderr (diagnostic):" >&2
+	cat "$GO_TEST_ERR" >&2
+fi
+
+# Evidence directory: one UTC-stamped directory per run, never overwritten.
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+EVIDENCE_DIR="$EVIDENCE_ROOT/$STAMP"
+SUFFIX=2
+while [ -e "$EVIDENCE_DIR" ]; do
+	EVIDENCE_DIR="$EVIDENCE_ROOT/$STAMP-$SUFFIX"
+	SUFFIX=$((SUFFIX + 1))
+done
+mkdir -p "$EVIDENCE_ROOT"
+mkdir "$EVIDENCE_DIR"
+
+set +e
+python3 - "$JSON_OUT" "$TABLE" "$SUMMARY_OUT" <<'PY'
+import json
+import sys
+
+json_path, table_path, summary_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# Actions seen per test name, from the events of exactly one
+# `go test -json` run. Only Action/Test/Package are consumed.
+actions = {}
+packages = {}
+with open(json_path, encoding="utf-8") as stream:
+    for line in stream:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        name = event.get("Test")
+        action = event.get("Action")
+        if not name or action not in ("run", "pass", "fail", "skip"):
+            continue
+        actions.setdefault(name, set()).add(action)
+        if event.get("Package"):
+            packages.setdefault(name, set()).add(event["Package"])
+
+errors = []
+rows = []
+table_names = set()
+with open(table_path, encoding="utf-8") as table:
+    for number, raw in enumerate(table, 1):
+        row = raw.rstrip("\n")
+        if not row or row.startswith("#"):
+            continue
+        parts = row.split("\t")
+        if len(parts) != 2 or parts[1] not in ("red", "green") or not parts[0]:
+            errors.append(f"malformed expectation row at line {number}: {row!r}")
+            continue
+        rows.append((parts[0], parts[1]))
+        table_names.add(parts[0])
+
+summary = ["test\texpected\tobserved\tpackage\tverdict"]
+for name, want in rows:
+    observed = actions.get(name)
+    pkg = ",".join(sorted(packages.get(name, {"(unknown)"})))
+    if observed is None:
+        errors.append(
+            f"{name}: expected {want}, but no test event was found at all "
+            f"(test missing or renamed?) [{pkg}]"
+        )
+        summary.append(f"{name}\t{want}\tabsent\t{pkg}\tERROR")
+        continue
+    observed_str = ",".join(sorted(observed))
+    if want == "red":
+        if "skip" in observed:
+            errors.append(
+                f"{name}: expected red, got skip — the SUPKV_RED_TESTS env "
+                f"gate failed to open [{pkg}]"
+            )
+            verdict = "ERROR"
+        elif "fail" not in observed:
+            errors.append(
+                f"{name}: expected red, no fail event among observed "
+                f"actions ({observed_str}) [{pkg}]"
+            )
+            verdict = "ERROR"
+        else:
+            verdict = "OK"
+    else:  # green
+        if "fail" in observed:
+            errors.append(f"{name}: expected green, got fail [{pkg}]")
+            verdict = "ERROR"
+        else:
+            verdict = "OK"
+    summary.append(f"{name}\t{want}\t{observed_str}\t{pkg}\t{verdict}")
+
+# Unexpected red: a failing test whose name is not an expected-red row
+# (subtests of a table row count as its own, so a failing subtest of a
+# known red test does not double-report).
+for name, observed in sorted(actions.items()):
+    if "fail" not in observed:
+        continue
+    known = name in table_names or any(
+        name.startswith(known_name + "/") for known_name in table_names
+    )
+    if known:
+        continue
+    pkg = ",".join(sorted(packages.get(name, {"(unknown)"})))
+    errors.append(
+        f"{name}: unexpected failing test — not in the expectation table [{pkg}]"
+    )
+    summary.append(f"{name}\t(not in table)\t{','.join(sorted(observed))}\t{pkg}\tERROR")
+
+with open(summary_path, "w", encoding="utf-8") as out:
+    out.write("\n".join(summary) + "\n")
+
+for err in errors:
+    print(f"red-runner: {err}", file=sys.stderr)
+print(f"red-runner: {len(rows)} expectation row(s) checked, {len(errors)} error(s)")
+sys.exit(1 if errors else 0)
+PY
+RC=$?
+set -e
+
+mv "$JSON_OUT" "$EVIDENCE_DIR/go-test.json"
+cp "$SUMMARY_OUT" "$EVIDENCE_DIR/summary.txt"
+if [ "$RC" -ne 0 ]; then
+	echo "red-runner: expectation check FAILED — offending rows are above" >&2
+	exit 1
+fi
+if [ "$SKIP_MUTANTS" = "true" ]; then
+	echo "red-runner: --skip-mutants: mutation stage skipped (local iteration only; the scheduled job runs the full script)"
+else
+	run_mutation_stage "$EVIDENCE_DIR/summary.txt"
+fi
+echo "red-runner: evidence written to $EVIDENCE_DIR (go-test.json, summary.txt)"

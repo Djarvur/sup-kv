@@ -72,8 +72,16 @@ func readmeSkipDarwin(t *testing.T) {
 // with the pinned grpcurl on PATH, the combined output must carry the base64
 // value the quickstart writes (the write/replication round-trip), and the
 // README must link the two docs (D-02).
+//
+// The walkthrough is serialized on purpose: it drives bash -e plus the
+// `go tool grpcurl` shim and competes with this package's process-spawning
+// tests, so running it beside those siblings produced empty tool captures
+// under compile load (04-protocol/deferred-items.md). The per-block budget
+// (docBlockBudget) and the process-group reap still bound a genuinely
+// wedged block; only the explicit parallel marker is gone.
+//
+//nolint:paralleltest // serialized on purpose: the grpcurl walkthrough competes with the package's process-spawning tests and stalls under compile load (doc comment).
 func TestReadmeQuickstart(t *testing.T) {
-	t.Parallel()
 	raw, err := os.ReadFile(readmeDocPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", readmeDocPath, err)

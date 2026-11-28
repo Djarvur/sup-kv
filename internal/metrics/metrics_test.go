@@ -11,13 +11,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/Djarvur/sup-kv/internal/app/persist"
 	"github.com/Djarvur/sup-kv/internal/app/repl"
 	"github.com/Djarvur/sup-kv/internal/metrics"
-	"github.com/Djarvur/sup-kv/internal/udprepl"
+	"github.com/Djarvur/sup-kv/internal/port"
 )
 
 // renderTo renders families into a string, failing the test on a write
@@ -192,12 +193,24 @@ var families = []struct {
 	{"supkv_replication_peers", "gauge"},
 	{"supkv_replication_datagrams_sent_total", "counter"},
 	{"supkv_replication_datagrams_retransmitted_total", "counter"},
+	{"supkv_replication_datagrams_paced_total", "counter"},
+	{"supkv_replication_send_queue", "gauge"},
+	{"supkv_replication_egress_dropped_total", "counter"},
+	{"supkv_replication_read_errors_total", "counter"},
+	{"supkv_replication_listings_dropped_total", "counter"},
+	{"supkv_replication_sync_streams_dropped_total", "counter"},
+	{"supkv_replication_listed_keys_evicted_total", "counter"},
+	{"supkv_replication_notifications_regressed_total", "counter"},
 	{"supkv_datagrams_discarded_total", "counter"},
 	{"supkv_merges_conflicts_total", "counter"},
 	{"supkv_clock_drift_warnings_total", "counter"},
 	{"supkv_dumps_duration_seconds", "gauge"},
 	{"supkv_dumps_total", "counter"},
 	{"supkv_dumps_errors_total", "counter"},
+	{"supkv_dumps_failures_total", "counter"},
+	{"supkv_dumps_unconfirmed_total", "counter"},
+	{"supkv_dump_load_total", "counter"},
+	{"supkv_dump_records_discarded_total", "counter"},
 	{"go_goroutines", "gauge"},
 	{"go_memstats_alloc_bytes", "gauge"},
 	{"go_memstats_sys_bytes", "gauge"},
@@ -212,10 +225,20 @@ func zeroSources() metrics.Sources {
 		Discards:      func() repl.DiscardStats { return repl.DiscardStats{} },
 		KnownPeers:    func() uint64 { return 0 },
 		Unacked:       func() repl.UnackedStats { return repl.UnackedStats{} },
-		Sent:          func() udprepl.SentByType { return udprepl.SentByType{} },
+		Sent:          func() repl.SentByType { return repl.SentByType{} },
 		Retransmitted: func() uint64 { return 0 },
 		MergeStats:    func() repl.MergeStats { return repl.MergeStats{} },
 		DumpStats:     func() persist.DumpStats { return persist.DumpStats{} },
+		LoadStats:     func() persist.LoadStats { return persist.LoadStats{} },
+		Paced:         func() uint64 { return 0 },
+		SendQueue:     func() int { return 0 },
+		EgressDropped: func() uint64 { return 0 },
+		ReadErrors:    func() uint64 { return 0 },
+
+		ListingDropped:         func() uint64 { return 0 },
+		SyncStreamDropped:      func() uint64 { return 0 },
+		ListedKeysEvicted:      func() uint64 { return 0 },
+		NotificationsRegressed: func() uint64 { return 0 },
 	}
 }
 
@@ -241,16 +264,43 @@ func TestMetrics_families(t *testing.T) {
 		"supkv_replication_unacked_oldest_age_seconds 0\n",
 		"supkv_replication_peers 0\n",
 		"supkv_replication_datagrams_retransmitted_total 0\n",
+		"supkv_replication_datagrams_paced_total 0\n",
+		"supkv_replication_send_queue 0\n",
+		"supkv_replication_egress_dropped_total 0\n",
+		"supkv_replication_read_errors_total 0\n",
+		"supkv_replication_listings_dropped_total 0\n",
+		"supkv_replication_sync_streams_dropped_total 0\n",
+		"supkv_replication_listed_keys_evicted_total 0\n",
+		"supkv_replication_notifications_regressed_total 0\n",
 		"supkv_merges_conflicts_total 0\n",
 		"supkv_clock_drift_warnings_total 0\n",
 		"supkv_dumps_duration_seconds 0\n",
 		"supkv_dumps_total 0\n",
 		"supkv_dumps_errors_total 0\n",
+		"supkv_dumps_failures_total{class=\"disk_full\"} 0\n",
+		"supkv_dumps_failures_total{class=\"permission\"} 0\n",
+		"supkv_dumps_failures_total{class=\"other\"} 0\n",
+		"supkv_dumps_unconfirmed_total 0\n",
+		"supkv_dump_load_total{outcome=\"prompt\"} 0\n",
+		"supkv_dump_load_total{outcome=\"main\"} 0\n",
+		"supkv_dump_load_total{outcome=\"backup\"} 0\n",
+		"supkv_dump_load_total{outcome=\"unusable\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"checksum\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"version\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"value_limit\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"malformed\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"bad_crc\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"undecodable\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"bad_proto_version\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"own_broadcast\"} 0\n",
 		"supkv_datagrams_discarded_total{class=\"duplicate_node_id\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"unbound_listing\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"empty_key\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"key_too_long\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"tombstone_with_data\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"bad_checksum\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"bad_version\"} 0\n",
+		"supkv_datagrams_discarded_total{class=\"bad_sync_header\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"hello\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"data\"} 0\n",
 		"supkv_replication_datagrams_sent_total{type=\"ack\"} 0\n",
@@ -259,6 +309,133 @@ func TestMetrics_families(t *testing.T) {
 	} {
 		if !strings.Contains(out, line) {
 			t.Errorf("zero-state output lacks the sample line %q:\n%s", line, out)
+		}
+	}
+}
+
+// otherSample extracts the class="other" dump-failure value from a rendered
+// snapshot, failing when the sample is absent or unparsable.
+func otherSample(t *testing.T, out string) float64 {
+	t.Helper()
+	const prefix = `supkv_dumps_failures_total{class="other"} `
+	for line := range strings.SplitSeq(out, "\n") {
+		value, ok := strings.CutPrefix(line, prefix)
+		if !ok {
+			continue
+		}
+		sample, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			t.Fatalf("parse %q: %v", line, err)
+		}
+		return sample
+	}
+	t.Fatalf("rendered snapshot lacks %q:\n%s", prefix, out)
+	return 0
+}
+
+// TestMetrics_dumpOtherMonotone is the IN-03 regression: a failed dump
+// increments its error total before it classifies the failure, so a scrape
+// can land between the two increments. The "other" sample must be the
+// explicitly counted class, never Errors minus the other classes — the
+// derived form renders 1 on the first scrape and 0 once any class increment
+// lands, a counter decrease that rate()/increase() interpret as a reset.
+// These three snapshots replay that faithful window: the class increment has
+// not happened, then disk_full lands while other is still uncounted (the
+// derived series drops 1→0, the counted one stays 0→0), then the explicitly
+// counted unclassified failure settles other at 1.
+func TestMetrics_dumpOtherMonotone(t *testing.T) {
+	t.Parallel()
+	scrapes := []persist.DumpStats{
+		{Total: 1, Errors: 1},              // between the error total and the class increment
+		{Total: 1, Errors: 1, DiskFull: 1}, // a class increment landed; other is still uncounted
+		{Other: 1},                         // the explicitly counted unclassified failure
+	}
+	previous := -1.0
+	for i, stats := range scrapes {
+		src := zeroSources()
+		src.DumpStats = func() persist.DumpStats { return stats }
+		got := otherSample(t, renderTo(t, metrics.Snapshot(src)))
+		if got < previous {
+			t.Fatalf("scrape %d rendered class=\"other\" = %v after %v — a counter decrease reads as a reset",
+				i, got, previous)
+		}
+		previous = got
+	}
+	if previous != 1 {
+		t.Errorf("the settled scrape rendered class=\"other\" = %v, want 1", previous)
+	}
+}
+
+// TestMetrics_values pins the by-effect half of the metrics surface: Sources
+// carrying nonzero readings render those exact values — the four XPORT-07
+// emission families, the four routed Phase-4 counters and the five
+// wire-validation discard classes. A wiring mistake that swapped two
+// accessors, or a family still rendering a constant zero, fails here even
+// though TestMetrics_families (the zero-state contract) would pass.
+func TestMetrics_values(t *testing.T) {
+	t.Parallel()
+	src := zeroSources()
+	src.Discards = func() repl.DiscardStats {
+		return repl.DiscardStats{
+			EmptyKey:          11,
+			KeyTooLong:        12,
+			TombstoneWithData: 13,
+			BadChecksum:       14,
+			BadVersion:        15,
+			BadSyncHeader:     16,
+			UnboundListing:    17,
+		}
+	}
+	src.Paced = func() uint64 { return 7001 }
+	src.SendQueue = func() int { return 23 }
+	src.EgressDropped = func() uint64 { return 3 }
+	src.ReadErrors = func() uint64 { return 5 }
+	src.ListingDropped = func() uint64 { return 18 }
+	src.SyncStreamDropped = func() uint64 { return 19 }
+	src.ListedKeysEvicted = func() uint64 { return 20 }
+	src.NotificationsRegressed = func() uint64 { return 21 }
+	src.DumpStats = func() persist.DumpStats {
+		return persist.DumpStats{Errors: 6, DiskFull: 2, Permission: 3, Other: 1, Unconfirmed: 4}
+	}
+	src.LoadStats = func() persist.LoadStats {
+		return persist.LoadStats{
+			Loaded:  true,
+			Outcome: port.LoadBackup,
+			Decoded: persist.DecodeStats{Checksum: 2, Version: 3, ValueLimit: 4, Malformed: 5},
+		}
+	}
+	out := renderTo(t, metrics.Snapshot(src))
+	for _, line := range []string{
+		"supkv_replication_datagrams_paced_total 7001\n",
+		"supkv_replication_send_queue 23\n",
+		"supkv_replication_egress_dropped_total 3\n",
+		"supkv_replication_read_errors_total 5\n",
+		"supkv_replication_listings_dropped_total 18\n",
+		"supkv_replication_sync_streams_dropped_total 19\n",
+		"supkv_replication_listed_keys_evicted_total 20\n",
+		"supkv_replication_notifications_regressed_total 21\n",
+		"supkv_dumps_failures_total{class=\"disk_full\"} 2\n",
+		"supkv_dumps_failures_total{class=\"permission\"} 3\n",
+		"supkv_dumps_failures_total{class=\"other\"} 1\n",
+		"supkv_dumps_unconfirmed_total 4\n",
+		"supkv_dump_load_total{outcome=\"prompt\"} 0\n",
+		"supkv_dump_load_total{outcome=\"main\"} 0\n",
+		"supkv_dump_load_total{outcome=\"backup\"} 1\n",
+		"supkv_dump_load_total{outcome=\"unusable\"} 0\n",
+		"supkv_dump_records_discarded_total{class=\"checksum\"} 2\n",
+		"supkv_dump_records_discarded_total{class=\"version\"} 3\n",
+		"supkv_dump_records_discarded_total{class=\"value_limit\"} 4\n",
+		"supkv_dump_records_discarded_total{class=\"malformed\"} 5\n",
+		"supkv_datagrams_discarded_total{class=\"empty_key\"} 11\n",
+		"supkv_datagrams_discarded_total{class=\"key_too_long\"} 12\n",
+		"supkv_datagrams_discarded_total{class=\"tombstone_with_data\"} 13\n",
+		"supkv_datagrams_discarded_total{class=\"bad_checksum\"} 14\n",
+		"supkv_datagrams_discarded_total{class=\"bad_version\"} 15\n",
+		"supkv_datagrams_discarded_total{class=\"bad_sync_header\"} 16\n",
+		"supkv_datagrams_discarded_total{class=\"unbound_listing\"} 17\n",
+	} {
+		if !strings.Contains(out, line) {
+			t.Errorf("output lacks the by-effect sample line %q:\n%s", line, out)
 		}
 	}
 }

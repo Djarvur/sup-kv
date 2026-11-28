@@ -12,12 +12,26 @@ import (
 	"github.com/Djarvur/sup-kv/internal/app/version"
 )
 
-// expectedDrift is the documented drift convention as a model: evaluated on
-// the pre-event state, the exact signed divergence when l and the wall clock
-// are apart beyond warn in either direction, zero within tolerance (positive
-// when l runs ahead, negative on a forward wall-clock jump).
-func expectedDrift(lBefore, ptBefore int64, warn time.Duration) time.Duration {
+// expectedTickDrift is the documented Tick drift convention as a model:
+// evaluated on the pre-event state, the exact signed divergence when the
+// clock's l and the wall clock are apart beyond warn in either direction,
+// zero within tolerance (positive when l runs ahead, negative on a forward
+// wall-clock jump).
+func expectedTickDrift(lBefore, ptBefore int64, warn time.Duration) time.Duration {
 	dMs := (lBefore - ptBefore) * int64(time.Millisecond)
+	if dMs > int64(warn) || dMs < -int64(warn) {
+		return time.Duration(dMs)
+	}
+	return 0
+}
+
+// expectedUpdateDrift is the documented Update drift convention as a model:
+// the RECEIVED reading against the pre-event wall clock — never the local l
+// — the exact signed divergence when they are apart beyond warn in either
+// direction, zero within tolerance (positive when the received version leads
+// the wall, negative on a forward wall-clock jump past it).
+func expectedUpdateDrift(remoteL, ptBefore int64, warn time.Duration) time.Duration {
+	dMs := (remoteL - ptBefore) * int64(time.Millisecond)
 	if dMs > int64(warn) || dMs < -int64(warn) {
 		return time.Duration(dMs)
 	}
@@ -27,11 +41,12 @@ func expectedDrift(lBefore, ptBefore int64, warn time.Duration) time.Duration {
 // TestClock_monotonic drives a 2000-step adversarial walk (backward and
 // forward jumps, stuck clocks) where every step is a random Tick or an
 // Update with a remote reading near the current state: every returned
-// (l, counter) is strictly greater than the previous one, and the drift
-// signal matches the documented sign convention at every step. A concurrent
-// subtest hammers one clock from parallel Tick/Update callers and checks
-// every caller's own readings stay monotonic with zero race-detector
-// findings (VERS-03, TEST-02).
+// (l, counter) is strictly greater than the previous one, and each op's
+// drift signal matches its own documented convention — Tick against the
+// clock's l, Update against the received reading. A concurrent subtest
+// hammers one clock from parallel Tick/Update callers and checks every
+// caller's own readings stay monotonic with zero race-detector findings
+// (VERS-03, TEST-02, OBSV-05).
 func TestClock_monotonic(t *testing.T) {
 	t.Parallel()
 	t.Run("sequential adversarial walk", func(t *testing.T) {
@@ -46,20 +61,22 @@ func TestClock_monotonic(t *testing.T) {
 			nowMs = nextWallTime(rng, nowMs)
 			lBefore, ptBefore := prev.l, nowMs
 			got := reading{}
-			var drift time.Duration
+			var drift, wantDrift time.Duration
 			if rng.IntN(2) == 0 {
 				got.l, got.counter, drift = clk.Tick()
+				wantDrift = expectedTickDrift(lBefore, ptBefore, testDriftWarn)
 			} else {
 				remoteL := max(0, prev.l+rng.Int64N(5)-2)
 				got.l, got.counter, drift = clk.Update(remoteL, uint16(rng.IntN(testCounterMax+1)))
+				wantDrift = expectedUpdateDrift(remoteL, ptBefore, testDriftWarn)
 			}
 			if havePrev && !got.after(prev) {
 				t.Fatalf("step %d = (%d, %d), want strictly after (%d, %d) (replay with the property seed above)",
 					i+1, got.l, got.counter, prev.l, prev.counter)
 			}
-			if want := expectedDrift(lBefore, ptBefore, testDriftWarn); drift != want {
+			if drift != wantDrift {
 				t.Fatalf("step %d drift = %v, want %v for pre-state (l=%d, pt=%d) (replay with the property seed above)",
-					i+1, drift, want, lBefore, ptBefore)
+					i+1, drift, wantDrift, lBefore, ptBefore)
 			}
 			prev = got
 			havePrev = true
@@ -274,9 +291,11 @@ func TestClock_restartProperty(t *testing.T) {
 }
 
 // TestClock_driftUnderChaos proves both drift signs are observable on a long
-// adversarial walk with DriftWarn 60s, and that the signal is exactly zero
-// whenever the pre-event state is within DriftWarn of the wall clock with no
-// jump beyond it in either direction (VERS-05, TEST-02).
+// adversarial walk with DriftWarn 60s — a backward wall jump makes the
+// received reading lead (positive) and a forward jump makes the wall lead
+// (negative) — and that each op's signal is exactly zero whenever its own
+// operand is within DriftWarn of the wall clock: Tick's l, Update's received
+// reading (VERS-05, TEST-02, OBSV-05).
 func TestClock_driftUnderChaos(t *testing.T) {
 	t.Parallel()
 	rng := testutil.NewRNG(t)
@@ -290,16 +309,18 @@ func TestClock_driftUnderChaos(t *testing.T) {
 		nowMs = nextWallTime(rng, nowMs)
 		lBefore, ptBefore := lastL, nowMs
 		got := reading{}
-		var drift time.Duration
+		var drift, wantDrift time.Duration
 		if rng.IntN(2) == 0 {
 			got.l, got.counter, drift = clk.Tick()
+			wantDrift = expectedTickDrift(lBefore, ptBefore, testDriftWarn)
 		} else {
 			remoteL := max(0, lastL+rng.Int64N(5)-2)
 			got.l, got.counter, drift = clk.Update(remoteL, uint16(rng.IntN(testCounterMax+1)))
+			wantDrift = expectedUpdateDrift(remoteL, ptBefore, testDriftWarn)
 		}
-		if want := expectedDrift(lBefore, ptBefore, testDriftWarn); drift != want {
+		if drift != wantDrift {
 			t.Fatalf("step %d drift = %v, want %v for pre-state (l=%d, pt=%d) (replay with the property seed above)",
-				i+1, drift, want, lBefore, ptBefore)
+				i+1, drift, wantDrift, lBefore, ptBefore)
 		}
 		observedPositive = observedPositive || drift > 0
 		observedNegative = observedNegative || drift < 0

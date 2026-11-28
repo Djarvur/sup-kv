@@ -245,7 +245,7 @@ func scenarioWrite(tb testing.TB, n *scenarioNode, key string, val []byte) versi
 	if err != nil {
 		tb.Fatalf("node store Get(%q): %v", key, err)
 	}
-	err = n.adapter.NotifyLocalWrite(key, rec)
+	err = n.adapter.NotifyLocalWrite(key, rec, false, nil)
 	if err != nil {
 		tb.Fatalf("NotifyLocalWrite(%q): %v", key, err)
 	}
@@ -262,20 +262,21 @@ func scenarioServes(n *scenarioNode, key string, ver version.RecordVersion, val 
 // TestScenario_convergence is the plan's tracer: two real adapters on the
 // asymmetric topology discover each other from broadcast Hellos alone, one
 // local write on each node crosses to the peer byte-equal, and BOTH pending
-// mirrors drain to empty — the unicast Ack path, the exact path the
+// sets drain to empty — the unicast Ack path, the exact path the
 // shared-port topology cannot carry (research Pattern 5 / Pitfall 1). The
 // write cycle is bounded by the timer-derived scenarioConvergeDeadline,
-// never wall-clock precision: broadcast RTT plus unicast Ack RTT plus the
-// drained-row retention window, each datagram sub-millisecond on loopback.
+// never wall-clock precision: broadcast RTT plus unicast Ack RTT, each
+// datagram sub-millisecond on loopback.
 func TestScenario_convergence(t *testing.T) {
 	t.Parallel()
 	cfg := scenarioTimers(func(msg string) { t.Logf("%s", msg) })
 	a, b, _, _, _ := scenarioConvergedPair(t, cfg, cfg)
 
-	// The Ack path: both pending mirrors drain to empty — the drained rows'
-	// retention window included — proving the unicast Acks crossed.
-	waitFor(t, scenarioConvergeDeadline, "both pending mirrors to drain to empty (the unicast Ack path)", func() bool {
-		return len(a.adapter.PendingCopy()) == 0 && len(b.adapter.PendingCopy()) == 0
+	// The Ack path: both pending sets drain to empty — the O(1) unacked
+	// gauge is the core's tracked-entry count, so zero proves the unicast
+	// Acks crossed.
+	waitFor(t, scenarioConvergeDeadline, "both pending sets to drain to empty (the unicast Ack path)", func() bool {
+		return a.adapter.UnackedStats().Count == 0 && b.adapter.UnackedStats().Count == 0
 	})
 }
 
@@ -331,6 +332,8 @@ func scenarioAssertClassExact(t *testing.T, driven string, got, before repl.Disc
 		want.OwnEcho++
 	case repl.DiscardDuplicateNodeID:
 		want.DuplicateNodeID++
+	case repl.DiscardUnboundListing:
+		want.UnboundListing++
 	}
 	if got != want {
 		t.Fatalf("%s shot: discards = %+v, want exactly %+v — only %s incremented", driven, got, want, driven)

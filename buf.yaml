@@ -1,5 +1,5 @@
-# Buf schema gates for the replication wire protocol (and the phase-5 gRPC
-# schema). Drives: make buf-lint / make buf-format / make buf-breaking and the
+# Buf schema gates for the replication wire protocol and the public client
+# API. Drives: make buf-lint / make buf-format / make buf-breaking and the
 # CI lint job's buf step — all via the go.mod-pinned `go tool buf` binary.
 version: v2
 
@@ -7,24 +7,23 @@ modules:
   # One module per proto tree, rooted at the tree itself so
   # PACKAGE_DIRECTORY_MATCH resolves relative to it: package supkv.v1 at
   # internal/udprepl/replproto/supkv/v1 and package supkvapi.v1 at
-  # internal/grpcapi/apiproto/supkvapi/v1 both match their package-derived
-  # paths with zero waivers. The former single root module needed the
-  # .gomodcache exclude (buf walks dot-directories by design and the
-  # repo-local, gitignored module cache holds stray .proto files); the two
-  # module roots sit above it, so the exclude is gone. NOTE: codegen does
-  # NOT run over this workspace — a bare `go tool buf generate` fails (the
-  # default template is gone); `make proto` generates per tree with the
-  # pinned-out templates (buf.gen.repl.yaml / buf.gen.api.yaml).
+  # api/supkvapi/v1 both match their package-derived paths with zero waivers.
+  # The replication schema stays internal (it is this cluster's own wire
+  # protocol); the API schema is the published consumer contract and lives
+  # outside internal/ so other modules can import its generated Go code.
+  # NOTE: codegen does NOT run over this workspace — a bare `go tool buf
+  # generate` fails (the default template is gone); `make proto` generates per
+  # tree with the pinned-out templates (buf.gen.repl.yaml / buf.gen.api.yaml).
   - path: internal/udprepl/replproto
-  - path: internal/grpcapi/apiproto
+  - path: api
 
 lint:
   # STANDARD is buf v1.75's name for the DEFAULT rule set (rule lists verified
   # identical via `buf config ls-lint-rules`); the DEFAULT spelling additionally
   # prints a deprecation WARN on every invocation (D-02: DEFAULT rule set).
-  # Zero waivers: the protos live in their package-derived directories
-  # (replproto/supkv/v1, apiproto/supkvapi/v1) and the API schema uses the
-  # standard names (service SupKVService, Watch response WatchResponse) — the
+  # Zero lint waivers: the protos live in their package-derived directories
+  # (replproto/supkv/v1, supkvapi/v1) and the API schema uses the standard
+  # names (service SupKVService, Watch response WatchResponse) — the
   # 2026-11-14 maintainer decision (pre-release window) replaced the former
   # D-06 ignore_only waivers with code-direction fixes.
   use:
@@ -32,6 +31,15 @@ lint:
 
 breaking:
   # FILE policy: a deleted, renumbered or retyped field vs origin/master fails
-  # the gate (D-03) — cheap insurance for the replication wire protocol.
+  # the gate (D-03) — cheap insurance for the replication wire protocol and
+  # the published API schema.
   use:
     - FILE
+  # The public move rewrote only `option go_package` (the module-relative
+  # source path stayed supkvapi/v1/supkvapi.proto), so FILE_SAME_GO_PACKAGE is
+  # waived for exactly that one file. The waiver is deliberately narrow: a
+  # FUTURE go_package change on the public file must be reviewed as a human
+  # diff, never widened silently.
+  ignore_only:
+    FILE_SAME_GO_PACKAGE:
+      - api/supkvapi/v1/supkvapi.proto

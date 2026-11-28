@@ -1,0 +1,10 @@
+{
+  "command": "go test -race -count=1 ./internal/app/persist/ -v -run '^TestEngine_(backoffLadder|dumpFailureClasses)$'",
+  "exitCode": 1,
+  "output": "=== RUN   TestEngine_backoffLadder\n=== PAUSE TestEngine_backoffLadder\n=== RUN   TestEngine_dumpFailureClasses\n=== PAUSE TestEngine_dumpFailureClasses\n=== CONT  TestEngine_backoffLadder\n=== CONT  TestEngine_dumpFailureClasses\n=== NAME  TestEngine_backoffLadder\n    backoff_test.go:127: the write registered during the backoff error = dump failed; write not confirmed, want nil from the recovering attempt\n--- FAIL: TestEngine_backoffLadder (0.00s)\n=== NAME  TestEngine_dumpFailureClasses\n    backoff_test.go:215: OnDumpFailure fired 0 times, want exactly 3 — one per failed attempt\n--- FAIL: TestEngine_dumpFailureClasses (0.00s)\nFAIL\nFAIL\tgithub.com/Djarvur/sup-kv/internal/app/persist\t0.008s\nFAIL\n",
+  "targetTest": "TestEngine_backoffLadder",
+  "targetFile": "internal/app/persist/backoff_test.go",
+  "expected": "A port failing seven attempts walks the 100 ms doubling ladder to the 5 s cap (attempts at +100/+300/+700/+1500/+3100/+6300/+11300 ms after the first failure), a write during the backoff is confirmed by the recovering attempt, a success resets the ladder, and each failed attempt invokes OnDumpFailure once with its class.",
+  "actual": "The engine still retries at the debounce cadence and never invokes OnDumpFailure: the write registered during the backoff was failed by the second 50 ms attempt (ErrDumpFailed instead of nil), and the class test observed zero callbacks.",
+  "semanticAssessment": "The target test executed and failed on its planned assertion (the write during backoff was not covered by a growing ladder - the second debounce-spaced attempt failed it). TestEngine_dumpFailureClasses failed on its planned one-callback-per-failure assertion (0 callbacks). No build, fixture or unrelated failure; the only failures are the two new target tests."
+}
